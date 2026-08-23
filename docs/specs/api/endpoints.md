@@ -59,10 +59,7 @@ Session-tier HTTP routes are also mounted on the local socket and serve only whi
         - `agent_update` (`on` | `off`) with optional `agent_update_frequency` (hour/day/week units, e.g. `12h`, `1d`).
         - Each `*_frequency` requires its policy. Omitted policies leave the config schema defaults intact.
         - `agent_update` is honored only for managed registry agents. `agent_update: "on"` against a custom agent fails the session.
-    - `defer_provider_credentials` (boolean, default `false`): the caller's declaration that it will push a configured custom provider's credential through the managed-state extension after init.
-        - Only when set does a missing custom-provider api-key ref soft-pass: init reports the deferral as progress and continues.
-        - Otherwise, and for mapped providers regardless of this flag, a missing provider ref fails the session exactly as a terminal run would.
-        - The declaration replaces the prior behavior of inferring the deferral from the mere presence of a hosted driver.
+    - `defer_provider_credentials` (boolean, default `false`): declares that the caller will push the configured provider's credential through the managed-state extension after init. A missing ref the push can deliver — a custom provider's api-key ref, or a mapped key-based provider's api-key and companion env vars under the names the agent reads — is not prompted and soft-passes. A ref the push cannot deliver stays required and fails the session: a noncanonical api-key alias, a `VAR=template` inner ref, and an agent-native-auth provider's refs. Without the declaration, a missing provider ref fails the session.
 - Response: `{ "session_id": "...", "status": "running" }` in the standard success envelope. `status` is one of `running`, `waiting_for_input`, `completed_awaiting_ack`, `errored`, `cancelled`, or `closed`. The same set backs the status route and the cancel route's `{session_id, status}` body.
 - Errors:
     - `409 init.session_active` — another session is running or awaiting result acknowledgement. Also returned while a failure is parked (see lifecycle below).
@@ -73,7 +70,7 @@ Session-tier HTTP routes are also mounted on the local socket and serve only whi
     - The route validates request shape, the cross-field rules, and the MCP secret-value positions in full at the boundary. Remaining semantic validation of field values (MCP URL scheme rules, data-source paths, and the enumerated values of `stack_update`, `agent_update`, `sandbox`, and `provider_api`) happens in-session. A declaration invalid only in those ways returns `200` with `"status": "running"` and then fails the init session.
     - Secret values referenced by these declarations (MCP `env`/`value_ref` entries, refs inside `${}` templates, S3 key refs) are never carried in the request body. Init collects any refs missing from the secret store over the prompt stream as `password` inputs with `required: false`.
     - Answering a secret-ref prompt with `null` skips the ref without failing the session. A skipped MCP secret later surfaces through runtime MCP health. A skipped S3 key ref fails workspace materialization.
-    - Provider key ref prompts stream `required: true` instead: a `null` answer is accepted but a still-unresolved provider ref fails the session. The exception is a request that declared `defer_provider_credentials` for a configured custom provider; the ref then defers to the post-init managed-state push.
+    - Provider key refs follow the `defer_provider_credentials` rule above. Otherwise their prompts stream `required: true`; a `null` answer is accepted, but a still-unresolved ref fails the session.
     - The values never appear in status or event replay.
     - Environment declarations the installed agent's capabilities do not cover do not fail the session. They are written to config, skipped at runtime, and reported only through the result payload's `ignored_features` (see [init.md](../init.md#platform-handoff-json)), never through `progress` frames.
 

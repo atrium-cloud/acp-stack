@@ -441,6 +441,7 @@ pub(super) trait HostedPromptDriver: Send + Sync {
 #[derive(Default)]
 pub(super) struct RecordingPromptDriver {
     signals: std::sync::Mutex<Vec<InitStateSignal>>,
+    password_prompts: std::sync::Mutex<Vec<String>>,
     defer_provider_credentials: bool,
 }
 
@@ -457,6 +458,15 @@ impl RecordingPromptDriver {
 
     pub(super) fn recorded(&self) -> Vec<InitStateSignal> {
         self.signals
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// The password prompts this driver was asked to stream, for asserting
+    /// that a deferral path never emitted a secret-value prompt.
+    pub(super) fn recorded_password_prompts(&self) -> Vec<String> {
+        self.password_prompts
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
@@ -479,8 +489,12 @@ impl HostedPromptDriver for RecordingPromptDriver {
 
     fn password(
         &self,
-        _request: HostedPromptRequest,
+        request: HostedPromptRequest,
     ) -> Result<HostedPromptOutcome<Option<String>>> {
+        self.password_prompts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(request.prompt);
         Ok(HostedPromptOutcome::Unhandled)
     }
 

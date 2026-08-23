@@ -218,6 +218,14 @@ pub enum StackError {
     SecretNotFound { name: String },
 
     #[error(
+        "provider secret `{env_ref}` is missing and the declared managed credential push cannot deliver it for provider `{provider_id}`: the push writes only the env vars the agent reads for this provider. Store it with `acps secrets set {env_ref}` before init, or reference the provider's push-delivered api-key variable."
+    )]
+    ProviderSecretNotPushDeliverable {
+        provider_id: String,
+        env_ref: String,
+    },
+
+    #[error(
         "provider credential change failed ({original}); credential catalog rollback also failed ({rollback})"
     )]
     ProviderCredentialRollbackFailed { original: String, rollback: String },

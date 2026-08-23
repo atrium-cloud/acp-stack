@@ -324,56 +324,86 @@ fn hosted_mcp_secret_values_are_collected_as_password_prompts() {
 }
 
 #[test]
-fn hosted_null_provider_key_answer_defers_to_managed_credential_push() {
+fn hosted_deferral_soft_passes_custom_provider_key_without_prompting() {
     let home = tempfile::tempdir().expect("tempdir");
     let session = test_session_deferring_credentials("init_provider_key_soft_pass");
     let driver: Arc<dyn HostedPromptDriver> = Arc::new(SessionPromptDriver {
         session: session.clone(),
     });
-    let home_path = home.path().to_path_buf();
-    let collector = std::thread::spawn(move || {
-        let mut store = SecretStore::open_or_create(&home_path).expect("secret store");
-        let mut config = config::load_config_from_str(include_str!(
-            "../../../../../tests/fixtures/valid-opencode-stack.toml"
-        ))
-        .expect("fixture config");
-        config.agent.provider = Some(config::AgentProviderConfig {
-            id: "my-custom".to_owned(),
-            model: Some("my-model".to_owned()),
-            api_key_ref: Some("CUSTOM_KEY".to_owned()),
-            custom: Some(config::AgentCustomProviderConfig {
-                name: "My Custom".to_owned(),
-                base_url: "https://example.test/v1".to_owned(),
-                api: config::CustomProviderApi::default(),
-                model_name: None,
-                context: config::DEFAULT_CUSTOM_MODEL_CONTEXT,
-                output_max_tokens: config::DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
-            }),
-        });
-        prompt::with_hosted_driver(driver, || {
-            collect_missing_provider_refs(
-                true,
-                &mut store,
-                &config,
-                Some("my-custom"),
-                &["CUSTOM_KEY".to_owned()],
-            )
-        })
+    let mut store = SecretStore::open_or_create(home.path()).expect("secret store");
+    let mut config = config::load_config_from_str(include_str!(
+        "../../../../../tests/fixtures/valid-opencode-stack.toml"
+    ))
+    .expect("fixture config");
+    config.agent.provider = Some(config::AgentProviderConfig {
+        id: "my-custom".to_owned(),
+        model: Some("my-model".to_owned()),
+        api_key_ref: Some("CUSTOM_KEY".to_owned()),
+        custom: Some(config::AgentCustomProviderConfig {
+            name: "My Custom".to_owned(),
+            base_url: "https://example.test/v1".to_owned(),
+            api: config::CustomProviderApi::default(),
+            model_name: None,
+            context: config::DEFAULT_CUSTOM_MODEL_CONTEXT,
+            output_max_tokens: config::DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
+        }),
     });
+    // No client interaction: the value prompt must never be streamed for a
+    // deferred ref, so the collection completes on this thread alone.
+    prompt::with_hosted_driver(driver, || {
+        collect_missing_provider_refs(
+            true,
+            &mut store,
+            &config,
+            Some("my-custom"),
+            &["CUSTOM_KEY".to_owned()],
+        )
+    })
+    .expect("declared deferral soft-passes the provider ref");
+    assert_deferral_stream_without_value_prompt(&session);
+}
 
-    let mut transcript = HostedPromptTranscript::new(session.clone());
-    let pending = transcript.answer(HostedPromptKind::ProviderApiKeyValue, Value::Null);
-    assert_eq!(pending.style, "password");
-    assert_eq!(pending.prompt, "CUSTOM_KEY");
+#[test]
+fn hosted_deferral_soft_passes_mapped_provider_key_without_prompting() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let session = test_session_deferring_credentials("init_mapped_provider_key_soft_pass");
+    let driver: Arc<dyn HostedPromptDriver> = Arc::new(SessionPromptDriver {
+        session: session.clone(),
+    });
+    let mut store = SecretStore::open_or_create(home.path()).expect("secret store");
+    let mut config = config::load_config_from_str(include_str!(
+        "../../../../../tests/fixtures/valid-opencode-stack.toml"
+    ))
+    .expect("fixture config");
+    config.agent.env = vec!["OPENROUTER_API_KEY".to_owned()];
+    config.agent.provider = Some(config::AgentProviderConfig {
+        id: "openrouter".to_owned(),
+        model: Some("some/model".to_owned()),
+        api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
+        custom: None,
+    });
+    prompt::with_hosted_driver(driver, || {
+        collect_missing_provider_refs(
+            true,
+            &mut store,
+            &config,
+            Some("openrouter"),
+            &["OPENROUTER_API_KEY".to_owned()],
+        )
+    })
+    .expect("declared deferral soft-passes the mapped provider ref");
+    assert_deferral_stream_without_value_prompt(&session);
+}
 
-    collector
-        .join()
-        .expect("collector thread")
-        .expect("null answer soft-passes the provider ref");
+fn assert_deferral_stream_without_value_prompt(session: &Arc<HostedInitSession>) {
     let events = serde_json::to_string(&session.events_after(0)).expect("events");
     assert!(
         events.contains("not present yet"),
         "deferral progress must reach the stream: {events}"
+    );
+    assert!(
+        !events.contains("provider_api_key_value"),
+        "the value prompt must not be streamed under a declared deferral: {events}"
     );
 }
 

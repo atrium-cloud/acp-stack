@@ -289,9 +289,10 @@ fn declared_defer_gate_defers_missing_provider_ref_but_not_flat_only_refs() {
     });
 
     // Only a driver whose start request declared `defer_provider_credentials`
-    // soft-passes the missing custom-provider ref.
+    // soft-passes a missing provider ref — custom and mapped alike — and the
+    // secret-value prompt is never streamed for a deferred ref.
     let deferring = Arc::new(prompt::RecordingPromptDriver::deferring_provider_credentials());
-    prompt::with_hosted_driver(deferring, || {
+    prompt::with_hosted_driver(deferring.clone(), || {
         collect_missing_provider_refs(
             true,
             &mut secret_store,
@@ -300,12 +301,6 @@ fn declared_defer_gate_defers_missing_provider_ref_but_not_flat_only_refs() {
             &required,
         )
         .expect("declared deferral soft-passes the custom-provider ref");
-        // Refs without a provider context (MCP refs on the prepared-config
-        // path) never soft-pass.
-        collect_missing_provider_refs(true, &mut secret_store, &config, None, &required)
-            .expect_err("flat-only refs keep the hard failure");
-        // Mapped providers keep the hard failure even with the declaration:
-        // their model-discovery spawn would fail on the missing ref anyway.
         let mapped_config = readiness_config("opencode");
         collect_missing_provider_refs(
             true,
@@ -314,8 +309,166 @@ fn declared_defer_gate_defers_missing_provider_ref_but_not_flat_only_refs() {
             Some("openai"),
             &["OPENAI_API_KEY".to_owned()],
         )
-        .expect_err("mapped providers keep the hard failure under a declared deferral");
+        .expect("declared deferral soft-passes the mapped-provider ref");
+        // An agent-native-auth provider's refs can never arrive through the
+        // managed push, so the declaration must not defer them.
+        let native_auth_config = readiness_config("claude-code");
+        collect_missing_provider_refs(
+            true,
+            &mut secret_store,
+            &native_auth_config,
+            Some("amazon-bedrock"),
+            &["AWS_REGION".to_owned()],
+        )
+        .expect_err("native-auth provider refs keep the hard failure under a declared deferral");
+        // Refs without a provider context (MCP refs on the prepared-config
+        // path) never soft-pass, and still prompt.
+        collect_missing_provider_refs(true, &mut secret_store, &config, None, &required)
+            .expect_err("flat-only refs keep the hard failure");
     });
+    assert_eq!(
+        deferring.recorded_password_prompts(),
+        vec!["AWS_REGION".to_owned(), "CUSTOM_KEY".to_owned()],
+        "deferred provider refs must not stream a value prompt; undeliverable and provider-less refs still do"
+    );
+}
+
+#[test]
+fn declared_defer_gate_rejects_non_push_deliverable_refs() {
+    use std::sync::Arc;
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let mut secret_store = SecretStore::open_or_create(tempdir.path()).expect("secret store");
+
+    // Even with the deferral declared, a ref the managed push cannot write must
+    // not soft-pass: the push carries a provider's canonical env vars only.
+    let deferring = Arc::new(prompt::RecordingPromptDriver::deferring_provider_credentials());
+    prompt::with_hosted_driver(deferring.clone(), || {
+        let mapped = readiness_config("opencode");
+        // A noncanonical api-key alias: the push writes OPENAI_API_KEY, never
+        // the alias.
+        let alias_error = collect_missing_provider_refs(
+            true,
+            &mut secret_store,
+            &mapped,
+            Some("openai"),
+            &["MY_OPENAI_ALIAS".to_owned()],
+        )
+        .expect_err("a noncanonical mapped alias is not push-deliverable");
+        assert!(matches!(
+            alias_error,
+            crate::error::StackError::ProviderSecretNotPushDeliverable { .. }
+        ));
+        // A `VAR=template` inner ref: the required ref is the inner secret, which
+        // the push never writes (it delivers the canonical var).
+        let template_error = collect_missing_provider_refs(
+            true,
+            &mut secret_store,
+            &mapped,
+            Some("openai"),
+            &["INNER_SECRET".to_owned()],
+        )
+        .expect_err("a mapped template inner ref is not push-deliverable");
+        assert!(matches!(
+            template_error,
+            crate::error::StackError::ProviderSecretNotPushDeliverable { .. }
+        ));
+        // Same for a custom provider: the push carries its configured api-key
+        // ref only, so a template inner ref behind it cannot be delivered.
+        let custom = custom_provider_readiness_config();
+        let custom_error = collect_missing_provider_refs(
+            true,
+            &mut secret_store,
+            &custom,
+            Some("my-custom"),
+            &["INNER_SECRET".to_owned()],
+        )
+        .expect_err("a custom template inner ref is not push-deliverable");
+        assert!(matches!(
+            custom_error,
+            crate::error::StackError::ProviderSecretNotPushDeliverable { .. }
+        ));
+    });
+
+    // Each undeliverable ref falls through to the value prompt rather than being
+    // silently deferred.
+    assert_eq!(
+        deferring.recorded_password_prompts(),
+        vec![
+            "MY_OPENAI_ALIAS".to_owned(),
+            "INNER_SECRET".to_owned(),
+            "INNER_SECRET".to_owned(),
+        ],
+        "a ref the push cannot deliver is prompted, not deferred"
+    );
+}
+
+#[test]
+fn declared_defer_gate_rejects_a_templated_provider_var() {
+    use std::sync::Arc;
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let mut secret_store = SecretStore::open_or_create(tempdir.path()).expect("secret store");
+
+    // The non-prepared init paths pass bare var names to the gate; a var
+    // resolved from a `VAR=template` entry needs its inner ref, which the push
+    // never writes, so it must not soft-pass on the canonical var name alone.
+    let mut config = readiness_config("opencode");
+    config.agent.env = vec!["OPENAI_API_KEY=${MY_KEY}".to_owned()];
+
+    let deferring = Arc::new(prompt::RecordingPromptDriver::deferring_provider_credentials());
+    prompt::with_hosted_driver(deferring.clone(), || {
+        let error = collect_missing_provider_refs(
+            true,
+            &mut secret_store,
+            &config,
+            Some("openai"),
+            &["OPENAI_API_KEY".to_owned()],
+        )
+        .expect_err("a templated provider var is not push-deliverable");
+        assert!(matches!(
+            error,
+            crate::error::StackError::ProviderSecretNotPushDeliverable { env_ref, .. } if env_ref == "MY_KEY"
+        ));
+    });
+    // The inner ref, not the canonical var, is prompted for (not silently
+    // deferred) so an answer lands where runtime resolution reads it.
+    assert_eq!(
+        deferring.recorded_password_prompts(),
+        vec!["MY_KEY".to_owned()]
+    );
+}
+
+#[test]
+fn templated_provider_var_gate_targets_the_inner_ref() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let mut secret_store = SecretStore::open_or_create(tempdir.path()).expect("secret store");
+    let mut config = readiness_config("opencode");
+    config.agent.env = vec!["OPENAI_API_KEY=${MY_KEY}".to_owned()];
+
+    // The inner ref is what the gate requires: absent, the failure names it, so
+    // an interactive prompt targets it and an answer lands where runtime reads.
+    let error = collect_missing_provider_refs(
+        false,
+        &mut secret_store,
+        &config,
+        Some("openai"),
+        &["OPENAI_API_KEY".to_owned()],
+    )
+    .expect_err("the missing inner ref fails the gate");
+    assert!(matches!(error, crate::error::StackError::SecretNotFound { name } if name == "MY_KEY"));
+
+    // With the inner ref present, the gate is satisfied — the canonical var name
+    // is never consulted (storing it there would leave runtime unresolved).
+    secret_store
+        .set_many([("MY_KEY", "sk-value")])
+        .expect("store inner ref");
+    collect_missing_provider_refs(
+        false,
+        &mut secret_store,
+        &config,
+        Some("openai"),
+        &["OPENAI_API_KEY".to_owned()],
+    )
+    .expect("the present inner ref satisfies the gate");
 }
 
 #[test]

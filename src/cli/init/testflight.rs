@@ -3,7 +3,7 @@ use crate::error::{Result, StackError};
 use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry};
 use crate::secrets::SecretStore;
 
-use super::provider::{pending_custom_provider_credential, pending_provider_credential_reason};
+use super::provider::{pending_deferred_provider_credential, pending_provider_credential_reason};
 use super::{InitArgs, prompt, prompts_enabled};
 
 /// What `acps init` should do with the post-init testflight phase. Resolved
@@ -114,9 +114,10 @@ pub(super) fn resolve_testflight_decision(
         return Ok(Some(TestflightDecision::SkipUnsupported));
     }
     // The testflight sends a real prompt, so it needs a resolvable provider
-    // credential. A hosted init defers a custom provider's ref to a managed
-    // push after init, which would surface here as an opaque spawn failure.
-    if let Some((provider_id, api_key_ref)) = pending_custom_provider_credential(config, secrets) {
+    // credential. A hosted init defers a provider's ref to a managed push
+    // after init, which would surface here as an opaque spawn failure.
+    if let Some((provider_id, api_key_ref)) = pending_deferred_provider_credential(config, secrets)
+    {
         if args.testflight {
             return Err(StackError::InvalidParam {
                 field: "testflight",

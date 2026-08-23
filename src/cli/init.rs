@@ -72,7 +72,7 @@ use self::provider::{
     apply_provider_to_config, collect_declared_secret_refs_for_init,
     collect_mcp_secret_refs_for_init, collect_prepared_secret_refs_for_init,
     configure_provider_for_init, configured_provider_refs_satisfied,
-    pending_custom_provider_credential, pending_provider_credential_reason,
+    pending_deferred_provider_credential, pending_provider_credential_reason,
     preflight_provider_for_init,
 };
 use self::registry_apply::{

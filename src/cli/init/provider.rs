@@ -10,8 +10,8 @@ use crate::runtime::agent::acp_bridge::KIMI_CODE_AGENT_ID;
 use crate::runtime::agent::provider_keys::{
     AgentProviderSummary, CLAUDE_CODE_AGENT_ID, env_ref_is_satisfiable_for_config,
     env_var_for_agent_provider_id, provider_id_is_known, provider_id_supports_agent,
-    provider_uses_agent_native_auth, providers_for_agent, reconcile_kimi_lane_env_declarations,
-    required_env_refs_for_agent_provider_id,
+    provider_uses_agent_native_auth, providers_for_agent, push_delivers_env_ref_for_config,
+    reconcile_kimi_lane_env_declarations, required_env_refs_for_agent_provider_id,
 };
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::secrets::SecretStore;
@@ -34,7 +34,7 @@ use self::secret_refs::agent_env_secret_refs_for_var;
 pub(super) use self::secret_refs::{
     collect_declared_secret_refs_for_init, collect_mcp_secret_refs_for_init,
     collect_missing_provider_refs, collect_prepared_secret_refs_for_init,
-    pending_custom_provider_credential, pending_provider_credential_reason,
+    pending_deferred_provider_credential, pending_provider_credential_reason,
     primary_provider_is_custom,
 };
 

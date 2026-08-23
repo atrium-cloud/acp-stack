@@ -328,6 +328,7 @@ fn agent_test_json_success_document_has_the_full_schema() {
             "cleanup",
             "code",
             "elapsed_ms",
+            "evidence",
             "fs_check",
             "ok",
             "phase",
@@ -346,6 +347,26 @@ fn agent_test_json_success_document_has_the_full_schema() {
     assert_eq!(document["stop_reason"], "end_turn");
     assert_eq!(document["updates"], 2);
     assert!(document["elapsed_ms"].is_u64());
+    assert_eq!(
+        json_keys(&document["evidence"]),
+        [
+            "final_assistant_text",
+            "message_chunks",
+            "text_truncated",
+            "thought_chunks",
+            "tool_call_updates",
+            "tool_calls",
+        ]
+    );
+    assert_eq!(
+        document["evidence"]["final_assistant_text"],
+        "chunk-1chunk-2"
+    );
+    assert_eq!(document["evidence"]["text_truncated"], false);
+    assert_eq!(document["evidence"]["message_chunks"], 2);
+    assert_eq!(document["evidence"]["thought_chunks"], 0);
+    assert_eq!(document["evidence"]["tool_calls"], 0);
+    assert_eq!(document["evidence"]["tool_call_updates"], 0);
     assert_eq!(json_keys(&document["fs_check"]), ["bytes", "status"]);
     assert_eq!(document["fs_check"]["status"], "skipped");
     assert_eq!(document["fs_check"]["bytes"], Value::Null);

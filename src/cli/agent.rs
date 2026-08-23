@@ -38,8 +38,11 @@ pub(in crate::cli) use self::test::run_init_testflight;
 
 pub(super) const DEFAULT_AGENT_TEST_PROMPT: &str =
     "Reply with exactly this text and nothing else: acp-stack test ok";
-pub(super) const DEFAULT_AGENT_TEST_TIMEOUT: &str = "60s";
-pub(super) const DEFAULT_AGENT_TEST_PROGRESS_TIMEOUT: &str = "30s";
+pub(super) const DEFAULT_AGENT_TEST_TIMEOUT: &str = "180s";
+/// Adapters emit no `session/update` before the first streamed token or tool
+/// event (verified against codex-acp and OpenCode), so this window budgets
+/// time-to-first-token: slow providers routinely exceed 30s cold.
+pub(super) const DEFAULT_AGENT_TEST_PROGRESS_TIMEOUT: &str = "90s";
 
 #[derive(Debug, Subcommand)]
 pub enum AgentCommand {
@@ -764,16 +767,42 @@ mod tests {
         let workspace = TempDir::new().expect("tempdir");
         let target = workspace.path().join("marker.txt");
         std::fs::write(&target, b"ok\n").expect("write");
-        let outcome =
-            verify_testflight_expect_fs(workspace.path(), "marker.txt").expect("verify ok");
+        let outcome = verify_testflight_expect_fs(workspace.path(), workspace.path(), "marker.txt")
+            .expect("verify ok");
         assert_eq!(outcome.path, target);
         assert_eq!(outcome.bytes, 3);
     }
 
     #[test]
+    fn verify_testflight_expect_fs_resolves_against_artifact_base() {
+        let workspace = TempDir::new().expect("tempdir");
+        let cwd = workspace.path().join("project");
+        std::fs::create_dir(&cwd).expect("mkdir");
+        std::fs::write(cwd.join("marker.txt"), b"ok\n").expect("write");
+        let outcome = verify_testflight_expect_fs(&cwd, workspace.path(), "marker.txt")
+            .expect("verify against cwd base ok");
+        assert_eq!(outcome.path, cwd.join("marker.txt"));
+        // The workspace root alone must not see the artifact: the agent wrote
+        // relative to its session cwd.
+        let err = verify_testflight_expect_fs(workspace.path(), workspace.path(), "marker.txt")
+            .expect_err("root-based lookup must miss");
+        assert_eq!(err.code(), "fs_check_missing");
+    }
+
+    #[test]
+    fn verify_testflight_expect_fs_rejects_artifact_base_outside_workspace() {
+        let workspace = TempDir::new().expect("tempdir");
+        let outside = TempDir::new().expect("outside tempdir");
+        std::fs::write(outside.path().join("marker.txt"), b"ok\n").expect("write");
+        let err = verify_testflight_expect_fs(outside.path(), workspace.path(), "marker.txt")
+            .expect_err("artifact base outside workspace must fail");
+        assert_eq!(err.code(), "fs_check_outside_workspace");
+    }
+
+    #[test]
     fn verify_testflight_expect_fs_fails_when_file_missing() {
         let workspace = TempDir::new().expect("tempdir");
-        let err = verify_testflight_expect_fs(workspace.path(), "missing.txt")
+        let err = verify_testflight_expect_fs(workspace.path(), workspace.path(), "missing.txt")
             .expect_err("missing file must fail");
         assert_eq!(err.stage(), "fs_check");
         assert_eq!(err.code(), "fs_check_missing");
@@ -785,7 +814,7 @@ mod tests {
         let workspace = TempDir::new().expect("tempdir");
         let target = workspace.path().join("empty.txt");
         std::fs::write(&target, b"").expect("write");
-        let err = verify_testflight_expect_fs(workspace.path(), "empty.txt")
+        let err = verify_testflight_expect_fs(workspace.path(), workspace.path(), "empty.txt")
             .expect_err("empty file must fail");
         assert_eq!(err.code(), "fs_check_empty");
     }
@@ -793,7 +822,7 @@ mod tests {
     #[test]
     fn verify_testflight_expect_fs_rejects_absolute_path_argument() {
         let workspace = TempDir::new().expect("tempdir");
-        let err = verify_testflight_expect_fs(workspace.path(), "/etc/passwd")
+        let err = verify_testflight_expect_fs(workspace.path(), workspace.path(), "/etc/passwd")
             .expect_err("absolute path must be rejected");
         assert_eq!(err.code(), "config_invalid");
         assert!(
@@ -805,8 +834,9 @@ mod tests {
     #[test]
     fn verify_testflight_expect_fs_rejects_parent_traversal() {
         let workspace = TempDir::new().expect("tempdir");
-        let err = verify_testflight_expect_fs(workspace.path(), "sub/../escape.txt")
-            .expect_err("`..` segment must be rejected");
+        let err =
+            verify_testflight_expect_fs(workspace.path(), workspace.path(), "sub/../escape.txt")
+                .expect_err("`..` segment must be rejected");
         assert_eq!(err.code(), "config_invalid");
     }
 
@@ -815,7 +845,8 @@ mod tests {
         let workspace = TempDir::new().expect("tempdir");
         let target = workspace.path().join("marker.txt");
         std::fs::write(&target, b"old\n").expect("write");
-        prepare_testflight_expect_fs(workspace.path(), "marker.txt").expect("prepare ok");
+        prepare_testflight_expect_fs(workspace.path(), workspace.path(), "marker.txt")
+            .expect("prepare ok");
         assert!(!target.exists(), "stale marker should be removed");
     }
 
@@ -829,7 +860,7 @@ mod tests {
         std::os::unix::fs::symlink(&outside_file, workspace.path().join("marker.txt"))
             .expect("symlink");
 
-        let err = prepare_testflight_expect_fs(workspace.path(), "marker.txt")
+        let err = prepare_testflight_expect_fs(workspace.path(), workspace.path(), "marker.txt")
             .expect_err("symlink marker must fail");
         assert_eq!(err.code(), "fs_check_not_regular_file");
         assert!(err.reason().contains("symlink"), "reason: {err:?}");
@@ -844,8 +875,9 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), workspace.path().join("linked"))
             .expect("symlink");
 
-        let err = verify_testflight_expect_fs(workspace.path(), "linked/marker.txt")
-            .expect_err("canonical escape must fail");
+        let err =
+            verify_testflight_expect_fs(workspace.path(), workspace.path(), "linked/marker.txt")
+                .expect_err("canonical escape must fail");
         assert_eq!(err.code(), "fs_check_outside_workspace");
         assert!(
             err.reason().contains("outside workspace"),

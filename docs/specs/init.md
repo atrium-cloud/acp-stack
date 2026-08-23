@@ -149,9 +149,7 @@ The operator-facing sequence, in order:
         - Explicit `--mode` and `--effort` are validated against the advertised values, and a rejection lists them.
         - When mode and/or effort are the only active lanes and neither flag was passed, a provisional session that cannot be established is reported and skipped rather than failing init; an explicit `--mode`/`--effort` still fails loudly.
         - Discovery also requires a resolvable provider credential:
-            - When a configured custom provider's api-key ref is still pending a managed credential push, all lanes skip with a progress note naming the provider and ref.
-            - An explicit `--mode`/`--effort` fails early with the same remediation rather than at the spawn.
-            - An explicit `--model` for the primary agent's custom provider bypasses discovery and is written as supplied, so it only trips the early failure when the pending custom provider is the subagent's.
+            - When hosted init has deferred the provider credential, discovery skips with a progress note; explicit `--model`, `--mode`, and `--effort` values are written without advertised-value validation.
         - Codex with a non-OpenAI provider lists models from the provider's live catalog (fetched during init and cached at `~/.config/acp-stack/provider-models.json`) instead of the adapter's advertised OpenAI presets.
         - When no catalog is available (custom provider or an offline fetch), the model step is skipped with a hint to rerun with `--model`.
         - Apply `--provider`, `--api-key-ref`, `--model`, `--mode`, `--effort`, and custom-provider flags.
@@ -247,11 +245,7 @@ The hosted flow follows the same init steps as interactive `acps init`, but stre
 - Environment configuration (skills, dependencies, browser-use, data sources) and the acp-stack/agent auto-update policies (`stack_update`/`stack_update_frequency`, `agent_update`/`agent_update_frequency`) are declared up-front in the session-create request instead of being streamed. These wizard prompts remain outside the streamed set, and the request fields map onto the same init arguments the wizard would produce.
 - Secret collection covers the refs those declarations name: MCP env/header refs (whole-value refs and refs named inside `${}` templates alike) and S3 data-source key refs missing from the store are requested as `password` inputs.
 - An unanswered ref skips without failing init and surfaces later through MCP health or workspace materialization.
-- Custom-provider api-key refs defer only when the start request declared `defer_provider_credentials: true`:
-    - A null answer to the `provider_api_key_value` prompt leaves the ref pending.
-    - Init reports the deferral as progress and continues.
-    - The credential is expected through the managed-state extension after init completes; until it arrives, agent start fails with an error naming the provider and ref.
-    - The declaration is the caller's promise to push the credential out-of-band; without it a driven init keeps the hard failure, matching mapped providers, terminal runs, and non-interactive runs.
+- Provider credential deferral follows the [`defer_provider_credentials` request contract](api/endpoints.md). While the credential is pending, prepared-config validation skips its unresolved provider refs.
 - Normal `acps init` keeps its existing terminal behavior; hosted prompts outside the streamed set use the same skip/default behavior as non-interactive init unless supplied through initial args.
 - The post-install MCP configuration step streams its prompts only when the start request declared no MCP server. Declaring servers up front still wins and skips the wizard outright.
 - MCP declarations the installed agent's capabilities do not cover are reported only through the result frame's `ignored_features`, never through progress frames.
@@ -331,7 +325,7 @@ Testflight is opt-in because it may consume provider credits:
 - Interactive runs prompt with a credit warning before running.
 - `--testflight` runs it without prompting; `--skip-testflight` skips it.
 - Non-interactive runs skip testflight unless `--testflight` is passed.
-- A configured custom provider whose api-key ref is still pending a managed credential push skips testflight, naming the provider and ref; an explicit `--testflight` fails with the same remediation instead of spending a prompt on an unresolvable credential.
+- A provider credential pending under hosted deferral skips testflight, naming the provider and ref; an explicit `--testflight` fails with the same remediation.
 - A hosted run whose backend answers the credit-warning prompt with `value: false` and `deferred: true` (see [api.md](api/api.md)) reports `testflight: deferred (runs after setup)` rather than a decline: the backend intends to run the test itself once setup completes.
 
 Testflight hard-fails on paths outside its supported set: browser-OAuth agents, private Drive/Dropbox links, non-archive cloud folders, unsafe archives, and missing required secrets. It also fails when an agent appears active but the configured timeout elapses with progress and terminal state both still pending.

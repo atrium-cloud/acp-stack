@@ -93,6 +93,14 @@ A daemon restart is required for daemon startup-cached settings:
   "prompt_source": "registry",
   "stop_reason": "end_turn",
   "updates": 7,
+  "evidence": {
+    "final_assistant_text": "Created .acp-stack-testflight.txt.",
+    "text_truncated": false,
+    "message_chunks": 3,
+    "thought_chunks": 2,
+    "tool_calls": 1,
+    "tool_call_updates": 2
+  },
   "fs_check": { "status": "ok", "bytes": 128 },
   "cleanup": { "session_delete": "deleted", "process": "terminated" }
 }
@@ -101,13 +109,15 @@ A daemon restart is required for daemon startup-cached settings:
 - `phase` is one of `spawn`, `initialize`, `session_new`, `session_config`, `prompt`, `fs_check`, `cleanup`, `done`. It is derived from `code`, so the two can never disagree.
 - `code` is one of `ok`, `agent_spawn_failed`, `agent_initialize_failed`, `session_create_failed`, `session_config_failed`, `prompt_failed`, `prompt_timeout`, `progress_timeout`, `unexpected_stop_reason`, `fs_check_missing`, `fs_check_empty`, `fs_check_not_regular_file`, `fs_check_outside_workspace`, `fs_check_failed`, `cleanup_failed`, `config_invalid`, `agent_unsupported`.
 - `prompt_source` is `provided`, `registry`, or `default`. `stop_reason` is `null` when the prompt phase was never reached.
-- `fs_check.status` is `ok`, `skipped`, or `failed`. `skipped` covers both a registry entry that declares no `testflight_expect_fs` and a run that failed before the check. `bytes` is `null` unless the status is `ok`.
+- `evidence` retains the final 2 KiB of assistant text with the run's injected env credential values scrubbed, marks truncation, and counts message, thought, tool-call, and tool-call-update events on every exit path.
+- `fs_check.status` is `ok`, `skipped`, or `failed`. `skipped` covers both a registry entry that declares no `testflight_expect_fs` and a run that failed before the check. `bytes` is `null` unless the status is `ok`. Artifact paths resolve against the session cwd within the workspace, and missing or empty artifacts are re-polled for two seconds.
 - `cleanup.session_delete` is `deleted`, `cleanup_failed`, `unsupported` (the agent does not advertise `session/delete`), or `skipped` (no session was ever created).
 - The delete is bounded at 10 seconds. A run that failed on a progress timeout leaves the agent wedged mid-prompt on its single event loop, where the request would never be answered. That case is reported as `cleanup_failed` rather than awaited.
 - `cleanup.process` is `terminated` or `terminate_failed`. `terminated` includes a spawn that failed before a child existed, since nothing is left running either way.
 - A failed session delete leaves `ok` unchanged. The verdict is prompt completion plus the fs check; a working agent with a flaky delete is not a failed test. A leaked agent child does flip it, reported as `phase: "cleanup"`, `code: "cleanup_failed"`.
 - `elapsed_ms` is measured against the wall clock, so a host suspend mid-run is reflected rather than lost.
-- The document deliberately carries no reason string, session id, prompt text, file contents, path, credential, or raw provider error. Reasons embed workspace paths and spawn argv; codes are the machine channel.
+- Apart from `evidence.final_assistant_text`, the document carries no reason string, session id, prompt text, file contents, path, credential, or raw provider error. Reasons embed workspace paths and spawn argv; codes are the machine channel.
+- `evidence.final_assistant_text` is agent-authored: injected env credential values are scrubbed from it, but content the model chose to echo — including prompt or workspace-file text — is retained, since telling model non-compliance from a harness defect is the field's purpose.
 - A failure that happens before the harness can run at all — an unreadable config, an unresolvable home directory — emits no document, only the stderr error and exit 1.
 
 ## Flag Reference

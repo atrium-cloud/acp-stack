@@ -23,7 +23,7 @@ stdio_framing = "json-lines"
 website = "https://opencode.ai"
 github = "anomalyco/opencode"
 support_doc = "docs/agents/opencode.md"
-testflight_prompt = "Create a file named .acp-stack-testflight.txt in the current workspace containing exactly: acp-stack testflight ok"
+testflight_prompt = "Use your file-writing tool to create a file at the relative path .acp-stack-testflight.txt in your current working directory, containing exactly this text: acp-stack testflight ok. Actually write the file to disk; a reply describing the action without writing the file is a failure."
 testflight_expect_fs = ".acp-stack-testflight.txt"
 
 [agents.harness]
@@ -98,7 +98,7 @@ agent_skills_install_dir = "~/.agents/skills"
 stdio_framing = "json-lines"
 website = "https://ampcode.com/"
 support_doc = "docs/agents/amp.md"
-testflight_prompt = "Create a file named .acp-stack-testflight.txt in the current workspace containing exactly: acp-stack testflight ok"
+testflight_prompt = "Use your file-writing tool to create a file at the relative path .acp-stack-testflight.txt in your current working directory, containing exactly this text: acp-stack testflight ok. Actually write the file to disk; a reply describing the action without writing the file is a failure."
 testflight_expect_fs = ".acp-stack-testflight.txt"
 
 [agents.adapter]
@@ -150,7 +150,7 @@ stdio_framing = "json-lines"
 website = "https://pi.dev"
 github = "earendil-works/pi"
 support_doc = "docs/agents/pi.md"
-testflight_prompt = "Create a file named .acp-stack-testflight.txt in the current workspace containing exactly: acp-stack testflight ok"
+testflight_prompt = "Use your file-writing tool to create a file at the relative path .acp-stack-testflight.txt in your current working directory, containing exactly this text: acp-stack testflight ok. Actually write the file to disk; a reply describing the action without writing the file is a failure."
 testflight_expect_fs = ".acp-stack-testflight.txt"
 
 [agents.adapter]
@@ -222,7 +222,7 @@ stdio_framing = "json-lines"
 website = "https://goose-docs.ai/"
 github = "aaif-goose/goose"
 support_doc = "docs/agents/goose.md"
-testflight_prompt = "Create a file named .acp-stack-testflight.txt in the current workspace containing exactly: acp-stack testflight ok"
+testflight_prompt = "Use your file-writing tool to create a file at the relative path .acp-stack-testflight.txt in your current working directory, containing exactly this text: acp-stack testflight ok. Actually write the file to disk; a reply describing the action without writing the file is a failure."
 testflight_expect_fs = ".acp-stack-testflight.txt"
 
 [agents.harness]
@@ -260,7 +260,7 @@ stdio_framing = "json-lines"
 website = "https://developers.openai.com/codex/"
 github = "openai/codex"
 support_doc = "docs/agents/codex.md"
-testflight_prompt = "Create a file named .acp-stack-testflight.txt in the current workspace containing exactly: acp-stack testflight ok"
+testflight_prompt = "Use your file-writing tool to create a file at the relative path .acp-stack-testflight.txt in your current working directory, containing exactly this text: acp-stack testflight ok. Actually write the file to disk; a reply describing the action without writing the file is a failure."
 testflight_expect_fs = ".acp-stack-testflight.txt"
 
 [agents.adapter]
@@ -312,7 +312,7 @@ agent_skills_link_dir = "~/.claude/skills"
 stdio_framing = "json-lines"
 website = "https://code.claude.com/docs/"
 support_doc = "docs/agents/claude-code.md"
-testflight_prompt = "Create a file named .acp-stack-testflight.txt in the current workspace containing exactly: acp-stack testflight ok"
+testflight_prompt = "Use your file-writing tool to create a file at the relative path .acp-stack-testflight.txt in your current working directory, containing exactly this text: acp-stack testflight ok. Actually write the file to disk; a reply describing the action without writing the file is a failure."
 testflight_expect_fs = ".acp-stack-testflight.txt"
 
 [agents.adapter]
@@ -349,7 +349,7 @@ stdio_framing = "json-lines"
 website = "https://www.kimi.com/code/docs/en/"
 github = "MoonshotAI/kimi-code"
 support_doc = "docs/agents/kimi.md"
-testflight_prompt = "Create a file named .acp-stack-testflight.txt in the current workspace containing exactly: acp-stack testflight ok"
+testflight_prompt = "Use your file-writing tool to create a file at the relative path .acp-stack-testflight.txt in your current working directory, containing exactly this text: acp-stack testflight ok. Actually write the file to disk; a reply describing the action without writing the file is a failure."
 testflight_expect_fs = ".acp-stack-testflight.txt"
 
 [agents.harness]
@@ -396,7 +396,7 @@ agent_skills_link_dir = "~/.hermes/skills"
 stdio_framing = "json-lines"
 website = "https://hermes-agent.nousresearch.com"
 support_doc = "docs/agents/hermes.md"
-testflight_prompt = "Create a file named .acp-stack-testflight.txt in the current workspace containing exactly: acp-stack testflight ok"
+testflight_prompt = "Use your file-writing tool to create a file at the relative path .acp-stack-testflight.txt in your current working directory, containing exactly this text: acp-stack testflight ok. Actually write the file to disk; a reply describing the action without writing the file is a failure."
 testflight_expect_fs = ".acp-stack-testflight.txt"
 
 [agents.harness]
@@ -471,7 +471,7 @@ stdio_framing = "json-lines"
 website = "https://kilo.ai"
 github = "Kilo-Org/kilocode"
 support_doc = "docs/agents/kilo.md"
-testflight_prompt = "Create a file named .acp-stack-testflight.txt in the current workspace containing exactly: acp-stack testflight ok"
+testflight_prompt = "Use your file-writing tool to create a file at the relative path .acp-stack-testflight.txt in your current working directory, containing exactly this text: acp-stack testflight ok. Actually write the file to disk; a reply describing the action without writing the file is a failure."
 testflight_expect_fs = ".acp-stack-testflight.txt"
 
 [agents.harness]
@@ -508,7 +508,7 @@ agent_skills_install_dir = "~/.agents/skills"
 stdio_framing = "json-lines"
 website = "https://antigravity.google/docs/cli/install/"
 support_doc = "docs/agents/antigravity.md"
-testflight_prompt = "Create a file named .acp-stack-testflight.txt in the current workspace containing exactly: acp-stack testflight ok"
+testflight_prompt = "Use your file-writing tool to create a file at the relative path .acp-stack-testflight.txt in your current working directory, containing exactly this text: acp-stack testflight ok. Actually write the file to disk; a reply describing the action without writing the file is a failure."
 testflight_expect_fs = ".acp-stack-testflight.txt"
 
 [agents.harness]

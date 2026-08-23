@@ -67,11 +67,68 @@ fn selected_alias_for<'a>(config: &'a Config, provider_id: &str) -> Option<&'a s
         .map(String::as_str)
 }
 
+/// Which slot of a provider's managed credential set an env ref maps to. Single
+/// source of truth for the runtime coverage check ([`catalog_covers_env_ref`])
+/// and the init deferral check ([`push_delivers_env_ref_for_config`]) so the two
+/// cannot drift: both dispatch on this classification instead of re-deriving the
+/// ref shape.
+enum ProviderEnvRefSlot {
+    /// A custom (BYOK) provider's configured api-key ref, delivered under its
+    /// own name.
+    CustomApiKey,
+    /// A mapped provider's primary api-key env var, delivered by the push under
+    /// the canonical store name `canonical_primary`.
+    MappedPrimary { canonical_primary: &'static str },
+    /// A mapped provider's companion or optional env var, delivered under its
+    /// own name.
+    MappedCompanion,
+    /// A ref the managed credential set never carries for this provider: a
+    /// noncanonical api-key alias, a `VAR=template` inner ref, a native-auth
+    /// provider (which takes no key), or an unknown id with no custom config.
+    Undeliverable,
+}
+
+/// Classify `env_ref` against `provider_id`'s managed credential set. The
+/// ordering mirrors the historical `catalog_covers_env_ref` body so both call
+/// sites resolve a ref to the same slot.
+fn classify_provider_env_ref(
+    agent_id: &str,
+    provider_id: &str,
+    configured_api_key_ref: Option<&str>,
+    env_ref: &str,
+) -> ProviderEnvRefSlot {
+    if !provider_id_is_known(provider_id) {
+        return if configured_api_key_ref == Some(env_ref) {
+            ProviderEnvRefSlot::CustomApiKey
+        } else {
+            ProviderEnvRefSlot::Undeliverable
+        };
+    }
+    if provider_uses_agent_native_auth(agent_id, provider_id) {
+        return ProviderEnvRefSlot::Undeliverable;
+    }
+    let Some(canonical_primary) = env_var_for_provider_id(provider_id) else {
+        return ProviderEnvRefSlot::Undeliverable;
+    };
+    if env_var_for_agent_provider_id(agent_id, provider_id) == Some(env_ref) {
+        return ProviderEnvRefSlot::MappedPrimary { canonical_primary };
+    }
+    let companion =
+        companion_env_refs_for_agent_provider_id(agent_id, provider_id).contains(&env_ref);
+    let optional =
+        optional_env_refs_for_agent_provider_id(agent_id, provider_id).contains(&env_ref);
+    if companion || optional {
+        ProviderEnvRefSlot::MappedCompanion
+    } else {
+        ProviderEnvRefSlot::Undeliverable
+    }
+}
+
 /// True when the credential catalog will inject `env_ref` for `provider_id` at
 /// spawn time. This is the exact mirror of the injection logic in
 /// [`resolve_agent_environment`]; the init secret gate relies on it so that a
-/// passing gate always implies a resolvable spawn environment. Changing one
-/// side without the other breaks that lockstep.
+/// passing gate always implies a resolvable spawn environment. Changing the slot
+/// classification without the injection logic breaks that lockstep.
 pub fn catalog_covers_env_ref(
     secrets: &SecretStore,
     agent_id: &str,
@@ -88,23 +145,38 @@ pub fn catalog_covers_env_ref(
     let Some((credential, _alias)) = credentials.selected(selected_alias) else {
         return false;
     };
-    if !provider_id_is_known(provider_id) {
-        return configured_api_key_ref == Some(env_ref) && credential.values.contains_key(env_ref);
+    match classify_provider_env_ref(agent_id, provider_id, configured_api_key_ref, env_ref) {
+        ProviderEnvRefSlot::CustomApiKey | ProviderEnvRefSlot::MappedCompanion => {
+            credential.values.contains_key(env_ref)
+        }
+        ProviderEnvRefSlot::MappedPrimary { canonical_primary } => {
+            credential.values.contains_key(canonical_primary)
+        }
+        ProviderEnvRefSlot::Undeliverable => false,
     }
-    if provider_uses_agent_native_auth(agent_id, provider_id) {
-        return false;
-    }
-    let Some(canonical_primary) = env_var_for_provider_id(provider_id) else {
-        return false;
-    };
-    if env_var_for_agent_provider_id(agent_id, provider_id) == Some(env_ref) {
-        return credential.values.contains_key(canonical_primary);
-    }
-    let companion =
-        companion_env_refs_for_agent_provider_id(agent_id, provider_id).contains(&env_ref);
-    let optional =
-        optional_env_refs_for_agent_provider_id(agent_id, provider_id).contains(&env_ref);
-    (companion || optional) && credential.values.contains_key(env_ref)
+}
+
+/// Whether a canonical managed-state credential push for `provider_id` would
+/// place `env_ref` into the agent's spawn environment. The init deferral gate
+/// consults this per ref: a caller that declared `defer_provider_credentials`
+/// may soft-pass a missing ref only when the promised push can actually deliver
+/// it. A noncanonical api-key alias or a `VAR=template` inner ref is never
+/// carried by the push, so deferring it would report init success on a config
+/// the agent can never resolve. The exact mirror of [`catalog_covers_env_ref`]
+/// with the credential assumed present, via the shared
+/// [`classify_provider_env_ref`].
+pub fn push_delivers_env_ref_for_config(config: &Config, provider_id: &str, env_ref: &str) -> bool {
+    matches!(
+        classify_provider_env_ref(
+            &config.agent.id,
+            provider_id,
+            agent_custom_provider_api_key_ref(&config.agent, provider_id),
+            env_ref,
+        ),
+        ProviderEnvRefSlot::CustomApiKey
+            | ProviderEnvRefSlot::MappedPrimary { .. }
+            | ProviderEnvRefSlot::MappedCompanion
+    )
 }
 
 /// The single satisfiability predicate for provider secret refs: the flat
@@ -519,10 +591,11 @@ fn custom_provider_config<'a>(
         })
 }
 
-/// A hosted init soft-passes a custom provider's api-key ref expecting a
-/// managed-state credential push after init; if the agent spawns before that
-/// push lands, the raw `SecretNotFound` from the env loop would name the ref
-/// but not the remediation. Name both.
+/// A hosted init soft-passes a provider's api-key ref (custom or mapped under
+/// `defer_provider_credentials`) expecting a managed-state credential push
+/// after init; if the agent spawns before that push lands, the raw
+/// `SecretNotFound` from the env loop would name the ref but not the
+/// remediation. Name both.
 fn remap_pending_provider_credential(
     config: &Config,
     entry: &str,
@@ -535,9 +608,14 @@ fn remap_pending_provider_credential(
     }
     let pending_provider = effective_active_provider_ids(&config.agent)
         .into_iter()
-        .filter(|provider_id| !provider_id_is_known(provider_id))
         .find(|provider_id| {
-            agent_custom_provider_api_key_ref(&config.agent, provider_id) == Some(entry)
+            if provider_id_is_known(provider_id) {
+                legacy_provider_config(&config.agent, provider_id)
+                    .and_then(|provider| provider.api_key_ref.as_deref())
+                    == Some(entry)
+            } else {
+                agent_custom_provider_api_key_ref(&config.agent, provider_id) == Some(entry)
+            }
         });
     match pending_provider {
         Some(provider_id) => StackError::InvalidParam {

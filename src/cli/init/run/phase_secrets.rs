@@ -199,11 +199,11 @@ pub(super) fn run_secrets_phase(flow: &mut InitFlow) -> Result<()> {
         ) {
             return finalize_with_error(&flow.store, &flow.init_run, error);
         }
-        // A hosted init may have just soft-passed a custom provider ref that is
+        // A hosted init may have just soft-passed a provider ref that is
         // pending a managed credential push; resolving the prepared environment
         // would hard-fail on that same ref, so only the unrelated MCP refs are
         // validated until the credential lands.
-        let validation = match pending_custom_provider_credential(
+        let validation = match pending_deferred_provider_credential(
             &prepared.canonical_config,
             &flow.secret_store,
         ) {

@@ -319,6 +319,64 @@ fn a_repeated_advertised_value_is_offered_once() {
 }
 
 #[test]
+fn deferred_mapped_credential_writes_explicit_model_without_discovery() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let secrets = crate::secrets::SecretStore::open_or_create(home.path()).expect("secret store");
+    let registry = RegistryCatalog::load_embedded().expect("registry");
+    let mut config = crate::config::load_config_from_str(include_str!(
+        "../../../../tests/fixtures/valid-opencode-stack.toml"
+    ))
+    .expect("fixture config");
+    config.agent.env = vec!["OPENROUTER_API_KEY".to_owned()];
+    config.agent.provider = Some(crate::config::AgentProviderConfig {
+        id: "openrouter".to_owned(),
+        model: None,
+        api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
+        custom: None,
+    });
+    let args = parse_init_args(&["--model", "some/model"]);
+
+    // Without the deferral declaration the pending credential still fails the
+    // explicit flag loudly.
+    let plain = std::sync::Arc::new(prompt::RecordingPromptDriver::default());
+    prompt::with_hosted_driver(plain, || {
+        configure_model_and_mode_for_init(
+            &args,
+            home.path(),
+            &registry,
+            &mut config,
+            Path::new("acps-config.toml"),
+            &secrets,
+        )
+    })
+    .expect_err("undeclared run cannot validate --model against a pending credential");
+
+    let deferring =
+        std::sync::Arc::new(prompt::RecordingPromptDriver::deferring_provider_credentials());
+    let outcome = prompt::with_hosted_driver(deferring, || {
+        configure_model_and_mode_for_init(
+            &args,
+            home.path(),
+            &registry,
+            &mut config,
+            Path::new("acps-config.toml"),
+            &secrets,
+        )
+    })
+    .expect("declared deferral accepts the explicit model without discovery");
+    assert_eq!(outcome.model_action, ModelModeAction::Set);
+    assert_eq!(
+        config
+            .agent
+            .provider
+            .as_ref()
+            .and_then(|provider| provider.model.as_deref()),
+        Some("some/model"),
+        "the explicit model lands in the provider block unvalidated"
+    );
+}
+
+#[test]
 fn discovery_only_retracts_a_lane_the_registry_claimed() {
     let driver = std::sync::Arc::new(prompt::RecordingPromptDriver::default());
     prompt::with_hosted_driver(driver.clone(), || {

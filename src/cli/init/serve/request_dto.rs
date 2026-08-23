@@ -117,10 +117,14 @@ pub(super) struct StartInitRequest {
     agent_update: Option<String>,
     /// Requires `agent_update`. Hour/day/week units, e.g. `12h`, `1d`.
     agent_update_frequency: Option<String>,
-    /// The caller's declaration that it will push a configured custom provider's
+    /// The caller's declaration that it will push the configured provider's
     /// credential through the managed-state extension after init. Only then does
-    /// a missing custom-provider api-key ref soft-pass; otherwise init hard-fails
-    /// on it exactly like a terminal run. Absent → false.
+    /// a missing provider ref soft-pass, and only for a ref the push can deliver:
+    /// a custom provider's api-key ref, or a mapped key-based provider's api-key
+    /// and companion env vars under the names the agent reads. A noncanonical
+    /// api-key alias, a `VAR=template` inner ref, or an agent-native-auth
+    /// provider's refs cannot arrive through the push and still hard-fail.
+    /// Absent → false.
     defer_provider_credentials: Option<bool>,
     #[serde(default)]
     data_sources: Vec<DataSourceRequest>,

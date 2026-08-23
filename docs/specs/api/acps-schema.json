@@ -1517,7 +1517,7 @@
               "boolean",
               "null"
             ],
-            "description": "The caller's declaration that it will push a configured custom provider's\ncredential through the managed-state extension after init. Only then does\na missing custom-provider api-key ref soft-pass; otherwise init hard-fails\non it exactly like a terminal run. Absent → false."
+            "description": "The caller's declaration that it will push the configured provider's\ncredential through the managed-state extension after init. Only then does\na missing provider ref soft-pass, and only for a ref the push can deliver:\na custom provider's api-key ref, or a mapped key-based provider's api-key\nand companion env vars under the names the agent reads. A noncanonical\napi-key alias, a `VAR=template` inner ref, or an agent-native-auth\nprovider's refs cannot arrive through the push and still hard-fail.\nAbsent → false."
           },
           "data_sources": {
             "type": "array",

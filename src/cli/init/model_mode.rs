@@ -23,7 +23,7 @@ use super::headless_snapshot::{
     headless_config_side_dirs, remove_new_files_in_dirs, restore_headless_snapshots,
 };
 use super::provider::{
-    pending_custom_provider_credential, pending_provider_credential_reason,
+    pending_deferred_provider_credential, pending_provider_credential_reason,
     primary_provider_is_custom,
 };
 use super::registry_apply::is_custom_agent;
@@ -325,18 +325,42 @@ pub(super) fn configure_model_and_mode_for_init(
     let fixture_discovery = std::env::var_os(FIXTURE_CONFIG_OPTIONS_ENV).is_some()
         || std::env::var_os(FIXTURE_NEW_SESSION_RESPONSE_ENV).is_some();
 
-    // A hosted init accepts a custom provider whose api-key ref has not landed
-    // yet, expecting a managed credential push once init finishes. Until it
-    // lands the agent cannot resolve its environment, so the discovery spawn
-    // would fail on a state that is pending by design. Checked before the
-    // binary/cwd preconditions so the attribution names the credential rather
-    // than whatever else happens to be unready.
+    // A hosted init accepts a provider (custom or mapped) whose api-key ref
+    // has not landed yet, expecting a managed credential push once init
+    // finishes. Until it lands the agent cannot resolve its environment, so
+    // the discovery spawn would fail on a state that is pending by design.
+    // Checked before the binary/cwd preconditions so the attribution names the
+    // credential rather than whatever else happens to be unready.
     if !fixture_discovery
         && let Some((provider_id, api_key_ref)) =
-            pending_custom_provider_credential(config, secrets)
+            pending_deferred_provider_credential(config, secrets)
     {
         let reason = pending_provider_credential_reason(&provider_id, &api_key_ref);
         if let Some(flags) = explicit_flags {
+            // Under the `defer_provider_credentials` declaration the missing
+            // credential is expected, so explicit values are written without
+            // the advertised-list validation instead of failing the run: a
+            // wrong value surfaces at the first real session, after the
+            // promised push lands.
+            if prompt::defer_provider_credentials() {
+                if model_lane_active && let Some(model) = args.model.as_deref() {
+                    write_model_into_config(config, model.to_owned(), entry.set_provider);
+                    outcome.model_action = ModelModeAction::Set;
+                }
+                if mode_lane_active && let Some(mode) = args.mode.as_deref() {
+                    write_mode_into_config(config, mode.to_owned());
+                    outcome.mode_action = ModelModeAction::Set;
+                }
+                if effort_lane_active && let Some(effort) = args.effort.as_deref() {
+                    write_effort_into_config(config, effort.to_owned());
+                    outcome.effort_action = ModelModeAction::Set;
+                }
+                init_progress(
+                    args,
+                    &format!("{flags} accepted without discovery validation: {reason}"),
+                );
+                return Ok(outcome);
+            }
             let error = StackError::AgentConfigProvision {
                 path: config_path.to_path_buf(),
                 reason: format!("cannot validate {flags} for {}: {reason}", entry.name),

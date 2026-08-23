@@ -199,10 +199,6 @@ fn configured_custom_providers(config: &Config) -> impl Iterator<Item = (&str, &
         })
 }
 
-fn provider_is_configured_custom(config: &Config, provider_id: &str) -> bool {
-    configured_custom_providers(config).any(|(id, _)| id == provider_id)
-}
-
 /// True when the primary agent's own provider is custom. The custom-provider
 /// flow writes a literal model id that no harness advertises, so the init model
 /// lane has nothing to discover. Derived from config rather than
@@ -236,6 +232,63 @@ pub(crate) fn pending_custom_provider_credential(
         .map(|(provider_id, api_key_ref)| (provider_id.to_owned(), api_key_ref.to_owned()))
 }
 
+/// Whether the managed-state credential push can actually satisfy this
+/// provider's refs after init. Custom providers always can (the push carries
+/// their api-key ref); a mapped key-based provider can too, including
+/// companion refs like base URLs, because the push delivers the provider's
+/// whole env set. An agent-native-auth provider cannot: managed-state apply
+/// rejects its id and the catalog never covers its refs, so its refs must be
+/// collected or fail at init.
+fn provider_credentials_are_push_deliverable(config: &Config, provider_id: &str) -> bool {
+    if configured_custom_providers(config).any(|(id, _)| id == provider_id) {
+        return true;
+    }
+    !provider_uses_agent_native_auth(&config.agent.id, provider_id)
+}
+
+/// The first provider credential this init run is waiting on, custom or
+/// mapped. Custom providers are always checked (see
+/// [`pending_custom_provider_credential`]); a mapped provider's refs only
+/// count as pending under the `defer_provider_credentials` declaration, and
+/// only the ones the push can actually deliver (canonical primary and companion
+/// refs). Without the declaration, or for a non-deliverable ref, a missing
+/// mapped ref already hard-failed in [`collect_missing_provider_refs`] — so
+/// terminal and undeclared hosted runs keep their custom-only semantics. Init
+/// lanes that would spawn the agent (model discovery, testflight,
+/// prepared-config validation) consult this so the spawn is skipped instead of
+/// failing on an environment that is pending by design.
+pub(crate) fn pending_deferred_provider_credential(
+    config: &Config,
+    secrets: &SecretStore,
+) -> Option<(String, String)> {
+    if let Some(pending) = pending_custom_provider_credential(config, secrets) {
+        return Some(pending);
+    }
+    if !prompt::defer_provider_credentials() {
+        return None;
+    }
+    let provider = config.agent.provider.as_ref()?;
+    if provider.custom.is_some() || !provider_credentials_are_push_deliverable(config, &provider.id)
+    {
+        return None;
+    }
+    required_env_refs_for_agent_provider_id(
+        &config.agent.id,
+        &provider.id,
+        provider.api_key_ref.as_deref(),
+    )
+    .iter()
+    .flat_map(|name| agent_env_secret_refs_for_var(&config.agent.env, name))
+    // Only a ref the push can actually deliver is "pending by design"; a
+    // non-deliverable one already hard-failed in `collect_missing_provider_refs`,
+    // so it must not masquerade as an awaited credential and skip the spawn.
+    .find(|env_ref| {
+        push_delivers_env_ref_for_config(config, &provider.id, env_ref)
+            && !env_ref_is_satisfiable_for_config(config, secrets, &provider.id, env_ref)
+    })
+    .map(|env_ref| (provider.id.clone(), env_ref))
+}
+
 /// Shared remediation for a custom provider whose credential has not landed
 /// yet; mirrors the spawn-time wording in `remap_pending_provider_credential`
 /// so an operator sees one story regardless of which layer catches it first.
@@ -252,6 +305,19 @@ pub(crate) fn collect_missing_provider_refs(
     provider_id: Option<&str>,
     required_refs: &[String],
 ) -> Result<()> {
+    // Expand each required var to the refs runtime actually resolves: the var
+    // itself when declared bare, the inner refs of a `VAR=template` entry.
+    // Prompting, storing, and the satisfiability check must all target these,
+    // or an answered prompt for `OPENAI_API_KEY=${MY_KEY}` would land the value
+    // under `OPENAI_API_KEY` and pass validation while runtime still resolves
+    // `MY_KEY` from the flat store and fails to start. The prepared-config path
+    // expands at its call site; re-expanding an inner ref (not itself a declared
+    // var) is a no-op, so this is safe for every caller.
+    let required_refs: Vec<String> = required_refs
+        .iter()
+        .flat_map(|name| agent_env_secret_refs_for_var(&config.agent.env, name))
+        .collect();
+    let required_refs = required_refs.as_slice();
     // With a provider context the ref is satisfiable from the flat store or
     // the structured credential catalog; without one (MCP refs on the
     // prepared-config path) only the flat store counts.
@@ -259,10 +325,35 @@ pub(crate) fn collect_missing_provider_refs(
         Some(provider_id) => env_ref_is_satisfiable_for_config(config, store, provider_id, env_ref),
         None => store.contains(env_ref),
     };
+    // A caller that declared `defer_provider_credentials` will push the
+    // credential through the managed-state extension after init, so a missing
+    // provider ref is deferred rather than prompted or fatal: a plaintext key
+    // must never ride an input frame, so the value prompt is not even streamed.
+    // Gated on the declaration, not on the mere presence of a hosted driver: a
+    // driven init that made no such promise keeps the prompt and the hard
+    // failure.
+    let defer_declared = prompt::defer_provider_credentials();
+    // `defer_provider` narrows to a push-deliverable provider so the per-ref
+    // check below only runs when deferral is possible at all; an
+    // agent-native-auth provider's refs never arrive through the push.
+    let defer_provider: Option<&str> = provider_id.filter(|provider_id| {
+        defer_declared && provider_credentials_are_push_deliverable(config, provider_id)
+    });
+    // Deferral is decided per ref, not per provider: the push writes only the
+    // env vars the agent reads for the provider, so a `VAR=template` inner ref
+    // (which runtime resolves from the flat store) or a noncanonical api-key
+    // alias is never push-deliverable and falls through to the prompt
+    // (interactive) or the hard failure (below) instead. `required_refs` is
+    // already the expanded inner-ref set, so this is a direct per-ref check.
+    let deferrable = |env_ref: &str| {
+        defer_provider.is_some_and(|provider_id| {
+            push_delivers_env_ref_for_config(config, provider_id, env_ref)
+        })
+    };
     if interactive {
         let mut collected = Vec::new();
         for env_ref in required_refs {
-            if satisfiable(secret_store, env_ref) {
+            if deferrable(env_ref) || satisfiable(secret_store, env_ref) {
                 continue;
             }
             // Masked entry via the wizard: a provider API key is a secret value;
@@ -289,33 +380,36 @@ pub(crate) fn collect_missing_provider_refs(
         )?;
     }
     for env_ref in required_refs {
-        if !satisfiable(secret_store, env_ref) {
-            // A caller that declared `defer_provider_credentials` will push the
-            // credential through the managed-state extension after init (the
-            // value prompt is answered with null by design, since plaintext
-            // never rides an input frame), so a provider ref missing here is
-            // deferred rather than fatal. Gated on the declaration, not on the
-            // mere presence of a hosted driver: a driven init that made no such
-            // promise keeps the hard failure. Scoped to configured custom
-            // providers: their init lanes skip every later agent spawn, whereas
-            // a mapped provider's model-discovery spawn would still hard-fail on
-            // the missing ref and turn the deferral into a worse-attributed
-            // failure.
-            let custom_provider = provider_id
-                .is_some_and(|provider_id| provider_is_configured_custom(config, provider_id));
-            if custom_provider && prompt::defer_provider_credentials() {
-                prompt::emit_progress(format!(
-                    "provider secret `{env_ref}` not present yet; expecting a managed credential push after init"
-                ));
-                tracing::warn!(
-                    env_ref = %env_ref,
-                    "provider secret missing at init; deferring to a managed credential push"
-                );
-                continue;
+        if satisfiable(secret_store, env_ref) {
+            continue;
+        }
+        if deferrable(env_ref) {
+            prompt::emit_progress(format!(
+                "provider secret `{env_ref}` not present yet; expecting a managed credential push after init"
+            ));
+            tracing::warn!(
+                env_ref = %env_ref,
+                "provider secret missing at init; deferring to a managed credential push"
+            );
+            continue;
+        }
+        // Not satisfiable and not deferrable. Under a declared deferral with a
+        // provider context — a noncanonical alias, a template inner ref, or an
+        // agent-native-auth provider's ref — name why the push cannot cover it,
+        // rather than emit a bare "not found" that reads as a broken promise.
+        // Refs with no provider context (MCP refs) keep the plain failure.
+        match provider_id {
+            Some(provider_id) if defer_declared => {
+                return Err(StackError::ProviderSecretNotPushDeliverable {
+                    provider_id: provider_id.to_owned(),
+                    env_ref: env_ref.clone(),
+                });
             }
-            return Err(StackError::SecretNotFound {
-                name: env_ref.clone(),
-            });
+            _ => {
+                return Err(StackError::SecretNotFound {
+                    name: env_ref.clone(),
+                });
+            }
         }
     }
     Ok(())
