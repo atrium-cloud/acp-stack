@@ -219,7 +219,7 @@ pub fn record_step_with_default_log_dir(
             existing.status.as_str(),
             INIT_STEP_SUCCEEDED | INIT_STEP_SKIPPED
         )
-        && verify().unwrap_or(false)
+        && verifier_holds(verify)
     {
         // Postcondition still holds; replay as `skipped` and leave the
         // body unexecuted. We accept BOTH `succeeded` and `skipped` as
@@ -233,7 +233,7 @@ pub fn record_step_with_default_log_dir(
     }
 
     store.mark_init_step_running(&step_id)?;
-    match body() {
+    match run_step_body(kind, body) {
         Ok(outcome) => {
             let log_dir = outcome.log_dir.as_deref().or(default_log_dir);
             store.mark_init_step_succeeded(&step_id, log_dir, &outcome.payload_json)?;
@@ -244,15 +244,74 @@ pub fn record_step_with_default_log_dir(
             })
         }
         Err(error) => {
-            store.mark_init_step_failed(
-                &step_id,
-                default_log_dir,
-                error.error_code(),
-                &error.to_string(),
-                "{}",
-            )?;
+            settle_failed_step(store, &step_id, default_log_dir, &error);
             Err(error)
         }
+    }
+}
+
+/// Run a step body, converting a panic into a typed [`StackError`] so the
+/// caller's failure arm settles the durable row and the driver's signal
+/// bracket plus the run's `finalize_with_error` still run. Resuming the unwind
+/// here would skip all of that and strand the `init_steps` row at `running`,
+/// which is exactly the leaked-state the hosted init crash exposed.
+fn run_step_body<T>(kind: &str, body: impl FnOnce() -> Result<T>) -> Result<T> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(result) => result,
+        Err(payload) => Err(StackError::InitStepPanicked {
+            kind: kind.to_owned(),
+            message: panic_payload_message(payload.as_ref()),
+        }),
+    }
+}
+
+/// Evaluate a step's resume verifier, treating BOTH an error and a panic as
+/// "postcondition not proven" so the body re-runs. The verifier runs before the
+/// row is marked `running`, so it is outside `run_step_body`; catching its panic
+/// here keeps a verifier that reads external state (e.g. `SecretStore::open`)
+/// from unwinding past `finalize_with_error` and stranding the row `pending`.
+fn verifier_holds(verify: impl FnOnce() -> Result<bool>) -> bool {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(verify))
+        .map(|result| result.unwrap_or(false))
+        .unwrap_or(false)
+}
+
+/// Best-effort extraction of a panic's message. `catch_unwind` yields the
+/// `panic!`/`unwrap` argument as `&str` or `String`; anything else is opaque.
+pub(crate) fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_owned()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "panic with a non-string payload".to_owned()
+    }
+}
+
+/// Mark a step `failed`, preserving the body error even when the failure write
+/// itself fails. A store write that fails between `running` and this call would
+/// otherwise strand the row at `running` AND replace the body error with the
+/// store error via `?`, hiding the real cause. The write failure is logged (it
+/// is a genuine local-state problem) but never masks the body error.
+fn settle_failed_step(
+    store: &StateStore,
+    step_id: &str,
+    default_log_dir: Option<&str>,
+    error: &StackError,
+) {
+    if let Err(settle_error) = store.mark_init_step_failed(
+        step_id,
+        default_log_dir,
+        error.error_code(),
+        &error.to_string(),
+        "{}",
+    ) {
+        tracing::error!(
+            step_id = %step_id,
+            body_error = %error,
+            settle_error = %settle_error,
+            "failed to record init step failure; the durable row may be left `running`",
+        );
     }
 }
 
@@ -304,20 +363,25 @@ pub fn record_step_with_log_dir(
             existing.status.as_str(),
             INIT_STEP_SUCCEEDED | INIT_STEP_SKIPPED
         )
-        && verify().unwrap_or(false)
+        && verifier_holds(verify)
     {
         store.mark_init_step_skipped(&step_id, &resume_payload(existing))?;
         return Ok(StepDisposition::Skipped);
     }
 
     store.mark_init_step_running(&step_id)?;
-    match body() {
+    match run_step_body(kind, body) {
         Ok((mut draft, outcome)) => {
             // Persisting log files is best-attempted but we'd rather mark
             // the step as `failed` with a clear error than `succeeded`
             // with logs missing — the audit copy is the entire point of
-            // this column. Same semantics as the installer module.
-            persist_step_logs_to_disk(&mut draft, agent_id_for_logs, log_base)?;
+            // this column. Same semantics as the installer module. Route the
+            // failure through `settle_failed_step` so the row never strands at
+            // `running` when the persist itself fails.
+            if let Err(error) = persist_step_logs_to_disk(&mut draft, agent_id_for_logs, log_base) {
+                settle_failed_step(store, &step_id, None, &error);
+                return Err(error);
+            }
             let log_dir = draft.log_dir.clone().or(outcome.log_dir);
             store.mark_init_step_succeeded(&step_id, log_dir.as_deref(), &outcome.payload_json)?;
             Ok(if outcome.background {
@@ -327,13 +391,7 @@ pub fn record_step_with_log_dir(
             })
         }
         Err(error) => {
-            store.mark_init_step_failed(
-                &step_id,
-                None,
-                error.error_code(),
-                &error.to_string(),
-                "{}",
-            )?;
+            settle_failed_step(store, &step_id, None, &error);
             Err(error)
         }
     }
@@ -654,6 +712,86 @@ mod tests {
             serde_json::from_str(&payload).expect("resume payload must be valid JSON");
         assert_eq!(parsed["installer_run_id"], "ins_1");
         assert_eq!(parsed["resume"]["verified"], true);
+    }
+
+    #[test]
+    fn record_step_converts_a_body_panic_into_a_failed_row_and_typed_error() {
+        // Regression for the hosted-init crash: a panicking step body must
+        // settle the durable row as `failed` and surface a typed error through
+        // the normal failure arm, never unwind the caller and strand the row at
+        // `running`.
+        let (_dir, store) = open_store();
+        let run = begin_run(&store, None, None, "{}").expect("begin");
+        let error = record_step(
+            &store,
+            &run,
+            1,
+            step_kind::PROVIDER_CONFIGURE,
+            || Ok(false),
+            || -> Result<StepOutcome> { panic!("boom inside the step body") },
+        )
+        .expect_err("a panicking body must surface as an error, not unwind the caller");
+        match &error {
+            StackError::InitStepPanicked { kind, message } => {
+                assert_eq!(kind, step_kind::PROVIDER_CONFIGURE);
+                assert!(
+                    message.contains("boom inside the step body"),
+                    "panic message not captured: {message}"
+                );
+            }
+            other => panic!("expected InitStepPanicked, got {other:?}"),
+        }
+        assert_eq!(error.error_code(), "init.step_panicked");
+        let steps = store.query_init_steps(&run.id).expect("steps");
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].status, INIT_STEP_FAILED);
+        assert_eq!(steps[0].error_kind.as_deref(), Some("init.step_panicked"));
+        assert!(
+            steps[0]
+                .error_detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("boom inside the step body"),
+            "durable error_detail must carry the panic message for post-mortem",
+        );
+    }
+
+    #[test]
+    fn record_step_treats_a_verifier_panic_as_unproven_and_reruns_the_body() {
+        // The resume verifier runs before the row is marked `running`, so a
+        // panic there is outside `run_step_body`. It must be swallowed like a
+        // verifier error (postcondition unproven → re-run the body), never
+        // unwind past `finalize_with_error` and strand the row `pending`.
+        let (_dir, store) = open_store();
+        let run = begin_run(&store, None, None, "{}").expect("begin");
+        record_step(
+            &store,
+            &run,
+            1,
+            step_kind::AGENT_INSTALL,
+            || Ok(false),
+            || Ok(StepOutcome::empty()),
+        )
+        .expect("first run leaves a succeeded row for the verifier to consult");
+
+        let mut reran = false;
+        let disposition = record_step(
+            &store,
+            &run,
+            1,
+            step_kind::AGENT_INSTALL,
+            || -> Result<bool> { panic!("verifier blew up reading external state") },
+            || {
+                reran = true;
+                Ok(StepOutcome::empty())
+            },
+        )
+        .expect("a verifier panic must not propagate; the body re-runs");
+        assert!(reran, "verifier panic must fall through to a body re-run");
+        assert_eq!(disposition, StepDisposition::Executed);
+        let steps = store.query_init_steps(&run.id).expect("steps");
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].status, INIT_STEP_SUCCEEDED);
     }
 
     #[test]

@@ -199,7 +199,9 @@ pub(super) fn finalize_with_error(
         .query_init_steps(&run.id)
         .ok()
         .and_then(failed_step_for_report);
-    finalize_run(store, &run.id, INIT_RUN_FAILED)?;
+    // Print the failure context BEFORE the fallible settle write: a store that
+    // fails at `finalize_run` must not swallow the operator-facing diagnostics
+    // (the original form bailed on `?` here, printing nothing on a broken store).
     eprintln!("init failed in run {}", run.id);
     if let Some(step) = failed_step {
         eprintln!("failed step: {}", step.kind);
@@ -210,6 +212,17 @@ pub(super) fn finalize_with_error(
         }
     }
     eprintln!("retry: acps init --resume --run-id {}", run.id);
+    // Settle the run row as failed. A write failure here is a genuine
+    // local-state problem, but it must never mask the body error that triggered
+    // finalization, so it is logged rather than propagated.
+    if let Err(settle_error) = finalize_run(store, &run.id, INIT_RUN_FAILED) {
+        tracing::error!(
+            run_id = %run.id,
+            body_error = %error,
+            settle_error = %settle_error,
+            "failed to settle init run as failed; the run row may be left non-terminal",
+        );
+    }
     Err(error)
 }
 

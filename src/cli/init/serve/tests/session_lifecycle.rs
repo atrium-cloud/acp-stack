@@ -164,6 +164,63 @@ async fn error_is_parked_until_acked() {
 }
 
 #[tokio::test]
+async fn set_result_on_an_errored_session_is_a_no_op() {
+    // A late failed handoff (KeyHandover's drop) must not overwrite a session
+    // that already parked `errored`: publishing result_ready after the terminal
+    // error frame would flip terminal_result from Err to Ok — a failed bootstrap
+    // exiting zero. The designed failed result still fires on a non-terminal
+    // (running) session; this guard only blocks the reorder.
+    let manager = HostedInitManager::new();
+    let session = HostedInitSession::new(
+        "init_errored_guard".to_owned(),
+        manager.shutdown.clone(),
+        false,
+    );
+    *lock_unpoisoned(&manager.active) = Some(session.clone());
+
+    session.set_error("init.failed", "provider setup failed".to_owned());
+    assert_eq!(session.status(), "errored");
+
+    session.set_result(json!({ "status": "failed" }));
+
+    assert_eq!(
+        session.status(),
+        "errored",
+        "set_result must not overwrite an errored session"
+    );
+    assert!(
+        !session.has_result(),
+        "an errored session must not publish a result"
+    );
+    manager
+        .terminal_result()
+        .expect_err("an errored session must still report failure after a blocked set_result");
+}
+
+#[test]
+fn progress_is_frozen_once_the_session_is_terminal() {
+    // Symmetric with signal suppression (apply_state_signal): after a terminal
+    // transition, progress (push_event) must not keep streaming. A progress line
+    // leaking past the terminal frame is the "a progress line arrived, then no
+    // signals" asymmetry that misdirected the hosted-init crash triage.
+    let session = test_session("init_progress_freeze");
+    session.set_error("init.failed", "boom".to_owned());
+    // Subscribe after the terminal transition so the receiver only sees frames
+    // broadcast from here on.
+    let receiver = session.subscribe();
+
+    session.push_event(ServerEvent::Progress {
+        message: "still working".to_owned(),
+    });
+
+    assert_eq!(
+        receiver.len(),
+        0,
+        "a terminal session must not broadcast further progress frames",
+    );
+}
+
+#[tokio::test]
 async fn ack_error_is_rejected_without_parked_error() {
     let session = test_session("init_no_error");
     match handle_client_frame(&session, r#"{"type":"ack_error"}"#) {

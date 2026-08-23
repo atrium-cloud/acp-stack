@@ -478,6 +478,9 @@ pub enum StackError {
     #[error("init run state is corrupted: {reason}")]
     InitRunCorrupted { reason: String },
 
+    #[error("init step `{kind}` panicked: {message}")]
+    InitStepPanicked { kind: String, message: String },
+
     #[error(
         "dependency apply produced failing actions: {summary}; inspect `acps installer history --agent deps_apply` (apply_run_id={apply_run_id})"
     )]

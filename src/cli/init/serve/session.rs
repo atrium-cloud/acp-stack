@@ -46,13 +46,44 @@ impl HostedInitManager {
             session: session.clone(),
         });
         std::thread::spawn(move || {
-            let result = prompt::with_hosted_driver(driver, || {
-                run_hosted_init(init_args, InitMode::Operator)
+            // Backstop for a panic OUTSIDE any recorded step body — preflight
+            // staging, the non-step config closures, finalize. `record_step`
+            // already converts a step-body panic into an orderly failure that
+            // settles its durable row; this catch parks the SESSION for the
+            // remainder so a panic can never leave it `running` until a reaper
+            // cancels it. It cannot settle the `init_runs` row (the `StateStore`
+            // lives in the now-dropped `InitFlow`); a non-step panic leaves that
+            // row non-terminal, which `acps init --resume` then recovers.
+            // Post-auth, `KeyHandover`'s drop has already delivered the spec'd
+            // failed result during the unwind, so the `has_result` guard below
+            // correctly skips `set_error`; pre-auth it fires and parks the
+            // session `errored`.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                prompt::with_hosted_driver(driver, || {
+                    run_hosted_init(init_args, InitMode::Operator)
+                })
+            }));
+            let result = outcome.unwrap_or_else(|payload| {
+                Err(StackError::InitStepPanicked {
+                    kind: "init".to_owned(),
+                    message: crate::runtime::init_runner::panic_payload_message(payload.as_ref()),
+                })
             });
-            if let Err(error) = result
-                && !session.has_result()
-            {
-                session.set_error(error.error_code(), error.public_message());
+            if let Err(error) = result {
+                if !session.has_result() {
+                    session.set_error(error.error_code(), error.public_message());
+                } else {
+                    // A result was already published (the spec'd failed handoff
+                    // from `KeyHandover`'s drop). The run error would otherwise
+                    // vanish here; log it so the failure is not silent when the
+                    // durable rows or the result payload are the only remaining
+                    // evidence.
+                    tracing::error!(
+                        error = %error,
+                        "hosted init failed after a result was already published; \
+                         see the durable init_steps/init_runs rows for the settled state",
+                    );
+                }
             }
         });
         Ok(response)
@@ -349,6 +380,15 @@ impl HostedInitSession {
     pub(super) fn push_event(&self, event: ServerEvent) {
         let frame = {
             let mut inner = lock_unpoisoned(&self.inner);
+            // Symmetric with `apply_state_signal`: once the session is terminal
+            // the client has treated the terminal frame as the last word. This
+            // method (progress only) had no such barrier, so a wizard thread
+            // still running after a cancel/expire kept streaming progress while
+            // every signal was frozen — the exact "a progress line arrived, then
+            // nothing" asymmetry that misdirected the hosted-init crash triage.
+            if is_terminal_status(&inner.status) {
+                return;
+            }
             self.emit_event_locked(&mut inner, event)
         };
         let _ = self.events.send(frame.to_string());
@@ -518,7 +558,14 @@ impl HostedInitSession {
         let mut result_json = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_owned());
         {
             let mut inner = lock_unpoisoned(&self.inner);
-            if matches!(inner.status.as_str(), "cancelled" | "closed") {
+            // Refuse any terminal status, not just cancelled/closed. An already
+            // `errored` session has emitted its terminal `error` frame; letting a
+            // late failed handoff (from `KeyHandover`'s drop) overwrite it to
+            // `completed_awaiting_ack` would publish `result_ready` after the
+            // error frame and flip `terminal_result` from Err to Ok — a failed
+            // bootstrap exiting zero. The spec'd failed result still fires on a
+            // NON-terminal (`running`) session, so this only blocks the reorder.
+            if is_terminal_status(&inner.status) {
                 result_json.zeroize();
                 return;
             }

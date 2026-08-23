@@ -32,6 +32,7 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         AgentRegistryMissing { .. } => "agent.registry_missing",
         AgentPlaceholderConfigured => "agent.placeholder_configured",
         InitRunCorrupted { .. } => "init.run_corrupted",
+        InitStepPanicked { .. } => "init.step_panicked",
         DepsApplyFailed { .. } => "deps.apply_failed",
         DepsApplyInFlight { .. } => "deps.apply_in_flight",
         DepsApplyRunNotFound { .. } => "deps.apply_run_not_found",
@@ -102,6 +103,10 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
             "config has legacy placeholder agent; select a real supported agent before starting the runtime".to_owned()
         }
         InitRunCorrupted { reason } => format!("init run state is corrupted: {reason}"),
+        // The raw panic message can carry local diagnostics; the public surface
+        // names only the step. The full message rides `Display` into the CLI log
+        // and the durable `init_steps.error_detail`.
+        InitStepPanicked { kind, .. } => format!("init step `{kind}` failed unexpectedly"),
         // Deliberately omits `summary`: it can carry operator shell text and
         // exit detail that should not leave the host over the API.
         DepsApplyFailed { apply_run_id, .. } => {
@@ -216,6 +221,7 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         | AgentInstallerLogPersist { .. }
         | AgentRegistryMissing { .. }
         | InitRunCorrupted { .. }
+        | InitStepPanicked { .. }
         | DepsApplyFailed { .. }
         | RegistryLoad { .. }
         | SkillInstallSourceMissing { .. }
