@@ -34,12 +34,12 @@ restart = "on-crash"
 
 `[array]` is the serialized source of truth. The legacy top-level `[agent]` block is not written to canonical config; it is read on load and migrated into a single Array target, and the in-memory `agent` is rebuilt from `array.primary_target`. Each `[[array.targets]]` entry wraps one full `[agent]` block under `[array.targets.agent]`, with the same fields documented in [config.md](config.md#agent) and [agents/config.md](agents/config.md).
 
-| Field            | Meaning                                                        |
-| ---------------- | -------------------------------------------------------------- |
-| `enabled`        | whether secondary targets may run; `false` keeps only the primary active |
-| `primary_target` | id of the target that backs the default `agent`/`/v1/agent/*` surfaces |
-| `targets[].id`   | target id; must equal its `agent.id`                           |
-| `targets[].agent`| the target's ACP agent process and injected secret refs        |
+| Field             | Meaning                                                                  |
+| ----------------- | ------------------------------------------------------------------------ |
+| `enabled`         | whether secondary targets may run; `false` keeps only the primary active |
+| `primary_target`  | id of the target that backs the default `agent`/`/v1/agent/*` surfaces   |
+| `targets[].id`    | target id; must equal its `agent.id`                                     |
+| `targets[].agent` | the target's ACP agent process and injected secret refs                  |
 
 ## Validation
 
@@ -56,30 +56,30 @@ Secret refs in a non-primary target's `env` may intentionally be shared across t
 
 ## CLI
 
-| Command | Tier | Effect |
-| ------- | ---- | ------ |
-| `acps array status` | session | Array config plus, when the daemon is reachable, per-target process state and pid, and local-delegation readiness |
-| `acps array on` / `off` | local | flip `array.enabled`; `off` keeps configured targets |
-| `acps array add <agent>` | local | add a target for a registry agent; rejects an already-configured harness |
-| `acps array set --target <id> ...` | local | configure model, mode, effort, or a custom provider for one target |
-| `acps array provider use\|set-active\|list-active --target <id> ...` | local | select the default mapped provider or inspect/replace its active set |
-| `acps array provider credential select --target <id> <provider> <alias>` | local | select one catalog alias for a target; catalog mutations use `acps agent provider credential` |
-| `acps array install\|start\|stop\|restart [--target <id>] [--admin-key <key>]` | admin | drive one target, or every configured target when `--target` is omitted |
-| `acps array restart auto [--target <id>] [--admin-key <key>]` | admin | queue guarded restarts when selected targets become idle |
-| `acps agent default set <target>` | local | repoint `primary_target` at an existing target |
+| Command                                                                        | Tier    | Effect                                                                                                            |
+| ------------------------------------------------------------------------------ | ------- | ----------------------------------------------------------------------------------------------------------------- |
+| `acps array status`                                                            | session | Array config plus, when the daemon is reachable, per-target process state and pid, and local-delegation readiness |
+| `acps array on` / `off`                                                        | local   | flip `array.enabled`; `off` keeps configured targets                                                              |
+| `acps array add <agent>`                                                       | local   | add a target for a registry agent; rejects an already-configured harness                                          |
+| `acps array set --target <id> ...`                                             | local   | configure model, mode, effort, or a custom provider for one target                                                |
+| `acps array provider use\|set-active\|list-active --target <id> ...`           | local   | select the default mapped provider or inspect/replace its active set                                              |
+| `acps array provider credential select --target <id> <provider> <alias>`       | local   | select one catalog alias for a target; catalog mutations use `acps agent provider credential`                     |
+| `acps array install\|start\|stop\|restart [--target <id>] [--admin-key <key>]` | admin   | drive one target, or every configured target when `--target` is omitted                                           |
+| `acps array restart auto [--target <id>] [--admin-key <key>]`                  | admin   | queue guarded restarts when selected targets become idle                                                          |
+| `acps agent default set <target>`                                              | local   | repoint `primary_target` at an existing target                                                                    |
 
 `acps array status` reads the local read-only socket and does not require a session key. The four daemon actions call the running daemon with the admin key (required when stdin is not a terminal). With Array off, `start` and `restart` are restricted to the primary target; `install` and `stop` are unrestricted (install is idempotent, and stop on a non-running target is a no-op). When `--target` is omitted, the command attempts every target, prints a per-target result line, and exits non-zero if any target failed — a single failing target never aborts the rest of the batch. `restart auto` uses the same fan-out but queues each restart until the target has no pending/running prompts and no pending ACP permission requests.
 
 ## API
 
-| Route | Tier | Contract |
-| ----- | ---- | -------- |
-| `GET /v1/array/status` | session | enabled flag, primary target, readiness, and per-target process/configured/loaded provider state |
-| `GET /v1/array/targets/{target_id}/capabilities` | session | latest ACP capability snapshot for one target |
-| `POST /v1/array/targets/{target_id}/install` | admin | install one target's harness |
-| `POST /v1/array/targets/{target_id}/start` | admin | start one target's process |
-| `POST /v1/array/targets/{target_id}/stop` | admin | stop one target's process |
-| `POST /v1/array/targets/{target_id}/restart` | admin | restart one target's process; `?auto=true` queues a guarded restart |
+| Route                                            | Tier    | Contract                                                                                         |
+| ------------------------------------------------ | ------- | ------------------------------------------------------------------------------------------------ |
+| `GET /v1/array/status`                           | session | enabled flag, primary target, readiness, and per-target process/configured/loaded provider state |
+| `GET /v1/array/targets/{target_id}/capabilities` | session | latest ACP capability snapshot for one target                                                    |
+| `POST /v1/array/targets/{target_id}/install`     | admin   | install one target's harness                                                                     |
+| `POST /v1/array/targets/{target_id}/start`       | admin   | start one target's process                                                                       |
+| `POST /v1/array/targets/{target_id}/stop`        | admin   | stop one target's process                                                                        |
+| `POST /v1/array/targets/{target_id}/restart`     | admin   | restart one target's process; `?auto=true` queues a guarded restart                              |
 
 The un-suffixed `/v1/agent/*` routes operate on `primary_target`. Session routes accept `?target=<id>` (alias `target`) to address a specific target. An unknown `target_id` returns `400 request.invalid_param`. Start/restart of a non-primary target while Array is off is rejected with `400` and an "Array mode is off" message; tiering matches the single-agent surface (read-only status/capabilities are session-tier, process control is admin-tier).
 

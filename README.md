@@ -8,7 +8,7 @@
 - Docker deployment: [docs/deploy/docker.md](docs/deploy/docker.md)
 - systemd deployment: [docs/deploy/systemd.md](docs/deploy/systemd.md)
 - Public edge options: [Cloudflare](docs/deploy/cloudflare.md), [Nginx](docs/deploy/nginx.md), or [Caddy](docs/deploy/caddy.md)
-- CLI contract: [docs/specs/cli.md](docs/specs/cli.md)
+- CLI contract: [docs/specs/cli/cli.md](docs/specs/cli/cli.md)
 - Config contract: [docs/specs/config.md](docs/specs/config.md)
 - API contract: [docs/specs/api/api.md](docs/specs/api/api.md)
 - Extension contract: [docs/specs/extensions.md](docs/specs/extensions.md)
@@ -19,25 +19,27 @@
 
 These harnesses are currently supported:
 
-| Agent              | ACP Compat |
-| ------------------ | ---------- |
-| Pi Agent           | adapter    |
-| OpenCode           | native     |
-| Claude Code        | adapter    |
-| Codex CLI          | adapter    |
-| Google Antigravity | native     |
-| Kimi Code          | native     |
-| Hermes Agent       | native     |
-| Goose              | native     |
-| Amp Code           | adapter    |
-| Kilo Code          | native     |
+| Agent        | ACP Compat |
+| ------------ | ---------- |
+| Pi Agent     | adapter    |
+| OpenCode     | native     |
+| Claude Code  | adapter    |
+| Codex CLI    | adapter    |
+| Antigravity  | native     |
+| Kimi Code    | native     |
+| Amp Code     | adapter    |
+| Hermes Agent | native     |
+| Goose        | native     |
+| Kilo Code    | native     |
 
-"native" means the agent harness is compatible with ACP natively; "adapter" means an ACP adapter must be installed alongside the harness to enable agent-ACP communication.
+Note:
+- "native": the agent harness is compatible with ACP natively;
+- "adapter": an ACP adapter is required for the harness to be reachable via ACP.
 
 - Agent setup notes live under [docs/agents](docs/agents/).
 - The support policy and current unsupported list are in [docs/specs/agents/support.md](docs/specs/agents/support.md).
 
-## Agent Harness Authentication
+## Authentication
 
 To deploy agents with `acp-stack`, you must use a supported API key env var for the harness of your choice. See [docs/specs/agents/api_key.md](docs/specs/agents/api_key.md) for more details.
 

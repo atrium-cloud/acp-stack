@@ -1,4 +1,4 @@
-//! HTTP response envelope per `docs/specs/api/api.md:20-42`.
+//! HTTP response envelope per `docs/specs/api/api.md:29-48`.
 //!
 //! `ApiError::from_stack_error` bridges the domain error enum to the wire
 //! envelope. `ApiResult<T>` is the standard handler return type: handlers can
@@ -48,7 +48,7 @@ pub struct ApiError {
     pub code: String,
     pub message: String,
     // Always serialized, even when empty. The API spec example at
-    // `docs/specs/api/api.md:31-41` shows `"details": {}` as present in error
+    // `docs/specs/api/api.md:39-48` shows `"details": {}` as present in error
     // responses; clients and tests can rely on the key existing without
     // having to distinguish "missing" from "empty".
     #[serde(default)]

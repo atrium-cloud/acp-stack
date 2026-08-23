@@ -18,7 +18,7 @@ TimeoutStopSec=30s
 StandardOutput=journal
 StandardError=journal
 
-# Hardening (mirrors docs/specs/security.md:279-289). The daemon also writes
+# Hardening (mirrors docs/specs/security.md:142-155). The daemon also writes
 # agent harnesses to ${HOME}/.local/bin and agent-owned config files under
 # ${HOME}/.config/{goose,opencode}, ${HOME}/.pi, and ${HOME}/.codex, so the
 # writable home subtree must cover the entire runtime homedir.

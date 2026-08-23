@@ -31,12 +31,13 @@ GOOSE_CONTEXT_STRATEGY: summarize
 GOOSE_DISABLE_SESSION_NAMING: true
 ```
 
-API key values are not written into Goose YAML; Goose reads them from the provider-native env var directly. For that reason, `acps agent set --provider <provider-id>` requires the selected `api_key_ref` to match the provider's mapped env var.
+### Notes
 
-Models are not persisted as `GOOSE_MODEL`. `acps` applies the configured model through ACP `session/set_config_option` on each new session. Mode and reasoning-effort values follow the same path: goose advertises a Mode-category option and a `thinking_effort` (`thought_level`) option at runtime, selected with `acps agent set --mode <mode>` / `--effort <effort>` and validated against that advertisement.
+- API key values are never written into the Goose YAML. Goose reads them from the provider-native env var directly.
+- For that reason, `acps agent set --provider <provider-id>` requires the selected `api_key_ref` to match the provider's mapped env var.
+- The configured model is applied through ACP `session/set_config_option` on each new session; the YAML carries no `GOOSE_MODEL`.
+- Mode and reasoning effort follow the same path. Goose advertises a Mode-category option and a `thinking_effort` (`thought_level`) option at runtime. Select them with `acps agent set --mode <mode>` / `--effort <effort>`; values are validated against that advertisement.
 
 ## Session Resume
 
-`session/load`, `session/resume`, and `session/list` are discovered from the Goose `initialize` reply at runtime; `data/agents.toml` does not pin a value.
-
-If the live ACP connection to `goose acp` drops, `restart = "on-crash"` relaunches the supervised agent automatically. Any prompt that was mid-stream is flipped to `stalled` once the stale-prompt sweeper observes no further updates beyond `[prompts].stale_threshold`. Clients reconnect by calling `GET /v1/sessions/{id}/snapshot`, wait for the agent process to be running, then call `POST /v1/sessions/{id}/resume` when the new Goose advertises `sessionCapabilities.resume`. Otherwise the practical recovery is a fresh session, with durable event history preserved.
+Goose discovers `session/load`, `session/resume`, and `session/list` support from its `initialize` reply at runtime; `data/agents.toml` omits the value. Crash recovery and the snapshot/resume flow are generic — see [Sessions](../specs/acp/acp-bridge.md#sessions) in docs/specs/acp/acp-bridge.md.

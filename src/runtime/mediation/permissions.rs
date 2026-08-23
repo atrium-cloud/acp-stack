@@ -16,7 +16,7 @@
 //!     topics.
 //!
 //! Tier: pending reads + approve/deny decisions are session-tier per
-//! `docs/specs/security.md:20`. The durability is in SQLite; the in-memory
+//! `docs/specs/security.md:26`. The durability is in SQLite; the in-memory
 //! state is purely the waiter map. On daemon restart `reconcile_orphaned_permissions`
 //! marks pending command rows `expired` and pending ACP rows `cancelled` so
 //! clients never see them stay pending forever.

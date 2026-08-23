@@ -10,7 +10,7 @@
 //! `auth_failures` table. The HTTP layer (next batch) calls this whenever it
 //! rejects a key; never store the attempted key value itself, only the kind
 //! that was expected and the reason it failed (per
-//! `docs/specs/security.md:23`).
+//! `docs/specs/security.md:70`).
 
 use base64::Engine;
 use rand::RngExt;

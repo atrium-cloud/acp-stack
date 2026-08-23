@@ -1,36 +1,8 @@
 # Agent Provider Config
 
-Provider config describes which model backend the configured agent should use. It is separate from the ACP agent id.
+Provider config describes which model backend the configured agent uses. It is separate from the ACP agent id.
 
-## CLI
-
-```sh
-acps agent provider use <provider-id> [--model <model>]
-acps agent provider set-active <provider-id,provider-id,...>
-acps agent provider list-active
-acps agent provider credential add <provider-id>
-acps agent provider credential update <provider-id> [alias]
-acps agent provider credential select <provider-id> <alias>
-acps agent provider credential list [provider-id]
-acps agent provider credential delete <provider-id> [alias]
-acps agent set --custom-provider --provider <id> --provider-name <name> --base-url <url> --api-key-ref <ref> --model <model-id>
-acps agent set --model <model>
-acps agent set --mode <mode>
-acps agent set --effort <effort>
-```
-
-OpenCode also supports:
-
-```sh
-acps subagent set --model <model> [--provider <provider-id>] [--api-key-ref <ref>]
-acps subagent match
-acps subagent free
-acps subagent disable
-```
-
-`acps subagent set` inherits the main provider when omitted and uses its selected structured credential or compatible legacy `api_key_ref`. `acps subagent free` takes no flags; it routes to `openrouter/free` or `opencode/big-pickle` based on the configured main provider or env, and errors with "Current provider does not support free." otherwise.
-
-`acps agent switch <agent>` rewrites the harness and provider lane through the admin API. It clears any existing model because model ids are agent-specific. After a switch, `acps agent set --model <model-id>` applies the model to the existing provider-backed config. Switch copies installed Agent Skills to the target skills directory when the source and target paths differ, and refreshes the target's skill symlinks when it declares an `agent_skills_link_dir`. By default, source harness config is preserved; `--drop` removes source agent-owned config only after the target switch succeeds.
+The `acps agent provider`, `acps agent set`, `acps subagent`, and `acps agent switch` commands are documented in [cli-flags.md](../cli/cli-flags.md). Switch clears the configured model because model ids are agent-specific.
 
 ## Config Shape
 
@@ -68,13 +40,26 @@ model = "<agent-model-id>"
 api_key_ref = "<provider-api-key-ref>"
 ```
 
-`acps subagent match` clears any explicit subagent provider/model so OpenCode `small_model` follows the main agent model.
+Notes on the shape:
 
-`[agent.provider]` remains the default provider/model lane. Without `[agent.providers]`, the implicit active set is that default provider plus any enabled subagent provider. A mapped provider may retain `api_key_ref` as legacy input; the first provider or credential mutation migrates it into the encrypted credential catalog. Custom providers keep their existing flat ref behavior.
+- `acps subagent set` inherits the main provider when omitted. It uses the main provider's selected structured credential or a compatible legacy `api_key_ref`.
+- `acps subagent match` clears any explicit subagent provider/model so OpenCode `small_model` follows the main agent model.
+- `acps subagent free` takes no flags. It routes to `openrouter/free` or `opencode/big-pickle` based on the configured main provider or env, and errors with "Current provider does not support free." otherwise.
+- `[agent.provider]` remains the default provider/model lane. Without `[agent.providers]`, the implicit active set is that default provider plus any enabled subagent provider.
+- A mapped provider may retain `api_key_ref` as legacy input. The first provider or credential mutation migrates it into the encrypted credential catalog. Custom providers keep their existing flat ref behavior.
+- The first catalog credential for a provider is aliasless. Adding a second permanently promotes that provider to named, case-sensitive aliases and keeps each affected target on its existing key. Alias selection is manual and target-scoped; aliases do not provide automatic failover.
 
-`[agent.config_options]` maps generic ACP session config-option ids to values (a string for select options, a TOML boolean for boolean options), applied on session creation after the typed mode/model/effort settings; entries the agent does not advertise (unknown id, off-list select value, kind mismatch) are reported through the ignored-features path, never a hard error. Ids the typed settings own (`mode`, `model`, `effort`, `reasoning_effort`) are rejected at validation with a pointer to the typed key; this is an id check only — an agent-specific id that happens to carry a typed category (e.g. kimi's `thinking` under `thought_level`) passes validation, applies after the typed setting, and wins, so prefer the typed key when one covers the option. A leading `_` is legal (ACP reserves `_`-prefixed ids for implementation-specific options); at most 32 entries. The map is cleared when the agent changes, like `mode`/`model`/`effort`.
+### `[agent.config_options]`
 
-The first catalog credential for a provider is aliasless. Adding a second permanently promotes that provider to named, case-sensitive aliases and keeps each affected target on its existing key. Alias selection is manual and target-scoped; aliases do not provide automatic failover.
+`[agent.config_options]` maps generic ACP session config-option ids to values: a string for select options, a TOML boolean for boolean options.
+
+- Values apply on session creation, after the typed mode/model/effort settings.
+- Entries the agent does not advertise — unknown id, off-list select value, kind mismatch — are reported through the ignored-features path. They are never a hard error.
+- Ids the typed settings own (`mode`, `model`, `effort`, `reasoning_effort`) are rejected at validation with a pointer to the typed key.
+- This is an id check only. An agent-specific id that happens to carry a typed category (e.g. kimi's `thinking` under `thought_level`) passes validation, applies after the typed setting, and wins. Prefer the typed key when one covers the option.
+- A leading `_` is legal. ACP reserves `_`-prefixed ids for implementation-specific options.
+- At most 32 entries.
+- The map is cleared when the agent changes, like `mode`/`model`/`effort`.
 
 ## Validation
 
@@ -95,17 +80,19 @@ The first catalog credential for a provider is aliasless. Adding a second perman
 
 ## Agent Behavior
 
-| Agent       | Provider/model behavior                                                                  |
-| ----------- | ---------------------------------------------------------------------------------------- |
-| OpenCode    | every active provider and an exact `enabled_providers` allowlist are written to OpenCode JSON |
-| Pi Agent    | every active provider env bundle is injected; only the default provider/model lane is written to Pi settings |
-| Amp Code    | no provider selection; model selects the `amp-mode` execution tier (`low`/`medium`/`high`/`ultra`) and mode selects `default`/`bypass` permission behavior, both applied through ACP session config |
-| Goose       | provider-native env vars; model applied through ACP session config                       |
-| Codex       | `openai` uses `OPENAI_API_KEY`; `openrouter` uses `OPENROUTER_API_KEY`                   |
-| Claude Code | Anthropic-compatible providers are written to Claude settings with provider-specific refs |
-| Kimi Code   | provider + model setup; runtime derives Kimi's process environment from the active lane's key ref |
-| Hermes Agent | provider env refs; the `model` block of `~/.hermes/config.yaml` carries the selected lane with the bare provider-native model id; endpoint-carrying configurations ride a managed `providers.acps-managed` entry (`custom:acps-managed`) |
-| Kilo Code   | env-var auth (`KILO_API_KEY` — required present by the harness; an empty placeholder is auto-recorded at init, `config import`, or `agent set --model` when a provider-native key is declared — or provider-native keys); model and `build`/`plan` modes applied through ACP session config |
-| Google Antigravity | env-var auth (`GEMINI_API_KEY`) with `auth.type: "gemini-api-key"` written to `~/.gemini/antigravity-acp/settings.json` by headless provisioning; no provider selection; model and mode selected from the ACP-advertised values |
+How each harness reads resolved credentials is covered under Secret Uptake in [api_key.md](api_key.md). This table covers only what the runtime provisions.
+
+| Agent              | Provisioning behavior                                                                                                                                                                                                 |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| OpenCode           | every active provider and an exact `enabled_providers` allowlist are written to OpenCode JSON                                                                                                                         |
+| Pi Agent           | only the default provider/model lane is written to Pi settings                                                                                                                                                        |
+| Amp Code           | no provider selection; model selects the `amp-mode` execution tier (`low`/`medium`/`high`/`ultra`) and mode selects `default`/`bypass` permission behavior, both applied through ACP session config                   |
+| Goose              | model applied through ACP session config                                                                                                                                                                              |
+| Codex              | provider config written to `~/.codex/config.toml`; OpenRouter authenticates through a command-based `auth` block                                                                                                      |
+| Claude Code        | Anthropic-compatible providers are written to Claude settings                                                                                                                                                         |
+| Kimi Code          | provider + model setup                                                                                                                                                                                                |
+| Hermes Agent       | the `model` block of `~/.hermes/config.yaml` carries the selected lane with the bare provider-native model id; endpoint-carrying configurations ride a managed `providers.acps-managed` entry (`custom:acps-managed`) |
+| Kilo Code          | model and `build`/`plan` modes applied through ACP session config                                                                                                                                                     |
+| Google Antigravity | no provider selection; model and mode selected from the ACP-advertised values                                                                                                                                         |
 
 Some changes affect only new sessions or require the supervised agent process to restart. The CLI prints that restart guidance when applicable.

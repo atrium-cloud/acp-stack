@@ -4,19 +4,19 @@ This document records technology choices that affect maintenance or deployment. 
 
 ## Runtime
 
-| Technology                | Use                                                        |
-| ------------------------- | ---------------------------------------------------------- |
-| Rust                      | runtime, CLI, and daemon                                   |
-| Tokio                     | async process, IO, timers, and networking                  |
-| Axum                      | HTTP routing and middleware                                |
-| SQLite                    | local durable state                                        |
-| tokio-postgres            | Supabase Postgres logging backend                          |
-| age-compatible encryption | local secret store                                         |
-| agent-client-protocol SDK | ACP client boundary to agents (1.x, protocol v1 schema)    |
-| serde_norway              | YAML parsing/serialization (maintained serde_yaml successor) |
-| cliclack                  | interactive `acps init` prompts and searchable selectors   |
-| rpassword                 | hidden terminal prompts for admin-key entry                |
-| clap_complete             | shell completion script generation for `acps`              |
+| Technology                | Use                                                                                                                                                                                                |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Rust                      | runtime, CLI, and daemon                                                                                                                                                                           |
+| Tokio                     | async process, IO, timers, and networking                                                                                                                                                          |
+| Axum                      | HTTP routing and middleware                                                                                                                                                                        |
+| SQLite                    | local durable state                                                                                                                                                                                |
+| tokio-postgres            | Supabase Postgres logging backend                                                                                                                                                                  |
+| age-compatible encryption | local secret store                                                                                                                                                                                 |
+| agent-client-protocol SDK | ACP client boundary to agents (1.x, protocol v1 schema)                                                                                                                                            |
+| serde_norway              | YAML parsing/serialization (maintained serde_yaml successor)                                                                                                                                       |
+| cliclack                  | interactive `acps init` prompts and searchable selectors                                                                                                                                           |
+| rpassword                 | hidden terminal prompts for admin-key entry                                                                                                                                                        |
+| clap_complete             | shell completion script generation for `acps`                                                                                                                                                      |
 | schemars                  | derives the published `/v1` JSON Schema from the wire DTOs (also pulled in transitively by the ACP SDK); the generator bin and `schema_export` module are `dev-tools`-gated, only the derive ships |
 
 ## Protocols And Interfaces
@@ -31,16 +31,16 @@ This document records technology choices that affect maintenance or deployment. 
 
 ## Deployment
 
-| Tooling           | Use                           |
-| ----------------- | ----------------------------- |
-| Docker            | container deployment          |
-| systemd           | host service deployment       |
-| uv                | optional VM Python tooling    |
+| Tooling                           | Use                                                                            |
+| --------------------------------- | ------------------------------------------------------------------------------ |
+| Docker                            | container deployment                                                           |
+| systemd                           | host service deployment                                                        |
+| uv                                | optional VM Python tooling                                                     |
 | util-linux (`unshare`, `setpriv`) | agent sandbox: namespace creation and privilege drop for the `unshare` backend |
-| bubblewrap (`bwrap`) | agent sandbox: unprivileged-user-namespace backend (optional) |
-| Browser Use       | optional browser MCP profile  |
-| Cloudflare Tunnel | preferred public-edge profile |
-| Nginx/Caddy       | reverse proxy alternatives    |
+| bubblewrap (`bwrap`)              | agent sandbox: unprivileged-user-namespace backend (optional)                  |
+| Browser Use                       | optional browser MCP profile                                                   |
+| Cloudflare Tunnel                 | preferred public-edge profile                                                  |
+| Nginx/Caddy                       | reverse proxy alternatives                                                     |
 
 ## Maintainer Details
 

@@ -1,6 +1,8 @@
 # Extensions
 
-An extension is a typed, data-declared integration seam. The operator declares an instance in the `[extensions]` config table, selecting from the small set of types acp-stack defines; acp-stack supervises or serves each type's generic contract and never learns the extension's semantics. There is no dynamic route registration and no in-process plugin loading — the extension itself is whatever external software fulfills the contract: an executable for `network-provider`, an API client for `managed-state`. Extensions require no particular language and nothing is compiled into acp-stack.
+An extension is a typed, data-declared integration seam. The operator declares an instance in the `[extensions]` config table, selecting from the small set of types acp-stack defines. acp-stack serves each type's generic contract; semantics stay with the extension. Route registration is static, and plugin code runs only in external processes.
+
+The extension itself is whatever external software fulfills the contract: an executable for `network-provider`, an API client for `managed-state`. Extensions may use any language, and extension code stays out of the acp-stack binary.
 
 ## Declaration
 
@@ -20,23 +22,36 @@ type = "managed-state"
 capability = "provider-credential"
 ```
 
-The table key is the operator-chosen instance name: lowercase alphanumeric with interior hyphens, at most 64 bytes, because it becomes an API path segment and a diagnostics label. Each type accepts only its own fields; a field that would enforce nothing for the declared type is rejected at config load. There is no CLI for declaring extensions — imported or directly edited TOML is the only way — and `acps extensions status` reports the declared instances read-only.
+The table key is the operator-chosen instance name: lowercase alphanumeric with interior hyphens, at most 64 bytes. It becomes an API path segment and a diagnostics label.
+
+Each type accepts only its own fields. A field that is inert for the declared type is rejected at config load. Extensions are declared through TOML alone — imported or directly edited. `acps extensions status` reports the declared instances read-only.
 
 ## Type `network-provider`
 
-Declaring a `network-provider` instance switches every sandboxed spawn (agent harness and each mediated command alike) to a fresh, per-spawn network namespace whose policy belongs entirely to the external provider executable. Requires `[workspace.sandbox] mode = "unshare"`; at most one instance may be declared. An empty or omitted `provider` argv means deny-all networking.
+Declaring a `network-provider` instance switches every sandboxed spawn — agent harness and each mediated command alike — to a fresh, per-spawn network namespace. Its policy belongs entirely to the external provider executable. Requires `[workspace.sandbox] mode = "unshare"`. At most one instance may be declared. An empty or omitted `provider` argv means deny-all networking.
 
-Fields: `provider` (lifecycle executable argv; the executable must be an absolute path), `provider_timeout` (default `30s`, applied independently to setup and teardown), `provider_stderr` (`daemon` or `null`), `workload_env` (environment injected into every workload spawned inside the namespace).
+Fields: `provider`, `provider_timeout`, `provider_stderr`, `workload_env`. `provider` is the lifecycle executable argv; the executable must be an absolute path. `provider_timeout` defaults to `30s` and applies independently to setup and teardown. `provider_stderr` is `daemon` or `null`. `workload_env` is environment injected into every workload spawned inside the namespace.
 
-`workload_env` exists because a namespace whose policy routes traffic through a proxy or a private CA is only usable if the workload knows to use it. Entries are injected into the agent harness, mediated commands, and ACP terminals alike — everything that runs inside the namespace — and never into the provider executable itself, which starts from a cleared environment carrying only the `ACPS_SANDBOX_NETWORK_*` contract variables. Values never appear in argv, so they are not visible in a process listing.
+A namespace whose policy routes traffic through a proxy or a private CA is usable only when the workload knows to use it. `workload_env` exists for that.
 
-The declaration is applied last, after `[agent].env` and after any runtime-managed launch variables, so it wins on conflict. That precedence is deliberate: the declaration is infrastructure config from the operator who owns the namespace, and a workload whose egress environment is half-overridden reaches no network at all. At most 16 entries; names must match `[A-Za-z_][A-Za-z0-9_]*` and be at most 128 bytes; values must be non-empty and at most 16 KiB. `PATH` and `HOME` are rejected at config load because both are runtime-managed at every spawn seam and a declared value would be silently dropped.
+- Entries are injected into the agent harness, mediated commands, and ACP terminals alike — everything that runs inside the namespace.
+- They are injected into the workload side only. The provider starts from a cleared environment carrying only the `ACPS_SANDBOX_NETWORK_*` contract variables.
+- Values are passed outside argv, keeping them out of process listings.
 
-The provider wire contract — `<executable> setup|teardown <configured-args...>` verbs, the `ACPS_SANDBOX_NETWORK_*` environment variables with protocol version 1, fail-closed setup, process-group supervision, and stderr routing — is specified in [security.md](security.md#network-isolation-unshare-only), and the supervisor mechanics in [runtime.md](runtime.md#network-isolated-spawns).
+The declaration is applied last, after `[agent].env` and after any runtime-managed launch variables, so it wins on conflict.
+
+### `workload_env` Validation
+
+- At most 16 entries.
+- Names must match `[A-Za-z_][A-Za-z0-9_]*` and be at most 128 bytes.
+- Values must carry at least one byte and at most 16 KiB.
+- `PATH` and `HOME` are rejected at config load. Both are runtime-managed at every spawn seam, so a declared value would be silently dropped.
+
+The provider wire contract is specified in [security.md](security.md#network-isolation-unshare-only), and the supervisor mechanics in [runtime.md](runtime.md#network-isolated-spawns). The contract covers the `<executable> setup|teardown <configured-args...>` verbs, the `ACPS_SANDBOX_NETWORK_*` environment variables with protocol version 1, fail-closed setup, process-group supervision, and stderr routing.
 
 ## Type `managed-state`
 
-A `managed-state` instance grants an external orchestrator ownership of one named state namespace. The only capability today is `provider-credential`: the namespace holds at most one provider credential selection, stored in the encrypted secret store's provider credential catalog exactly like an operator-managed credential, but marked with the namespace as its provenance source.
+A `managed-state` instance grants an external orchestrator ownership of one named state namespace. The only capability today is `provider-credential`. The namespace holds at most one provider credential selection. It is stored in the encrypted secret store's provider credential catalog, exactly like an operator-managed credential. The namespace is recorded as its provenance source.
 
 The seam is one fixed admin route, parameterized by the declared instance name:
 
@@ -64,24 +79,78 @@ Request body:
 
 - `schema_version` must be `1`.
 - `revision` is the orchestrator's monotonically increasing registry revision; it must be a positive integer.
-- `selection` is a required key that may be `null` (clear the namespace's credential). A missing key is a parse error, never a destructive clear.
-- `values` are keyed by env-var name and validated against the provider's env-var contract. For a mapped (registry) provider the contract comes from the embedded mapping: the canonical API-key env var and every required companion must be present, and only contract env vars are accepted. For a provider id outside the mapping, the selection is accepted only when the running agent config declares that id as a custom provider; its contract is exactly the configured `api_key_ref` as the single env-var key, which config validation keeps unambiguous by reserving registry ids for mapped providers and requiring every declaration of one custom provider id — primary agent, subagents, and Array targets alike — to name the same `api_key_ref`. A provider id that is neither mapped nor configured as a custom provider is rejected with `request.invalid_param`. The contract check is provider-scoped, matching the catalog's semantics; agent-specific env-var mapping happens at spawn-time resolution. Because rejection happens before any revision watermark persists, an orchestrator that applies a custom-provider credential before init has written the provider config can retry the same revision once the config lands. The handler re-reads the config from disk on every apply, leniently: an unusable MCP server or skill-source declaration is skipped the way it is at daemon start rather than blocking a credential rotation.
-- `source_refs` may name flat secret-store refs per env var instead of inline values; each ref resolves into the stored values at apply time and the ref name is retained. A ref-backed selection is replay-stable only while the referenced secrets are stable.
-- `base_url` is optional and routes this provider's traffic at the given endpoint instead of its vendor default. It must be an `https://` URL with a host, or `http://` to a loopback host (`127.0.0.1`, `::1`, `localhost`) — the same rule MCP HTTP servers obey, so a local relay listener is reachable without weakening the no-plaintext-off-host rule. It must carry no embedded credentials and no query string or fragment, and is at most 2048 bytes. The value is stored verbatim; each agent appends to it per its own native convention. `base_url` participates in the identical-replay comparison, so a replay at the applied revision carrying a different endpoint conflicts rather than silently no-oping.
+- `selection` is a required key that may be `null` (clear the namespace's credential). A missing key is a parse error; only an explicit `null` clears.
+- `values` are keyed by env-var name and validated against the provider's env-var contract.
+- `source_refs` may name flat secret-store refs per env var instead of inline values. Each ref resolves into the stored values at apply time, and the ref name is retained. A ref-backed selection is replay-stable only while the referenced secrets are stable.
+- `base_url` is optional and routes this provider's traffic at the given endpoint instead of its vendor default. See [Endpoint overrides](#endpoint-overrides) below.
 
-An endpoint override is written into the configured agent's own native config, so it is accepted only for agents whose registry entry declares `set_provider_base_url`: `opencode` (`provider.<id>.options.baseURL`), `pi` (a `models.json` provider entry carrying only `baseUrl`, which pi treats as an override of the built-in provider and keeps its model list), `codex` (`[model_providers.<id>].base_url`), `claude-code` (`ANTHROPIC_BASE_URL` in the settings `env` block), and `hermes` (a managed named entry in the `providers:` map of `~/.hermes/config.yaml` — `providers.acps-managed` carrying the provider's `name`, the override `base_url`, a `key_env` that reads the stored key unconditionally, and a `transport` pinning the wire shape — with `model.provider: custom:acps-managed` and the provider-native model id; `model.base_url` is never written, because the bare `custom` lane resolves its key and wire shape from URL heuristics that both miss on a loopback relay base). Any other agent is rejected with `request.invalid_param` before the revision persists. Codex additionally refuses an override for its built-in `openai` provider: Codex reserves that provider id and the shape a replacement table must take is version-dependent, so `openrouter` or a custom provider is required instead, and an agent switch that would land the overridden provider on that pair is rejected at plan time. At most one provider may hold an endpoint override at a time — the native config carries exactly one — so a `base_url` selection naming a different provider while another namespace's credential already carries an endpoint is rejected with `request.invalid_param` before the revision persists, keeping the revision reusable once the first namespace's endpoint is cleared.
+### The env-var contract for `values`
 
-The native config is rewritten immediately after the store write, under the mutation lock the apply handler already holds, because the agent reads it at process start and the orchestrator restarts the agent after a credential push. Rewriting also runs on a `noop` replay, so a retry after a failed native-config write heals rather than replaying as a no-op with the endpoint permanently unapplied. Clearing the selection, or applying one without `base_url`, re-provisions without the endpoint and restores the vendor default. While an override is stored, every agent-change path that would strand it is rejected rather than silently dropping a live routing decision: `acps agent switch` to an agent that does not declare `set_provider_base_url` (rejected at plan time), selecting an existing Array target whose agent lacks it, and re-running init toward such an agent or toward any custom agent (which has no registry-managed endpoint surface). A switch or init re-confirm whose target provider is the overridden one on a pair that refuses overrides (codex + `openai`) is rejected the same way. On an `applied` or `cleared` outcome the provider model-catalog cache entries for the outgoing and incoming providers are invalidated, so the next catalog read refetches from the endpoint now in force. Provider model-catalog fetches follow the override: when one names the configured provider, the catalog is read from `{base_url}/models` instead of the provider's declared `models_url`, still bearing the stored value as the credential. That `{base}/models` convention matches every shipped `models_url` but one: novita-ai's listing does not live under its inference base, so its fetch under an override fails and the catalog degrades to the last cached entry while inference still follows the override. A provider that declares no `models_url` is still never fetched, and without an override the declared URL is used unchanged.
+- For a mapped (registry) provider, the contract comes from the embedded mapping. The canonical API-key env var and every required companion must be present, and only contract env vars are accepted.
+- For a provider id outside the mapping, the selection is accepted only when the running agent config declares that id as a custom provider. Its contract is exactly the configured `api_key_ref` as the single env-var key.
+- Config validation keeps that contract unambiguous. Registry ids are reserved for mapped providers. Every declaration of one custom provider id — primary agent, subagents, and Array targets alike — must name the same `api_key_ref`.
+- A provider id outside both the mapping and the configured custom providers is rejected with `request.invalid_param`.
 
-Revision semantics, enforced in the store and persisted atomically with the credential catalog swap under the agent-config mutation lock:
+The contract check is provider-scoped, matching the catalog's semantics. Agent-specific env-var mapping happens at spawn-time resolution.
+
+Rejection happens before any revision watermark persists. An orchestrator that applies a custom-provider credential before init has written the provider config can therefore retry the same revision once the config lands. The handler re-reads the config from disk on every apply, leniently. An unusable MCP server or skill-source declaration is skipped the way it is at daemon start, and the credential rotation proceeds.
+
+### Endpoint overrides
+
+The `base_url` value must be an `https://` URL with a host, or `http://` to a loopback host (`127.0.0.1`, `::1`, `localhost`). This is the same rule MCP HTTP servers obey, so a local relay listener stays reachable while the no-plaintext-off-host rule holds. Embedded credentials, query strings, and fragments are rejected; the value is at most 2048 bytes.
+
+The value is stored verbatim; each agent appends to it per its own native convention. `base_url` participates in the identical-replay comparison, so a replay at the applied revision carrying a different endpoint raises a conflict.
+
+An endpoint override is written into the configured agent's own native config. It is accepted only for agents whose registry entry declares `set_provider_base_url`:
+
+- `opencode`: `provider.<id>.options.baseURL`.
+- `pi`: a `models.json` provider entry carrying only `baseUrl`. pi treats it as an override of the built-in provider and keeps its model list.
+- `codex`: `[model_providers.<id>].base_url`.
+- `claude-code`: `ANTHROPIC_BASE_URL` in the settings `env` block.
+- `hermes`: a managed named entry in the `providers:` map of `~/.hermes/config.yaml`. The entry `providers.acps-managed` carries the provider's `name`, the override `base_url`, a `key_env` that reads the stored key unconditionally, and a `transport` pinning the wire shape. It pairs with `model.provider: custom:acps-managed` and the provider-native model id. Only the managed entry is written; `model.base_url` stays untouched. The bare `custom` lane resolves its key and wire shape from URL heuristics, and both miss on a loopback relay base.
+
+Any other agent is rejected with `request.invalid_param` before the revision persists.
+
+Codex additionally refuses an override for its built-in `openai` provider. Codex reserves that provider id, and the shape a replacement table must take is version-dependent. Use `openrouter` or a custom provider instead. An agent switch that would land the overridden provider on that pair is rejected at plan time.
+
+At most one provider may hold an endpoint override at a time — the native config carries exactly one. A `base_url` selection naming a different provider while another namespace's credential already carries an endpoint is rejected with `request.invalid_param` before the revision persists. The revision stays reusable once the first namespace's endpoint is cleared.
+
+The native config is rewritten immediately after the store write, under the mutation lock the apply handler already holds. The agent reads it at process start, and the orchestrator restarts the agent after a credential push.
+
+Rewriting also runs on a `noop` replay, so a retry after a failed native-config write still applies the endpoint. Clearing the selection, or applying a selection that omits `base_url`, re-provisions with the endpoint removed and restores the vendor default.
+
+While an override is stored, every agent-change path that would strand it is rejected, keeping the live routing decision intact:
+
+- `acps agent switch` to an agent whose registry entry omits `set_provider_base_url` — rejected at plan time.
+- Selecting an existing Array target whose agent omits it.
+- Re-running init toward such an agent, or toward any custom agent. A custom agent's endpoint surface is entirely self-managed.
+- A switch or init re-confirm whose target provider is the overridden one is rejected the same way. This covers pairs that refuse overrides (codex + `openai`).
+
+On an `applied` or `cleared` outcome, the provider model-catalog cache entries for the outgoing and incoming providers are invalidated. The next catalog read refetches from the endpoint now in force.
+
+Provider model-catalog fetches follow the override. When an override names the configured provider, the catalog is read from `{base_url}/models`. The declared `models_url` is set aside, and the stored value still goes along as the credential.
+
+That `{base}/models` convention matches every shipped `models_url` but one: novita-ai's listing lives outside its inference base. Its fetch under an override fails, and the catalog degrades to the last cached entry while inference still follows the override.
+
+Only providers that declare a `models_url` are ever fetched. With the override cleared, the declared URL is used unchanged.
+
+### Revision semantics and ownership
+
+Revision semantics are enforced in the store and persisted atomically with the credential catalog swap under the agent-config mutation lock:
 
 - `revision` greater than the applied watermark: applied (or cleared for a `null` selection; the watermark survives a clear).
 - `revision` equal to the watermark with identical content: idempotent no-op.
 - `revision` equal to the watermark with different content, or lower: rejected with `409` `extensions.revision_conflict`.
 
-Ownership is store-level provenance, not endpoint behavior: a namespace may create catalog entries or replace its own, and nothing else. Applying onto an operator-managed credential or another namespace's credential is rejected with `400` `extensions.state_ownership`; symmetrically, operator credential flows refuse to modify externally-owned entries. An undeclared or non-managed-state `{name}` is `404` `extensions.not_found`. The declared namespace set is resolved from the config the daemon started with, like the rest of runtime config: a config import that adds a `managed-state` instance answers `404` until the next daemon start.
+Ownership is store-level provenance, distinct from endpoint behavior. A namespace may only create catalog entries or replace its own.
 
-Responses use the standard envelope: `{"ok": true, "data": {"applied_revision": 7, "outcome": "applied"}}` with `outcome` one of `applied`, `cleared`, `noop`. Every apply records a `server.extension_managed_state_applied` audit event carrying the namespace, outcome, revision, and provider id — never credential values.
+- Applying onto an operator-managed credential or another namespace's credential is rejected with `400` `extensions.state_ownership`.
+- Symmetrically, operator credential flows refuse to modify externally-owned entries.
+- An undeclared `{name}`, or one belonging to another extension type, is `404` `extensions.not_found`.
+
+The declared namespace set is resolved from the config the daemon started with, like the rest of runtime config. A config import that adds a `managed-state` instance answers `404` until the next daemon start.
+
+Responses use the standard envelope: `{"ok": true, "data": {"applied_revision": 7, "outcome": "applied"}}` with `outcome` one of `applied`, `cleared`, `noop`. Every apply records a `server.extension_managed_state_applied` audit event carrying the namespace, outcome, revision, and provider id only.
 
 ## Versioning
 

@@ -19,24 +19,28 @@ sudo bash scripts/install-systemd.sh \
   --acps-binary /path/to/acps
 ```
 
-During first initialization, the installer prints the session and admin API keys. Save them immediately. Later runs preserve existing keys and do not print them again.
+During first initialization, the installer prints the session and admin API keys. Save them immediately. Later runs preserve existing keys and keep them out of the printed output.
 
 ## Installer Options
 
-| Flag                     | Default                                 | Purpose                                 |
-| ------------------------ | --------------------------------------- | --------------------------------------- |
-| `--acps-binary <path>`   | required                                | local path to `acps`                    |
-| `--user <name>`          | `acp`                                   | runtime user                            |
-| `--home <dir>`           | `/home/<user>`                          | runtime home                            |
-| `--workspace <dir>`      | `/workspace`                            | workspace root                          |
-| `--bind <addr>`          | `127.0.0.1:7700`                        | daemon bind address                     |
-| `--agent <id>`           | required when init runs                 | agent id selected for init              |
-| `--unit-path <path>`     | `/etc/systemd/system/acp-stack.service` | unit destination                        |
-| `--no-init`              | off                                     | install files but skip `acps init`      |
-| `--no-os-deps`           | off                                     | skip OS dependency installation         |
-| `--force`                | off                                     | replace a differing unit or re-run init |
+| Flag                   | Default                                 | Purpose                                 |
+| ---------------------- | --------------------------------------- | --------------------------------------- |
+| `--acps-binary <path>` | required                                | local path to `acps`                    |
+| `--user <name>`        | `acp`                                   | runtime user                            |
+| `--home <dir>`         | `/home/<user>`                          | runtime home                            |
+| `--workspace <dir>`    | `/workspace`                            | workspace root                          |
+| `--bind <addr>`        | `127.0.0.1:7700`                        | daemon bind address                     |
+| `--agent <id>`         | required when init runs                 | agent id selected for init              |
+| `--unit-path <path>`   | `/etc/systemd/system/acp-stack.service` | unit destination                        |
+| `--no-init`            | off                                     | install files but skip `acps init`      |
+| `--no-os-deps`         | off                                     | skip OS dependency installation         |
+| `--force`              | off                                     | replace a differing unit or re-run init |
 
-The installer is idempotent for the same arguments. It preserves existing instance data, skips initialization when config already exists, and refuses to replace a differing unit unless `--force` is passed.
+The installer is idempotent for the same arguments:
+
+- It preserves existing instance data.
+- It skips initialization when config already exists.
+- It refuses to replace a differing unit unless `--force` is passed.
 
 ## Two-Step Install
 
@@ -71,7 +75,7 @@ The starter config binds the API to `127.0.0.1:7700`. Keep that loopback bind an
 
 ## Environment Overrides
 
-The unit ships with `EnvironmentFile=-/etc/acp-stack/environment` (the leading `-` makes the file optional). Use it for runtime env vars that the service should receive without editing the unit:
+The unit ships with `EnvironmentFile=-/etc/acp-stack/environment` (the leading `-` makes the file optional). Use it for runtime env vars the service should receive while the unit file stays unchanged:
 
 ```sh
 sudo install -m 0600 -o root -g root /dev/null /etc/acp-stack/environment
@@ -94,19 +98,11 @@ sudo systemctl stop acp-stack
 sudo systemctl disable --now acp-stack
 ```
 
-Use the journal for process logs:
-
-```sh
-journalctl -u acp-stack -f
-journalctl -u acp-stack --since "1 hour ago"
-journalctl -u acp-stack -p warning
-```
-
-Use `acps logs query` for structured runtime history.
+Use `journalctl -u acp-stack -f` for process logs. Use `acps logs query` for structured runtime history.
 
 ## Reverse Proxy
 
-`acp-stack` does not terminate TLS. For public access, bind the daemon to loopback and use one of:
+`acp-stack` serves plain HTTP only; TLS termination belongs to the reverse proxy. For public access, bind the daemon to loopback and use one of:
 
 - [Cloudflare Tunnel](./cloudflare.md)
 - [Nginx](./nginx.md)
@@ -149,6 +145,6 @@ Instance data is intentionally left in place. Remove `/workspace` and `/home/acp
 
 ## Security
 
-The unit runs as `User=acp`, sets `NoNewPrivileges=true`, `PrivateTmp=true`, and `ProtectSystem=strict`, and constrains writes through `ReadWritePaths=<workspace> <home>`. Root execution is not the production path.
+The unit runs as `User=acp`, sets `NoNewPrivileges=true`, `PrivateTmp=true`, and `ProtectSystem=strict`, and constrains writes through `ReadWritePaths=<workspace> <home>`. The production path is the unprivileged `acp` user.
 
 `ReadWritePaths` covers the workspace root and the runtime user's home because agent installs land under `~/.local/bin` and supported headless agents write their own config under `~/.config/{goose,opencode}`, `~/.pi`, or `~/.codex`. The daemon itself stays unprivileged.

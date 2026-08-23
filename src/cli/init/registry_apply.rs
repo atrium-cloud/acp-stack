@@ -336,7 +336,7 @@ pub(super) fn select_agent_for_init<'a>(
     items.push(prompt::item(
         AgentChoice::Custom,
         "__custom",
-        "Custom agent…",
+        "Custom agent",
         "not in the registry",
     ));
     items.push(prompt::item(AgentChoice::Skip, "__skip", "Skip", ""));
@@ -368,7 +368,7 @@ pub(super) fn select_agent_for_init<'a>(
 }
 
 /// Collect a custom agent definition interactively. Only reached after the
-/// operator explicitly picks "Custom agent…" in a TTY, so every field prompt is
+/// operator explicitly picks "Custom agent" in a TTY, so every field prompt is
 /// interactive; `required` re-prompts on empty for the mandatory fields.
 fn collect_custom_agent_interactively(registry: &RegistryCatalog) -> Result<CustomAgentSpec> {
     let id = required_custom_text(

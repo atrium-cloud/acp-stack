@@ -25,31 +25,27 @@ restart = "on-crash"
 
 OpenCode reads provider config from `~/.config/opencode/opencode.json`. `acps agent set` writes that file with the selected provider, model, API-key env reference, and enabled provider list.
 
-OpenCode mode can be set with:
+Set the OpenCode mode with:
 
 ```sh
 acps agent set --mode <build|plan>
 ```
 
-Reasoning effort follows the runtime advertisement: OpenCode advertises an `effort` (`thought_level`) option when the active model has effort variants, and `acps agent set --effort <effort>` validates against that advertisement.
+Reasoning effort follows the runtime advertisement. OpenCode advertises an `effort` (`thought_level`) option when the active model has effort variants. `acps agent set --effort <effort>` validates against that advertisement.
 
 ### Cloudflare Providers
 
-Cloudflare providers require companion env refs alongside the main API key. Set each one with `acps secrets set` before running `acps agent set --provider`.
-
-| Provider id             | Required env refs                                                        |
-| ----------------------- | ------------------------------------------------------------------------ |
-| `cloudflare-workers-ai` | `CLOUDFLARE_API_KEY`, `CLOUDFLARE_ACCOUNT_ID`                            |
-| `cloudflare-ai-gateway` | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_GATEWAY_ID` |
+Cloudflare providers require companion env refs alongside the main API key. Set each one with `acps secrets set` before running `acps agent set --provider`. The base `companion_env_vars` list per provider lives in `data/env_vars.toml`, with per-provider overrides on the `[[providers]]` entries in `data/providers.toml`.
 
 ## Subagent Model
 
-OpenCode can call a `small_model` for background tasks such as title generation. It has been reported that OpenCode can call Anthropic Claude Haiku 4.5 when using `OPENROUTER_API_KEY` for auth even when the main model is not Haiku 4.5.
-- We have reproduced this behavior using an `OPENROUTER_API_KEY`.
-- GitHub issue [Openrouter unwated requests to Claude Haiku 4.5. #4579](https://github.com/anomalyco/opencode/issues/4579) remains open as of May 26, 2026.
-- GitHub PR [fix(provider): treat empty small_model as disabled #21184](https://github.com/anomalyco/opencode/pull/21184) has not been merged as of May 26, 2026.
+OpenCode can call a `small_model` for background tasks such as title generation. OpenCode has been reported to call Anthropic Claude Haiku 4.5 over `OPENROUTER_API_KEY` auth even with a different main model selected:
 
-To make this more easily configurable, you can run `acps subagent *` commands to configure `small_model` directly or disable it:
+- We reproduced this behavior with an `OPENROUTER_API_KEY`.
+- GitHub issue [Openrouter unwated requests to Claude Haiku 4.5. #4579](https://github.com/anomalyco/opencode/issues/4579) remains open as of May 26, 2026.
+- GitHub PR [fix(provider): treat empty small_model as disabled #21184](https://github.com/anomalyco/opencode/pull/21184) is still pending as of May 26, 2026.
+
+Run `acps subagent *` to configure `small_model` directly or disable it:
 
 ```sh
 acps subagent status
@@ -59,16 +55,15 @@ acps subagent free
 acps subagent disable
 ```
 
-Usage:
-- `acps subagent set` inherits `--provider` and `--api-key-ref` from the main agent provider when omitted, so the common case is `acps subagent set --model <model>`.
-- `acps subagent match` makes `small_model` follow the main agent model if not already.
-- `acps subagent free` selects `openrouter/free` if using `OPENROUTER_API_KEY` or `opencode/big-pickle` if using `OPENCODE_API_KEY`; errors with "Current provider does not support free." otherwise.
-- `acps subagent disable` sets model ID to an invalid string to ensure that OpenCode `small_model` requests cannot be executed. This is a tried-and-true workaround that will remain until PR#21184 is merged.
+### Usage
 
-When no subagent model is configured, OpenCode configured through `acp-stack` defaults to inheriting the main model for the small model.
+- `acps subagent set` inherits `--provider` and `--api-key-ref` from the main agent provider when omitted. The common case is `acps subagent set --model <model>`.
+- `acps subagent match` makes `small_model` follow the main agent model if not already.
+- `acps subagent free` selects `openrouter/free` with `OPENROUTER_API_KEY`, or `opencode/big-pickle` with `OPENCODE_API_KEY`. It errors with "Current provider does not support free." otherwise.
+- `acps subagent disable` sets the model ID to an invalid string so OpenCode `small_model` requests cannot execute. This workaround stays until PR #21184 merges.
+
+With no subagent model configured, OpenCode configured through `acp-stack` inherits the main model as the small model.
 
 ## Session Resume
 
-`session/load`, `session/resume`, and `session/list` are discovered from the OpenCode `initialize` reply at runtime; `data/agents.toml` does not pin a value.
-
-If the live ACP connection to OpenCode drops, `restart = "on-crash"` relaunches the supervised agent automatically. Any prompt that was mid-stream is flipped to `stalled` once the stale-prompt sweeper observes no further updates beyond `[prompts].stale_threshold`. Clients reconnect by calling `GET /v1/sessions/{id}/snapshot`, wait for the agent process to be running, then call `POST /v1/sessions/{id}/resume` when the new OpenCode advertises `sessionCapabilities.resume`. If it does not, a fresh `POST /v1/sessions` is the recovery path and the prior prompt history remains as durable events.
+`session/load`, `session/resume`, and `session/list` are discovered from the OpenCode `initialize` reply at runtime. See [docs/specs/acp/acp-bridge.md](../specs/acp/acp-bridge.md), "Session Resume Capability Matrix", for the generic resume and reconnect behavior.

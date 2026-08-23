@@ -461,7 +461,7 @@ impl AgentSupervisor {
     /// store) and passing the resulting name->value map; that keeps the
     /// supervisor independent of secrets infrastructure and avoids opening
     /// the secret store in code paths whose `agent.env` is empty. `cwd`
-    /// falls back to `workspace.root` per `docs/specs/acp/acp-bridge.md:15`.
+    /// falls back to `workspace.root` per `docs/specs/acp/acp-bridge.md:60`.
     ///
     /// On success, records `agent.started` and an UPSERT into
     /// `agent_capabilities`. On failure, transitions back to `Stopped` so a

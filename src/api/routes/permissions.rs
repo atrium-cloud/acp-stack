@@ -55,7 +55,7 @@ pub(crate) async fn permissions_approve_handler(
 > {
     let Json(body) = body.unwrap_or_default();
     // The deciding principal is the bearer-token tier. These routes are
-    // session-tier (per docs/specs/security.md:20); the principal is always
+    // session-tier (per docs/specs/security.md:26); the principal is always
     // "session-key" and that's what's recorded in `permission_decisions`. If
     // the tier policy ever splits approve vs deny across keys, surface the
     // resolved KeyKind from the request extension here.

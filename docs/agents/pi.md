@@ -2,7 +2,7 @@
 
 Pi Agent is adapter-backed. `acp-stack` launches `pi-acp`, which launches Pi in RPC mode.
 
-`pi-acp` 0.0.31 or newer is required: older adapter releases advertise models through the pre-1.0 ACP `models` session state, which `acp-stack` no longer consumes on ACP v1 (verified 2026-07-07: 0.0.27 fails model selection, 0.0.31 advertises a `model` session config option). `acps` installs the latest adapter from npm, so this only affects externally managed installs.
+`pi-acp` 0.0.31 or newer is required. Older adapter releases advertise models through the pre-1.0 ACP `models` session state, a channel `acp-stack` retired on ACP v1. Verified 2026-07-07: 0.0.27 fails model selection; 0.0.31 advertises a `model` session config option. `acps` installs the latest adapter from npm, so this only affects externally managed installs.
 
 ## Setup
 
@@ -24,21 +24,18 @@ env = ["<provider-api-key-ref>"]
 restart = "on-crash"
 ```
 
-Pi provider credentials are injected through `[agent].env`. Provider ids and default secret refs are summarized in [../specs/agents/api_key.md](../specs/agents/api_key.md).
+Provider credentials are injected through `[agent].env`. Provider ids and default secret refs are summarized in [../specs/agents/api_key.md](../specs/agents/api_key.md).
 
 `acps agent set` writes the selected model into Pi's agent settings. Pi keeps Cloudflare model values in Pi's native form. Custom providers are supported when the required base URL, API family, model, and secret ref are supplied explicitly.
 
 ## Cloudflare Providers
 
-Cloudflare providers require companion env refs alongside the main API key. Note that Pi uses `CLOUDFLARE_API_KEY` for `cloudflare-ai-gateway` (OpenCode uses `CLOUDFLARE_API_TOKEN`).
+Cloudflare providers require companion env refs alongside the main API key. The base `companion_env_vars` list per provider lives in [../../data/env_vars.toml](../../data/env_vars.toml), with per-provider overrides in [../../data/providers.toml](../../data/providers.toml).
 
-| Provider id             | Required env refs                                                      |
-| ----------------------- | ---------------------------------------------------------------------- |
-| `cloudflare-workers-ai` | `CLOUDFLARE_API_KEY`, `CLOUDFLARE_ACCOUNT_ID`                          |
-| `cloudflare-ai-gateway` | `CLOUDFLARE_API_KEY`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_GATEWAY_ID` |
+Note: Pi uses `CLOUDFLARE_API_KEY` for `cloudflare-ai-gateway`; OpenCode uses `CLOUDFLARE_API_TOKEN`.
 
 ## Session Resume
 
-`session/load`, `session/resume`, and `session/list` are discovered from the `pi-acp` adapter's `initialize` reply at runtime; `data/agents.toml` does not pin a value.
+`session/load`, `session/resume`, and `session/list` are discovered from the `pi-acp` adapter's `initialize` reply at runtime.
 
-If the live ACP connection to `pi-acp` drops, `restart = "on-crash"` relaunches the supervised agent automatically. Any prompt that was mid-stream is flipped to `stalled` once the stale-prompt sweeper observes no further updates beyond `[prompts].stale_threshold`. Clients reconnect through `GET /v1/sessions/{id}/snapshot`, wait for the agent process to be running, then call `POST /v1/sessions/{id}/resume` when the new adapter advertises `sessionCapabilities.resume`. If `session/resume` is unsupported, prompt resumption is not possible and a fresh session is the recovery path.
+For crash recovery, stalled prompts, and client reconnection, see [../specs/acp/acp-bridge.md](../specs/acp/acp-bridge.md).

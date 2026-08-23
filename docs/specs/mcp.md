@@ -10,17 +10,17 @@ Per-session MCP declarations are unsupported. Use separate runtime configs when 
 
 ## Matrix
 
-| Server shape | Config support | Health check | Notes |
-| ------------ | -------------- | ------------ | ----- |
-| Stdio MCP | supported | command is executable; secret refs exist | Environment values come from the encrypted secret store. |
-| HTTP MCP | supported | declaration and secret refs only | Health checks do not call remote MCP endpoints. |
-| Slack MCP | preset-compatible | stdio/HTTP shape dependent | Declare the server shape and required token refs explicitly. |
-| Linear MCP | preset-compatible | HTTP secret refs | Use `https://mcp.linear.app/mcp` with an authorization header ref. |
-| Generic HTTP MCP | supported | declaration and secret refs only | Any HTTPS MCP endpoint can be declared with required headers. |
+| Server shape     | Config support    | Health check                             | Notes                                                              |
+| ---------------- | ----------------- | ---------------------------------------- | ------------------------------------------------------------------ |
+| Stdio MCP        | supported         | command is executable; secret refs exist | Environment values come from the encrypted secret store.           |
+| HTTP MCP         | supported         | declaration and secret refs only         | Health checks do not call remote MCP endpoints.                    |
+| Slack MCP        | preset-compatible | stdio/HTTP shape dependent               | Declare the server shape and required token refs explicitly.       |
+| Linear MCP       | preset-compatible | HTTP secret refs                         | Use `https://mcp.linear.app/mcp` with an authorization header ref. |
+| Generic HTTP MCP | supported         | declaration and secret refs only         | Any HTTPS MCP endpoint can be declared with required headers.      |
 
 ## Examples
 
-HTTP:
+### HTTP
 
 ```toml
 [[mcp.servers]]
@@ -30,7 +30,9 @@ url = "https://mcp.linear.app/mcp"
 headers = [{ name = "Authorization", value_ref = "LINEAR_API_KEY" }]
 ```
 
-HTTP with a templated header value (exactly one of `value_ref` or `value` per header; templates interpolate `${SECRET_REF}` and must contain at least one ref — see the secret-reference-template rules in [config.md](config.md)):
+### Templated Header Values
+
+Exactly one of `value_ref` or `value` per header; templates interpolate `${SECRET_REF}` and must contain at least one ref — see the secret-reference-template rules in [config.md](config.md):
 
 ```toml
 [[mcp.servers]]
@@ -40,7 +42,9 @@ url = "https://api.parallel.example/mcp"
 headers = [{ name = "Authorization", value = "Bearer ${PARALLEL_API_KEY}" }]
 ```
 
-Stdio (bare `NAME` entries export the whole secret under that name; `VAR=template` entries compose the value):
+### Stdio
+
+Bare `NAME` entries export the whole secret under that name; `VAR=template` entries compose the value:
 
 ```toml
 [[mcp.servers]]

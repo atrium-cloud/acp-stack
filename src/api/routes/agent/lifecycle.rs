@@ -92,7 +92,7 @@ async fn start_agent_target_locked(
     // Re-read disk config and resolve env BEFORE invoking the supervisor so
     // `acps agent set` changes made while the daemon is running are honored
     // by the next start. open_agent_env enforces the same allowlist semantics
-    // (security.md:91) regardless of caller.
+    // (security.md:49) regardless of caller.
     let (config, target) = load_fresh_config_for_target(state, target_id).await?;
     ensure_array_process_start_allowed(&config, target_id)?;
     let environment = open_agent_environment(&config)?;

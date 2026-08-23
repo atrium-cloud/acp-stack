@@ -28,6 +28,8 @@ The configured agent owns model behavior, prompt interpretation, and tool use in
 
 ## Initial Release Goals
 
+### In Scope
+
 The initial release focuses on:
 
 - local daemon and CLI operation
@@ -38,6 +40,8 @@ The initial release focuses on:
 - workspace files and mediated commands
 - durable logs, metrics, and session history
 - keyless local `acps` observability
+
+### Out Of Scope
 
 Out of scope for the initial release:
 
@@ -50,9 +54,9 @@ Out of scope for the initial release:
 
 ## Detailed Specs
 
-- [CLI](cli.md)
+- [CLI](cli/cli.md) ([flag reference](cli/cli-flags.md))
 - [Config](config.md)
-- [API](api/api.md)
+- [API](api/api.md) ([endpoint reference](api/endpoints.md))
 - [Runtime](runtime.md)
 - [Security](security.md)
 - [State and logging](state-logging.md)

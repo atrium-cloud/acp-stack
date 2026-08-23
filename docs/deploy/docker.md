@@ -24,13 +24,13 @@ Mount these paths for a persistent instance:
 
 ## First Run
 
-Build the image:
+### Build the image
 
 ```sh
 docker build -t acp-stack:local .
 ```
 
-Create volumes:
+### Create volumes
 
 ```sh
 docker volume create acp-stack-workspace
@@ -38,7 +38,7 @@ docker volume create acp-stack-config
 docker volume create acp-stack-state
 ```
 
-Initialize config, state, and API keys:
+### Initialize config, state, and API keys
 
 ```sh
 docker run --rm \
@@ -51,7 +51,7 @@ docker run --rm \
 
 Save both printed API keys immediately. The session key is used for normal API calls. The admin key is used for management actions and is printed only when it is first generated.
 
-Start the daemon:
+### Start the daemon
 
 ```sh
 docker run -d \
@@ -63,7 +63,11 @@ docker run -d \
   acp-stack:local
 ```
 
+### Auto-init
+
 Set `ACP_STACK_AUTO_INIT=1` and `ACP_STACK_INIT_AGENT=<agent-id>` only when you want the entrypoint to initialize a missing config automatically. Provider-backed agents can also set `ACP_STACK_INIT_PROVIDER`, `ACP_STACK_INIT_API_KEY_REF`, and `ACP_STACK_INIT_MODEL`; these map to the matching `acps init` flags. `ACP_STACK_INIT_WORKSPACE_ROOT` and `ACP_STACK_INIT_WORKSPACE_UPLOADS` override the workspace paths used at init. First-run API keys are printed to container logs in auto-init mode.
+
+### Supabase logging
 
 For Supabase logging, run setup after init on a host/container where the Supabase CLI is authenticated:
 
@@ -73,6 +77,8 @@ acps logging supabase check
 ```
 
 The legacy PostgREST backend can still be configured with `acps logging supabase enable`.
+
+### Updates
 
 `acps update check` can report available `acp-stack` releases inside the container, but install is refused. Update Docker and Railway deployments by redeploying a newer image.
 

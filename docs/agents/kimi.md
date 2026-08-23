@@ -1,6 +1,8 @@
 # Kimi Code
 
-Kimi Code is a native ACP target. `acp-stack` launches `kimi acp`. Authentication is headless: the `KIMI_MODEL_*` environment contract builds an in-memory provider from `KIMI_MODEL_API_KEY` / `KIMI_MODEL_NAME` / `KIMI_MODEL_BASE_URL`, which is the launch environment `acp-stack` constructs; Kimi's interactive OAuth flow is not used.
+Kimi Code is a native ACP target. `acp-stack` launches `kimi acp`.
+
+Authentication is headless. `acp-stack` builds an in-memory provider from a `KIMI_MODEL_*` launch environment. Headless env auth replaces Kimi's interactive OAuth flow.
 
 ## Setup
 
@@ -28,18 +30,45 @@ model = "k3"
 
 ## Providers
 
-Kimi Code selects between mapped provider lanes; the credential and endpoint differ per lane and are not interchangeable.
+Kimi Code selects between mapped provider lanes. The credential and endpoint differ per lane; each lane accepts only its own, and the runtime fixes each lane's endpoint at launch. Lane ids and key refs are declared in [../../data/providers.toml](../../data/providers.toml) and [../../data/env_vars.toml](../../data/env_vars.toml).
 
-- Kimi For Coding (provider ids `kimi-for-coding`, `kimi-code`, and aliases): the subscription surface at `https://api.kimi.com/coding/v1`, authenticated with `KIMI_API_KEY` (a coding-plan credential).
-- Kimi For Coding (Global) (`kimi-coding-global`): the global-region subscription surface at `https://api.kimi.ai/coding/v1`, also authenticated with `KIMI_API_KEY`.
-- Moonshot AI (`moonshotai`, or `moonshotai-cn` for the China endpoint): the pay-as-you-go platform at `https://api.moonshot.ai/v1`, authenticated with `MOONSHOT_API_KEY`. Select a lane with `acps init --agent kimi --provider <id>` or `acps agent provider use <id>`; the selection swaps the `[agent].env` credential declaration to the lane's key.
-- Custom providers: any Anthropic- or OpenAI-compatible endpoint via `--custom-provider`, with `--provider-api` `chat-completions`, `anthropic-messages`, or `responses`. The declared API maps onto Kimi Code's `KIMI_MODEL_PROVIDER_TYPE` (`openai`, `anthropic`, `openai_responses`); `responses` requires Kimi Code's v2 engine (the default). The custom base URL, context, output cap, and display name flow through the same `KIMI_MODEL_*` launch environment; model capabilities are not set and follow Kimi Code's defaults.
+- Kimi For Coding (`kimi-for-coding`, `kimi-code`, and aliases): the subscription surface.
+- Kimi For Coding (Global) (`kimi-coding-global`): the global-region subscription surface.
+- Moonshot AI (`moonshotai`; `moonshotai-cn` for the China endpoint): the pay-as-you-go platform.
 
-A legacy config without `[agent.provider]` still launches on the Kimi For Coding subscription lane; all configuration surfaces now require an explicit provider selection.
+Select a lane with `acps init --agent kimi --provider <id>` or `acps agent provider use <id>`. The selection swaps the `[agent].env` credential declaration to the lane's key.
 
-The api key stays in the encrypted secret store. At launch, `acp-stack` passes its value as `KIMI_MODEL_API_KEY`, selects the model through `KIMI_MODEL_NAME`, and sets `KIMI_MODEL_BASE_URL` to the selected lane's endpoint. Do not add `KIMI_MODEL_*` refs to `[agent].env`.
+### Custom providers
 
-`acps init` pins a per-lane default model when `--model` is not passed: `kimi-for-coding` on the subscription lanes (available on every Kimi plan) and `kimi-k3` on the Moonshot platform; a model already present in config is kept. K3 requires a Moderato plan or above on the subscription lanes; eligible users can select it with `acps init --agent kimi --provider kimi-code --model k3` or `acps agent set --model k3`. Model ids are accepted as supplied without ACP discovery because Kimi requires the model environment to initialize; Kimi Code validates the id when the process starts. If a hand-edited config omits the model, the runtime launches with the lane default. Mode values are discovered over ACP and can be selected with `acps agent set --mode <mode>`. Reasoning effort is discovered the same way — Kimi advertises a `thinking` (`thought_level`) option offering `off` plus the model's declared effort levels — and set with `acps agent set --effort <effort>`.
+Custom providers accept any Anthropic- or OpenAI-compatible endpoint via `--custom-provider`:
+
+- Set `--provider-api` to `chat-completions`, `anthropic-messages`, or `responses`.
+- The declared API maps onto `KIMI_MODEL_PROVIDER_TYPE` (`openai`, `anthropic`, `openai_responses`). `responses` requires Kimi Code's v2 engine (the default).
+- The custom base URL, context, output cap, and display name flow through the same `KIMI_MODEL_*` launch environment.
+- Model capabilities fall through to Kimi Code's defaults.
+
+A legacy config predating `[agent.provider]` still launches on the Kimi For Coding subscription lane. All configuration surfaces now require an explicit provider selection.
+
+## Launch environment
+
+The API key stays in the encrypted secret store. At launch, `acp-stack`:
+
+- passes its value as `KIMI_MODEL_API_KEY`
+- selects the model through `KIMI_MODEL_NAME`
+- sets `KIMI_MODEL_BASE_URL` to the selected lane's endpoint
+
+Reserve `[agent].env` for the credential ref; `acp-stack` owns the `KIMI_MODEL_*` launch vars.
+
+## Models
+
+- When `--model` is not passed, `acps init` pins a per-lane default: `kimi-for-coding` on the subscription lanes (available on every Kimi plan) and `kimi-k3` on the Moonshot platform. A model already present in config is kept.
+- K3 requires a Moderato plan or above on the subscription lanes. Eligible users select it with `acps init --agent kimi --provider kimi-code --model k3` or `acps agent set --model k3`.
+- Model ids are accepted as supplied, without ACP discovery, because Kimi requires the model environment to initialize. Kimi Code validates the id when the process starts.
+- If a hand-edited config omits the model, the runtime launches with the lane default.
+- Mode values are discovered over ACP. Select one with `acps agent set --mode <mode>`.
+- Reasoning effort is discovered the same way. Kimi advertises a `thinking` (`thought_level`) option offering `off` plus the model's declared effort levels. Set it with `acps agent set --effort <effort>`.
+
+## Sessions and capabilities
 
 Kimi Code receives configured MCP servers through ACP. Managed Agent Skills are installed into `~/.agents/skills`.
 

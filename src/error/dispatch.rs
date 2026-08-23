@@ -7,7 +7,7 @@ use super::*;
 
 impl StackError {
     /// Dotted-namespace code suitable for the HTTP error envelope at
-    /// `docs/specs/api/api.md:20-42`. Delegates to per-domain helpers so the
+    /// `docs/specs/api/api.md:29-48`. Delegates to per-domain helpers so the
     /// variant-to-code table lives next to the matching domain.
     pub fn error_code(&self) -> &str {
         if let Self::NativeAgentConfigOperationFailed { code } = self {

@@ -67,7 +67,7 @@ impl EventHub {
     }
 
     /// Fan out a workspace mutation to subscribers of the `workspace` topic.
-    /// Topic name matches `docs/specs/api/api.md:165-176`. Payload is shaped
+    /// Topic name matches `docs/specs/api/endpoints.md:1123-1130`. Payload is shaped
     /// like the session-update envelope so client code can dispatch on
     /// `payload.kind` uniformly across topics.
     pub fn publish_workspace_event(&self, event: &Event, data: Value) {

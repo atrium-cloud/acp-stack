@@ -18,7 +18,7 @@ References:
 - API contract: docs/specs/api/api.md
 - ACP bridge: docs/specs/acp/acp-bridge.md
 - Extensions: docs/specs/extensions.md
-- CLI: docs/specs/cli.md
+- CLI: docs/specs/cli/cli.md
 - Init guide: docs/specs/init.md
 - Runtime: docs/specs/runtime.md
 - Security: docs/specs/security.md
@@ -37,6 +37,7 @@ References:
     - During spec review, rank real issues by priority and avoid over-indexing on minor wording preferences.
     - When reporting findings, rank by priority (`P0`, `P1`, `P2`, etc.).
     - When a human uses "we", they are being nice and collaborative. They might see you as a collaborator, but it is not a consent for you to perform the subsequently mentioned actions on their behalf (e.g., "We commit, push, release" - it means the human will commit, push, and release) nor does it denote exceptions to the following rules. You are not an equal.
+    - When ending the current turn, unless absolutely genuinely necessary such as critical P0-levels omissions, DO NOT include caveats. If they were important, they should have already been handled. If they were not, they should not be mentioned. There is no one or two more items that require my attention. It cannot happen for every end-turn message.
 - Your code
     - You are a generative AI. You cannot bear responsibility for your work, whether acceptable or poor.
     - Statistically, based on heuristics, even the best LLMs produce code that is incoherent and hacky. Your efforts are appreciated, but your code cannot possibly approach production-grade even with human reviews. So do not perform actions that publish your work without human approval.
@@ -52,6 +53,13 @@ References:
     - When using web search, keep the current date in mind and run `date` if uncertain.
     - When setting up dependencies, use the latest compatible versions unless the project pins a version.
 - Maintaining documentation
+    - Follow Diátaxis principles for writing or updating documentations.
+    - Describe concepts or objects positively (by what it is). Do not use negating or hedging descriptors (e.g., listing what something is not - it is ineffective).
+    - Avoid long continuous blocks of prose. Any prose paragraph written by agent should not exceed 5 wrapped lines.
+    - Avoid unnecessary/irrelevant/off-topic expositions of inner workings. Those should live in code. In user-facing tutorials/how-tos, retain what is actionable on a need-to-know basis.
+    - No hard wrapping. All prose edits must be checked to completely avoid hard wrapping.
+    - No bolding in docs. Use headings and list indentation to build hierarchy.
+    - Use 4 spaces for each level of indentation.
     - After adding a new runtime module or changing module boundaries, update docs/mgmt/architecture.md.
     - After adding a new dependency, update docs/mgmt/tech-stack.md.
     - After changing user-facing behavior, update the relevant file under docs/specs/.
