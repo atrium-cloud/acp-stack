@@ -42,15 +42,13 @@ fn extract_usage_payload_returns_none_when_shape_unknown() {
 fn extract_usage_payload_rejects_negative_numbers() {
     let payload = r#"{"usage": {"input_tokens": -5, "output_tokens": 3}}"#;
     let usage = super::extract_usage_payload("s", payload).expect("partial usage");
-    // Negative tokens were dropped; output tokens preserved.
     assert!(usage.get("input_tokens").is_none());
     assert_eq!(usage["output_tokens"].as_i64(), Some(3));
 }
 
 #[test]
 fn extract_execute_tool_call_lifts_command_from_raw_input() {
-    // Serialized shape of an ACP `tool_call` update from a built-in
-    // shell tool (Claude Code / OpenCode bash convention).
+    // Serialized shape of an ACP `tool_call` update from a built-in shell tool.
     let payload = r#"{"sessionId":"sess_1","update":{"sessionUpdate":"tool_call","toolCallId":"call_1","title":"uname -a","kind":"execute","status":"in_progress","rawInput":{"command":"uname -a","description":"print kernel info"}}}"#;
     let event = super::extract_execute_tool_call("sess_local", payload)
         .expect("execute tool call extracted");
@@ -67,20 +65,17 @@ fn extract_execute_tool_call_accepts_updates_that_restate_kind() {
     let event = super::extract_execute_tool_call("sess_local", payload)
         .expect("execute tool call update extracted");
     assert_eq!(event["status"].as_str(), Some("completed"));
-    // No rawInput on this transition: command absent, not empty.
     assert!(event.get("command").is_none());
 }
 
 #[test]
 fn extract_execute_tool_call_ignores_other_updates() {
-    // Non-execute tool kind.
     let read_call = r#"{"update":{"sessionUpdate":"tool_call","toolCallId":"call_2","kind":"read","status":"pending"}}"#;
     assert!(super::extract_execute_tool_call("s", read_call).is_none());
-    // Update without a restated kind (ACP only requires kind on the
-    // initial tool_call) must not fire.
+    // ACP requires `kind` only on the initial tool_call, so an update without a
+    // restated kind must not fire.
     let bare_update = r#"{"update":{"sessionUpdate":"tool_call_update","toolCallId":"call_1","status":"completed"}}"#;
     assert!(super::extract_execute_tool_call("s", bare_update).is_none());
-    // Non-tool-call updates and garbage.
     let chunk = r#"{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}}"#;
     assert!(super::extract_execute_tool_call("s", chunk).is_none());
     assert!(super::extract_execute_tool_call("s", "not-json").is_none());
@@ -123,10 +118,8 @@ fn touch_running_prompt_advances_updated_at_on_in_flight_row() {
         )
         .expect("prompt flipped to running");
 
-    // Force `updated_at` into the past so the re-touch is visible
-    // even at sub-second resolution. Without this the wall-clock
-    // delta between insert and touch is too small for the string
-    // comparison to be reliable.
+    // Aged into the past because the real insert-to-touch delta is too small for
+    // the string comparison to be reliable.
     let aged = "2020-01-01T00:00:00.000000000Z";
     let connection =
         rusqlite::Connection::open(store.path()).expect("open sqlite for age override");
@@ -199,7 +192,6 @@ async fn writer_persists_derived_tool_execute_event() {
             .payload_json
             .contains("\"session_id\":\"sess_local\"")
     );
-    // The verbatim session.update row is still written alongside.
     let verbatim = guard
         .query_events(crate::state::LogFilter {
             limit: 10,
@@ -393,18 +385,14 @@ fn available_commands_updates_replace_stored_list() {
         assert_eq!(commands[0]["name"], "compact");
         assert_eq!(commands[0]["description"], "Summarize the conversation");
         assert_eq!(commands[0]["input_hint"], "optional instructions");
-        // `_meta` is dropped by the compact projection.
         assert!(commands[0].get("_meta").is_none());
-        // No input spec means no hint key at all.
         assert_eq!(commands[1]["name"], "init");
         assert!(commands[1].get("input_hint").is_none());
         assert!(metadata["available_commands_updated_at"].is_string());
-        // Unrelated metadata keys survive the write.
         assert_eq!(metadata["preserved"], true);
         assert_eq!(metadata["agent_meta"]["old"], true);
     }
 
-    // Latest-wins: a second update replaces rather than merges.
     let replace = serde_json::json!({
         "sessionId": "agent_sess_1",
         "update": {
@@ -430,7 +418,7 @@ fn available_commands_updates_replace_stored_list() {
         assert_eq!(commands[0]["name"], "review");
     }
 
-    // An empty list is a legitimate advertisement and clears the stored list.
+    // An empty list is a legitimate advertisement, not a no-op.
     let clear = serde_json::json!({
         "sessionId": "agent_sess_1",
         "update": {
@@ -528,14 +516,12 @@ fn config_option_updates_replace_stored_snapshot() {
         // A boolean current value stays a JSON bool, never the string "true".
         assert_eq!(options[1]["current_value"], serde_json::json!(true));
         assert!(options[1].get("options").is_none());
-        // Category-less options survive verbatim, with no invented category.
         assert_eq!(options[2]["id"], "_custom");
         assert!(options[2].get("category").is_none());
         assert!(metadata["config_options_updated_at"].is_string());
         assert_eq!(metadata["preserved"], true);
     }
 
-    // Latest-wins: a second update replaces rather than merges.
     let replace = serde_json::json!({
         "sessionId": "agent_sess_1",
         "update": {
@@ -585,7 +571,6 @@ fn available_commands_projection_ignores_other_updates_and_truncates_over_cap() 
         )
         .expect("session inserted");
 
-    // Non-matching payloads are a no-op, not an error.
     let chunk = r#"{"sessionId":"agent_sess_1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}}"#;
     super::project_available_commands_update(&store, "sess_local", chunk).expect("chunk no-op");
     let bare = r#"{"sessionId":"agent_sess_1"}"#;
@@ -869,7 +854,7 @@ fn touch_running_prompt_is_noop_when_no_in_flight_prompt() {
         })
         .expect("session inserted");
 
-    // No prompt rows — re-touch must succeed without an error so the
-    // ACP session sink never blocks on a benign no-op.
+    // With no prompt rows the re-touch must still succeed, so the sink never
+    // blocks on a benign no-op.
     super::touch_running_prompt(&store, "sess_empty").expect("noop succeeds");
 }

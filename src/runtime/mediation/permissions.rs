@@ -1,25 +1,6 @@
-//! Durable permission pipeline.
-//!
-//! `PermissionService` is the single funnel for permission requests originating
-//! from either the Command Gateway (`commands.rs`) or the ACP bridge
-//! (`acp_bridge.rs`). It:
-//!
-//!   * Persists each request as a `permission_requests` row in the `pending`
-//!     state.
-//!   * Holds an in-memory waiter (`tokio::sync::oneshot`) keyed by request id,
-//!     plus any source-specific sensitive payload (e.g. raw command env
-//!     values) that must NOT enter the durable row.
-//!   * Resolves the waiter when the request is approved, denied, canceled, or
-//!     expires after `[permissions].request_timeout`.
-//!   * Records the decision as a `permission_decisions` row and publishes a
-//!     `permission.*` event on both the `permissions` and `logs` WebSocket
-//!     topics.
-//!
-//! Tier: pending reads + approve/deny decisions are session-tier per
-//! `docs/specs/security.md:26`. The durability is in SQLite; the in-memory
-//! state is purely the waiter map. On daemon restart `reconcile_orphaned_permissions`
-//! marks pending command rows `expired` and pending ACP rows `cancelled` so
-//! clients never see them stay pending forever.
+//! Durable permission pipeline: `PermissionService` is the single funnel for
+//! Command Gateway and ACP bridge permission requests, persisting each as a
+//! `permission_requests` row backed by an in-memory oneshot waiter.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -219,9 +200,8 @@ impl PermissionService {
             &record.created_at,
             "permission.created",
             json!({
-                // `permission_id` lets log queries filter by the permission row
-                // id through `json_extract(payload_json, '$.permission_id')`;
-                // `id` is preserved for clients that already key on it.
+                // `permission_id` is what log queries filter on; `id` stays for
+                // clients that already key on it.
                 "id": record.id,
                 "permission_id": record.id,
                 "source": record.source,
@@ -311,10 +291,9 @@ impl PermissionService {
             state.decide_permission(id, new_status, Some(deciding_principal), reason.as_deref())?
         };
 
-        // Take the waiter (if any) and fire it. A missing waiter means the
-        // timer already fired or the daemon was restarted between request and
-        // decision — still record the durable decision row so the audit trail
-        // is complete.
+        // A missing waiter means the timer already fired or the daemon
+        // restarted; the durable decision row is still written for the audit
+        // trail.
         if let Some(op) = self.pending.lock().await.remove(id) {
             let _ = op.waiter.send(outcome.clone());
         }
@@ -371,10 +350,8 @@ impl PermissionService {
                 ),
             };
 
-            // Use the atomic decide_permission so a concurrent approve/deny
-            // cannot land between the transition and the decision row. If the
-            // row was already decided by another caller, that caller's `resolve`
-            // has fired the waiter; we exit without writing.
+            // The atomic `decide_permission` keeps a concurrent approve/deny
+            // from landing between the transition and the decision row.
             let outcome_for_waiter = outcome.clone();
             let result = {
                 let store = state.lock().await;
@@ -388,15 +365,12 @@ impl PermissionService {
             let now = match result {
                 Ok(Some(created_at)) => created_at,
                 Ok(None) => {
-                    // Concurrent decision settled the row first. The decider
-                    // has already fired the waiter; we have nothing to do.
+                    // A concurrent decider settled the row and fired the waiter.
                     return;
                 }
                 Err(err) => {
-                    // A real state error: drop the waiter from the map and
-                    // fire it with Expired so the caller doesn't hang. The
-                    // row stays pending in SQLite; reconcile_orphaned_permissions
-                    // will sweep it on next daemon restart.
+                    // Fire the waiter with Expired so the caller cannot hang;
+                    // the row stays pending for the restart sweep.
                     tracing::warn!(error = %err, perm_id = %id, "timer transition/decision failed");
                     if let Some(op) = pending.lock().await.remove(&id) {
                         let _ = op.waiter.send(PermissionOutcome::Expired);
@@ -520,9 +494,8 @@ fn compute_expiry(timeout: Duration) -> Option<String> {
     if timeout.is_zero() {
         return None;
     }
-    // Use millisecond precision so sub-second timeouts (test fixtures, future
-    // fast-cycle UI) still write a non-NULL expires_at. `as_millis()` returns
-    // u128 but real-world timeouts fit in i64 ms easily.
+    // Millisecond precision so sub-second timeouts still write a non-NULL
+    // expires_at.
     let millis = i64::try_from(timeout.as_millis()).unwrap_or(i64::MAX);
     let now = chrono::Utc::now();
     let expires = now + chrono::Duration::milliseconds(millis);
@@ -700,8 +673,6 @@ mod tests {
         assert_eq!(payload["subject_id"], "cmd_x");
         assert_eq!(payload["reason"], "command-permission-waiter-lost");
 
-        // The `command_id` link must make the event visible to a client
-        // filtering the log by the command, not just by the permission.
         let by_command = {
             let state = service.state.lock().await;
             state
@@ -753,8 +724,6 @@ mod tests {
             .expect("canceled event");
         let payload: serde_json::Value =
             serde_json::from_str(&canceled.payload_json).expect("payload json");
-        // An ACP subject is a session id — presenting it as a command id
-        // would corrupt command-scoped log queries.
         assert!(payload.get("command_id").is_none());
         assert_eq!(payload["source"], "acp");
         assert_eq!(payload["subject_id"], "sess_a");

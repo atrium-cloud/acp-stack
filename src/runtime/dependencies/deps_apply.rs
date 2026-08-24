@@ -1,24 +1,5 @@
-//! Narrow `acps deps apply` runner.
-//!
-//! Phase 4 / Dependency Apply: lets operators run the install snippet
-//! they declared per-dependency in `[dependencies.commands.install]`,
-//! captures stdout/stderr/exit, verifies a `creates` postcheck, and
-//! persists one `installer_runs` row per action with `step =
-//! "deps_apply"` so the audit log is unified with the agent installer.
-//!
-//! Scope is deliberately narrow per the Phase 4 spec:
-//!
-//! - Only commands with an explicit `install` block are eligible.
-//!   Missing-but-declared deps without an install action surface as
-//!   "no install action declared" — the runtime never guesses an
-//!   apt/brew/yum invocation.
-//! - System-scoped actions (`scope = "system"`) run directly as root,
-//!   escalate through passwordless `sudo -n` when the process is
-//!   non-root, and refuse (recording `privilege_required`) when
-//!   neither applies — the runner never prompts for a password and
-//!   never downgrades a system action to user scope.
-//! - Caller must confirm before any action runs (`--yes` flag on the
-//!   CLI, `confirmation: true` body field on the API).
+//! Runner for `acps deps apply`: executes declared `[dependencies.commands.install]`
+//! snippets and records one `installer_runs` audit row per action.
 
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -188,13 +169,6 @@ pub fn apply_dependencies_with_escalation(
     apply_run_id: Option<&str>,
     mut progress: impl FnMut(usize, usize, &str) -> Result<()>,
 ) -> Result<DepsApplyReport> {
-    // before/after must honor each dep's `install.creates` (which may
-    // be an absolute path), not just PATH on `entry.name`. The plain
-    // `check_dependencies` checker resolves `entry.name`, so an
-    // install action whose `creates = "/opt/foo/bin/agent"` would
-    // succeed but `report.after` would still say "missing". Compose
-    // per-entry `check_one` for command deps with `install` blocks
-    // and fall through to the standard checker for everything else.
     let before = compute_before_after_report(config);
     let mut results = Vec::new();
     // A caller-supplied id keeps the per-action `installer_runs.apply_run_id`
@@ -366,10 +340,7 @@ fn apply_one(
         .unwrap_or_else(|| entry.name.clone());
     let started_at = current_timestamp();
 
-    // Idempotence shortcut: if `creates` already resolves, skip the
-    // shell entirely. Same contract as the agent installer's
-    // `already_present` outcome — re-running `acps deps apply` after
-    // a successful run is a no-op.
+    // Idempotence: an already-resolving `creates` skips the shell entirely.
     if let Some(_path) = resolve_command(&creates) {
         let finished_at = current_timestamp();
         append_deps_run(
@@ -390,13 +361,8 @@ fn apply_one(
         });
     }
 
-    // Re-derive the decision at the execution point: `NotNeeded` also
-    // stands in for "nothing was pending at probe time, so no probe ran".
-    // If a system-scope action became pending between probe and apply
-    // (operator think-time at the confirm prompt, or an earlier action
-    // changing PATH), trusting the stale value would run a root-intended
-    // script as the unprivileged user — the downgrade this module promises
-    // never happens. A non-root euid under `NotNeeded` therefore refuses.
+    // `NotNeeded` also means "no probe ran", so it must be re-derived here: trusting it
+    // stale would run a root-intended script as the unprivileged user. Non-root refuses.
     let effective_escalation = match escalation {
         PrivilegeEscalation::NotNeeded => {
             let uid = current_uid();
@@ -452,17 +418,13 @@ fn apply_one(
         .timeout_secs
         .map(Duration::from_secs)
         .unwrap_or(DEFAULT_TIMEOUT);
-    // The running row makes the in-flight action visible to concurrent
-    // readers; it is finalized in place below once the shell exits.
     let running_run_id = begin_deps_run(state, apply_run_id, &started_at)?;
     let shell_result = run_shell(shell_program, &install.shell, timeout, sudo);
     let (exit_code, stdout, stderr, timed_out, stderr_tail) = match shell_result {
         Ok(captured) => captured,
         Err(error) => {
-            // A spawn/IO failure must not leave the row reading as in-flight
-            // forever: finalize it as `error` before propagating. A failed
-            // finalize is warn-logged — the original error is the one the
-            // caller needs.
+            // A spawn/IO failure must not strand the row as in-flight: settle it before
+            // propagating, and warn-log a failed settle so the original error survives.
             if let Some(run_id) = &running_run_id
                 && let Err(finish_error) = finish_deps_run(
                     state,
@@ -510,13 +472,8 @@ fn apply_one(
         DepApplyOutcome::PrivilegeRequired { .. } => "privilege_required",
         DepApplyOutcome::Failed { .. } => "failed",
     };
-    // Timed-out runs use `ExitStatus::default()` (success on
-    // every platform) because we never observed a real exit
-    // code from the killed process. Persisting `status.code()`
-    // for that case would let `acps installer history` show a
-    // failed timeout row with `exit_status = 0`, contradicting
-    // the operator-facing outcome which reports timeout as
-    // `exit_code: None`. Match the outcome contract instead.
+    // A killed process yields `ExitStatus::default()` (success), so persisting its code
+    // would show a failed timeout row as `exit_status = 0`. Match the outcome contract.
     let persisted_exit = if timed_out { None } else { exit_code };
     let persisted_stdout = if sudo.is_some() {
         cap_stream(&format!("{ESCALATED_STDOUT_MARKER}\n{stdout}"))
@@ -535,11 +492,8 @@ fn apply_one(
                 &cap_stream(&stderr),
                 persisted_exit,
             ) {
-                // A failed finalize must neither abort the remaining actions
-                // nor leave the row reading as in-flight: warn-log it and
-                // mark the row `error` best-effort (mirrors the agent
-                // installer's finalize_tracked_step). The step's own outcome
-                // still surfaces in the report below.
+                // A failed finalize must neither abort remaining actions nor strand the row
+                // as in-flight: warn-log and best-effort mark it `error`.
                 tracing::warn!(%error, run_id, dep = %entry.name, "deps apply: failed to finalize running row");
                 let reason = format!("deps apply finalize failed: {error}");
                 if let Err(mark_error) = finish_deps_run(
@@ -618,11 +572,8 @@ pub fn candidate_summary_line(candidate: &DepApplyCandidate) -> String {
         DependencyInstallScope::User => "user",
         DependencyInstallScope::System => "system",
     };
-    // Surface the literal shell snippet alongside the metadata. A
-    // confirmation prompt that hides the command being approved is
-    // a footgun — the operator needs to see exactly what will run.
-    // Long snippets are shown verbatim; truncating them would
-    // re-introduce the same hidden-blob problem.
+    // Snippets are shown verbatim and never truncated: the operator must see exactly
+    // what a confirmation approves.
     let mut buf = String::new();
     write!(
         &mut buf,

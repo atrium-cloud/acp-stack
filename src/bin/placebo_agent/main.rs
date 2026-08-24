@@ -179,10 +179,8 @@ async fn run_acp(args: AcpArgs) -> agent_client_protocol::Result<()> {
             agent_client_protocol::on_receive_notification!(),
         )
         .on_receive_dispatch(
-            // Only claim unhandled REQUESTS. Responses and notifications must
-            // fall through to the SDK's internal routing — swallowing a
-            // response here would poison the placebo's own outbound requests
-            // (e.g. the terminal probe's terminal/create).
+            // Only claim unhandled REQUESTS: swallowing a response here would
+            // poison the placebo's own outbound requests.
             async move |message: Dispatch, connection: ConnectionTo<Client>| match message {
                 Dispatch::Request(..) => {
                     message.respond_with_error(Error::method_not_found(), connection)?;

@@ -59,10 +59,8 @@ impl AgentCliHarness {
         Self::spawn_inner(None).await
     }
 
-    /// Spawn a harness that reports a custom `effective_bind` to the security
-    /// check. Used to drive findings like `api.public_bind` from the CLI side
-    /// without rewriting the actual TCP bind (we always bind to `127.0.0.1:0`
-    /// for the test listener).
+    /// Spawn a harness reporting a custom `effective_bind` to the security
+    /// check, without rewriting the actual `127.0.0.1:0` test bind.
     pub async fn spawn_with_effective_bind(effective_bind: &str) -> Self {
         Self::spawn_inner(Some(effective_bind.to_owned())).await
     }
@@ -259,9 +257,8 @@ pub fn seed_provider_credential(home: &std::path::Path, provider_id: &str, env_n
         .expect("provider credential should be stored");
 }
 
-/// Seed a catalog credential WITHOUT the flat-store copy, mirroring what a
-/// managed-state apply leaves behind: the value lives only in the structured
-/// catalog.
+/// Seed a catalog credential WITHOUT the flat-store copy, as a managed-state
+/// apply leaves it.
 pub fn seed_catalog_only_provider_credential(
     home: &std::path::Path,
     provider_id: &str,
@@ -377,9 +374,8 @@ pub fn write_acp_config_options_with_efforts(
         }));
     }
     if !efforts.is_empty() {
-        // codex-acp's shape: a non-"effort" option id under the reserved
-        // `thought_level` category, so the fixture exercises the category
-        // match rather than the id fallback.
+        // codex-acp's shape: a non-"effort" id under the reserved
+        // `thought_level` category, exercising the category match not the id fallback.
         options.push(serde_json::json!({
             "id": "reasoning_effort",
             "name": "Reasoning Effort",

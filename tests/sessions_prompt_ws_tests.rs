@@ -1,12 +1,6 @@
 #![cfg(feature = "test-fixtures")]
 
-//! Prompt-path and websocket coverage for the session routes: the modality
-//! gate that screens prompt content against the target model, live event
-//! fanout over `/v1/ws`, and the prompt failure taxonomy persisted when the
-//! agent's inference call fails or the prompt stalls.
-//!
-//! The placebo ACP fixture stands in for a real ACP agent;
-//! `tests/acp_bridge_tests.rs` exercises the lower-level bridge layer.
+//! Prompt-path and websocket coverage for the session routes: the modality gate, `/v1/ws` event fanout, and the persisted prompt failure taxonomy.
 
 mod common;
 
@@ -402,8 +396,8 @@ async fn append_session_event_fans_out_to_session_and_logs_topics() {
     let harness = Harness::spawn().await;
     let session_id = create_session(&harness).await;
 
-    // One subscriber per topic; the bug we are guarding against silently
-    // dropped session-topic delivery while logs-topic delivery still worked.
+    // One subscriber per topic: the guarded-against bug dropped session-topic delivery while
+    // logs-topic delivery still worked.
     let session_request = websocket_request(&harness, session_bearer());
     let (mut session_ws, _) = tokio_tungstenite::connect_async(session_request)
         .await
@@ -436,10 +430,8 @@ async fn append_session_event_fans_out_to_session_and_logs_topics() {
         .await
         .expect("logs subscribe");
 
-    // The WS server processes subscribe frames inside the same select! arm as
-    // event fanout, so a state write that happens before the server has
-    // observed the subscribe frame is silently dropped on the broadcast end.
-    // Poll the connections endpoint until both topics show as subscribed.
+    // The WS server handles subscribe frames in the same select! arm as event fanout, so a state
+    // write landing before the subscribe frame is observed is dropped on the broadcast end.
     let subscribe_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         if tokio::time::Instant::now() > subscribe_deadline {
@@ -477,8 +469,7 @@ async fn append_session_event_fans_out_to_session_and_logs_topics() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    // Direct state write so the assertion targets the publish site, not the
-    // bridge plumbing.
+    // Direct state write so the assertion targets the publish site, not the bridge plumbing.
     {
         let store = harness.state.lock().await;
         store
@@ -510,13 +501,7 @@ async fn append_session_event_fans_out_to_session_and_logs_topics() {
     assert_eq!(logs_event["payload"]["data"]["kind"], "session.update");
 }
 
-/// Phase 2: when the agent's `session/prompt` JSON-RPC failure carries an
-/// embedded HTTP status (e.g. `503 Service Unavailable`), the supervisor
-/// classifies it as an inference-5xx failure, persists the structured detail
-/// envelope, and emits a `prompt.inference_failed` session event. The raw
-/// upstream message — including the URL and secret-looking token below — must
-/// never reach the persisted `error_message`, `failure_detail_json`, or event
-/// payload.
+/// The raw upstream message, including the URL and secret-looking token below, must never reach the persisted `error_message`, `failure_detail_json`, or event payload.
 #[tokio::test]
 async fn prompt_inference_5xx_persists_taxonomy_and_emits_event() {
     let injected_message = "upstream call to https://api.openai.com/v1/chat?key=sk-secret returned 503 Service Unavailable";
@@ -548,8 +533,6 @@ async fn prompt_inference_5xx_persists_taxonomy_and_emits_event() {
         .expect("prompt id")
         .to_owned();
 
-    // Poll the prompt row until it lands in a terminal status; the inference
-    // failure path settles as `errored`.
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     let terminal = loop {
         if std::time::Instant::now() > deadline {
@@ -588,8 +571,7 @@ async fn prompt_inference_5xx_persists_taxonomy_and_emits_event() {
     assert_eq!(detail_value["status_code"], 503);
     assert_eq!(detail_value["reason_category"], "service_unavailable");
 
-    // The persisted error_message must NOT contain any portion of the raw
-    // upstream string (URL substring, secret-looking token, raw status text).
+    // The persisted error_message must NOT contain any portion of the raw upstream string.
     let error_message = terminal
         .error_message
         .as_deref()
@@ -607,9 +589,7 @@ async fn prompt_inference_5xx_persists_taxonomy_and_emits_event() {
         "secret-looking token leaked into error_message: {error_message}"
     );
 
-    // Same invariant applied to `failure_detail_json` and `error_code` — a
-    // future refactor that pipes raw upstream text into the JSON detail or the
-    // error code must be caught here.
+    // Same invariant for `failure_detail_json` and `error_code`.
     assert!(
         !detail.contains("503 Service Unavailable")
             && !detail.contains("api.openai.com")
@@ -622,8 +602,6 @@ async fn prompt_inference_5xx_persists_taxonomy_and_emits_event() {
         "raw upstream text leaked into error_code: {error_code}"
     );
 
-    // A session-scoped event with kind `prompt.inference_failed` must exist
-    // for this session and carry the structured payload.
     let state = harness.state.lock().await;
     let events = state
         .query_session_events(&session_id, None, 100)
@@ -638,7 +616,6 @@ async fn prompt_inference_5xx_persists_taxonomy_and_emits_event() {
     assert_eq!(payload_value["status_code"], 503);
     assert_eq!(payload_value["reason_category"], "service_unavailable");
     assert_eq!(payload_value["prompt_id"], prompt_id);
-    // And neither the message nor the payload should leak the URL/secret.
     assert!(!inference_event.message.contains("openai"));
     assert!(!inference_event.message.contains("sk-secret"));
     assert!(!inference_event.payload_json.contains("openai"));
@@ -754,8 +731,7 @@ async fn operator_disconnect_records_supplied_reason() {
     assert_eq!(body["data"]["requested"], 1);
 
     let payload = await_disconnect_payload(&harness, &connection_id).await;
-    // The machine cause and the operator's text are separate fields: the
-    // former stays a closed vocabulary, the latter is free-form.
+    // Separate fields: `reason` is a closed vocabulary, `operator_reason` is free-form.
     assert_eq!(payload["reason"], "operator_disconnect");
     assert_eq!(payload["operator_reason"], "rotating the session key");
 }
@@ -828,10 +804,7 @@ async fn session_disconnect_records_supplied_reason() {
     );
 }
 
-/// Poll `/v1/ws/connections` until a connection carrying every topic in
-/// `required_topics` is listed, and return its id. Neither the registry insert
-/// nor the subscribe frame is observable the moment the client call returns —
-/// both are processed on the server's connection task.
+/// Poll `/v1/ws/connections` until a connection carrying every `required_topics` entry is listed. Neither the registry insert nor the subscribe frame is observable when the client call returns; both run on the server's connection task.
 async fn await_ws_connection_id(harness: &Harness, required_topics: &[String]) -> String {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {

@@ -102,11 +102,9 @@ fn provision_codex_main_config(
         return Ok(Some(path));
     }
     if provider.id == CODEX_OPENAI_PROVIDER_ID {
-        // Codex reserves the `openai` provider id for its built-in definition,
-        // whose required shape (wire_api, auth mode) is version-dependent and
-        // not modeled here. Synthesizing a `[model_providers.openai]` table to
-        // carry an endpoint would be a guess that fails at request time rather
-        // than at apply time, so the override is refused instead.
+        // Codex reserves `openai` for its built-in definition, whose required
+        // shape is version-dependent; a synthesized table would fail at request
+        // time instead of here.
         if base_url_override.is_some() {
             return Err(StackError::AgentConfigProvision {
                 path,
@@ -146,12 +144,10 @@ fn provision_codex_main_config(
         });
     }
 
-    // Codex writes the model string into config.toml verbatim and OpenRouter
-    // answers an unknown slug with an empty turn instead of an error, so a
-    // routing-prefixed slug fails invisibly at prompt time. Only the
-    // double-qualified shape is rejectable here: OpenRouter itself publishes
-    // single-slash ids under the `openrouter` vendor (`openrouter/auto`,
-    // `openrouter/free`), which the live catalog offers verbatim.
+    // OpenRouter answers an unknown slug with an empty turn instead of an
+    // error, so a routing-prefixed slug fails invisibly at prompt time. Only
+    // the double-qualified shape is rejectable: `openrouter/auto` and friends
+    // are genuine catalog ids under OpenRouter's own vendor.
     if let Some(model) = model_opt.as_deref().filter(|model| {
         model
             .strip_prefix(CODEX_OPENROUTER_SLUG_PREFIX)
@@ -167,13 +163,9 @@ fn provision_codex_main_config(
     }
 
     let mut root = read_toml_table(&path)?;
-    // Always settle the OpenRouter provider table even when no model
-    // is selected yet — the L87 provider-only init path relies on
-    // ~/.codex/config.toml advertising the new provider so the
-    // provisional discovery spawn picks it up; a half-written
-    // `model_provider = "openrouter"` with no matching provider
-    // table would otherwise leave the launched harness unable to
-    // resolve auth.
+    // Settle the provider table even with no model selected: a
+    // `model_provider = "openrouter"` without a matching table leaves the
+    // launched harness unable to resolve auth.
     match model_opt.as_deref() {
         Some(model) => {
             root.insert("model".to_owned(), TomlValue::String(model.to_owned()));
@@ -206,9 +198,8 @@ fn provision_codex_main_config(
                 .to_owned(),
         ),
     );
-    // Command-based auth instead of env_key: per the OpenRouter Codex
-    // cookbook, a plain env_key authenticates but skips Codex's model-catalog
-    // refresh, leaving non-OpenAI models with fallback metadata.
+    // Command-based auth, not env_key: a plain env_key authenticates but skips
+    // Codex's model-catalog refresh, leaving fallback metadata behind.
     openrouter.remove("env_key");
     let mut auth = TomlMap::new();
     auth.insert("command".to_owned(), TomlValue::String("sh".to_owned()));
@@ -263,11 +254,8 @@ fn write_codex_custom_provider_selection(
 
 fn provision_codex_openai_config(config: &Config, path: &Path) -> Result<Option<PathBuf>> {
     let Some(model) = configured_provider_model(config) else {
-        // Provider switched to openai without a model selection. If a
-        // prior run wrote a model into ~/.codex/config.toml, clear it
-        // so the launched harness does not silently keep using the
-        // stale model under the new provider lane. When there's no
-        // existing file we simply have nothing to do.
+        // Provider switched to openai with no model: clear any model a prior
+        // run wrote so the harness does not keep using it under the new lane.
         if !path.exists() {
             return Ok(None);
         }
@@ -392,7 +380,6 @@ mod tests {
             value["model_providers"]["openrouter"]["base_url"].as_str(),
             Some("http://127.0.0.1:3129/openrouter")
         );
-        // The rest of the provider table is untouched by the override.
         assert_eq!(
             value["model_providers"]["openrouter"]["wire_api"].as_str(),
             Some("responses")
@@ -406,9 +393,6 @@ mod tests {
         );
     }
 
-    /// Codex reserves the `openai` provider id for its built-in definition,
-    /// whose required shape is version-dependent; refusing at provision time
-    /// beats writing a guessed table that fails at request time.
     #[test]
     fn codex_refuses_an_endpoint_for_the_built_in_openai_provider() {
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -529,7 +513,6 @@ mod tests {
         let mut config = config_with_agent("codex", &["OPENROUTER_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "openrouter".to_owned(),
-            // A genuine catalog id under OpenRouter's own vendor, not a routing prefix.
             model: Some("openrouter/auto".to_owned()),
             api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
             custom: None,

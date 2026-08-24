@@ -1,10 +1,5 @@
-//! Feeds the bootstrap init API's wire DTOs into the published JSON Schema
-//! without widening the visibility of the (deliberately module-private) init
-//! DTOs. The umbrella enums stay private here; only the two `pub(crate)`
-//! functions escape (through a `#[cfg]`-gated re-export chain to `crate::cli`),
-//! and they return plain `serde_json::Value` so no private type leaks. Each
-//! umbrella is a schema-generation root that is discarded, so its members land
-//! in `$defs` while the umbrella itself does not. Dev-tools only.
+//! Feeds the bootstrap init API's module-private wire DTOs into the published JSON
+//! Schema without widening their visibility. Dev-tools only.
 
 use schemars::generate::Contract;
 use serde_json::Value;

@@ -1,9 +1,5 @@
-//! Agent-specific headless config provisioning.
-//!
-//! `acp-stack` owns secret delivery through `[agent].env`, but some harnesses
-//! need a config file that tells them how to consume those environment
-//! variables. Keep that mapping explicit here so "supported" means a configured
-//! agent can start headlessly after init.
+//! Agent-specific headless config provisioning: the native config files a harness needs in order
+//! to consume the environment variables `acp-stack` delivers through `[agent].env`.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -76,9 +72,8 @@ pub(crate) const CLAUDE_CODE_CREDENTIAL_ENV_KEYS: &[&str] = &[
 pub(crate) const CLAUDE_CODE_EXECUTABLE_COMMAND_ROOTS: &[&str] =
     &["fileSuggestion", "otelHeadersHelper", "statusLine"];
 
-/// Native paths whose semantics are owned by canonical acps configuration or
-/// acps policy. Import removes these before the residual is written, then
-/// this provisioner regenerates the supported subset from canonical config.
+/// Native paths owned by acps config or policy: import strips them, then this provisioner
+/// regenerates the supported subset from canonical config.
 pub(crate) const CLAUDE_CODE_PERMISSION_ROOTS: &[&str] = &[
     "autoMode",
     "defaultMode",
@@ -172,10 +167,8 @@ pub(crate) const OPENCODE_MANAGED_UNSUPPORTED_ROOTS: &[&str] = &[
     "small_model",
 ];
 
-/// Amp `settings.json` uses flat dotted keys (`"amp.commands.allowlist"`),
-/// so these are matched as literal top-level object keys, not nested paths.
-/// Command allowlists gate which shell commands Amp runs without prompting —
-/// a sandbox-escape surface if imported — so they stay owned by acps.
+/// Amp `settings.json` uses flat dotted keys, so these match as literal top-level object keys,
+/// not nested paths. They gate which shell commands Amp runs unprompted, so acps owns them.
 pub(crate) const AMP_PERMISSION_ROOTS: &[&str] = &[
     "amp.commands.allowlist",
     "amp.commands.strict",
@@ -184,36 +177,23 @@ pub(crate) const AMP_PERMISSION_ROOTS: &[&str] = &[
     "amp.mcpPermissions",
     "amp.permissions",
 ];
-/// Tool enable/disable filters are a policy surface: dropping one would
-/// silently re-enable a tool the user turned off.
+/// Tool enable/disable filters; dropping one would silently re-enable a tool the user turned off.
 pub(crate) const AMP_POLICY_ROOTS: &[&str] = &["amp.tools.disable"];
 
-/// Pi trust roots. `defaultProjectTrust` decides whether Pi auto-approves a
-/// workspace's tool calls, so it stays owned by acps rather than imported.
+/// Pi trust roots: `defaultProjectTrust` decides whether Pi auto-approves tool calls.
 pub(crate) const PI_PERMISSION_ROOTS: &[&str] = &["defaultProjectTrust"];
-/// Pi keys that invoke a shell/executable. `shellPath`/`shellCommandPrefix`
-/// choose the shell Pi runs commands through and `npmCommand` is the argv Pi
-/// spawns for package installs — both are command-execution surfaces.
+/// Pi keys that invoke a shell or executable, so importing them is command execution.
 pub(crate) const PI_EXECUTABLE_COMMAND_ROOTS: &[&str] =
     &["shellPath", "shellCommandPrefix", "npmCommand"];
-/// Pi resource-source roots. Each points at packages, extensions, skills,
-/// prompts, or themes Pi loads and executes, so importing them would pull in
-/// third-party code the operator has not vetted.
+/// Pi resource-source roots; importing them would pull in unvetted third-party code.
 pub(crate) const PI_EXECUTABLE_PLUGIN_ROOTS: &[&str] =
     &["packages", "extensions", "skills", "prompts", "themes"];
 
-/// Goose approval/permission roots. `GOOSE_MODE`
-/// (`auto`/`approve`/`smart_approve`/`chat`) decides whether Goose runs tool
-/// calls without prompting, and `GOOSE_ALLOWLIST` names a remote URL of
-/// extensions Goose is permitted to load — both permission surfaces acps owns
-/// rather than imports.
+/// Goose approval roots: `GOOSE_MODE` gates unprompted tool calls and `GOOSE_ALLOWLIST` names
+/// a remote URL of loadable extensions.
 pub(crate) const GOOSE_PERMISSION_ROOTS: &[&str] = &["GOOSE_MODE", "GOOSE_ALLOWLIST"];
-/// Goose planner-model roots. Planning Mode selects a second model+provider
-/// lane (the `/plan` command's dedicated planner) that acps cannot express in
-/// its single-provider canonical config and cannot provision credentials for.
-/// Blocking them keeps a launched Goose from reaching for an unprovisioned
-/// second provider. (Lead/Worker mode and its `GOOSE_LEAD_*` keys were removed
-/// upstream and replaced by these planner keys.)
+/// Goose planner-model roots. Planning Mode selects a second model+provider lane that acps
+/// cannot express or credential, so blocking them keeps Goose off an unprovisioned provider.
 pub(crate) const GOOSE_MANAGED_UNSUPPORTED_ROOTS: &[&str] = &[
     "GOOSE_PLANNER_CONTEXT_LIMIT",
     "GOOSE_PLANNER_MODEL",
@@ -250,11 +230,8 @@ pub fn provision_agent_headless_config_transition(
     provision_agent_headless_config_with_previous_pi_model(config, home, previous_pi_model)
 }
 
-/// The provider endpoint override in force for `home`, resolved from the
-/// secret store rather than passed in: every re-provisioning path (init, agent
-/// switch, provider set, subagent, native-config import) must observe the same
-/// override, and resolving it here is what makes that true without each call
-/// site remembering to carry it.
+/// The provider endpoint override in force for `home`, resolved from the secret store here so
+/// every re-provisioning path observes the same one without carrying it.
 fn resolved_endpoint_override(
     home: &Path,
 ) -> Result<Option<crate::secrets::ProviderEndpointOverride>> {
@@ -512,9 +489,7 @@ fn require_agent_env_for_provider_config<'a>(
     })
 }
 
-/// Shared test fixtures for this module and its per-agent submodules. Kept at
-/// module scope with `pub(super)` visibility so each sibling's `mod tests` can
-/// reach them through its `use super::*`.
+/// Shared test fixture, `pub(super)` so each sibling's `mod tests` reaches it via `use super::*`.
 #[cfg(test)]
 pub(super) fn config_with_agent(id: &str, env: &[&str]) -> Config {
     use crate::config::load_config_from_str;

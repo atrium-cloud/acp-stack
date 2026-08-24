@@ -1,8 +1,6 @@
 use super::*;
 
-/// Whether init should drive interactive prompts: a real TTY and no
-/// prompt-suppressing automation flags. The single source of truth for the
-/// gate, so every prompt site honors the same contract.
+/// The single source of truth for whether init drives interactive prompts, so every prompt site honors the same gate.
 pub(super) fn prompts_enabled_for(args: &InitArgs, stdin_is_terminal: bool) -> bool {
     (stdin_is_terminal || prompt::hosted_driver_active())
         && !args.non_interactive
@@ -13,10 +11,7 @@ pub(in crate::cli::init) fn prompts_enabled(args: &InitArgs) -> bool {
     prompts_enabled_for(args, io::stdin().is_terminal())
 }
 
-/// Whether the post-probe `mcp_configure` step drives its own prompts. Hosted
-/// runs stream them like any other init prompt, so declaring MCP servers in the
-/// start request is what keeps a hosted session out of the wizard: those
-/// servers are already in `config.mcp.servers` by the time this is evaluated.
+/// Whether the post-probe `mcp_configure` step drives its own prompts; servers declared in the start request are already in `config.mcp.servers` here, which is what keeps a hosted session out of the wizard.
 pub(super) fn mcp_prompting_enabled(
     args: &InitArgs,
     creating_config: bool,
@@ -182,10 +177,7 @@ pub(super) fn agent_install_progress_message(attempt: u32) -> String {
     }
 }
 
-/// MCP applicability as the live handshake reports it. An agent that
-/// advertises no MCP transport cannot be given servers, and a probe that could
-/// not run leaves no evidence MCP works — both are inapplicable, with the
-/// probe's own wording as the reason.
+/// MCP applicability as the live handshake reports it; both an agent advertising no transport and a probe that could not run are inapplicable.
 pub(in crate::cli::init) fn mcp_applicability_from_probe(
     outcome: &CapabilityProbeOutcome,
 ) -> InitStateSignal {
@@ -202,16 +194,7 @@ pub(in crate::cli::init) fn mcp_applicability_from_probe(
     }
 }
 
-/// The MCP lane's outcome as the probe leaves it. A run that declared its
-/// servers up front never reaches the prompt that would otherwise settle this
-/// lane, and a resumed run re-probes every time, so this is where the servers
-/// the agent will actually be handed become known. `ignored` is the partition
-/// the probe already computed, which is what keeps this report and the
-/// runtime's own transport filtering from drifting apart; a partition that
-/// could not be computed arrives empty, leaving the list untrimmed rather than
-/// unreported. `None` when nothing will be delivered — an agent that advertises
-/// no MCP support has already been ruled inapplicable, and a run with no
-/// declared servers leaves the lane for the prompt to settle.
+/// The MCP lane's outcome as the probe leaves it; reusing the probe's own `ignored` partition is what keeps this report and the runtime's transport filtering from drifting apart.
 pub(in crate::cli::init) fn mcp_settlement_from_probe(
     capabilities: &crate::runtime::agent::acp_bridge::AgentCapabilitiesDto,
     config: &Config,
@@ -238,9 +221,7 @@ pub(in crate::cli::init) fn mcp_settlement_from_probe(
     })
 }
 
-/// Skills freshly written this run. A resumed run whose skills were all
-/// already present installs nothing, which settles the category with no value
-/// rather than an empty list.
+/// Skills freshly written this run, or `None` when nothing was installed.
 pub(super) fn installed_skill_names(reports: &[SkillInstallReport]) -> Option<String> {
     let names = reports
         .iter()
@@ -249,9 +230,7 @@ pub(super) fn installed_skill_names(reports: &[SkillInstallReport]) -> Option<St
     (!names.is_empty()).then(|| names.join(", "))
 }
 
-/// A reason is carried only for an inapplicable verdict: "why is this lane
-/// missing" is the question a client asks, and an applicable lane answers it
-/// by simply appearing.
+/// An applicability verdict; the reason is carried only when the lane is inapplicable.
 pub(super) fn applicability(
     category: InitCategory,
     applicable: bool,
@@ -266,15 +245,7 @@ pub(super) fn applicability(
     }
 }
 
-/// Everything knowable about the categories the instant the agent is settled:
-/// the registry says which lanes this agent even has, the flags say which of
-/// the remaining lanes this run will drive, and the config on disk says what
-/// the harness lanes already hold. Returned rather than emitted so the
-/// derivation is exercisable without a hosted driver.
-///
-/// MCP is deliberately absent from the applicability verdicts — the registry
-/// has no MCP column and only the live capability probe can answer it, so MCP
-/// stays provisionally applicable until the probe corrects it.
+/// Everything knowable about the init categories the instant the agent is settled. MCP is deliberately absent: only the live capability probe can answer it, so MCP stays provisionally applicable until the probe corrects it.
 pub(in crate::cli::init) fn agent_settlement_signals(
     config: &Config,
     registry: &RegistryCatalog,
@@ -288,9 +259,7 @@ pub(in crate::cli::init) fn agent_settlement_signals(
     let registry_applicability = |category, applicable, reason: &str| {
         applicability(category, applicable, ApplicabilitySource::Registry, reason)
     };
-    // A custom agent has no registry entry, so init drives none of the
-    // harness-configuration lanes for it: provider, model, mode, and effort go
-    // through the agent's own environment, and skills have no known install dir.
+    // A custom agent has no registry entry, so init drives none of the harness-configuration lanes for it.
     let entry = registry.lookup(&config.agent.id);
     let custom_reason = "custom agents configure this outside acp-stack";
     signals.push(registry_applicability(
@@ -319,8 +288,7 @@ pub(in crate::cli::init) fn agent_settlement_signals(
     signals.push(registry_applicability(
         InitCategory::Skills,
         skills_applicable,
-        // The reason is wire surface for hosted clients, which have no flags:
-        // a hosted request turns skills off by declaring none of them.
+        // The reason is wire surface for hosted clients, which have no flags.
         if args.no_skills {
             "no skills were declared"
         } else {
@@ -345,26 +313,17 @@ pub(in crate::cli::init) fn agent_settlement_signals(
         !pending_candidates(config, None).is_empty(),
         "no pending dependency install actions",
     ));
-    // A resumed run replays its configuration steps as skipped and a fully
-    // declared run never prompts, so on those paths no write site ever fires
-    // and the lanes would report `settled` with a null value. The config in
-    // hand is the outcome, so it is what gets reported; when a lane is really
-    // driven later, its write site settles it again with the same value, and
-    // an `awaiting_input` prompt still outranks a settlement while it is live.
-    // MCP is deliberately not settled here: only the probe knows whether the
-    // installed agent can be given servers at all, so its lane settles there.
-    // These four rest on the disk rather than on anything this run did, so they
-    // settle provisionally: an agent that dropped a lane since the config was
-    // written must still be able to retract it from the live discovery pass.
+    // These four rest on the config on disk rather than on anything this run did, so they settle
+    // provisionally: an agent that dropped a lane since the config was written must still be able
+    // to retract it from the live discovery pass.
     if let Some(provider) = config.agent.provider.as_ref() {
         signals.push(InitStateSignal::CategoryProvisionallySettled {
             category: InitCategory::Provider,
             value: provider.id.clone(),
         });
     }
-    // `write_model_into_config` puts the model in the provider slot for
-    // provider-backed agents and at the agent root otherwise, clearing the slot
-    // it did not use; reading them in that order recovers the written value.
+    // `write_model_into_config` uses the provider slot for provider-backed agents and the agent
+    // root otherwise, clearing the unused slot; reading in that order recovers the written value.
     if let Some(model) = config
         .agent
         .provider
@@ -392,15 +351,7 @@ pub(in crate::cli::init) fn agent_settlement_signals(
     signals
 }
 
-/// Re-adopt the skill plan a resumed run recorded, for a resume that redeclared
-/// nothing about skills.
-///
-/// `agent_settlement_signals` runs well before this point and read the request's
-/// own `no_skills`, so a resume inheriting a skills-off verdict from the original
-/// run has already been reported to hosted clients as having a Skills lane. The
-/// skills step will not run and the terminal sweep would settle the lane with no
-/// value, so the verdict is corrected here — legally, since nothing has settled
-/// Skills yet.
+/// Re-adopt the skill plan a resumed run recorded, correcting the Skills verdict `agent_settlement_signals` already emitted from this request's own flags.
 pub(super) fn restore_recorded_skill_plan(args: &mut InitArgs, recorded: &RecordedInitArgs) {
     args.skills_source = recorded.skills_source.clone();
     args.skills = recorded.skills.clone();

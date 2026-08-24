@@ -1,17 +1,13 @@
-//! Small reusable validators and helpers used across the per-domain validators.
-//!
-//! These intentionally avoid pulling in domain knowledge: they validate types
-//! (durations, sockets, paths, sha256, env names, secret refs) and surface
-//! generic `StackError` variants keyed on a field name supplied by the caller.
+//! Domain-free validators (durations, sockets, paths, sha256, secret refs) shared by the
+//! per-domain config validators.
 
 use std::net::SocketAddr;
 use std::path::Path;
 
 use crate::error::{Result, StackError};
 
-/// Parse a duration string like "10m", "5s", "2h", "1d", "4w", "750ms". Returns `None` on
-/// any invalid input. Empty string and pure-numeric inputs (no suffix) are
-/// rejected so config typos surface at load time rather than meaning seconds.
+/// Parse a duration string like `10m`, `750ms`, `4w`. A bare number is rejected rather than
+/// meaning seconds, so config typos surface at load time.
 pub fn parse_duration_string(input: &str) -> Option<std::time::Duration> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -35,24 +31,16 @@ pub fn parse_duration_string(input: &str) -> Option<std::time::Duration> {
     }
 }
 
-/// The largest duration any config field may express: the time elapsed since
-/// the Unix epoch. Durations are used as `now - duration` windows (staleness,
-/// auto-update skip), so a span longer than this would place the computed
-/// cutoff before 1970-01-01 — meaningless for the timestamps this runtime
-/// records. The bound grows with wall-clock time, so a config that validates
-/// once stays valid. A system clock set before 1970 (degenerate) yields
-/// `Duration::MAX`, which disables the cap rather than failing every load.
+/// The largest duration a config field may express: durations are `now - duration` windows, so a
+/// longer span would place the cutoff before the Unix epoch.
 fn max_duration_since_epoch() -> std::time::Duration {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or(std::time::Duration::MAX)
 }
 
-/// Validate a duration-valued config field: it must parse via
-/// [`parse_duration_string`] and must not exceed [`max_duration_since_epoch`].
-/// Returns the parsed `Duration` so callers can apply their own extra checks
-/// (e.g. non-zero). Every duration field routes through this or
-/// [`normalize_duration`], so the 1970 hardstop lives in exactly one helper.
+/// Validate a duration-valued config field. Every duration field routes through this or
+/// [`normalize_duration`], so the epoch hardstop lives in exactly one place.
 pub(crate) fn validate_duration_field(
     field: &'static str,
     raw: &str,
@@ -62,8 +50,6 @@ pub(crate) fn validate_duration_field(
     Ok(duration)
 }
 
-/// The 1970 hardstop described at [`max_duration_since_epoch`], shared by
-/// [`validate_duration_field`] and [`normalize_duration`].
 fn validate_duration_epoch_hardstop(
     field: &'static str,
     raw: &str,
@@ -80,15 +66,8 @@ fn validate_duration_epoch_hardstop(
     Ok(())
 }
 
-/// Duration units understood by [`parse_duration_string`], plus `Month`.
-/// Ordered finest to coarsest.
-///
-/// `Month` is deliberately *not* in the shared parser: it is spelled `mo` (a
-/// fixed 30-day month, mirroring `time_util::parse_coarse_duration_suffix`) so
-/// it never collides with `m` (minute). [`normalize_duration`] recognizes it so
-/// consumers can accept it via [`DurationLimits`]; a consumer that does must
-/// also teach its runtime re-parser the `mo` suffix, since stored values are
-/// re-parsed with [`parse_duration_string`] when scheduling.
+/// Duration units, finest to coarsest. `Month` (spelled `mo`) is absent from [`parse_duration_string`],
+/// so a consumer that accepts it must also teach its runtime re-parser the suffix.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum DurationUnit {
     Millisecond,
@@ -138,7 +117,6 @@ impl DurationUnit {
         }
     }
 
-    /// "a day", "an hour" — for prose in error messages and prompts.
     fn indefinite_name(self) -> String {
         let article = if matches!(self, Self::Hour) {
             "an"
@@ -173,10 +151,7 @@ impl DurationUnit {
     }
 }
 
-/// Per-consumer acceptance rules for a duration-valued field: which unit
-/// suffixes are accepted and the minimum total duration. Declared at each
-/// consumer (e.g. stack vs managed-agent update frequencies) so every surface
-/// states its own granularity policy instead of sharing a hardcoded one.
+/// Per-consumer acceptance rules for a duration-valued field.
 pub(crate) struct DurationLimits {
     /// Accepted units, declared finest-first.
     pub accepted_units: &'static [DurationUnit],
@@ -184,10 +159,8 @@ pub(crate) struct DurationLimits {
 }
 
 impl DurationLimits {
-    /// Minute and month must never appear in the same accepted set: both read
-    /// as "m" to users (month is spelled `mo`), so one field accepting both
-    /// would invite silent misconfiguration. Enforced here — at compile time
-    /// for the `const` declarations consumers use.
+    /// Minute and month must never share an accepted set: both read as "m" to users, so a field
+    /// accepting both invites silent misconfiguration. The asserts fire at compile time.
     pub(crate) const fn new(
         accepted_units: &'static [DurationUnit],
         minimum: std::time::Duration,
@@ -227,8 +200,7 @@ impl DurationLimits {
         self.accepted_units[0]
     }
 
-    /// A fine and a coarse example value, e.g. `1h, 3w` — for prompts and
-    /// error messages.
+    /// A fine and a coarse example value, e.g. `1h, 3w`.
     pub(crate) fn examples(&self) -> String {
         format!(
             "1{}, 3{}",
@@ -237,14 +209,12 @@ impl DurationLimits {
         )
     }
 
-    /// The minimum rendered as prose, e.g. `1 hour` — for prompts and error
-    /// messages.
+    /// The minimum rendered as prose, e.g. `1 hour`.
     pub(crate) fn render_minimum(&self) -> String {
         render_duration_prose(self.minimum)
     }
 
-    /// The accepted units rendered for error messages, e.g. `an hour (h), day
-    /// (d), or week (w) unit`.
+    /// The accepted units rendered for error messages, e.g. `an hour (h), day (d), or week (w) unit`.
     fn render_accepted_units(&self) -> String {
         let parts: Vec<String> = self
             .accepted_units
@@ -268,12 +238,8 @@ impl DurationLimits {
     }
 }
 
-/// Validate a duration-valued field against a consumer's [`DurationLimits`]:
-/// the value must carry one of the accepted unit suffixes and total at least
-/// the minimum duration. Returns the trimmed value for storage. Applies the
-/// same 1970 hardstop as [`validate_duration_field`] so config load stays in
-/// agreement with the runtime, which re-parses the stored string when it
-/// schedules work.
+/// Validate a duration-valued field against a consumer's [`DurationLimits`], returning the trimmed
+/// value for storage.
 pub(crate) fn normalize_duration(
     field: &'static str,
     raw: &str,
@@ -319,8 +285,7 @@ pub(crate) fn normalize_duration(
     Ok(value.to_owned())
 }
 
-/// Render a duration as `{count} {unit}` with the coarsest whole unit, for
-/// prose in prompts and error messages ("1 hour", "3 weeks").
+/// Render a duration as `{count} {unit}` with the coarsest whole unit ("1 hour", "3 weeks").
 fn render_duration_prose(duration: std::time::Duration) -> String {
     for unit in [
         DurationUnit::Month,
@@ -340,17 +305,13 @@ fn render_duration_prose(duration: std::time::Duration) -> String {
     format!("{} milliseconds", duration.as_millis())
 }
 
-/// Hosts for which plaintext http is accepted: a request to a loopback address
-/// never leaves the machine, so the no-plaintext-off-host rule that motivates
-/// https-only is not violated.
+/// Hosts for which plaintext http is accepted, because the request never leaves the machine.
 pub(crate) const LOOPBACK_HOSTS: [&str; 3] = ["127.0.0.1", "::1", "localhost"];
 
 /// Upper bound on any externally supplied endpoint URL.
 pub(crate) const MAX_ENDPOINT_URL_BYTES: usize = 2048;
 
-/// What is wrong with an endpoint URL. The caller owns the wording, because the
-/// same rules guard config-declared MCP servers and orchestrator-supplied
-/// provider endpoints, whose operators read very different messages.
+/// What is wrong with an endpoint URL; the caller owns the wording.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EndpointUrlProblem {
     Unparseable,
@@ -360,11 +321,8 @@ pub(crate) enum EndpointUrlProblem {
     TooLong,
 }
 
-/// The shared endpoint-URL rule: https, or http toward a loopback host; no
-/// embedded credentials; no query or fragment (both are meaningless on an
-/// endpoint base and are a smuggling surface); bounded length. The value is
-/// never normalized — callers store it verbatim and append per their own
-/// convention.
+/// The shared endpoint-URL rule: https (or http to loopback), no embedded credentials, no query or
+/// fragment (a smuggling surface), bounded length. The value is never normalized.
 pub(crate) fn check_endpoint_url(
     url: &str,
     allow_query_or_fragment: bool,
@@ -413,11 +371,8 @@ pub(crate) fn validate_absolute_path(field: &'static str, value: &str) -> Result
     Ok(())
 }
 
-/// `Path::starts_with` is purely lexical — `/workspace/../etc/uploads`
-/// "starts with" `/workspace` even though it resolves outside. Reject `..`
-/// segments in the configured paths up front so the workspace-root/uploads
-/// containment check below cannot be tricked, and so request-time path
-/// resolution does not have to canonicalize the config paths repeatedly.
+/// `Path::starts_with` is purely lexical, so `/workspace/../etc` "starts with" `/workspace`;
+/// rejecting `..` up front is what keeps the containment checks from being tricked.
 pub(crate) fn validate_no_parent_dir_segments(field: &'static str, value: &str) -> Result<()> {
     for component in Path::new(value).components() {
         if matches!(component, std::path::Component::ParentDir) {
@@ -480,9 +435,7 @@ pub(crate) fn validate_secret_ref_name_value(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Accept identifier-like names: ASCII letters, digits, and underscores; must
-/// not be empty and must not start with a digit. Matches the spirit of POSIX
-/// env-var names and the auth-key naming used elsewhere in the project.
+/// Accept identifier-like names: ASCII letters, digits, and underscores, not starting with a digit.
 pub fn is_valid_secret_ref_name(name: &str) -> bool {
     let trimmed = name.trim();
     if trimmed.is_empty() || trimmed.len() != name.len() {
@@ -505,10 +458,7 @@ pub(crate) fn secret_ref_looks_like_value(name: &str) -> bool {
     secret_value_shape(name)
 }
 
-/// The shape heuristics of [`secret_ref_looks_like_value`] without the
-/// length ceiling, which only makes sense for ref names. Concatenated
-/// template literals are screened with this so long-but-legitimate static
-/// text does not trip the name-length rule.
+/// The shape heuristics of [`secret_ref_looks_like_value`] without the ref-name length ceiling.
 pub(crate) fn secret_value_shape(text: &str) -> bool {
     if text.len() > 40 && text.chars().all(|c| c.is_ascii_hexdigit()) {
         return true;
@@ -581,8 +531,6 @@ mod tests {
 
     #[test]
     fn normalize_duration_rejects_month_when_not_declared() {
-        // Month is a known unit (spelled `mo`), but a consumer that did not
-        // declare it gets the same accepted-units message as any other unit.
         let error = normalize_duration("field", "1mo", &HOURLY_OR_SLOWER)
             .expect_err("month is not in the declared set");
         assert!(error.to_string().contains("hour (h)"), "got: {error}");

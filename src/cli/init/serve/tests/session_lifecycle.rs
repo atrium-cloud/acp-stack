@@ -114,8 +114,7 @@ async fn error_is_parked_until_acked() {
         tokio::pin!(waiter);
         session.set_error("init.failed", "provider setup failed".to_owned());
 
-        // The failure parks: the process must stay up so the backend can
-        // replay and acknowledge the typed error.
+        // The failure parks so the backend can replay and ack the error.
         assert!(
             tokio::time::timeout(Duration::from_millis(100), &mut waiter)
                 .await
@@ -165,11 +164,9 @@ async fn error_is_parked_until_acked() {
 
 #[tokio::test]
 async fn set_result_on_an_errored_session_is_a_no_op() {
-    // A late failed handoff (KeyHandover's drop) must not overwrite a session
-    // that already parked `errored`: publishing result_ready after the terminal
-    // error frame would flip terminal_result from Err to Ok — a failed bootstrap
-    // exiting zero. The designed failed result still fires on a non-terminal
-    // (running) session; this guard only blocks the reorder.
+    // A late failed handoff must not overwrite a session that already parked
+    // `errored`: publishing result_ready after the terminal error frame would
+    // flip terminal_result from Err to Ok, exiting zero on a failed bootstrap.
     let manager = HostedInitManager::new();
     let session = HostedInitSession::new(
         "init_errored_guard".to_owned(),
@@ -199,14 +196,12 @@ async fn set_result_on_an_errored_session_is_a_no_op() {
 
 #[test]
 fn progress_is_frozen_once_the_session_is_terminal() {
-    // Symmetric with signal suppression (apply_state_signal): after a terminal
-    // transition, progress (push_event) must not keep streaming. A progress line
-    // leaking past the terminal frame is the "a progress line arrived, then no
-    // signals" asymmetry that misdirected the hosted-init crash triage.
+    // After a terminal transition, progress must not keep streaming; a line
+    // leaking past the terminal frame is what misdirected the hosted-init
+    // crash triage.
     let session = test_session("init_progress_freeze");
     session.set_error("init.failed", "boom".to_owned());
-    // Subscribe after the terminal transition so the receiver only sees frames
-    // broadcast from here on.
+    // Subscribe after the terminal transition so only later frames are seen.
     let receiver = session.subscribe();
 
     session.push_event(ServerEvent::Progress {

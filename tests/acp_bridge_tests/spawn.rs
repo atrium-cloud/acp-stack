@@ -98,7 +98,6 @@ async fn unadvertised_http_mcp_transport_is_skipped_not_fatal() {
     assert_eq!(partitioned.skipped[0].name, "test-http");
     assert_eq!(partitioned.skipped[0].capability, "mcpCapabilities.http");
 
-    // The session still gets created from the remaining (empty) set.
     bridge
         .new_session(std::env::temp_dir(), partitioned.accepted)
         .await
@@ -123,17 +122,13 @@ async fn shutdown_terminates_the_child() {
     let pid = bridge.pid().expect("pid available");
     bridge.shutdown().await.expect("shutdown ok");
 
-    // After shutdown, the child should be gone. We can't query directly via
-    // a portable API, but the OS will refuse `kill(pid, 0)` for a dead pid.
     #[cfg(unix)]
     {
-        // SAFETY: kill with signal 0 is the standard "does this pid exist"
-        // probe; never delivers a signal.
+        // SAFETY: signal 0 is the standard "does this pid exist" probe; it delivers no signal.
         unsafe {
             let alive = libc::kill(pid as i32, 0);
             if alive == 0 {
-                // The PID may have been reused; give the kernel a beat then
-                // recheck. If still alive, we've leaked.
+                // The pid may have been reused; recheck after a beat before calling it a leak.
                 std::thread::sleep(std::time::Duration::from_millis(50));
                 let still_alive = libc::kill(pid as i32, 0);
                 assert_ne!(

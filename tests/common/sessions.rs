@@ -1,10 +1,5 @@
-//! Shared fixtures for the `sessions_*_tests` binaries: an in-process server
-//! harness wired to the placebo ACP agent, plus the auth/websocket/state
-//! helpers its tests assert against.
-//!
-//! `tests/common/api.rs` defines same-named items (`SESSION_KEY`, `ADMIN_KEY`,
-//! `test_config`, ...) with different key values and different signatures.
-//! The two sets are deliberately separate — do not merge or cross-import them.
+//! Shared fixtures for the `sessions_*_tests` binaries: an in-process server harness wired to the placebo ACP agent.
+//! `tests/common/api.rs` defines same-named items with different key values and signatures; the two sets MUST stay separate, never merged or cross-imported.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,8 +37,7 @@ impl Harness {
         Self::spawn_inner(mutate, None, true).await
     }
 
-    /// Harness that never calls `POST /v1/agent/start`, mirroring a freshly
-    /// initialized host where the process manager owns `acps serve` only.
+    /// Harness that never calls `POST /v1/agent/start`, mirroring a freshly initialized host.
     pub async fn spawn_without_agent_start(mutate: impl FnOnce(&mut Config)) -> Self {
         Self::spawn_inner(mutate, None, false).await
     }

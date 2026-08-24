@@ -1,11 +1,5 @@
-//! Config root: aggregator `Config` struct, top-level constants, the raw
-//! deserialization shim, and the public entry points (`load_config_from_str`,
-//! `default_config_path`, `Config::*`).
-//!
-//! The TOML schema types live in `config/schema.rs`; per-domain validators
-//! live under `config/validate/`. Both are re-exported here so callers can
-//! continue to write `use crate::config::{AgentConfig, Config, ...}` as
-//! they always have — the split is internal.
+//! Config root: the aggregator `Config` struct, top-level constants, the raw
+//! deserialization shim, and the public load entry points.
 
 mod schema;
 mod secret_template;
@@ -270,9 +264,6 @@ impl Config {
 }
 
 fn has_legacy_workspace_source_table(input: &str) -> bool {
-    // Cheap line-prefix scan; a substring match would false-positive on
-    // values that happen to contain the literal string. We do not need to
-    // be exact — we only want a friendly hint for the common case.
     input.lines().any(|line| {
         let trimmed = line.trim_start();
         trimmed.starts_with("[workspace.source]") || trimmed.starts_with("[workspace.source.")
@@ -394,12 +385,8 @@ fn lenient_config_from_str_reporting(
 }
 
 fn parse_config_from_str_with_legacy(input: &str) -> Result<LoadedConfig> {
-    // Phase 4 removed the legacy single `[workspace.source]` block in favor
-    // of `[[workspace.code_sources]]` / `[[workspace.data_sources]]`. The
-    // serde error for an unknown field is correct but unhelpful for
-    // operators upgrading an older config. Surface a targeted message
-    // pointing at the migration path before serde gives them
-    // `unknown field`.
+    // Surface targeted migration messages for removed tables before serde reports
+    // an unhelpful `unknown field`.
     if has_legacy_workspace_source_table(input) {
         return Err(StackError::InvalidParam {
             field: "workspace.source",
@@ -601,8 +588,7 @@ mod tests {
 
     #[test]
     fn invalid_skill_source_branch_rejected() {
-        // A branch is interpolated raw into the archive URL, so reject refs with
-        // URL-breaking characters or `..` traversal segments.
+        // A branch is interpolated raw into the archive URL.
         for branch in ["main?x", "a#b", "../evil", "feature\\x", "/leading"] {
             let block = format!(
                 "[[skills.sources]]\nalias = \"my-org\"\ngithub = \"my-org/skills\"\nbranch = \"{branch}\"\n\n"
@@ -616,9 +602,8 @@ mod tests {
 
     #[test]
     fn skill_source_owner_stricter_than_repo() {
-        // The installer's fetch path only accepts GitHub-shaped owners
-        // (alnum + dash, at most 39 chars); config must reject the same
-        // shapes or a persisted source would be permanently unusable.
+        // Config must reject what the installer's fetch path rejects, or a
+        // persisted source would be permanently unusable.
         for github in [
             "my_org/skills",
             "my.org/skills",
@@ -631,7 +616,6 @@ mod tests {
                 "github `{github}` should be rejected"
             );
         }
-        // Repos stay permissive: GitHub allows `_` and `.` there.
         let block = "[[skills.sources]]\nalias = \"my-org\"\ngithub = \"my-org/my_repo.rs\"\n\n";
         assert!(load_config_from_str(&config_with_block(block)).is_ok());
     }
@@ -670,7 +654,6 @@ mod tests {
             "[[skills.sources]]\nalias = \"good\"\ngithub = \"b/skills\"\n\n",
             "[[skills.sources]]\nalias = \"badbranch\"\ngithub = \"c/skills\"\nbranch = \"../evil\"\n\n",
         ));
-        // The strict loader (candidate-config write paths) still rejects.
         assert!(load_config_from_str(&input).is_err());
         let loaded = load_from_str_for_serve(&input).expect("serve load degrades");
         let aliases: Vec<&str> = loaded
@@ -700,7 +683,6 @@ mod tests {
             "[[mcp.servers]]\ntype = \"http\"\nname = \"good\"\nurl = \"https://mcp.example/mcp\"\n\n",
             "[[mcp.servers]]\ntype = \"http\"\nname = \"plain\"\nurl = \"http://mcp.example.com/mcp\"\n\n",
         ));
-        // The strict loader (candidate-config write paths) still rejects.
         assert!(load_config_from_str(&input).is_err());
         let loaded = load_from_str_for_serve(&input).expect("serve load degrades");
         assert_eq!(server_names(&loaded), vec!["good"]);
@@ -730,10 +712,6 @@ mod tests {
 
     #[test]
     fn serve_load_drops_screening_tripping_server() {
-        // A pasted credential in a header trips the looks-like-a-secret
-        // screening. The server is dropped (the drop reason is the redacted
-        // screening error, not an echoing name-validation error) instead of
-        // failing the boot.
         let input = config_with_mcp(concat!(
             "[[mcp.servers]]\ntype = \"http\"\nname = \"s\"\nurl = \"https://x.example/mcp\"\n",
             "headers = [{ name = \"Authorization\", value_ref = \"sk-livekey-abc-def\" }]\n\n",

@@ -79,11 +79,8 @@ pub(super) fn apply_edge_profile_to_config(args: &InitArgs, config: &mut Config)
     Ok(true)
 }
 
-/// An operator-declared agent that is not in the embedded registry. It is
-/// modeled entirely with existing config: `[agent].id/name/command/args` plus
-/// the `[agent.install]` shell escape hatch. An adapter-backed custom agent
-/// uses the same shape — `command`/`args` point at the adapter binary and
-/// `install_shell` installs the harness and the adapter together.
+/// An operator-declared agent outside the embedded registry, modeled with `[agent]` plus the
+/// `[agent.install]` shell escape hatch.
 #[derive(Debug, Clone)]
 pub(super) struct CustomAgentSpec {
     pub(super) id: String,
@@ -100,18 +97,13 @@ pub(super) enum AgentSelection<'a> {
     Custom(CustomAgentSpec),
 }
 
-/// True when the on-disk config points at an agent the registry does not know
-/// but carries an `[agent.install]` escape hatch — i.e. an operator-declared
-/// custom agent. Used to bypass the registry-only gates (install support
-/// checks, provider/model auto-config) that only make sense for curated agents.
+/// True when the config points at an unknown agent carrying an `[agent.install]` escape hatch,
+/// which bypasses the registry-only gates.
 pub(super) fn is_custom_agent(config: &Config, registry: &RegistryCatalog) -> bool {
     config.agent.install.is_some() && registry.lookup(&config.agent.id).is_none()
 }
 
-/// Assemble a custom-agent spec from the `--custom-agent-*` flags. Returns
-/// `None` when no custom agent was requested. `--custom-agent-id` is the anchor
-/// flag; `command` and `install` are mandatory, `name` defaults to the id and
-/// `creates` defaults to the command.
+/// Assemble a custom-agent spec from the `--custom-agent-*` flags; `None` when none were passed.
 pub(super) fn resolve_custom_agent_spec(args: &InitArgs) -> Result<Option<CustomAgentSpec>> {
     let Some(raw_id) = args.custom_agent_id.as_deref() else {
         return Ok(None);
@@ -173,19 +165,14 @@ fn validate_custom_agent_id(id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Outcome of the `--adapter-override-*` flag family: designate an adapter,
-/// or clear a stored designation. `None` means no flags were passed and any
-/// stored block follows the preserve/clear lifecycle.
+/// Outcome of the `--adapter-override-*` flag family: designate an adapter, or clear a stored one.
 pub(super) enum AdapterOverrideAction {
     Set(Box<crate::config::AgentAdapterOverrideConfig>),
     Clear,
 }
 
-/// Assemble the adapter-override action from init flags. `--adapter-override-command`
-/// is the anchor; exactly one install source (npm or shell) is required. The
-/// github-asset install variant is import-only: it needs a whole flag family
-/// for zero interactive users, and stays expressible through `acps config
-/// import` / `--from-*`.
+/// Assemble the adapter-override action from init flags; exactly one install source is required.
+/// The github-asset variant is import-only, reachable through `acps config import` / `--from-*`.
 pub(super) fn resolve_adapter_override_action(
     args: &InitArgs,
 ) -> Result<Option<AdapterOverrideAction>> {
@@ -259,8 +246,7 @@ pub(super) fn resolve_adapter_override_action(
     ))))
 }
 
-/// Apply a resolved adapter-override action onto the agent block. Returns
-/// true when the config changed.
+/// Apply a resolved adapter-override action onto the agent block, returning true when it changed.
 pub(super) fn apply_adapter_override_action(
     config: &mut Config,
     action: &Option<AdapterOverrideAction>,
@@ -367,9 +353,7 @@ pub(super) fn select_agent_for_init<'a>(
     }
 }
 
-/// Collect a custom agent definition interactively. Only reached after the
-/// operator explicitly picks "Custom agent" in a TTY, so every field prompt is
-/// interactive; `required` re-prompts on empty for the mandatory fields.
+/// Collect a custom agent definition interactively, reached only after picking "Custom agent" in a TTY.
 fn collect_custom_agent_interactively(registry: &RegistryCatalog) -> Result<CustomAgentSpec> {
     let id = required_custom_text(
         prompt::HostedPromptKind::CustomAgentId,
@@ -438,10 +422,8 @@ fn required_custom_text(kind: prompt::HostedPromptKind, prompt_text: &str) -> Re
     Ok(value)
 }
 
-/// Apply a custom agent to config, paralleling `apply_registry_entry_to_config`.
-/// Writes the launch command and the `[agent.install]` shell escape hatch, and
-/// clears registry-derived fields. `auto_update` stays `None`: the managed
-/// updater only knows how to update registry agents.
+/// Apply a custom agent to config, paralleling `apply_registry_entry_to_config`. `auto_update` stays
+/// `None`: the managed updater only knows how to update registry agents.
 pub(super) fn apply_custom_agent_to_config(config: &mut Config, spec: &CustomAgentSpec) {
     let agent_changed = config.agent.id != spec.id;
     config.agent.id = spec.id.clone();
@@ -472,13 +454,8 @@ pub(super) fn apply_custom_agent_to_config(config: &mut Config, spec: &CustomAge
 }
 
 pub(super) fn apply_registry_entry_to_config(config: &mut Config, entry: &RegistryEntry) {
-    // When the operator re-confirms the SAME agent (e.g. `acps init
-    // --agent X` again to refresh secrets or pick up registry changes
-    // for the launch command), preserve provider/model/mode/effort/env
-    // so a bare re-run doesn't quietly drop a previously pinned model
-    // or mode. When switching to a DIFFERENT agent, clear the agent
-    // block so leftover provider/model/mode/effort from the prior agent
-    // can't poison the new launch context.
+    // Re-confirming the SAME agent preserves provider/model/mode/effort/env so a bare re-run does
+    // not drop a pinned model; switching agents clears them so they cannot poison the new launch.
     let agent_changed = config.agent.id != entry.id;
     config.agent.id = entry.id.clone();
     config.agent.name = entry.name.clone();
@@ -492,9 +469,7 @@ pub(super) fn apply_registry_entry_to_config(config: &mut Config, entry: &Regist
         config.agent.provider = None;
         config.agent.providers = None;
         config.agent.auto_update = default_supported_agent_auto_update();
-        // The override designates an adapter for THIS agent; a different
-        // target must not inherit it. Re-confirming the same agent keeps it,
-        // like provider/model/mode above.
+        // The override designates an adapter for THIS agent; a different target must not inherit it.
         config.agent.adapter_override = None;
     } else if config.agent.auto_update.is_none() {
         config.agent.auto_update = default_supported_agent_auto_update();
@@ -508,11 +483,8 @@ pub(super) fn apply_registry_entry_to_config(config: &mut Config, entry: &Regist
     apply_agent_launch_command(config, entry);
 }
 
-/// Write `agent.command`/`agent.args` for a registry agent: from the
-/// operator's designated adapter when `[agent.adapter_override]` is set,
-/// otherwise from the curated entry. Callers that mutate the override after
-/// `apply_registry_entry_to_config` re-run this to keep the launch command in
-/// step.
+/// Write `agent.command`/`agent.args` from `[agent.adapter_override]` when set, else the curated
+/// entry. Callers that mutate the override after `apply_registry_entry_to_config` MUST re-run this.
 pub(super) fn apply_agent_launch_command(config: &mut Config, entry: &RegistryEntry) {
     if let Some(override_config) = config.agent.adapter_override.clone() {
         config.agent.command = override_config.command;

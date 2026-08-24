@@ -8,8 +8,6 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
-// ----- 0.0.1 auth/secrets/reset/config-import tests -----
-
 fn run_operator_init_with_home(home: &std::path::Path, extra: &[&str]) {
     write_supabase_init_registry(home);
     let workspace = home.join("workspace");
@@ -390,16 +388,15 @@ fn logging_supabase_sql_prints_prefixed_public_ddl() {
             "missing security_invoker for {view}"
         );
     }
-    // PUBLIC is revoked unconditionally; anon/authenticated are revoked only
-    // behind a pg_roles existence guard (so the SQL is safe on a non-Supabase
-    // Postgres), never as an unconditional `FROM PUBLIC, "anon", "authenticated"`.
+    // anon/authenticated must be revoked behind a pg_roles existence guard,
+    // never unconditionally, so the SQL stays safe on non-Supabase Postgres.
     assert!(sql.contains("FROM PUBLIC;"));
     assert!(sql.contains("IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = api_role_name)"));
     assert!(sql.contains("EXECUTE format('REVOKE ALL ON TABLE"));
     assert!(sql.contains("EXECUTE format('REVOKE ALL ON FUNCTION"));
     assert!(!sql.contains("FROM PUBLIC, \"anon\", \"authenticated\""));
-    // Writes go through the SECURITY DEFINER ingest function, so the writer role
-    // gets no direct table access and no per-table RLS policies are emitted.
+    // Writes go through the SECURITY DEFINER ingest function, so the writer
+    // role gets no direct table access.
     assert!(!sql.contains("CREATE POLICY"));
     assert!(!sql.contains("FOR INSERT TO \"acp_stack_logger\""));
     assert!(!sql.contains("FOR UPDATE TO \"acp_stack_logger\""));
@@ -418,8 +415,8 @@ fn logging_supabase_sql_rejects_unsafe_schema() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_operator_init_with_home(tempdir.path(), &[]);
 
-    // A schema with a single quote would break out of the PL/pgSQL `format()`
-    // string literal in the generated revoke statements; reject it up front.
+    // A single quote would break out of the PL/pgSQL `format()` string literal
+    // in the generated revoke statements, so reject it up front.
     acps_command()
         .env("HOME", tempdir.path())
         .args([

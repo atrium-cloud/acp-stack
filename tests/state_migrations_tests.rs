@@ -459,7 +459,6 @@ fn migration_024_rewrites_legacy_single_l_cancelled_spelling() {
         "permission.cancelled"
     );
 
-    // Rows that never carried the old spelling must be left exactly as they were.
     assert_eq!(
         scalar("SELECT status FROM commands WHERE id = 'cmd_failed'"),
         "failed"
@@ -469,8 +468,8 @@ fn migration_024_rewrites_legacy_single_l_cancelled_spelling() {
         "command.failed"
     );
 
-    // A spelling rename is not a state transition: `updated_at` must not move,
-    // and the append-only payload/message columns are deliberately untouched.
+    // A spelling rename is not a state transition, so `updated_at` must not
+    // move and the append-only columns stay untouched.
     assert_eq!(
         scalar("SELECT updated_at FROM commands WHERE id = 'cmd_legacy'"),
         "2026-05-13T00:01:00Z"
@@ -653,9 +652,8 @@ fn migration_015_accepts_every_lifecycle_status() {
                 prompt_json: "[]".to_owned(),
             })
             .expect("prompt inserted");
-        // insert_prompt always writes 'pending'; flip to the target status
-        // through update_prompt_status. PromptStatus::from_str guards the
-        // matrix and `terminal()` is enforced by callers, not the DB.
+        // insert_prompt always writes 'pending', so reach the target status
+        // through update_prompt_status.
         let prompt_status =
             PromptStatus::from_str(status).expect("status should round-trip via PromptStatus");
         if prompt_status != PromptStatus::Pending {
@@ -676,8 +674,7 @@ fn migration_015_preserves_rows_inserted_at_schema_14() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let path = tempdir.path().join("state.sqlite");
     let connection = Connection::open(&path).expect("sqlite should open");
-    // Replay every pre-015 migration so the prompts table matches the
-    // shape callers wrote against before this batch landed.
+    // Replay every pre-015 migration so the prompts table has its old shape.
     connection
         .execute_batch(include_str!("../migrations/001_init.sqlite.sql"))
         .expect("001 schema should apply");
@@ -754,8 +751,7 @@ fn migration_015_preserves_rows_inserted_at_schema_14() {
             "#,
         )
         .expect("schema_migrations should seed");
-    // Seed a session + two prompts using the pre-015 column set so the
-    // rebuild path has actual data to copy across.
+    // Seed with the pre-015 column set so the rebuild path has data to copy.
     connection
         .execute_batch(
             r#"

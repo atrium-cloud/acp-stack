@@ -136,10 +136,8 @@ fn init_explicit_model_shorthand_prefers_selected_provider() {
 
 #[test]
 fn init_rejected_model_restores_prior_headless_config() {
-    // Pre-write a prior opencode headless config, then run init with
-    // an unadvertised --model. The init must reject the value AND
-    // leave the prior headless config exactly as it was (rollback
-    // guarantee).
+    // Rejecting an unadvertised --model must also leave the prior headless
+    // config exactly as it was.
     let tempdir = tempfile::tempdir().expect("tempdir");
     write_workspace_init_config(tempdir.path());
     seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test")]);
@@ -244,8 +242,7 @@ fn init_noninteractive_missing_model_prints_advertised_values_without_mutating_c
 
     let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
         .expect("config should be readable");
-    // L87 contract: provider was set this run, but the no-flag path
-    // must not write a model into config.
+    // The provider was set this run, but the no-flag path must not write a model.
     assert!(config.contains(r#"id = "openai""#));
     assert!(!config.contains(r#"model = "openai/"#));
 }

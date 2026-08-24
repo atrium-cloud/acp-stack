@@ -2,11 +2,8 @@ use std::fs;
 
 use crate::common::cli::*;
 
-// L84-L87 cover the provisional ACP discovery flow during init: validate
-// explicit `--model` against the harness's advertised values (L86) and
-// surface the list when non-interactive callers omit `--model` (L87). The
-// fixture env var short-circuits the actual spawn so these tests don't depend
-// on a real opencode binary being installed.
+// The fixture env var short-circuits the ACP spawn so these tests do not
+// require a real opencode binary.
 pub(crate) fn write_workspace_init_config(home: &std::path::Path) {
     let config_dir = home.join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir");

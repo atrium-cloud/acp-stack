@@ -1,12 +1,6 @@
-//! Supabase logging sink worker.
-//!
-//! Drains the local `sink_outbox` table, hydrates each source row through the
-//! state module, runs the per-table redaction allowlist, and POSTs batched
-//! JSON to the project's PostgREST endpoint with
-//! `Prefer: resolution=merge-duplicates,return=minimal` for idempotent
-//! replay. Local SQLite writes never block on the sink; transient failures
-//! land in `sink_failures_summary` so `acps security check` can surface
-//! them.
+//! Supabase logging sink worker: drains `sink_outbox`, redacts each row, and
+//! POSTs batched JSON with `Prefer: resolution=merge-duplicates` so replay is
+//! idempotent. Local SQLite writes never block on the sink.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,9 +22,7 @@ use crate::state::{StateStore, sink_outbox::OutboxRow};
 use super::sink_redaction::redact_row;
 use super::supabase_mirror;
 
-/// Sink poll cadence. Starts at the minimum, doubles on empty fetches up to
-/// the ceiling, and resets to the minimum after any non-empty fetch so the
-/// outbox drains promptly under bursty load.
+/// Sink poll cadence: doubles on empty fetches, resets on a non-empty one.
 const POLL_INTERVAL_MIN: Duration = Duration::from_secs(1);
 const POLL_INTERVAL_MAX: Duration = Duration::from_secs(30);
 const BATCH_SIZE: usize = 128;
@@ -55,9 +47,8 @@ pub enum SupabaseSinkCredential {
     PostgresDbUrl(String),
 }
 
-/// Spawned background worker that owns the Supabase REST client and a
-/// shutdown latch. Construct with `SupabaseSink::spawn`; call `shutdown` on
-/// graceful daemon stop so the in-flight batch finishes draining.
+/// Background worker owning the Supabase client and a shutdown latch. Call
+/// `shutdown` on graceful stop so the in-flight batch finishes draining.
 pub struct SupabaseSink {
     shutdown: Arc<Notify>,
     handle: Option<JoinHandle<()>>,
@@ -99,10 +90,9 @@ impl SupabaseSink {
     }
 
     pub async fn shutdown(mut self) {
-        // notify_one stores a permit if the worker has not yet awaited
-        // notified(); that matters because the worker only checks the latch
-        // inside its select!, so a signal raised between iterations would be
-        // dropped by notify_waiters (which leaves no permit behind).
+        // `notify_one` stores a permit; `notify_waiters` would drop a signal
+        // raised between loop iterations, since the latch is only checked
+        // inside the worker's select!.
         self.shutdown.notify_one();
         if let Some(handle) = self.handle.take()
             && let Err(err) = handle.await
@@ -116,9 +106,8 @@ impl SupabaseSink {
 impl Drop for SupabaseSink {
     fn drop(&mut self) {
         if self.handle.is_some() {
-            // If the owner forgot to call shutdown(), signal so the task does
-            // not outlive the daemon's tokio runtime. We do not block here
-            // because Drop can be called from sync contexts.
+            // Signal without blocking: Drop can run from a sync context, but
+            // the task must not outlive the daemon's tokio runtime.
             self.shutdown.notify_one();
         }
     }
@@ -139,10 +128,6 @@ async fn run_worker(
     let mut window_started_at = std::time::Instant::now();
 
     loop {
-        // Wait for either the next poll tick or a shutdown signal. The
-        // shutdown branch exits the loop immediately; we still try to flush
-        // the failure window summary on exit so the security check sees the
-        // most recent run.
         tokio::select! {
             biased;
             _ = shutdown.notified() => {
@@ -184,10 +169,9 @@ async fn run_worker(
         }
     }
 
-    // Final drain: process whatever lifecycle / audit rows landed during
-    // shutdown (the daemon writes `agent.stopped` and `server.stopped`
-    // AFTER signaling sink shutdown) before returning. Bound the loop so a
-    // server that never recovers from a 5xx doesn't block daemon exit.
+    // The daemon writes `agent.stopped`/`server.stopped` AFTER signaling sink
+    // shutdown, so drain again here. Bounded so an unrecoverable 5xx cannot
+    // block daemon exit.
     let drain_deadline = std::time::Instant::now() + Duration::from_secs(5);
     while std::time::Instant::now() < drain_deadline {
         match process_one_batch(
@@ -207,8 +191,7 @@ async fn run_worker(
         }
     }
 
-    // Final window flush on shutdown so any failures from the last partial
-    // minute land in the durable summary.
+    // Flush so failures from the last partial minute land in the summary.
     if failure_window_count > 0 {
         let now = current_timestamp();
         if let Err(err) = state.lock().await.record_sink_failure_window(
@@ -222,10 +205,8 @@ async fn run_worker(
     }
 }
 
-/// Run one outbox poll cycle. Returns:
-/// - `Some(true)` if the batch had rows we tried to ship.
-/// - `Some(false)` if the outbox was empty.
-/// - `None` if reading the outbox itself failed; caller backs off.
+/// Run one outbox poll cycle: `Some(true)` shipped rows, `Some(false)` empty
+/// outbox, `None` read failure (caller backs off).
 async fn process_one_batch(
     state: &Arc<TokioMutex<StateStore>>,
     client: &reqwest::Client,
@@ -238,10 +219,9 @@ async fn process_one_batch(
     let now = current_timestamp();
     let batch_result = {
         let guard = state.lock().await;
-        // The worker is strictly sequential, so between polls no row is
-        // legitimately claimed: anything still `sending` was stranded by a
-        // crashed previous worker or by a mark_* write error in the last
-        // cycle, and must be released before claiming the next batch.
+        // The worker is strictly sequential, so anything still `sending`
+        // between polls was stranded by a crashed worker or a failed mark_*
+        // write, and must be released before claiming the next batch.
         match guard.recover_sink_outbox_in_flight() {
             Ok(0) => {}
             Ok(recovered) => {
@@ -313,12 +293,7 @@ async fn upload_group(
     table: &str,
     rows: &[OutboxRow],
 ) -> Result<()> {
-    // Hydrate, redact, and prepare the row list before doing any I/O so we
-    // hold the state mutex only briefly. Three outcomes per row:
-    //   - source deleted: ack with mark_sent so the outbox does not retry forever.
-    //   - hydration / redaction failed: park as a permanent failure so the row
-    //     does not hot-loop with attempts=0; surfaces via security check.
-    //   - hydrated OK: include in the batch POST.
+    // Hydrate and redact before any I/O so the state mutex is held briefly.
     let mut payloads: Vec<Value> = Vec::with_capacity(rows.len());
     let mut acked_ids: Vec<String> = Vec::new();
     let mut payload_ids: Vec<String> = Vec::new();
@@ -342,10 +317,8 @@ async fn upload_group(
 
     if !hydration_failed.is_empty() {
         let now = current_timestamp();
-        // Hydration/redaction errors are deterministic — same row, same
-        // failure — so park them 24h out and let the operator fix the
-        // schema/redaction drift before retrying. They still show up in
-        // open_failure_count via attempts > 0 after this mark_failure.
+        // Hydration/redaction errors are deterministic, so park them 24h out
+        // rather than hot-looping until an operator fixes the drift.
         let next_attempt = offset_iso(&now, Duration::from_secs(24 * 3600));
         let ids: Vec<String> = hydration_failed.iter().map(|(id, _)| id.clone()).collect();
         let aggregated_error = hydration_failed
@@ -378,9 +351,8 @@ async fn upload_group(
         });
     }
 
-    // Ack rows whose source has been deleted regardless of the HTTP outcome:
-    // there is nothing more to upload for them, so they must not get stuck
-    // riding along with a failing HTTP batch.
+    // Ack deleted-source rows regardless of the HTTP outcome, so they do not
+    // get stuck riding along with a failing batch.
     if !acked_ids.is_empty() {
         let now = current_timestamp();
         context
@@ -648,9 +620,8 @@ fn record_failure_observation(
     *failure_window_last_error = Some(error);
 }
 
-/// Classify an HTTP failure as permanent (operator must fix Supabase config
-/// or schema) vs transient (worth retrying with backoff). 5xx and 429 are
-/// transient; other 4xx are permanent; transport errors retry.
+/// Classify an HTTP failure as permanent vs transient: 5xx, 429, and
+/// transport errors retry; other 4xx are permanent.
 fn classify_error(err: &StackError) -> (bool, String) {
     match err {
         StackError::SupabaseSinkHttp { status, body } => {
@@ -662,8 +633,7 @@ fn classify_error(err: &StackError) -> (bool, String) {
     }
 }
 
-/// `min(30s * 2^(attempts - 1), 1h)` ± 20% jitter. `attempts == 1` is the
-/// first failure, yielding ~30s; subsequent attempts double up to the cap.
+/// `min(30s * 2^(attempts - 1), 1h)` ± 20% jitter.
 fn backoff_delay(attempts: i64) -> Duration {
     let base_secs: u64 = 30u64.saturating_mul(1u64 << attempts.saturating_sub(1).min(7) as u32);
     let capped = base_secs.min(3600);

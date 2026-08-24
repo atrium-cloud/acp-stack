@@ -83,9 +83,8 @@ pub(crate) async fn handle_prompt(
     if let Some(message) = args.prompt_inference_error_after_update {
         return responder.respond_with_error(Error::new(-32000, message));
     }
-    // The client probes send requests back to the client, so they must run
-    // off the event loop (block_task inside a handler deadlocks). The
-    // responder moves into the spawned task and answers from there.
+    // The client probes send requests back to the client, so they must run off the event loop:
+    // block_task inside a handler deadlocks.
     let probe_requested = args.terminal_command.is_some()
         || args.terminal_release_unknown
         || args.fs_write_path.is_some()
@@ -152,9 +151,8 @@ async fn finish_prompt(
             StopReason::EndTurn
         }
     };
-    // Echo the local message-id extension: acp-stack stamps
-    // `_meta.acpStack.messageId` on `session/prompt` and treats the same shape
-    // on the response as the acknowledgment.
+    // Echo the local message-id extension: acp-stack treats `_meta.acpStack.messageId` on the
+    // response as the acknowledgment of the one it stamped on `session/prompt`.
     let mut response = PromptResponse::new(stop_reason);
     if let Some(message_id) = request
         .meta

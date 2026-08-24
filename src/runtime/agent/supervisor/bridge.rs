@@ -1,8 +1,5 @@
-//! Bridge spawn and exit monitoring for the agent supervisor.
-//!
-//! Spawning owns the pre-spawn integrity guard and the `agent.starting` /
-//! `agent.started` / `agent.spawn_failed` lifecycle rows. Exit monitoring owns
-//! the crash-detection loop and the `on-crash` restart path.
+//! Bridge spawn and exit monitoring for the agent supervisor: the pre-spawn
+//! integrity guard, the lifecycle rows, and the `on-crash` restart path.
 
 use super::*;
 
@@ -21,10 +18,8 @@ pub(super) async fn spawn_agent_bridge(
 ) -> Result<(AgentCapabilitiesDto, AcpBridge)> {
     let cwd = resolve_agent_cwd(agent, workspace_root);
 
-    // Enforce the optional integrity guard BEFORE spawning. The installer
-    // already hashes `[agent.install].creates`, but `[agent].command` may
-    // resolve to a different binary (different path, or replaced on disk
-    // between install and start).
+    // The integrity guard MUST run before spawning: `[agent].command` can
+    // resolve to a different binary than the one the installer hashed.
     if let Some(expected) = agent.expected_sha256.as_deref() {
         verify_agent_binary_sha256(&agent.command, &cwd, expected)?;
     }

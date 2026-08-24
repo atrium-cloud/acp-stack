@@ -1,9 +1,4 @@
-//! HTTP response envelope per `docs/specs/api/api.md:29-48`.
-//!
-//! `ApiError::from_stack_error` bridges the domain error enum to the wire
-//! envelope. `ApiResult<T>` is the standard handler return type: handlers can
-//! `?` on `StackError` and the wrapper handles status code + envelope on the
-//! way back out.
+//! HTTP response envelope per `docs/specs/api/api.md`.
 
 use axum::Json;
 use axum::response::{IntoResponse, Response};
@@ -47,10 +42,8 @@ pub struct ApiError {
     /// failures. See docs/specs/api/api.md and docs/specs/state-logging.md.
     pub code: String,
     pub message: String,
-    // Always serialized, even when empty. The API spec example at
-    // `docs/specs/api/api.md:39-48` shows `"details": {}` as present in error
-    // responses; clients and tests can rely on the key existing without
-    // having to distinguish "missing" from "empty".
+    // Always serialized, even when empty: the spec shows `"details": {}` as present in error
+    // responses, so clients never have to distinguish "missing" from "empty".
     #[serde(default)]
     pub details: Map<String, Value>,
 }
@@ -147,10 +140,8 @@ where
 
 impl IntoResponse for ApiErrorEnvelope {
     fn into_response(self) -> Response {
-        // ApiErrorEnvelope on its own carries no status code. Callers that
-        // construct envelopes directly should use `ApiError::into_response_with`
-        // to attach an explicit status. Falling through here means the caller
-        // forgot; surface that as 500 rather than silently 200.
+        // An envelope carries no status of its own; reaching here means the caller skipped
+        // `ApiError::into_response_with`, which must surface as 500 rather than a silent 200.
         (StatusCode::INTERNAL_SERVER_ERROR, Json(self)).into_response()
     }
 }
@@ -212,8 +203,6 @@ mod tests {
             Value::String("config.invalid".into())
         );
         assert_eq!(json["error"]["message"], Value::String("bad".into()));
-        // The API spec example shows `"details": {}` as a present key even
-        // when empty; serialization must include it.
         assert_eq!(json["error"]["details"], serde_json::json!({}));
     }
 
@@ -382,9 +371,6 @@ mod tests {
 
     #[test]
     fn for_status_emits_domain_prefixed_codes() {
-        // Every published code carries a `<domain>.` prefix; the rewrapping
-        // middlewares must not reintroduce bare identifiers for the statuses
-        // axum generates on its own.
         let code = |status| ApiError::for_status(status).code;
         assert_eq!(code(StatusCode::BAD_REQUEST), "request.invalid");
         assert_eq!(code(StatusCode::UNAUTHORIZED), "auth.invalid");

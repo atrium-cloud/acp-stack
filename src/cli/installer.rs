@@ -1,11 +1,6 @@
-//! `acps installer` subcommands: operator-facing view of `installer_runs`.
-//!
-//! The installer module (`src/runtime/install/agent_installer.rs`) writes one row per
-//! step into SQLite each time an install runs. Until now the only consumers
-//! were the durable-event log and the HTTP `POST /v1/agent/install` response.
-//! `acps installer history` surfaces those rows to the operator without going
-//! through the daemon, so a failed install can be diagnosed even when the
-//! daemon hasn't been started yet.
+//! `acps installer` subcommands: operator-facing view of `installer_runs`,
+//! read straight from SQLite so a failed install can be diagnosed even when
+//! the daemon has never been started.
 
 use clap::{Args, Subcommand};
 
@@ -92,10 +87,8 @@ fn run_installer_history(args: InstallerHistoryArgs, output: OutputFormat) -> Re
     Ok(())
 }
 
-/// Render the installer-history table. Columns sized to common content
-/// (started_at is the RFC3339 nano timestamp; durations and exit codes fit
-/// in single digits in practice). Truncation is preferred over wrapping so
-/// the output stays grep-able.
+/// Render the installer-history table, truncating rather than wrapping so the
+/// output stays grep-able.
 fn print_history_table(rows: &[InstallerRun]) {
     let header = format!(
         "{started:<32}  {agent:<14}  {step:<8}  {status:<10}  {duration:>8}  {exit:>5}  {version}",
@@ -126,19 +119,15 @@ fn print_history_table(rows: &[InstallerRun]) {
             exit = exit,
             version = version,
         );
-        // log_dir is rendered as a continuation line because the full path
-        // would otherwise blow out the fixed-width table. The leading
-        // indentation matches the data columns so a grep on `log_dir:` still
-        // picks it up. Rows that never wrote logs (config_error, legacy)
-        // suppress the line entirely.
+        // A continuation line: the full path would blow out the fixed-width
+        // table.
         if let Some(dir) = row.log_dir.as_deref() {
             println!("  log_dir: {dir}");
         }
     }
 }
 
-/// Compute the row's elapsed time as `finished_at - started_at`. Returns
-/// `None` when finished_at is unset (e.g. a config_error row that never ran).
+/// Elapsed time as `finished_at - started_at`; `None` when the row never ran.
 fn duration_ms(row: &InstallerRun) -> Option<i64> {
     let started = chrono::DateTime::parse_from_rfc3339(&row.started_at).ok()?;
     let finished = chrono::DateTime::parse_from_rfc3339(row.finished_at.as_deref()?).ok()?;

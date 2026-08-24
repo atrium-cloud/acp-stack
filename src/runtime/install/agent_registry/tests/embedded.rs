@@ -9,9 +9,8 @@ fn embedded_registry_parses() {
     );
 }
 
-/// The flag gates whether a managed credential may carry a `base_url`, so an
-/// agent listed here without a native endpoint field would accept a routing
-/// instruction it silently never applies.
+/// The flag gates whether a managed credential may carry a `base_url`, so an agent
+/// without a native endpoint field would accept routing it silently never applies.
 #[test]
 fn only_agents_with_a_native_endpoint_field_declare_set_provider_base_url() {
     let catalog = RegistryCatalog::load_embedded().expect("registry");
@@ -27,15 +26,13 @@ fn only_agents_with_a_native_endpoint_field_declare_set_provider_base_url() {
             "`{id}` has no per-provider endpoint field and must not declare set_provider_base_url"
         );
     }
-    // An agent outside the registry has no acps-managed native config at all.
     assert!(!catalog.supports_provider_base_url("not-a-registered-agent"));
 }
 
 #[test]
 fn opencode_keeps_an_npm_fallback_behind_its_github_backed_shell_installer() {
-    // The shell recipe runs opencode's upstream installer, which resolves its
-    // release through the GitHub API and fails on rate-limited hosts. The npm
-    // path is what the fallback chain lands on then, so it must stay declared.
+    // The shell recipe resolves its release through the GitHub API and fails on
+    // rate-limited hosts, so the npm fallback must stay declared.
     let catalog = RegistryCatalog::load_embedded().expect("registry");
     let harness = catalog
         .lookup("opencode")
@@ -115,10 +112,8 @@ fn embedded_registry_advertises_tested_headless_support() {
             "{} must declare the documented Agent Skills install directory",
             entry.id
         );
-        // Claude Code only discovers `~/.claude/skills` and Hermes only
-        // discovers `~/.hermes/skills`, so they are the agents whose installed
-        // skills get symlinked out of the shared dir. Amp reads
-        // `~/.agents/skills` natively, so it needs no link dir.
+        // Claude Code and Hermes discover their own dirs, so their skills get
+        // symlinked out of the shared one; the rest read `~/.agents/skills` natively.
         match entry.id.as_str() {
             "claude-code" => assert_eq!(
                 entry.agent_skills_link_dir.as_deref(),
@@ -377,12 +372,8 @@ fn embedded_registry_contains_only_curated_examples() {
     );
     assert!(hermes_shell.script.contains("--skip-browser"));
     assert!(hermes_shell.script.contains("'.[acp]'"));
-    // The recipe drives an upstream installer that provisions a Python
-    // toolchain, a virtualenv and a source checkout under one budget, and all
-    // of it fits the shared default: measured at 185s end to end on a fresh
-    // 8-core host. An earlier override here was fitted to a host whose
-    // `python3` was a wrapper script, which made the upstream installer's
-    // node-gyp step unbounded — a defect no budget could have absorbed.
+    // The full Python toolchain + virtualenv + checkout fits the shared default,
+    // measured at 185s end to end on a fresh 8-core host.
     assert_eq!(hermes_shell.timeout_secs, None);
     let kilo = catalog.lookup("kilo").expect("Kilo Code entry exists");
     assert_eq!(kilo.name, "Kilo Code");
@@ -440,8 +431,8 @@ fn embedded_registry_contains_only_curated_examples() {
         .as_ref()
         .expect("Google Antigravity harness");
     assert_eq!(antigravity_harness.id, "antigravity");
-    // The literal `--uid=` flag is what the upstream registry declares for the
-    // Linux targets; an `acp` subcommand would not start the server.
+    // The literal `--uid=` flag is what upstream declares for the Linux targets;
+    // an `acp` subcommand would not start the server.
     assert_eq!(antigravity_harness.acp_args, ["--uid="]);
     assert!(
         antigravity_harness.install.npm.is_none(),

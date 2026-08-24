@@ -15,10 +15,8 @@ pub(crate) struct PlaceboState {
     pub(crate) cancelled_sessions: HashSet<String>,
     pub(crate) model_configured: bool,
     pub(crate) client_capabilities: Option<ClientCapabilities>,
-    /// Values applied via `session/set_config_option`, keyed by
-    /// `(session_id, config_id)` so a set on one session never leaks into
-    /// another's advertised currents. Overrides the fixture-declared currents
-    /// in `config_options()`.
+    /// Values applied via `session/set_config_option`, keyed by `(session_id, config_id)` so a set
+    /// on one session never leaks into another's advertised currents.
     pub(crate) config_option_values: BTreeMap<(String, String), SessionConfigOptionValue>,
 }
 
@@ -131,9 +129,8 @@ fn parse_select_spec(
     Some((id, category, current.to_owned(), values))
 }
 
-/// `<id>[@<category>]=<true|false>`. A typo'd value yields `None` (option
-/// skipped, so a test asserting on it fails visibly) rather than a silent
-/// `false`.
+/// `<id>[@<category>]=<true|false>`. A typo'd value yields `None` so the option is skipped and the
+/// asserting test fails visibly, rather than silently defaulting to `false`.
 fn parse_boolean_spec(spec: &str) -> Option<(String, Option<SessionConfigOptionCategory>, bool)> {
     let (head, value) = spec.split_once('=')?;
     let (id, category) = parse_id_and_category(head);

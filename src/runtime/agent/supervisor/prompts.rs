@@ -1,17 +1,11 @@
 //! Prompt submission, cancellation, and the in-flight prompt registry.
-//!
-//! Submission is fire-and-forget: the durable `prompts` row is the source of
-//! truth for clients, and the background task that drives ACP
-//! `session/prompt` owns writing the terminal status onto it.
 
 use super::*;
 
 impl AgentSupervisor {
-    /// `POST /v1/sessions/{id}/prompt`. Fire-and-forget: inserts a row in
-    /// `prompts` with status `pending`, spawns a background task that drives
-    /// the ACP `session/prompt` to completion, and returns the prompt id
-    /// immediately. Clients poll `GET /v1/sessions/{id}/prompts/{prompt_id}`
-    /// (or session events) until the status transitions to a terminal one.
+    /// `POST /v1/sessions/{id}/prompt`. Fire-and-forget: inserts a `pending`
+    /// row, spawns the task that drives ACP `session/prompt`, and returns the
+    /// prompt id immediately for clients to poll.
     pub async fn submit_prompt(
         &self,
         session_id: &str,
@@ -66,10 +60,8 @@ impl AgentSupervisor {
             .meta(prompt_message_id_meta(&message_id));
 
         let join = tokio::spawn(async move {
-            // Flip `pending -> running` so clients polling immediately after
-            // submit see the task is live. If this write fails, log and
-            // continue; the row is still in `pending` and the task will
-            // overwrite with a terminal status on settle.
+            // A failed `pending -> running` flip is survivable: the row stays
+            // `pending` and settle still writes the terminal status.
             {
                 let guard = state_clone.lock().await;
                 if let Err(err) = guard.update_prompt_status(
@@ -106,11 +98,8 @@ impl AgentSupervisor {
                 }
             }
 
-            // Terminal taxonomy: cancellation is not a failure (failure_class
-            // stays None), inference-HTTP failures get their own class and a
-            // structured detail payload, and everything else folds into
-            // `agent_request`. The session-event emit happens after the row
-            // write so subscribers see consistent SQL state.
+            // The session-event emit must follow the row write so subscribers
+            // observe consistent SQL state.
             let terminal = build_terminal_outcome_with_prompt_id(outcome, Some(&prompt_id_owned));
 
             {
@@ -169,18 +158,13 @@ impl AgentSupervisor {
                 session_id: session_id.to_owned(),
             },
         );
-        // Reap on a delay: every settled task removes its own entry from
-        // the map via `reap_finished`. We don't spawn a watchdog; the next
-        // submit/cancel call performs the cleanup pass cheaply.
         self.reap_finished().await;
         Ok(record)
     }
 
-    /// `POST /v1/sessions/{id}/cancel`. Notifies the agent via ACP
-    /// `session/cancel` first; only on success does the supervisor fire the
-    /// local cancellation tokens. This ordering avoids the agent-disagrees
-    /// race where a failed bridge call would leave prompt rows locally
-    /// `cancelled` while the agent kept running the turn.
+    /// `POST /v1/sessions/{id}/cancel`. ACP `session/cancel` goes out FIRST;
+    /// local cancellation tokens fire only on its success, so a failed bridge
+    /// call cannot leave rows `cancelled` while the agent keeps running.
     pub async fn cancel_session(
         &self,
         session_id: &str,
@@ -200,10 +184,6 @@ impl AgentSupervisor {
         bridge
             .cancel_session(AcpSessionId::new(agent_session_id.clone()))
             .await?;
-        // Bridge confirmed the cancel notification went out; settle local
-        // state. The agent will return `cancelled` on the in-flight prompt
-        // anyway, but firing the token lets the task observe the cancel
-        // promptly even if the agent's response is slow.
         self.cancel_prompts_for_session(session_id).await;
         let guard = state.lock().await;
         guard.append_session_event(
@@ -226,9 +206,8 @@ impl AgentSupervisor {
     }
 
     pub(super) async fn cancel_all_prompts(&self) {
-        // Drain handles out of the map first so we don't hold the registry
-        // lock while awaiting tasks (the tasks themselves may indirectly
-        // touch the map via `reap_finished` from other paths).
+        // Drain handles out of the map before awaiting: the tasks may
+        // re-enter the registry via `reap_finished` from other paths.
         let handles: Vec<PromptHandle> = {
             let mut prompts = self.prompts.lock().await;
             prompts.drain().map(|(_, handle)| handle).collect()
@@ -236,10 +215,8 @@ impl AgentSupervisor {
         for handle in &handles {
             handle.cancel.cancel();
         }
-        // Await each task so terminal `prompts` rows ('cancelled' /
-        // 'errored') are written before shutdown returns. Bounded so a
-        // misbehaving task cannot delay teardown indefinitely; we abort
-        // anything still running past the budget and log it.
+        // Await each task so terminal `prompts` rows are written before
+        // shutdown returns, bounded so a stuck task cannot delay teardown.
         let deadline = tokio::time::Instant::now() + PROMPT_DRAIN_BUDGET;
         for handle in handles {
             let PromptHandle { join, .. } = handle;
@@ -250,11 +227,8 @@ impl AgentSupervisor {
                     tracing::warn!(error = ?err, "prompt task panicked during drain");
                 }
                 Err(_) => {
-                    // The task is still running. We've already cancelled it;
-                    // dropping the JoinHandle here detaches it. The bridge's
-                    // connection is being torn down moments from now, so the
-                    // task will see send-error and write its terminal row on
-                    // its next loop turn.
+                    // Dropping the JoinHandle detaches the already-cancelled
+                    // task; the imminent bridge teardown makes it settle.
                     tracing::warn!("prompt task did not settle within drain budget");
                 }
             }

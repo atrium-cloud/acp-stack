@@ -1,22 +1,6 @@
-//! Live ACP bridge: spawns an ACP agent subprocess and owns the JSON-RPC
-//! connection to it.
-//!
-//! Wire format is newline-delimited JSON over stdio (per
-//! `docs/ref/acp/protocol/transports.md`). Framing, request/response
-//! correlation, and the message schema all live in the
-//! `agent-client-protocol` crate; this module is the thin wrapper that:
-//!
-//! - spawns the configured `[agent].command` via `tokio::process::Command`
-//!   with the minimum env we resolved for `[agent].env`,
-//! - drives the ACP `initialize` handshake,
-//! - captures the resulting `AgentCapabilities` as a JSON snapshot for our
-//!   own API contract (so upstream renames don't leak through),
-//! - retains a `ConnectionTo<Agent>` handle so session methods can be
-//!   dispatched after initialize completes,
-//! - persists `session/update` notifications to SQLite through a
-//!   `SessionEventSink`,
-//! - keeps the connection running in a dedicated task until `shutdown` is
-//!   called or the supervisor is dropped.
+//! Live ACP bridge: spawns an ACP agent subprocess, drives the `initialize`
+//! handshake, and owns the newline-delimited JSON-RPC connection to it until
+//! shutdown.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -75,16 +59,9 @@ pub use self::capabilities::{
 pub(crate) use self::process_env::{
     KIMI_API_KEY_ENV, KIMI_CODE_AGENT_ID, kimi_default_model_for_provider,
 };
-// `spawn.rs` owns command resolution; `resolve_command_path` and
-// `agent_process_path` keep their pre-split paths for the CLI, supervisor and
-// terminal handlers that import them from this module.
 pub(super) use self::spawn::agent_process_path;
 pub(crate) use self::spawn::resolve_command_path;
 
-// External callers (CLI, supervisor, model_discovery, integration tests) wrote
-// `crate::runtime::agent::acp_bridge::{SessionEventSink, StateStoreSessionSink, session_*}`
-// before the extraction. Preserve those paths with re-exports so the split is
-// internal to `runtime::agent`.
 pub use crate::runtime::agent::acp_codec::{
     meta_message_id, prompt_message_id_meta, session_config_id_for_value, session_config_values,
     session_model_selection_for_value, session_model_values,
@@ -100,8 +77,8 @@ pub enum AcpPermissionPolicy {
     Cancel,
     /// Daemon path: durable, operator-decided permissions.
     Service(PermissionService),
-    /// `acps agent test`: a non-interactive smoke test with no operator to
-    /// ask, so allow-kind options are approved on the spot.
+    /// `acps agent test`: no operator to ask, so allow-kind options are
+    /// approved on the spot.
     AutoApprove,
 }
 
@@ -114,21 +91,15 @@ impl From<Option<PermissionService>> for AcpPermissionPolicy {
     }
 }
 
-/// Maximum time we wait for `initialize` to return before declaring the agent
-/// unresponsive. A warm agent handshakes in milliseconds, but the first launch
-/// on a freshly provisioned host pays for cold page cache, JIT/runtime warmup
-/// and the agent's own first-run setup; 15s was tight enough that hosted init
-/// failed `provider_configure` on real sprites. The deadline exists to catch a
-/// wedged or incompatible agent, so it can be generous without losing that.
+/// Deadline for `initialize`. Deliberately generous: a cold first launch on a
+/// freshly provisioned host failed hosted init's `provider_configure` at 15s.
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Maximum time we wait between sending the shutdown signal and SIGKILLing
-/// the agent child. The closure should return immediately once the oneshot
-/// fires; if it does not, the child is misbehaving and we cut losses.
+/// Window between the shutdown signal and SIGKILLing the agent child.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
-/// Poll cadence for the bridge-owned child exit watcher. ACP transports can
-/// remain parked until orderly shutdown, so process death is observed directly.
+/// Poll cadence for the child exit watcher. ACP transports can remain parked
+/// until orderly shutdown, so process death is observed directly.
 const CHILD_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,10 +133,8 @@ impl AgentSessionConfigCategory {
     }
 
     // ACP reserves the `thought_level` category but not the option id, and
-    // shipping adapters disagree on the id (claude-code-acp uses `effort`,
-    // codex-acp uses `reasoning_effort`), so the id fallback accepts both.
-    // `pub(crate)`: config validation also consults this to keep typed-lane
-    // ids out of `[agent.config_options]`.
+    // shipping adapters disagree on it (claude-code-acp uses `effort`,
+    // codex-acp uses `reasoning_effort`), so the fallback accepts both.
     pub(crate) fn matches_id(self, id: &str) -> bool {
         match self {
             Self::Effort => id == "effort" || id == "reasoning_effort",
@@ -174,35 +143,25 @@ impl AgentSessionConfigCategory {
     }
 }
 
-/// One spawned agent + its live ACP connection.
-///
-/// Use through `Arc<AcpBridge>` once spawned so multiple session dispatchers
-/// and the shutdown path can hold the same handle without serializing through
-/// the supervisor's state lock. Single-use lifecycle: `spawn` once, hold while
-/// the agent should run, then call `shutdown()` exactly once.
+/// One spawned agent + its live ACP connection. Single-use lifecycle: `spawn`
+/// once, hold while the agent should run, then `shutdown()` exactly once.
 pub struct AcpBridge {
-    /// `TokioMutex<Option<Child>>` so `shutdown(&self)` can `.take()` the
-    /// child to await/kill without consuming the bridge. Reads after a
-    /// successful shutdown see `None` and short-circuit.
     child: Arc<TokioMutex<Option<Child>>>,
     capabilities: AgentCapabilitiesDto,
-    /// Cloneable handle for sending requests/notifications to the agent.
-    /// Populated inside the connect closure before it parks on `shutdown_rx`,
-    /// so callers outside the closure can dispatch session methods. Wrapped
-    /// in an `Option` because `shutdown()` clears it before tearing down.
+    /// Cloneable handle for dispatching to the agent; `None` once `shutdown()`
+    /// has cleared it.
     connection: TokioMutex<Option<ConnectionTo<Agent>>>,
     shutdown_tx: TokioMutex<Option<oneshot::Sender<()>>>,
     connection_task: TokioMutex<Option<JoinHandle<()>>>,
     planned_shutdown: Arc<AtomicBool>,
     exit_rx: watch::Receiver<Option<AcpBridgeExit>>,
     spawn_pid: Option<u32>,
-    /// Held so `shutdown()` can flush any pending `session/update` writes the
-    /// sink's background writer task has queued.
+    /// Held so `shutdown()` can flush pending `session/update` writes.
     sink: Arc<dyn SessionEventSink>,
     notification_drain: Arc<NotificationDrain>,
-    /// Live client terminals. Terminal children run in their own process
-    /// groups (not the agent's), so shutdown must drain this registry
-    /// explicitly — the agent-pgroup kill never reaches them.
+    /// Live client terminals. Their children run in their own process groups,
+    /// so shutdown MUST drain this registry explicitly; the agent-pgroup kill
+    /// never reaches them.
     terminals: Arc<TerminalRegistry>,
 }
 
@@ -285,9 +244,7 @@ impl AcpBridge {
         &self.capabilities
     }
 
-    /// Best-effort pid of the spawned child. Captured at spawn time and
-    /// stable for the bridge lifetime; once `shutdown()` has reaped the
-    /// child, callers should rely on `agent_lifecycle` rows instead.
+    /// Best-effort pid of the spawned child, captured at spawn time.
     pub fn pid(&self) -> Option<u32> {
         self.spawn_pid
     }
@@ -315,35 +272,28 @@ impl AcpBridge {
         Ok(status.code())
     }
 
-    /// Gracefully tear down the agent: signal the connection task to return,
-    /// then close stdin / wait / SIGKILL the child on a bounded timeline.
-    /// Returns the exit status if available. Idempotent: a second call sees
-    /// every field already `None` and returns `Ok(None)`.
+    /// Gracefully tear down the agent on a bounded timeline. Idempotent.
     pub async fn shutdown(&self) -> Result<Option<i32>> {
         self.teardown(false).await
     }
 
     /// Tear down a provisional probe by killing the process group before the
-    /// client IO loop drops stdout. This keeps one-shot discovery from
-    /// surfacing adapter-side broken-pipe stack traces after values were read.
+    /// client IO loop drops stdout, so one-shot discovery does not surface
+    /// adapter-side broken-pipe stack traces after values were read.
     pub async fn terminate_probe(&self) -> Result<Option<i32>> {
         self.teardown(true).await
     }
 
-    /// Shared teardown for both exit paths. `kill_first` selects the probe
-    /// ordering: SIGKILL the process group before the client IO loop is asked
-    /// to stop. The graceful path instead stops the IO loop first, so the
-    /// child can notice stdin closure and exit on its own, and only escalates
-    /// to a kill when it does not.
+    /// Shared teardown. `kill_first` SIGKILLs the process group before
+    /// stopping the IO loop; the graceful path stops the loop first so the
+    /// child can exit on stdin closure, escalating only if it does not.
     async fn teardown(&self, kill_first: bool) -> Result<Option<i32>> {
         self.planned_shutdown.store(true, Ordering::SeqCst);
         // Clear the cloneable handle so any in-flight session calls fail
         // fast with `AgentNotRunning` rather than hanging on a dead IO loop.
         self.clear_connection().await;
-        // Kill-and-release live client terminals before agent teardown: they
-        // run in their own process groups, so the agent-pgroup SIGKILL below
-        // would orphan them. The supervisor's crash monitor also routes
-        // through shutdown(), so this covers unplanned exits too.
+        // Terminals run in their own process groups, so the agent-pgroup
+        // SIGKILL below would orphan them.
         self.terminals.drain_all().await;
 
         if !kill_first {
@@ -352,11 +302,9 @@ impl AcpBridge {
 
         let status = match self.child.lock().await.take() {
             Some(mut child) => {
-                // Every kill here is a process-group SIGKILL rather than a
-                // plain child kill, so any grandchildren the agent forked (MCP
-                // servers, tool subprocesses) also die with the daemon — the
-                // bridge spawned with `process_group(0)`, so the child is its
-                // own pgid leader.
+                // Process-group SIGKILL rather than a plain child kill, so
+                // grandchildren the agent forked (MCP servers, tool
+                // subprocesses) die with it.
                 if kill_first {
                     kill_tokio_process_group(&mut child);
                 }
@@ -390,8 +338,6 @@ impl AcpBridge {
         Ok(status.and_then(|s| s.code()))
     }
 
-    /// Signal the connect closure to return, wait for the connection task to
-    /// finish, then flush everything it queued.
     async fn stop_connection_task(&self) {
         if let Some(tx) = self.shutdown_tx.lock().await.take() {
             let _ = tx.send(());
@@ -426,9 +372,8 @@ impl AcpBridge {
 
     async fn flush_notifications(&self) {
         self.notification_drain.wait_idle().await;
-        // Drain queued `session/update` writes after the connection task has
-        // stopped and every accepted notification append task has finished
-        // enqueueing its row. Only then is it safe to close the sink.
+        // Only safe to close the sink once every accepted notification append
+        // task has finished enqueueing its row.
         self.sink.flush().await;
     }
 }

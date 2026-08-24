@@ -1,9 +1,6 @@
 use super::*;
 
-/// A guard restating one of clap's `requires`/`conflicts_with` rules at the
-/// wire boundary. `field` and `reason` are spelled out per row because neither
-/// follows from the other: the both-or-neither pairs report the first field of
-/// the pair, while the skills pair reports `skills`.
+/// A guard restating one of clap's `requires`/`conflicts_with` rules at the wire boundary.
 struct WireGuard {
     field: &'static str,
     violated: bool,
@@ -184,10 +181,6 @@ struct DepRequest {
     shell: String,
 }
 
-// A dedicated wire enum rather than `config::DataSourceConfig`: the config
-// struct accepts any field combination (validation happens later in the config
-// validator), while the hosted contract should reject a malformed declaration
-// at the HTTP boundary and stay decoupled from the config schema.
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum DataSourceRequest {
@@ -205,9 +198,7 @@ enum DataSourceRequest {
     S3 {
         name: Option<String>,
         bucket: String,
-        // Required here because the config validator requires it for s3
-        // sources; accepting it as optional would fail the session only after
-        // the boundary already returned success.
+        // Required here because the config validator requires it for s3 sources.
         region: String,
         prefix: Option<String>,
         access_key_ref: String,
@@ -273,17 +264,8 @@ impl DataSourceRequest {
 }
 
 impl StartInitRequest {
-    /// The clap `requires`/`conflicts_with` rules the `--custom-agent-*` flags
-    /// carry, plus the two fields `resolve_custom_agent_spec` treats as
-    /// mandatory, restated at the wire boundary. Reasons name fields only: a
-    /// rejected declaration must never echo what was submitted, and an id or
-    /// command reflected into a 400 body is the same leak as any other value.
-    ///
-    /// The mandatory pair is checked here as well as in the resolver because
-    /// the hosted cost of deferring is not a message: an incomplete spec would
-    /// start a session, hold the one-at-a-time slot, and park it errored for
-    /// the full ack grace. Everything the resolver alone can judge (reserved
-    /// and registry ids) still fails there, where the registry is in hand.
+    /// Restates the `--custom-agent-*` clap rules at the wire boundary. Reasons name fields only:
+    /// a rejected declaration must never echo the submitted id or command into the 400 body.
     fn validate_custom_agent_declaration(&self) -> Result<()> {
         let dependents: [(&'static str, bool); 5] = [
             ("custom_agent_name", self.custom_agent_name.is_some()),
@@ -301,10 +283,8 @@ impl StartInitRequest {
             }
             return Ok(());
         }
-        // A custom agent is configured through its own environment, so every
-        // registry-driven harness knob is meaningless for it. Booleans are
-        // judged on their effective value: an explicit `false` declares
-        // nothing and must not collide.
+        // Booleans are judged on their effective value: an explicit `false` declares nothing
+        // and must not collide.
         let conflicts: [(&'static str, bool); 6] = [
             ("agent", self.agent.is_some()),
             ("provider", self.provider.is_some()),
@@ -319,8 +299,7 @@ impl StartInitRequest {
                 reason: format!("custom_agent_id conflicts with {field}"),
             });
         }
-        // Blank counts as absent, matching `require_custom_flag`: a spec that
-        // cannot launch or install the agent is not a spec.
+        // Blank counts as absent, matching `require_custom_flag`.
         let declared = |value: &Option<String>| {
             value
                 .as_deref()
@@ -340,20 +319,13 @@ impl StartInitRequest {
         Ok(())
     }
 
-    /// Only what clap or the engine cannot structurally catch: clap's
-    /// `requires`/`conflicts_with` declarations have no hosted equivalent, and
-    /// dep names round-trip through a `NAME=SHELL` string split.
-    ///
-    /// The order the three groups run in is observable, since the first
-    /// rejection is the one reported: a request that violates both a
-    /// custom-agent rule and a later one gets the custom-agent error, which is
-    /// the one that actually explains it.
+    /// Wire guards for what clap or the engine cannot structurally catch. Group order is
+    /// observable: the first rejection is the one reported.
     fn validate(&self) -> Result<()> {
         let custom_provider = self.custom_provider.unwrap_or(false);
         WireGuard::check([
-            // Both-or-neither, stricter than the CLI's `requires`: the hosted
-            // driver never streams the interactive apply confirmation, so
-            // `deps_apply` alone would silently default to "not applied".
+            // Stricter than the CLI's `requires`: the hosted driver never streams the apply
+            // confirmation, so `deps_apply` alone would silently default to "not applied".
             WireGuard {
                 field: "deps_apply",
                 violated: self.deps_apply.unwrap_or(false) != self.deps_apply_yes.unwrap_or(false),
@@ -365,12 +337,7 @@ impl StartInitRequest {
                     && !self.deps_apply.unwrap_or(false),
                 reason: "deps_apply_async requires deps_apply",
             },
-            // Mirror clap's `requires` on the CLI frequency flags: a frequency
-            // with no policy would be silently dropped by the configure step,
-            // so reject it at the boundary instead. Value validation
-            // (on|security|off, unit limits, custom-agent rejection) runs later
-            // in the shared engine via
-            // `validate_stack_update_args`/`validate_agent_update_args`.
+            // A frequency with no policy would be silently dropped by the configure step.
             WireGuard {
                 field: "stack_update_frequency",
                 violated: self.stack_update_frequency.is_some() && self.stack_update.is_none(),
@@ -383,13 +350,8 @@ impl StartInitRequest {
             },
         ])?;
         self.validate_custom_agent_declaration()?;
-        // Mirror clap's `requires` on the provider family. Provider processing
-        // returns early when no provider is declared and the custom-provider
-        // fields are read only while assembling one, so an unanchored field
-        // would be dropped without a word. Ordered after the custom-agent
-        // declaration so a request that both names a custom agent and asks for
-        // a custom provider still reports the conflict that actually explains
-        // it.
+        // Ordered after the custom-agent declaration so a request that names both still reports
+        // the custom-agent conflict.
         if self.provider.is_none() {
             for (field, declared) in [
                 ("api_key_ref", self.api_key_ref.is_some()),
@@ -422,9 +384,6 @@ impl StartInitRequest {
         }
         let essential_skills = self.essential_skills.unwrap_or(false);
         WireGuard::check([
-            // Mirrors clap's `conflicts_with` between `--resume` and
-            // `--fresh`: one says continue the recorded run, the other says
-            // ignore it.
             WireGuard {
                 field: "resume",
                 violated: self.resume.unwrap_or(false) && self.fresh.unwrap_or(false),
@@ -499,13 +458,8 @@ impl StartInitRequest {
             content: Zeroizing::new(upload.content),
         });
         args.mcp_preset = self.mcp_preset;
-        // Structured records land on the wizard-side prompt_* fields, which
-        // are strictly more expressive than the NAME=VALUE flag strings (argv
-        // and env for stdio servers); `mcp_from_args` merges and validates
-        // them the same way.
-        // Boundary validation runs screening before any name-shape check: a
-        // screening rejection redacts a pasted credential, while name-shape
-        // errors echo the offending string into the 400 body.
+        // Screening MUST run before any name-shape check: a screening rejection redacts a pasted
+        // credential, while name-shape errors echo the offending string into the 400 body.
         args.prompt_mcp_stdio = self
             .mcp_stdio
             .into_iter()
@@ -583,22 +537,14 @@ impl StartInitRequest {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        // `InitArgs::default` sets `no_skills: true` and the skill plan
-        // resolver short-circuits on it, so any skills declaration must clear
-        // it or the declaration would be silently dropped.
-        //
-        // A resume that redeclares nothing must not inherit that default: the
-        // recorded skills replay is itself gated on `!no_skills`, so leaving it
-        // set would drop the original run's skill plan — and a run that crashed
-        // inside `agent_skills_install` would then resume into a step with no
-        // plan to re-drive and fail as a corrupted run.
+        // `InitArgs::default` sets `no_skills: true` and both the plan resolver and the recorded
+        // skills replay short-circuit on it, so a declaration (or a resume) must clear it or the
+        // original run's skill plan is dropped and the resumed step fails as corrupted.
         args.no_skills =
             !resume && self.skills_source.is_none() && self.skills.is_empty() && !essential_skills;
         args.skills_source = self.skills_source;
         args.skills = self.skills;
         args.essential_skills = essential_skills;
-        // Same `NAME=SHELL` shape the wizard pushes, so `deps_from_args`
-        // consumes flag, wizard, and hosted declarations uniformly.
         args.dep = self
             .deps
             .iter()
@@ -624,11 +570,8 @@ impl StartInitRequest {
             .into_iter()
             .map(DataSourceRequest::into_data_source_config)
             .collect();
-        // No request field for `rotate_keys`: hosted mode forces it true at
-        // init entry and records it, so any resume of a crashed hosted run
-        // re-rotates — the `resume` request field included, which reaches the
-        // same replay the CLI's `--resume` does and rotates exactly once per
-        // resumed run.
+        // No request field for `rotate_keys`: hosted mode forces it true at init entry, so any
+        // resume rotates exactly once per resumed run.
         Ok(args)
     }
 }

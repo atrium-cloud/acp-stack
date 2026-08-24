@@ -122,8 +122,7 @@ fn rejects_duplicate_array_harnesses() {
 
 #[test]
 fn rejects_dangling_primary_target() {
-    // The coordination invariant: primary_target must name a real target, or
-    // the Array has no distinguished coordinator.
+    // primary_target must name a real target, or the Array has no coordinator.
     let mut config = load_config_from_str(VALID_CONFIG).expect("legacy config should parse");
     config.array.primary_target = "does-not-exist".to_owned();
 
@@ -523,10 +522,8 @@ fn rejects_custom_provider_without_api_key_ref() {
 
 #[test]
 fn rejects_operator_written_agent_adapter() {
-    // [agent.adapter] is runtime-populated from the embedded registry, not
-    // operator-written. A config carrying it over from the pre-rework shape
-    // should fail with a clear unknown-field error rather than silently
-    // shadowing what the registry would have resolved.
+    // [agent.adapter] is runtime-populated, not operator-written, so a config carrying
+    // it must fail loudly rather than shadow what the registry would resolve.
     let config = VALID_CONFIG.replace(
         r#"restart = "on-crash""#,
         r#"restart = "on-crash"
@@ -628,8 +625,6 @@ fn accepts_agent_config_options_map() {
             "researcher".to_owned()
         ))
     );
-    // Round-trip: a boolean survives canonicalization as a TOML bool, not a
-    // string.
     let canonical = parsed.to_canonical_toml().expect("canonical TOML");
     assert!(canonical.contains("_custom_toggle = true"));
     assert!(!canonical.contains(r#"_custom_toggle = "true""#));
@@ -709,7 +704,6 @@ fn rejects_uppercase_expected_sha256() {
             .contains("agent.expected_sha256 must be exactly 64 lowercase hex characters")
     );
 
-    // sanity: lowercase form parses fine
     let ok = VALID_CONFIG.replace(
         r#"restart = "on-crash""#,
         &format!("expected_sha256 = \"{valid_hash}\"\nrestart = \"on-crash\""),
@@ -792,8 +786,6 @@ creates = "custom-acp"
 "#;
 
 fn config_with_adapter_override(block: &str) -> String {
-    // Matches ADAPTER_OVERRIDE_NPM_BLOCK's command/args; blocks without args
-    // go through config_with_adapter_override_and_launch.
     config_with_adapter_override_and_launch(block, "custom-acp", "[\"--verbose\"]")
 }
 
@@ -802,10 +794,8 @@ fn config_with_adapter_override_and_launch(
     launch_command: &str,
     launch_args: &str,
 ) -> String {
-    // The fixture carries an [agent.install] escape hatch, which is mutually
-    // exclusive with a designated adapter; swap it for the override block.
-    // The launch command doubles as the adapter identity, so [agent]
-    // command/args must point at the adapter too.
+    // [agent.install] is mutually exclusive with a designated adapter, and the launch
+    // command doubles as the adapter identity, so [agent] must point at the adapter.
     VALID_CONFIG
         .replace(ADAPTER_OVERRIDE_INSTALL_BLOCK, block)
         .replace(
@@ -946,9 +936,8 @@ shell_rerun = true
 
 #[test]
 fn adapter_override_rejects_launch_command_mismatch() {
-    // [agent] command/args stay on the harness while the override points at
-    // the adapter: the managed lanes would track the adapter but the
-    // supervisor would launch the bare harness, so this is a hard error.
+    // A hard error: managed lanes would track the adapter while the supervisor launched
+    // the bare harness.
     let error = load_config_from_str(&config_with_adapter_override_and_launch(
         ADAPTER_OVERRIDE_NPM_BLOCK,
         "opencode",

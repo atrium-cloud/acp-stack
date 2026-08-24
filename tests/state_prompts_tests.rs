@@ -1,7 +1,6 @@
 mod common;
 
-// A Cargo integration-test crate root owns `tests/`, not `tests/<crate>/`, so the
-// group modules need explicit paths.
+// A Cargo integration-test crate root owns `tests/`, so group modules need explicit paths.
 #[path = "state_prompts_tests/permissions.rs"]
 mod permissions;
 #[path = "state_prompts_tests/restart_blockers.rs"]

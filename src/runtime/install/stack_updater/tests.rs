@@ -464,8 +464,7 @@ fn auto_frequency_gate_reference_survives_many_accumulated_skip_rows() {
             payload_json: "{}",
         })
         .expect("seed real run");
-    // Enough newer skip rows to overflow any fixed recent-row window
-    // (e.g. a long frequency with a daily timer).
+    // Enough newer skip rows to overflow any fixed recent-row window.
     for _ in 0..25 {
         store
             .append_stack_update_run(NewStackUpdateRun {

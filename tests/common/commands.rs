@@ -1,10 +1,7 @@
-//! Shared fixtures for the `commands_*_tests` binaries: an in-process server
-//! harness with overridable permissions/commands config, the auth helpers its
-//! tests submit through, and the polling/WebSocket helpers they assert on.
+//! Shared fixtures for the `commands_*_tests` binaries.
 //!
 //! `tests/common/api.rs` and `tests/common/sessions.rs` define same-named items
-//! (`SESSION_KEY`, `ADMIN_KEY`, `Harness`, `test_config`, ...) with different
-//! key values and different signatures. The three sets are deliberately
+//! with different key values and signatures. The three sets are deliberately
 //! separate — do not merge or cross-import them.
 
 use std::path::PathBuf;
@@ -160,9 +157,8 @@ pub async fn approve_pending_command(harness: &Harness, command_id: &str) {
     assert_eq!(approve_response.status(), StatusCode::OK);
 }
 
-/// Drive `GET /v1/commands/{id}` until the row reaches a terminal status
-/// (anything other than `pending` / `running`). Bounded loop so a regression
-/// surfaces as a deterministic timeout rather than a hung test.
+/// Drive `GET /v1/commands/{id}` until the row reaches a terminal status,
+/// bounded so a regression is a deterministic timeout rather than a hung test.
 pub async fn wait_for_terminal(harness: &Harness, id: &str) -> Value {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {

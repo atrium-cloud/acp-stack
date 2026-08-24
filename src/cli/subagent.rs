@@ -231,11 +231,8 @@ fn run_subagent_free() -> Result<()> {
     let free_model = resolve_free_model(&config, entry)?;
     let provider_id = free_model.provider.clone();
     let model = free_model.model.clone();
-    // When the resolved free provider is in the same family as the main
-    // provider (same id or same canonical env ref), reuse the main api_key_ref
-    // so a custom secret name (e.g. `MY_OPENROUTER_KEY`, or `MY_OPENCODE_KEY`
-    // shared between `opencode` and `opencode-go`) is preserved instead of
-    // being silently replaced by the canonical default.
+    // Same-family free providers reuse the main api_key_ref so a custom secret name
+    // survives instead of being replaced by the canonical default.
     let inherited_main_api_key_ref = config
         .agent
         .provider
@@ -368,11 +365,8 @@ fn run_subagent_set(args: SubagentSetArgs) -> Result<()> {
     Ok(())
 }
 
-// `acps subagent` only gates OpenCode's `small_model` today. Other harnesses
-// (pi, goose, amp, codex) have their own in-harness subagent/role
-// mechanisms that are out of scope until they're tested end-to-end. Keep this
-// guard tied to the built-in OpenCode id so a registry override cannot enable
-// an untested code path.
+// Tied to the built-in OpenCode id so a registry override cannot enable an untested
+// code path: `acps subagent` only gates OpenCode's `small_model`.
 fn ensure_subagent_supported(entry: &RegistryEntry) -> Result<()> {
     if entry.id == OPENCODE_AGENT_ID {
         return Ok(());
@@ -389,10 +383,7 @@ fn configure_mapped_subagent(
     config: &mut Config,
     args: SubagentSetArgs,
 ) -> Result<()> {
-    // Inherit from main when --provider is omitted: the subagent lane is a
-    // convenience over the main provider/key, so most operators only need to
-    // supply --model. Falling back here keeps the common case ergonomic and
-    // matches the inherited-main semantic surfaced by `acps subagent match`.
+    // Inherit from main when --provider is omitted, matching `acps subagent match`.
     let provider = args
         .provider
         .clone()
@@ -417,10 +408,8 @@ fn configure_mapped_subagent(
             ),
         });
     }
-    // api-key-ref resolution order:
-    //   1. explicit --api-key-ref
-    //   2. main agent api-key-ref (only when resolved provider == main provider)
-    //   3. provider's well-known env var default
+    // api-key-ref order: explicit --api-key-ref, then the main agent's ref when the
+    // provider matches, then the provider's well-known env var default.
     let main_inherited_api_key_ref = config
         .agent
         .provider
@@ -475,14 +464,10 @@ fn configure_mapped_subagent(
             ),
         });
     };
-    // Register the subagent provider before model discovery. In the structured
-    // credential path the key is not pushed onto `[agent].env`; it is resolved
-    // only for providers returned by `effective_active_provider_ids`, which
-    // appends the subagent provider solely when `agent.subagent` is already
-    // set. Without this pre-step, discovery for a subagent provider that
-    // differs from the main provider and has no `[agent.providers]` active
-    // block would probe the model list unauthenticated. Model is filled in
-    // after discovery resolves it.
+    // Register the subagent provider BEFORE model discovery: in the structured
+    // credential path the key resolves only for providers `effective_active_provider_ids`
+    // returns, which appends the subagent provider only once `agent.subagent` is set.
+    // Model is filled in after discovery resolves it.
     config.agent.subagent = Some(AgentSubagentConfig {
         disabled: false,
         provider: Some(AgentProviderConfig {
@@ -645,17 +630,9 @@ fn configured_main_provider_with_model(config: &Config) -> Option<&AgentProvider
     })
 }
 
-// Resolution priority:
-//   1. Main provider is in the same provider family as a free model — either
-//      same id, or same canonical env ref (covers `opencode-go` ↔ `opencode`
-//      even when the operator uses a non-canonical `api_key_ref` like
-//      `MY_OPENCODE_KEY`).
-//   2. ONLY when no main provider is configured at all, fall back to scanning
-//      `[agent].env` for a free model provider's canonical env ref. List order
-//      in `data/agents.toml` is the tiebreaker. Refusing env-fallback when a
-//      main provider is set prevents stale env entries from silently routing
-//      an unsupported provider (e.g. `openai` with leftover `OPENCODE_API_KEY`)
-//      to a free model that doesn't match the operator's current intent.
+// Prefers a free model in the main provider's family; the `[agent].env` scan is a
+// fallback ONLY when no main provider is set, so stale env entries cannot silently
+// route an unsupported provider to a free model.
 fn resolve_free_model<'a>(
     config: &Config,
     entry: &'a RegistryEntry,
@@ -690,9 +667,8 @@ fn resolve_free_model<'a>(
     })
 }
 
-// Two provider ids are in the same family for the given agent when they share
-// the same canonical env ref. This is the data-driven way to recognize aliases
-// like `opencode-go` ↔ `opencode` without hardcoding the alias here.
+// Same family = same canonical env ref, which recognizes aliases like
+// `opencode-go` ↔ `opencode` without hardcoding them.
 fn same_provider_family(agent_id: &str, a: &str, b: &str) -> bool {
     if a == b {
         return true;

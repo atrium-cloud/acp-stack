@@ -652,8 +652,8 @@ fn claude_code_provider_use_succeeds_and_omits_available_models_when_catalog_off
         .expect("config should be written");
     seed_provider_credential(tempdir.path(), "moonshotai", &["MOONSHOT_API_KEY"]);
 
-    // Dead endpoint: the fetch must degrade to a warning, never fail the
-    // command or leave a stale availableModels list behind.
+    // A dead endpoint must degrade to a warning, never failing the command or
+    // leaving a stale availableModels list behind.
     acps_command()
         .env("HOME", tempdir.path())
         .env("ACP_STACK_PROVIDER_MODELS_BASE", "http://127.0.0.1:1")

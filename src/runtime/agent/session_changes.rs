@@ -1,8 +1,5 @@
-//! Bounded, process-local projection of ACP file-diff tool content.
-//!
-//! The durable session event stream remains the raw ACP source of truth. This
-//! store exists only to give API clients a compact current snapshot without
-//! replaying those events or consulting Git/the workspace.
+//! Bounded, process-local projection of ACP file-diff tool content; the durable
+//! session event stream remains the raw ACP source of truth.
 
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -564,11 +561,8 @@ impl SessionChangesStore {
                 continue;
             };
             if victim.tool_calls.is_empty() {
-                // Once a compact tombstone itself is the least-recent data,
-                // dropping it is the only way to keep the global bound. Its
-                // session id is forgotten, so from here on every unknown or
-                // new session must conservatively report `truncated` via
-                // `capacity_reached` and the daemon-global revision.
+                // Dropping a tombstone forgets its session id, so from here on
+                // every unknown session must conservatively report `truncated`.
                 self.capacity_reached = true;
                 self.next_revision();
             } else {

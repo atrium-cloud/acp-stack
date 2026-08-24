@@ -1,15 +1,5 @@
-//! Provisional ACP session helpers for model/mode discovery.
-//!
-//! Both `acps agent set` (CLI) and `GET /v1/models` (HTTP API) need to
-//! query the configured agent for its ACP-advertised `model`, `mode`,
-//! and effort (`thought_level`) `session/new` config options before
-//! letting the operator pick one.
-//! That requires spawning the agent's binary, opening one short-lived
-//! ACP session, reading the response's `config_options`, and shutting
-//! the agent down — all in-process and synchronous from the caller's
-//! POV.
-//!
-//! This module is the single place that owns that dance.
+//! Provisional ACP session helpers for model/mode/effort discovery: spawn the
+//! agent, read `session/new` config options, shut it down.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -36,10 +26,8 @@ use crate::runtime::agent::provider_keys::{
 };
 use crate::secrets::SecretStore;
 
-/// Default cap for a single provisional model-discovery session.
-/// Healthy ACP agents return `session/new` quickly; this bounds the
-/// process lifetime when an agent accepts initialize but hangs before
-/// advertising config options.
+/// Default cap for one provisional discovery session, bounding an agent that
+/// accepts initialize but then hangs.
 pub const DEFAULT_MODELS_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub fn model_value_is_explicit_without_discovery(agent: &AgentConfig) -> bool {
@@ -48,18 +36,15 @@ pub fn model_value_is_explicit_without_discovery(agent: &AgentConfig) -> bool {
             && agent.provider.as_ref().is_some_and(|provider| {
                 provider.custom.is_some() || is_claude_code_profiled_provider(&provider.id)
             }))
-        // Codex accepts arbitrary model strings verbatim, while codex-acp
-        // advertises codex-core's bundled OpenAI preset catalog regardless of
-        // the configured provider — so for OpenRouter and custom providers
-        // the advertised list must not gate the operator's model choice.
+        // codex-acp advertises codex-core's bundled OpenAI preset catalog
+        // regardless of provider, while Codex itself accepts arbitrary model
+        // strings, so the advertised list must not gate the operator's choice.
         || (agent.id == CODEX_AGENT_ID
             && agent.provider.as_ref().is_some_and(|provider| {
                 provider.custom.is_some() || provider.id == CODEX_OPENROUTER_PROVIDER_ID
             }))
-        // Hermes advertises the pre-1.0 `models`/`modes` session state rather
-        // than ACP v1 `configOptions`, so the advertised list is empty from
-        // this runtime's perspective; the model id is applied through the
-        // provisioned `~/.hermes/config.yaml` instead.
+        // Hermes advertises pre-1.0 `models`/`modes` session state rather than
+        // ACP v1 `configOptions`, so its advertised list reads empty here.
         || agent.id == HERMES_AGENT_ID
 }
 
@@ -77,10 +62,9 @@ pub fn fetch_session_config(home: &Path, config: &Config) -> Result<NewSessionRe
     ))
 }
 
-/// Async variant used by the HTTP API. Unlike the CLI wrapper, this
-/// does not park discovery on a detached blocking thread: timeout,
-/// request errors, and success all flow through `AcpBridge::terminate_probe`
-/// so the provisional child process is reaped before the call returns.
+/// Async variant used by the HTTP API. Timeout, request errors, and success all
+/// flow through `AcpBridge::terminate_probe` so the provisional child is reaped
+/// before the call returns.
 pub async fn fetch_session_config_with_timeout(
     home: &Path,
     config: &Config,
@@ -149,10 +133,8 @@ pub async fn fetch_session_config_with_timeout(
     }
 }
 
-/// Spawn the configured agent for its `initialize` handshake only, capture
-/// the advertised capabilities, and tear the process down. No session is
-/// created; this is the cheapest definitive answer to "what does this
-/// harness/adapter actually support".
+/// Spawn the agent for its `initialize` handshake only, capture the advertised
+/// capabilities, and tear the process down without creating a session.
 pub fn fetch_agent_capabilities(home: &Path, config: &Config) -> Result<AgentCapabilitiesDto> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -161,10 +143,9 @@ pub fn fetch_agent_capabilities(home: &Path, config: &Config) -> Result<AgentCap
     runtime.block_on(fetch_agent_capabilities_async(home, config))
 }
 
-/// Async variant of [`fetch_agent_capabilities`]. No extra timeout wraps the
-/// spawn: `AcpBridge::spawn` owns the `initialize` exchange and already bounds
-/// it with its cold-host-tolerant handshake timeout; wrapping the future here
-/// would leak the child process on expiry instead of reaping it.
+/// Async variant of [`fetch_agent_capabilities`]. No extra timeout may wrap the
+/// spawn: `AcpBridge::spawn` already bounds the handshake, and wrapping the
+/// future here would leak the child process on expiry instead of reaping it.
 pub async fn fetch_agent_capabilities_async(
     home: &Path,
     config: &Config,
@@ -202,20 +183,17 @@ pub async fn fetch_agent_capabilities_async(
     )
     .await?;
     let capabilities = bridge.capabilities().clone();
-    // The handshake already succeeded, so the captured advertisement is good
-    // even when teardown misbehaves; discarding it would turn a working agent
-    // into "no capability evidence". Teardown failure is logged, not fatal.
+    // The handshake already succeeded, so a teardown failure is logged rather
+    // than discarding a good advertisement.
     if let Err(error) = bridge.terminate_probe().await {
         tracing::warn!(%error, "capability probe teardown failed after a successful handshake");
     }
     Ok(capabilities)
 }
 
-/// Convenience for callers that just want the advertised string values
-/// for one category. `Model` flows through the legacy-aware
-/// `session_model_values` so older agents that surface model lists in
-/// non-config-options shapes still work; `Mode` and `Effort` read
-/// straight from `config_options`.
+/// Advertised string values for one category. `Model` routes through the
+/// legacy-aware `session_model_values` so older agents that surface model lists
+/// outside `config_options` still work.
 pub fn advertised_values_for_category(
     response: &NewSessionResponse,
     category: AgentSessionConfigCategory,
@@ -228,14 +206,9 @@ pub fn advertised_values_for_category(
     }
 }
 
-/// Validate that `value` matches one of the agent's ACP-advertised
-/// values for the given category. Returns `Ok(())` if accepted, or
-/// `StackError::AgentConfigProvision` describing the rejection.
-///
-/// Both `acps agent set` and `acps init` use this before writing
-/// `agent.provider.model`, `agent.model`, `agent.mode`, or `agent.effort` to disk so
-/// the canonical config never disagrees with what the harness itself
-/// will accept on `session/new`.
+/// Validate `value` against the agent's ACP-advertised values for a category.
+/// Callers MUST run this before writing a model/mode/effort to disk so the
+/// config never disagrees with what the harness accepts on `session/new`.
 pub fn validate_advertised_value(
     response: &NewSessionResponse,
     category: AgentSessionConfigCategory,

@@ -55,9 +55,7 @@ fn link_agent_skills_is_idempotent_and_repoints_stale_links() {
     write_installed_skill(&install_root, "repo-map", "# Repo Map\n");
     let link_root = home_path.join(".claude/skills");
     std::fs::create_dir_all(&link_root).expect("link root");
-    // The stale link points into the install root at a since-removed skill,
-    // so repointing must win over pruning: once refreshed the link targets
-    // the live skill and prune keeps it.
+    // A stale link into the install root at a since-removed skill: repointing must win over pruning.
     std::os::unix::fs::symlink(install_root.join("old-name"), link_root.join("repo-map"))
         .expect("stale");
 
@@ -69,8 +67,6 @@ fn link_agent_skills_is_idempotent_and_repoints_stale_links() {
         .expect("relink")
         .expect("report");
 
-    // The first refresh repoints the stale link; the second finds it
-    // already correct and reports it as unchanged instead of linked.
     assert_eq!(first.linked.len(), 1);
     assert!(first.unchanged.is_empty());
     assert!(first.pruned.is_empty());
@@ -158,7 +154,6 @@ fn link_agent_skills_resolves_symlinked_link_root_ancestor() {
         std::fs::read_link(dotfiles_claude.join("skills/repo-map")).expect("target"),
         install_root.join("repo-map")
     );
-    // The harness path traverses the ~/.claude symlink to the same skill.
     assert!(
         home_path
             .join(".claude/skills/repo-map")
@@ -224,14 +219,12 @@ fn link_agent_skills_skips_stray_symlinks_in_install_root() {
     let home_path = canonical_temp_home(&home);
     let install_root = home_path.join(".agents/skills");
     write_installed_skill(&install_root, "repo-map", "# Repo Map\n");
-    // A symlink inside a skill dir would fail the copy-time port checks;
-    // linking copies nothing, so the skill still links.
+    // A symlink inside a skill dir fails the copy-time port checks, but linking copies nothing.
     std::os::unix::fs::symlink(
         home_path.join("elsewhere"),
         install_root.join("repo-map/linked-file"),
     )
     .expect("symlink inside skill");
-    // A stray symlink at the install root is skipped, not an error.
     std::os::unix::fs::symlink(home_path.join("elsewhere"), install_root.join("stray"))
         .expect("stray symlink");
 
@@ -278,9 +271,7 @@ fn link_agent_skills_leaves_user_directories_untouched() {
     let home_path = canonical_temp_home(&home);
     let install_root = home_path.join(".agents/skills");
     write_installed_skill(&install_root, "repo-map", "# Repo Map\n");
-    // A user-owned directory in the link root holding a dangling symlink
-    // pointing outside the install root plus a real file: recursion reaches
-    // the directory, but nothing user-owned is modified or pruned.
+    // Recursion reaches this user-owned directory, but nothing user-owned is modified or pruned.
     let user_dir = home_path.join(".claude/skills/user-skill");
     std::fs::create_dir_all(&user_dir).expect("user dir");
     std::os::unix::fs::symlink(home_path.join("no-such-target"), user_dir.join("ref"))
@@ -315,8 +306,7 @@ fn link_agent_skills_best_effort_reports_error_without_failing() {
         "repo-map",
         "# Repo Map\n",
     );
-    // A regular file where the harness config dir should be makes the link
-    // root unusable; the failure is reported, not propagated.
+    // A regular file where the harness config dir should be makes the link root unusable.
     std::fs::write(home_path.join(".claude"), "not a directory\n").expect("file");
 
     let outcome = link_agent_skills_best_effort(home.path(), claude_code_entry(&catalog));
@@ -354,10 +344,7 @@ fn link_agent_skills_prunes_nested_links_and_emptied_group_dirs() {
     assert_eq!(second.pruned.len(), 2);
     assert_eq!(second.pruned[0].name, "contact-center/android");
     assert_eq!(second.pruned[1].name, "tools/jq");
-    // The emptied `tools` group dir is removed with its pruned link...
     assert!(!link_root.join("tools").exists());
-    // ...but `contact-center` still holds user content, so it stays,
-    // with the user file untouched.
     assert_eq!(
         std::fs::read_to_string(link_root.join("contact-center/notes.md")).expect("user file kept"),
         "user notes\n"
@@ -374,8 +361,7 @@ fn link_agent_skills_collects_per_skill_errors_and_continues() {
     write_installed_skill(&install_root, "contact-center/android", "# Android\n");
     let link_root = home_path.join(".claude/skills");
     std::fs::create_dir_all(&link_root).expect("link root");
-    // A user symlink where the nested skill's group dir should be blocks
-    // that one skill; the other must still link, and prune must still run.
+    // A user symlink where the nested skill's group dir should be blocks that one skill only.
     std::os::unix::fs::symlink(
         home_path.join("elsewhere"),
         link_root.join("contact-center"),

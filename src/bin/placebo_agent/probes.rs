@@ -62,8 +62,7 @@ pub(crate) async fn run_fs_probe(
     Ok(report)
 }
 
-/// Terminal round-trip driven against the client, reported as a JSON object.
-/// Runs in a spawned task; `block_task` is safe here.
+/// Terminal round-trip driven against the client. Runs in a spawned task, so `block_task` is safe.
 pub(crate) async fn run_terminal_probe(
     args: &AcpArgs,
     session_id: &SessionId,
@@ -142,8 +141,7 @@ pub(crate) async fn run_terminal_probe(
         );
     }
     if args.terminal_kill || args.terminal_cancel_wait {
-        // Poll until the child has produced output before killing, so the
-        // output-stays-readable-after-kill assertion is deterministic.
+        // Wait for child output before killing, so the read-after-kill assertion is deterministic.
         for _ in 0..100 {
             let output = connection
                 .send_request(TerminalOutputRequest::new(

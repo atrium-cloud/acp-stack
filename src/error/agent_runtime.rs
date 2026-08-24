@@ -1,6 +1,4 @@
-//! Agent runtime/lifecycle error helpers.
-//!
-//! Covers the half of the `agent.*` namespace that surfaces while the agent
+//! Error helpers for the `agent.*` namespace that surfaces while the agent
 //! subprocess is running (spawn, lifecycle state, JSON-RPC requests).
 
 use http::StatusCode;
@@ -54,8 +52,8 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
         } => format!("inference endpoint returned {status_code} ({reason_category})"),
         AgentTestFailed { stage, reason, .. } => format!("agent test failed at {stage}: {reason}"),
         AgentSwitchConflict { reason } => format!("agent switch conflict: {reason}"),
-        // The on-disk path stays out of the public message; the Display text
-        // carries it for local logs and CLI diagnostics.
+        // The on-disk path stays out of the public message; Display carries it
+        // for local logs only.
         AgentSwitchJournalCorrupt { .. } => {
             "the pending agent-switch journal is corrupt local state".to_owned()
         }
@@ -73,14 +71,11 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         AgentSpawnFailed { .. } | AgentApiRequest { .. } | AgentApiStatus { .. } => {
             StatusCode::INTERNAL_SERVER_ERROR
         }
-        // Corrupt local state is unrecoverable by the client; it must repair
-        // or remove the journal file before switching again.
         AgentSwitchJournalCorrupt { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         AgentRequestFailed { .. } | AgentTestFailed { .. } => StatusCode::BAD_GATEWAY,
         InferenceRequestFailed { status_code, .. } => {
-            // 4xx variants are surfaced as "failed dependency": the upstream
-            // accepted the request but rejected it on its own terms. 5xx (and
-            // 529-overloaded) become 502 because the upstream itself failed.
+            // 4xx means the upstream rejected the request on its own terms;
+            // 5xx means the upstream itself failed.
             if (400..500).contains(status_code) {
                 StatusCode::FAILED_DEPENDENCY
             } else {

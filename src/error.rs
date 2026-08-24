@@ -487,10 +487,7 @@ pub enum StackError {
     DepsApplyFailed {
         summary: String,
         apply_run_id: String,
-        /// Retry command for the CLI surface that raised the error —
-        /// `acps deps apply` and init resume have different re-run
-        /// invocations, so the remediation hint cannot be one static
-        /// string.
+        /// Retry command for the CLI surface that raised the error.
         retry_command: &'static str,
     },
 
@@ -659,19 +656,17 @@ pub enum StackError {
         message: String,
     },
 
-    /// Agent's upstream inference endpoint surfaced an HTTP failure. Carries
-    /// only the parsed status code and a vetted `'static` reason label, so the
-    /// raw upstream message (URLs, headers, bodies, secrets) never reaches the
-    /// state store or events.
+    /// Carries only a status code and a vetted `'static` label, so raw
+    /// upstream text (URLs, headers, bodies, secrets) never reaches the state
+    /// store or events.
     #[error("inference endpoint returned {status_code} ({reason_category})")]
     InferenceRequestFailed {
         status_code: u16,
         reason_category: &'static str,
     },
 
-    /// `stage`/`reason` are the human channel; `code` is the machine channel
-    /// that `agent test --format json` reports instead of `reason`, which
-    /// embeds workspace paths and spawn argv.
+    /// `code` is the machine channel `agent test --format json` reports
+    /// instead of `reason`, which embeds workspace paths and spawn argv.
     #[error("agent test failed at {stage}: {reason}")]
     AgentTestFailed {
         stage: String,

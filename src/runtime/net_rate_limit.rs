@@ -1,22 +1,7 @@
-//! Process-wide per-domain pacing for outbound HTTP requests.
-//!
-//! Hosted computers share egress IPs, so unauthenticated per-IP quotas (most
-//! notably GitHub's 60 requests/hour on `api.github.com`) are effectively a
-//! shared, near-exhausted resource. This module spaces requests to
-//! quota-bearing domains and opens a cooldown circuit when a domain answers
-//! with a rate-limit response, so retry loops degrade to waiting instead of
-//! burning the remaining quota.
-//!
-//! Coverage is currently the agent install flow (`github_release`): callers
-//! must opt in via [`acquire`]/[`report_rate_limited`]. `acps update`
-//! (`stack_updater`) and the manual dev tools query the GitHub API without
-//! this pacing.
-//!
-//! Only domains with a policy entry are limited; every other host passes
-//! through untouched. Callers are blocking installer threads, so waiting is
-//! implemented with `std::thread::sleep`. State is a process-wide map shared
-//! across the parallel harness/adapter installer threads (same precedent as
-//! `NPM_INSTALL_LOCK` in the agent installer).
+//! Process-wide per-domain pacing for outbound HTTP requests: hosted computers
+//! share egress IPs, so unauthenticated per-IP quotas are a near-exhausted shared
+//! resource. Callers opt in via [`acquire`]/[`report_rate_limited`]; hosts without
+//! a policy entry pass through untouched.
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, PoisonError};
@@ -28,16 +13,13 @@ use crate::error::{Result, StackError};
 const GITHUB_API_HOST: &str = "api.github.com";
 /// Minimum spacing between our own requests to `api.github.com`.
 const GITHUB_API_MIN_INTERVAL: Duration = Duration::from_secs(10);
-/// Circuit cooldown applied when a rate-limit response carries no usable
-/// `Retry-After` / `X-RateLimit-Reset` information.
+/// Cooldown used when a rate-limit response carries no usable reset header.
 const DEFAULT_COOLDOWN: Duration = Duration::from_secs(5 * 60);
-/// Upper bound on any header-supplied cooldown. Reset headers come from the
-/// network; an absurd value must not arm a de-facto permanent circuit (or
-/// overflow `Instant` arithmetic, which panics).
+/// Upper bound on a header-supplied cooldown: reset headers come from the network,
+/// and an absurd value must not arm a permanent circuit or overflow `Instant` math.
 const MAX_COOLDOWN: Duration = Duration::from_secs(60 * 60);
-/// Hard cap on any single wait. Beyond this a typed error is returned —
-/// a longer in-attempt sleep is indistinguishable from a hang, and the
-/// callers' own retry loops handle the long tail.
+/// Hard cap on any single wait; beyond this a typed error is returned instead,
+/// since a longer sleep is indistinguishable from a hang.
 const MAX_WAIT: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Debug, Clone, Copy)]
@@ -95,10 +77,8 @@ fn open_circuit(state: &mut DomainState, now: Instant, cooldown: Duration) {
     }
 }
 
-/// Block until `host` may be contacted per its policy, then reserve the
-/// slot. Hosts without a policy return immediately. Errors with
-/// [`StackError::DomainRateLimited`] only when the required wait exceeds
-/// [`MAX_WAIT`].
+/// Block until `host` may be contacted per its policy, then reserve the slot;
+/// errors only when the required wait exceeds [`MAX_WAIT`].
 pub fn acquire(host: &str) -> Result<()> {
     let Some(policy) = policy_for(host) else {
         return Ok(());
@@ -128,9 +108,8 @@ pub fn acquire(host: &str) -> Result<()> {
     }
 }
 
-/// Record that `host` answered with a rate-limit response. Opens the
-/// domain's circuit until `retry_after` (from response headers) or
-/// [`DEFAULT_COOLDOWN`] elapses; subsequent [`acquire`] calls wait it out.
+/// Record that `host` answered with a rate-limit response, opening its circuit
+/// until `retry_after` or [`DEFAULT_COOLDOWN`] elapses.
 pub fn report_rate_limited(host: &str, retry_after: Option<Duration>) {
     if policy_for(host).is_none() {
         return;
@@ -245,8 +224,8 @@ mod tests {
         }
     }
 
-    /// Clear a host's process-global state so tests that arm the real
-    /// circuit cannot leak order-dependent failures into other tests.
+    /// Clear a host's process-global state so an armed circuit cannot leak
+    /// order-dependent failures into other tests.
     fn reset_host(host: &str) {
         DOMAIN_STATES
             .lock()
@@ -256,8 +235,6 @@ mod tests {
 
     #[test]
     fn wait_beyond_cap_is_a_typed_error_not_a_sleep() {
-        // An hour-long circuit exceeds MAX_WAIT, so acquire must error
-        // immediately instead of blocking the thread.
         report_rate_limited(GITHUB_API_HOST, Some(Duration::from_secs(u64::MAX)));
         let result = acquire(GITHUB_API_HOST);
         reset_host(GITHUB_API_HOST);

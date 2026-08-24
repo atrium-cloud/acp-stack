@@ -85,8 +85,7 @@ pub(super) fn port_skill_directories(
                 PortAction::Overwrite
             }
             ExistingTargetState::AlreadyInstalled => {
-                // A same-named skill the runtime did not install: leave the
-                // user's folder untouched rather than replacing it.
+                // A same-named skill the runtime did not install stays untouched.
                 tracing::warn!(
                     skill = %skill_name,
                     "skipping port overwrite of a skill not installed by acp-stack"
@@ -111,8 +110,8 @@ pub(super) fn port_skill_directories(
     for install in installs {
         match install.action {
             PortAction::Copy => {
-                // Ported skills keep whatever marker the source dir carries;
-                // nothing new is installed here, so no marker is staged.
+                // Ported skills keep the source dir's marker; nothing new is
+                // installed here, so no marker is staged.
                 copy_skill_dir_atomically(
                     &install.source_dir,
                     &install.target_dir,

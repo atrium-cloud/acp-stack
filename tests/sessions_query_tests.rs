@@ -1,11 +1,6 @@
 #![cfg(feature = "test-fixtures")]
 
-//! Read-side coverage for the session routes: list (agent sync, time bounds,
-//! target resolution), the compact `-/status` summary, snapshot/changes, and
-//! the not-found / unsupported-capability / auth-tier error paths.
-//!
-//! The placebo ACP fixture stands in for a real ACP agent;
-//! `tests/acp_bridge_tests.rs` exercises the lower-level bridge layer.
+//! Read-side coverage for the session routes, against the placebo ACP fixture.
 
 mod common;
 

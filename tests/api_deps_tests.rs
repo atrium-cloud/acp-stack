@@ -19,8 +19,8 @@ use common::api::{ADMIN_KEY, SESSION_KEY, ServerHarness, test_config};
 /// Long enough that the probe below lands inside the apply window, short
 /// enough to keep the test fast.
 const SLOW_INSTALL_SECONDS: u64 = 3;
-/// The probe touches no state, so it must answer immediately. A wait anywhere
-/// near the install duration means it was queued behind the apply.
+/// The probe touches no state, so a wait near the install duration means it
+/// was queued behind the apply.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 /// Upper bound on how long the in-flight action may take to become visible.
 const RUNNING_ROW_DEADLINE: Duration = Duration::from_secs(10);
@@ -33,8 +33,7 @@ fn config_with_slow_install() -> Config {
         feature: None,
         install: Some(DependencyInstallAction {
             shell: format!("sleep {SLOW_INSTALL_SECONDS}"),
-            // Never resolves, so the runner always executes the snippet
-            // instead of taking the already-present shortcut.
+            // Never resolves, so the runner always executes the snippet.
             creates: Some("acps-deps-apply-probe".to_owned()),
             scope: DependencyInstallScope::User,
             timeout_secs: Some(60),
@@ -64,10 +63,10 @@ async fn deps_apply_does_not_block_unrelated_requests() {
             .expect("deps apply request")
     });
 
-    // The action's `running` row is committed before its shell spawns, so its
-    // appearance pins the probe inside the apply window instead of relying on
-    // a sleep. Read it on a dedicated connection: going through the harness
-    // store handle would contend for the very mutex under test.
+    // The `running` row lands before the shell spawns, so its appearance pins
+    // the probe inside the apply window without a sleep. Read it on a
+    // dedicated connection: the harness store handle would contend for the
+    // very mutex under test.
     let reader = StateStore::open(&harness.state_path).expect("reader connection");
     let deadline = Instant::now() + RUNNING_ROW_DEADLINE;
     while !deps_apply_running(&reader) {
@@ -79,8 +78,8 @@ async fn deps_apply_does_not_block_unrelated_requests() {
     }
 
     // `/v1/workspace` reads in-memory config only, but the `api.request` audit
-    // middleware takes the shared state mutex after the handler returns — so
-    // an apply that holds that mutex stalls even this request.
+    // middleware takes the shared state mutex after the handler returns, so an
+    // apply holding that mutex stalls even this request.
     let probe = reqwest::Client::builder()
         .timeout(PROBE_TIMEOUT)
         .build()
@@ -101,9 +100,8 @@ async fn deps_apply_does_not_block_unrelated_requests() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
-/// The apply outlives the client that started it, so an orchestrator that
-/// restarts the runtime to pick up new config would tear a running install
-/// down mid-flight. `/v1/status` is where it learns to wait instead.
+/// The apply outlives the client that started it, so `/v1/status` is where an
+/// orchestrator learns to wait rather than restart mid-install.
 #[tokio::test]
 async fn status_reports_a_deps_apply_in_flight() {
     let harness = ServerHarness::spawn_with_config(config_with_slow_install()).await;
@@ -132,8 +130,7 @@ async fn status_reports_a_deps_apply_in_flight() {
             .expect("deps apply request")
     });
 
-    // Same pinning as above: the action's `running` row lands before its shell
-    // spawns, so the probe below is inside the apply window by construction.
+    // Same `running`-row pinning as above.
     let reader = StateStore::open(&harness.state_path).expect("reader connection");
     let deadline = Instant::now() + RUNNING_ROW_DEADLINE;
     while !deps_apply_running(&reader) {
@@ -162,8 +159,8 @@ async fn status_reports_a_deps_apply_in_flight() {
     let response = apply.await.expect("apply task");
     assert_eq!(response.status(), StatusCode::OK);
 
-    // The handler awaits the blocking task, so the guard is already released
-    // by the time the apply response lands.
+    // The handler awaits the blocking task, so the guard is released by the
+    // time the apply response lands.
     let after: serde_json::Value = client
         .get(&status_url)
         .header("Authorization", format!("Bearer {SESSION_KEY}"))
@@ -267,7 +264,7 @@ async fn deps_apply_runs_routes_expose_progress_and_retryable_outcome() {
     assert_eq!(response.status(), StatusCode::OK);
 
     // The probe dep's `creates` never resolves, so the settled run is failed
-    // and retryable — the state a hosting client keys the retry surface on.
+    // and retryable, which is what a hosting client keys its retry surface on.
     let after: serde_json::Value = client
         .get(&latest_url)
         .header("Authorization", format!("Bearer {SESSION_KEY}"))
@@ -321,8 +318,8 @@ async fn deps_apply_runs_routes_expose_progress_and_retryable_outcome() {
     );
 }
 
-/// `deps_apply_in_flight` must observe applies the daemon did not start —
-/// a detached init child or a CLI apply — via the live run row, not just the
+/// `deps_apply_in_flight` must observe applies the daemon did not start (a
+/// detached init child, a CLI apply) via the live run row, not just the
 /// in-process lock.
 #[tokio::test]
 async fn status_reports_an_externally_owned_deps_apply() {
@@ -331,8 +328,8 @@ async fn status_reports_an_externally_owned_deps_apply() {
     let client = reqwest::Client::new();
 
     let external = StateStore::open(&harness.state_path).expect("external connection");
-    // Stands in for a CLI/detached apply: a running row owned by a live pid
-    // (this test process), with no daemon lock held.
+    // Stands in for a CLI/detached apply: a running row owned by a live pid,
+    // with no daemon lock held.
     external
         .claim_deps_apply_run(
             NewDepsApplyRun {

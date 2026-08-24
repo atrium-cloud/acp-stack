@@ -9,8 +9,8 @@ use crate::support::write_workspace_init_config;
 
 #[test]
 fn init_rejects_effort_flag_for_agents_without_set_effort() {
-    // amp/hermes leave set_effort at its false default; `--effort` must
-    // fail fast as a capability check rather than being silently dropped.
+    // amp/hermes leave set_effort false, so `--effort` must fail the
+    // capability check rather than being silently dropped.
     for agent in ["amp", "hermes"] {
         let tempdir = tempfile::tempdir().expect("tempdir");
 
@@ -151,8 +151,7 @@ fn init_rejects_effort_not_advertised_by_the_agent() {
 #[test]
 fn init_without_effort_flag_never_enters_the_effort_lane() {
     // An unattended run for an effort-capable agent must not enter the effort
-    // lane: the model lane prints its list as usual, nothing mentions effort,
-    // no effort is written, and the step payload records the skip.
+    // lane; the step payload records the skip.
     let tempdir = tempfile::tempdir().expect("tempdir");
     write_workspace_init_config(tempdir.path());
     seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);

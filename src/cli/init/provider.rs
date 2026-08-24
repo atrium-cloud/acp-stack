@@ -117,9 +117,8 @@ pub(super) fn preflight_provider_for_init(
     Ok(())
 }
 
-/// The paired custom-provider / custom-model registry gates. Every lane that
-/// can land in a custom-provider config runs both in this order, so the two
-/// messages stay identical across preflight, apply, and validation.
+/// The paired custom-provider / custom-model registry gates, run in this
+/// order by every lane so the messages stay identical across surfaces.
 fn require_custom_provider_support(
     entry: &crate::runtime::install::agent_registry::RegistryEntry,
     config: &Config,
@@ -328,12 +327,8 @@ fn select_provider_for_init(
         });
     }
 
-    // Offline-curated picker. The compatibility list is the same source
-    // `GET /v1/providers` uses, so the operator sees exactly the
-    // providers that any other surface (CLI/API/UI) would offer for the
-    // selected agent. Free-form id entry is still accepted at the
-    // prompt so an operator can target a provider the embedded mapping
-    // pre-dates without round-tripping through `acps agent set`.
+    // Offline-curated picker, drawn from the same list `GET /v1/providers`
+    // serves. Free-form id entry stays accepted at the prompt.
     let providers = providers_for_agent(&config.agent.id);
     if providers.is_empty() {
         let provider_id = prompt::text(
@@ -353,9 +348,7 @@ fn select_provider_for_init(
         .iter()
         .partition(|summary| provider_has_available_secret_refs(config, summary, secret_store));
     // Ready providers first, then ones needing secret/custom setup; the hint
-    // column carries the readiness label so the grouping survives without
-    // separate headers. A trailing item accepts a free-form id for a provider
-    // the embedded mapping pre-dates.
+    // column carries the readiness label in place of section headers.
     #[derive(Clone, PartialEq, Eq)]
     enum ProviderChoice {
         Id(String),
@@ -394,18 +387,14 @@ fn select_provider_for_init(
     }
 }
 
-/// How a provider would fare if the operator picked it right now. The picker
-/// needs both a grouping decision and a hint string; deriving them from one
-/// classification keeps the two from disagreeing.
+/// How a provider would fare if the operator picked it right now.
 enum ProviderReadiness {
     /// Every required ref resolves and the mapping names an API-key ref.
     Ready,
     /// No API-key ref is needed because the harness authenticates natively.
     AgentNativeAuth,
-    /// The harness lists the provider but the registry maps no API-key env var
-    /// for it, and the id itself stays reserved, so the only route is a custom
-    /// provider under a different id. Selecting the entry can now only produce
-    /// that error.
+    /// The harness lists the provider but the registry maps no API-key env
+    /// var, and the id stays reserved, so only a distinct custom id works.
     NeedsDistinctCustomId,
     /// Required refs that resolve from neither the store nor the catalog.
     MissingRefs(Vec<String>),

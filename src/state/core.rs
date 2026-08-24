@@ -1,8 +1,5 @@
-//! `StateStore` wiring: connection lifetime, default on-disk path, and the
-//! `pub(super)` accessors that the domain leaves use to reach the underlying
-//! `rusqlite::Connection`. Each domain table's persistence logic lives in the
-//! sibling leaf (`sessions`, `events`, `commands`, ...); this file is just
-//! the store struct + opener.
+//! `StateStore` struct and opener: connection lifetime, default on-disk path,
+//! and the `pub(super)` accessors the domain leaves query through.
 
 use crate::error::Result;
 use crate::events::EventHub;
@@ -12,25 +9,17 @@ use std::time::Duration;
 
 use super::sink_outbox;
 
-/// Busy-timeout applied to every state connection. The daemon funnels its own
-/// writes through a single connection behind a mutex, but the agent updater
-/// opens a second connection (in `spawn_blocking`) and `acps agent update
-/// --restart` opens one from a separate process while the daemon is live. With
-/// WAL plus this timeout a contended writer waits for the lock instead of
-/// failing immediately with `SQLITE_BUSY`.
+/// Busy-timeout applied to every state connection so a contended writer waits
+/// for the lock instead of failing immediately with `SQLITE_BUSY`.
 const STATE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct StateStore {
     connection: Connection,
     path: PathBuf,
-    /// Optional fan-out for every `append_event` write. Set via
-    /// `attach_event_hub` from `acps serve`; CLI tools that open the store
-    /// read-only leave it `None`.
+    /// Optional fan-out for every `append_event` write.
     event_hub: Option<EventHub>,
     /// When true, every persist call site enqueues into `sink_outbox` in the
-    /// same transaction as the source write. Set by `acps serve` only when
-    /// `[logging.supabase].enabled = true`; standalone CLI tools leave it
-    /// off so they don't write an outbox row the daemon will then re-send.
+    /// same transaction as the source write.
     external_logging_enabled: bool,
 }
 
@@ -62,16 +51,12 @@ impl StateStore {
     }
 
     /// Attach a live `EventHub` so every `append_event` write also fans out on
-    /// the `logs` topic. The daemon (`acps serve`) calls this once at startup;
-    /// CLI tools that open the store for ad-hoc queries leave it unset.
+    /// the `logs` topic.
     pub fn attach_event_hub(&mut self, hub: EventHub) {
         self.event_hub = Some(hub);
     }
 
     /// Enable transactional outbox writes alongside every persist call.
-    /// Caller must already have validated `[logging.supabase].enabled` and
-    /// the matching API key secret; this flag is the on/off switch the
-    /// persist leaves consult.
     pub fn set_external_logging_enabled(&mut self, enabled: bool) {
         self.external_logging_enabled = enabled;
     }
@@ -80,17 +65,12 @@ impl StateStore {
         self.external_logging_enabled
     }
 
-    /// `pub(super)` accessor so the domain leaves can issue queries against
-    /// the shared connection without exposing the field publicly. Kept off
-    /// the public API: external callers reach the store through the typed
-    /// `query_*` / `append_*` methods, not the raw `Connection`.
     pub(super) fn connection(&self) -> &Connection {
         &self.connection
     }
 
-    /// Narrow integration-test hook for concurrent SQLite tests that need a
-    /// non-default busy timeout. Keep this typed instead of exposing the raw
-    /// `Connection`, because rusqlite mutates through `&self`.
+    /// Integration-test hook for concurrent SQLite tests that need a
+    /// non-default busy timeout.
     pub fn set_busy_timeout_for_test(&self, timeout: Duration) -> Result<()> {
         self.connection.busy_timeout(timeout)?;
         Ok(())
@@ -100,12 +80,8 @@ impl StateStore {
         self.event_hub.as_ref()
     }
 
-    /// Run a single persistence operation that writes one row to
-    /// `source_table` and, when external logging is enabled, atomically
-    /// enqueues an outbox row for delivery. When external logging is off
-    /// the closure runs directly on the connection (the cheap path used by
-    /// every non-Supabase deployment); otherwise the closure runs inside an
-    /// IMMEDIATE transaction and the outbox enqueue happens before commit.
+    /// Write one row to `source_table`, atomically enqueueing an outbox row
+    /// when external logging is enabled.
     pub(super) fn persist_with_outbox<F, R>(
         &self,
         source_table: &str,
@@ -126,11 +102,8 @@ impl StateStore {
         Ok(value)
     }
 
-    /// Like `persist_with_outbox`, but for an operation that writes several
-    /// rows that must commit together. `inner` performs the write(s) and
-    /// returns the source ids it changed; one outbox row is enqueued per id
-    /// before commit so external logging stays consistent with the local
-    /// write. The whole batch is atomic — a failure rolls back every row.
+    /// Like `persist_with_outbox`, but atomic across several rows: `inner`
+    /// returns the source ids it changed and one outbox row is enqueued per id.
     pub(super) fn persist_many_with_outbox<F>(
         &self,
         source_table: &str,

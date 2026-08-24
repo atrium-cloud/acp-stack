@@ -1,11 +1,5 @@
-//! Validation for the `[extensions]` table.
-//!
-//! Extensions are typed, data-declared seams; the config struct is flat across
-//! all types, so the per-type field discipline is enforced here: a field that
-//! looks configured but would enforce nothing for the declared type must not
-//! load. Cross-section coupling with the sandbox also lives here — a
-//! `network-provider` instance switches every wrapped spawn to an isolated
-//! network namespace, which only the `unshare` backend can provide.
+//! Validation for the `[extensions]` table. The config struct is flat across
+//! extension types, so per-type field discipline is enforced here.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -48,9 +42,8 @@ pub(crate) fn validate_extensions(config: &Config) -> Result<()> {
             ),
         });
     }
-    // Cross-section coupling: an isolated network namespace per spawn exists
-    // only for the unshare backend; any other backend carrying a
-    // network-provider extension would imply an unenforced guarantee.
+    // Only the unshare backend gives each spawn an isolated network namespace;
+    // any other backend would imply an unenforced guarantee.
     if !network_provider_names.is_empty()
         && config.workspace.sandbox.mode != crate::config::SandboxMode::Unshare
     {
@@ -120,9 +113,8 @@ fn validate_network_provider_fields(name: &str, extension: &ExtensionConfig) -> 
             reason: format!("extension `{name}`: provider argv entries must be non-empty"),
         });
     }
-    // Mediated spawns can run without PATH in their environment, so a
-    // bare-name provider would resolve for agent spawns but fail closed
-    // for mediated ones. Require an absolute path for determinism.
+    // Mediated spawns can run without PATH, so a bare-name provider would
+    // resolve for agent spawns but fail closed for mediated ones.
     if let Some(provider) = extension.provider.first()
         && !Path::new(provider).is_absolute()
     {
@@ -152,9 +144,8 @@ fn validate_network_provider_fields(name: &str, extension: &ExtensionConfig) -> 
     Ok(())
 }
 
-/// `workload_env` entries go straight into the workload's `execve` envp, so the
-/// name charset is stricter than the managed-state credential check: anything a
-/// shell or libc would treat specially must fail at config load, not at spawn.
+/// `workload_env` entries go straight into the workload's `execve` envp, so
+/// anything a shell or libc treats specially must fail at load, not at spawn.
 fn validate_workload_env(name: &str, workload_env: &BTreeMap<String, String>) -> Result<()> {
     if workload_env.len() > MAX_WORKLOAD_ENV_COUNT {
         return Err(StackError::InvalidParam {

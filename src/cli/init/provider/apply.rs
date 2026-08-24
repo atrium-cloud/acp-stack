@@ -77,12 +77,8 @@ pub(crate) fn apply_provider_to_config(
             ),
         });
     }
-    // Drop any stray root-level `agent.model` left over from a prior
-    // `acps agent set --model` for a model-only agent before we switch
-    // to a provider-based flow. Runtime selection prefers
-    // `agent.model` over `agent.provider.model` (supervisor.rs), so
-    // leaving the old root value in place would silently override the
-    // new `--model` chosen during this init run.
+    // Runtime selection prefers `agent.model` over `agent.provider.model`, so
+    // a stray root-level value would silently override this run's choice.
     config.agent.model = None;
     if args.custom_provider {
         require_custom_provider_support(entry, config, config_path)?;
@@ -110,9 +106,8 @@ pub(crate) fn apply_provider_to_config(
     let native_auth = provider_uses_agent_native_auth(&config.agent.id, &provider_id);
     if default_api_key_ref.is_none() && !native_auth {
         require_custom_provider_support(entry, config, config_path)?;
-        // A registry id with no mapping for this harness cannot be steered into
-        // custom setup: the id stays reserved, so the config it would write is
-        // rejected by validation. Point at the distinct-id route instead.
+        // A registry id with no mapping for this harness stays reserved, so
+        // custom setup under that id would fail validation.
         return Err(StackError::AgentConfigProvision {
             path: config_path.to_path_buf(),
             reason: format!(
@@ -145,13 +140,8 @@ pub(crate) fn apply_provider_to_config(
             config.agent.env.push(env_ref.clone());
         }
     }
-    // Preserve the existing provider model only when the operator is
-    // re-confirming the SAME provider id (e.g. re-running `acps init
-    // --provider X` to refresh secrets or run resume). Switching to a
-    // different provider implies the old model probably belongs to a
-    // different catalog, so clear it; the subsequent model lane in
-    // configure_model_and_mode_for_init will either write a validated
-    // new value or follow L87 print-and-skip semantics.
+    // Preserve the model only when re-confirming the SAME provider id; a
+    // different provider implies a different catalog.
     let preserved_model = match config.agent.provider.as_ref() {
         Some(existing) if existing.id == provider_id => existing.model.clone(),
         _ => None,

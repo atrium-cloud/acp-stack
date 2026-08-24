@@ -1,7 +1,5 @@
-//! Integration test for the Supabase logging sink. Brings up a hand-rolled
-//! HTTP/1.1 server on a random local port, points the sink at it, enqueues
-//! source rows, and asserts batching, header shape, redaction (no secrets
-//! escape), and the merge-duplicates header used for idempotent replay.
+//! Integration test for the Supabase logging sink against a hand-rolled local HTTP
+//! server: batching, header shape, redaction, and the merge-duplicates header.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -16,9 +14,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::mpsc;
 
-/// One captured request observed by the fake Supabase server. Used by the
-/// assertions to verify headers, body, and per-table grouping without
-/// re-parsing HTTP on the test side.
+/// One captured request observed by the fake Supabase server.
 #[derive(Debug, Clone)]
 struct CapturedRequest {
     path: String,
@@ -35,9 +31,8 @@ impl CapturedRequest {
     }
 }
 
-/// Scripted response sequence: returns the configured status for the Nth
-/// request, then sticks on the last entry. Lets a test simulate
-/// 503-then-200 or 401 (permanent failure) etc.
+/// Scripted response sequence: the configured status for the Nth request, then stuck
+/// on the last entry.
 #[derive(Clone)]
 struct ResponsePlan {
     statuses: Vec<u16>,
@@ -86,8 +81,6 @@ async fn start_fake_supabase(plan: ResponsePlan) -> (String, mpsc::Receiver<Capt
 }
 
 async fn handle_one_request(mut stream: TcpStream, status: u16) -> Option<CapturedRequest> {
-    // Buffer up to a generous fixed limit; tests never send more than a few
-    // KB of JSON. Parse headers, then read Content-Length bytes for the body.
     let mut buf = vec![0u8; 16 * 1024];
     let mut total = 0usize;
     let header_end: usize = loop {
@@ -201,8 +194,7 @@ async fn happy_path_uploads_grouped_batches_and_marks_sent() {
     )
     .expect("sink spawn");
 
-    // Enqueue rows across three source tables. The sink groups by table and
-    // issues one POST per group.
+    // The sink groups by table and issues one POST per group.
     {
         let guard = state.lock().await;
         guard
@@ -249,7 +241,6 @@ async fn happy_path_uploads_grouped_batches_and_marks_sent() {
         captured.len()
     );
 
-    // Every request must include the merge-duplicates header.
     for req in &captured {
         let prefer = req.header("Prefer").expect("prefer header present");
         assert!(prefer.contains("merge-duplicates"), "prefer was {prefer}");
@@ -259,8 +250,6 @@ async fn happy_path_uploads_grouped_batches_and_marks_sent() {
         assert_eq!(req.header("Authorization"), None);
     }
 
-    // The events POST should target /rest/v1/events and contain both event rows
-    // in a single JSON array (batched).
     let events_req = captured
         .iter()
         .find(|r| r.path.ends_with("/rest/v1/events"))
@@ -337,14 +326,12 @@ async fn happy_path_uploads_grouped_batches_and_marks_sent() {
             .map(|v| v.is_null())
             .unwrap_or(false)
     );
-    // The ACP-vs-operator provenance must survive into the external mirror.
     assert_eq!(command.get("origin").and_then(|v| v.as_str()), Some("acp"));
     assert_eq!(
         command.get("session_id").and_then(|v| v.as_str()),
         Some("sess_1")
     );
 
-    // Local outbox state: all rows must be marked sent.
     let pending_after = state
         .lock()
         .await
@@ -369,9 +356,8 @@ async fn payload_never_contains_plaintext_secret() {
     )
     .expect("sink spawn");
 
-    // The payload here mimics a buggy upstream that stuffed a token into an
-    // events row. The redactor must drop the offending keys before the body
-    // ever leaves the daemon.
+    // Mimics a buggy upstream that stuffed a token into an events row; the redactor
+    // must drop the offending keys before the body leaves the daemon.
     {
         let guard = state.lock().await;
         guard
@@ -404,7 +390,6 @@ async fn payload_never_contains_plaintext_secret() {
             "bearer leaked: {body}",
             body = req.body
         );
-        // session_id is on the allowlist and must survive.
         assert!(
             req.body.contains("sess_1"),
             "session_id should pass through: {body}",
@@ -436,7 +421,6 @@ async fn permanent_4xx_failure_does_not_retry_immediately() {
             .expect("append");
     }
 
-    // Wait for the first failure to be observed.
     let captured = drain_at_least(&mut rx, 1).await;
     assert_eq!(captured.len(), 1, "401 must not trigger immediate retries");
 

@@ -46,18 +46,10 @@ impl HostedInitManager {
             session: session.clone(),
         });
         std::thread::spawn(move || {
-            // Backstop for a panic OUTSIDE any recorded step body — preflight
-            // staging, the non-step config closures, finalize. `record_step`
-            // already converts a step-body panic into an orderly failure that
-            // settles its durable row; this catch parks the SESSION for the
-            // remainder so a panic can never leave it `running` until a reaper
-            // cancels it. It cannot settle the `init_runs` row (the `StateStore`
-            // lives in the now-dropped `InitFlow`); a non-step panic leaves that
-            // row non-terminal, which `acps init --resume` then recovers.
-            // Post-auth, `KeyHandover`'s drop has already delivered the spec'd
-            // failed result during the unwind, so the `has_result` guard below
-            // correctly skips `set_error`; pre-auth it fires and parks the
-            // session `errored`.
+            // Backstop for a panic OUTSIDE any recorded step body, so a panic can
+            // never leave the session `running` until a reaper cancels it. The
+            // `init_runs` row stays non-terminal here (the `StateStore` died with
+            // the `InitFlow`); `acps init --resume` recovers it.
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 prompt::with_hosted_driver(driver, || {
                     run_hosted_init(init_args, InitMode::Operator)
@@ -73,11 +65,8 @@ impl HostedInitManager {
                 if !session.has_result() {
                     session.set_error(error.error_code(), error.public_message());
                 } else {
-                    // A result was already published (the spec'd failed handoff
-                    // from `KeyHandover`'s drop). The run error would otherwise
-                    // vanish here; log it so the failure is not silent when the
-                    // durable rows or the result payload are the only remaining
-                    // evidence.
+                    // A result was already published, so the run error would
+                    // otherwise vanish here.
                     tracing::error!(
                         error = %error,
                         "hosted init failed after a result was already published; \
@@ -89,10 +78,8 @@ impl HostedInitManager {
         Ok(response)
     }
 
-    /// Look a session up by id. This does not count as client activity on its
-    /// own: routes that represent activity touch the session explicitly, after
-    /// reading anything time-sensitive, so a status poll can report how long
-    /// the session was idle *before* that poll.
+    /// Look a session up by id. Deliberately does not count as client activity;
+    /// routes that represent activity touch the session explicitly.
     pub(super) fn session(&self, id: &str) -> Option<Arc<HostedInitSession>> {
         lock_unpoisoned(&self.active)
             .as_ref()
@@ -100,9 +87,8 @@ impl HostedInitManager {
             .cloned()
     }
 
-    /// Record authenticated API activity on the server-level idle clock. This
-    /// clock only governs the pre-session window; once a session exists its
-    /// own activity timestamp takes over.
+    /// Record API activity on the server-level idle clock, which governs only
+    /// the pre-session window.
     pub(super) fn touch_activity(&self) {
         *lock_unpoisoned(&self.activity) = tokio::time::Instant::now();
     }
@@ -115,21 +101,16 @@ impl HostedInitManager {
         self.shutdown.notified().await;
     }
 
-    /// Shut the server down without a session transition. Used by the
-    /// lifetime reapers when the server idled out before any session was
-    /// created. `Notify` retains one permit, so firing before
-    /// `wait_for_terminal()` awaits is safe. The reason is recorded so
-    /// `terminal_result()` can exit non-zero: an orchestrator must be able to
-    /// tell a timed-out bootstrap apart from a successful one.
+    /// Shut the server down without a session transition. The reason is recorded
+    /// so `terminal_result()` exits non-zero on a timed-out bootstrap.
     pub(super) fn initiate_shutdown(&self, reason: &'static str) {
         *lock_unpoisoned(&self.shutdown_reason) = Some(reason);
         self.shutdown.notify_one();
     }
 
-    /// `initiate_shutdown` variant for the idle reaper's pre-session branch:
-    /// the no-session check and the shutdown fire atomically under the same
-    /// lock so a session created between the reaper's check and the shutdown
-    /// is not silently dropped. Returns false when a session already exists.
+    /// `initiate_shutdown` for the idle reaper: the no-session check and the
+    /// shutdown fire under one lock so a session created in between is not
+    /// silently dropped. Returns false when a session already exists.
     pub(super) fn shutdown_if_no_session(&self, reason: &'static str) -> bool {
         let active = lock_unpoisoned(&self.active);
         if active.is_some() {
@@ -177,10 +158,8 @@ impl HostedInitManager {
     }
 }
 
-/// One client answer: the answer value plus the optional `deferred` sibling
-/// flag from the input frame. The flag is meaningful only to a confirm prompt
-/// whose caller distinguishes a decline from a backend-run-it-later answer;
-/// every other prompt ignores it.
+/// One client answer: the value plus the `deferred` sibling flag, which only a
+/// confirm prompt distinguishing decline from run-it-later reads.
 #[derive(Debug, Clone)]
 pub(super) struct HostedAnswer {
     pub(super) value: Value,
@@ -205,10 +184,6 @@ pub(super) struct HostedInitSession {
     shutdown: Arc<Notify>,
     activity: Mutex<tokio::time::Instant>,
     connected_ws: std::sync::atomic::AtomicUsize,
-    /// The start request's declaration that a custom provider's credential will
-    /// arrive out-of-band after init. Read by the prompt driver so the wizard's
-    /// secret-collection step defers a missing custom-provider ref rather than
-    /// failing. Fixed for the session's lifetime.
     defer_provider_credentials: bool,
 }
 
@@ -218,19 +193,11 @@ pub(super) struct SessionInner {
     history: Vec<Value>,
     pub(super) pending_input: Option<PublicInputRequest>,
     pending_response: Option<(String, HostedAnswer)>,
-    /// The last step a `step_started`/`step_finished` signal named, kept only
-    /// so a failure that parks the session can badge the step's category. The
-    /// client folds `current_step` for itself from the signal stream; this copy
-    /// is not put on the wire.
     current_step: Option<&'static str>,
-    /// Whether `current_step` is still running. A failure surfacing between
-    /// steps belongs to no lane, so it must not emit a `category_failed` signal
-    /// for the settled category the previous step left behind.
+    /// Whether `current_step` is still running. A failure between steps belongs
+    /// to no lane and must not badge the category the last step settled.
     step_in_flight: bool,
-    /// Every `signal` event emitted so far, in order, for the `hello`/status
-    /// replay. Bounded by init's structure (a fixed set of steps and
-    /// categories), not by client activity, so it is never evicted the way the
-    /// mixed `history` is.
+    /// Every `signal` event so far, in order, for the `hello`/status replay.
     signal_log: Vec<Value>,
     result_json: Option<String>,
     error: Option<PublicError>,
@@ -283,8 +250,7 @@ impl HostedInitSession {
     }
 
     /// Whether the start request declared that provider credentials arrive
-    /// out-of-band after init. The prompt driver surfaces this to the wizard's
-    /// secret-collection step.
+    /// out-of-band after init.
     pub(super) fn defer_provider_credentials(&self) -> bool {
         self.defer_provider_credentials
     }
@@ -293,9 +259,8 @@ impl HostedInitSession {
         let inner = lock_unpoisoned(&self.inner);
         match inner.status.as_str() {
             "running" | "waiting_for_input" | "completed_awaiting_ack" => true,
-            // A parked failure keeps the session (and its WebSocket) alive so
-            // the backend can replay and acknowledge the typed error,
-            // symmetric with `completed_awaiting_ack`.
+            // A parked failure keeps the session alive so the backend can replay
+            // and acknowledge the typed error.
             "errored" => !inner.error_acked,
             _ => false,
         }
@@ -317,8 +282,7 @@ impl HostedInitSession {
 
     pub(super) fn ws_disconnected(&self) {
         // `fetch_update` only errs when the counter was already 0, which the
-        // ConnectionGuard pairing makes unreachable; the count stays correct
-        // either way.
+        // ConnectionGuard pairing makes unreachable.
         self.connected_ws
             .fetch_update(
                 std::sync::atomic::Ordering::Relaxed,
@@ -326,9 +290,8 @@ impl HostedInitSession {
                 |count| count.checked_sub(1),
             )
             .ok();
-        // The idle clock starts at disconnect: a listen-only backend whose
-        // socket drops mid-init gets the full idle timeout to reconnect and
-        // replay/ack the result before the reaper may expire the session.
+        // The idle clock starts at disconnect, giving a dropped backend the full
+        // idle timeout to reconnect and ack before the reaper expires it.
         self.touch();
     }
 
@@ -341,8 +304,6 @@ impl HostedInitSession {
         InitStatusResponse {
             session_id: self.id.clone(),
             status: inner.status.clone(),
-            // The raw signal stream a REST poller folds itself, identical to
-            // what `hello` carries.
             signals: inner.signal_log.clone(),
             last_seq: inner.next_seq,
             pending_input: inner.pending_input.clone(),
@@ -355,8 +316,6 @@ impl HostedInitSession {
 
     pub(super) fn hello_frame(&self) -> String {
         let snapshot = self.status_snapshot();
-        // `error` rides along so a backend that reconnects after its socket
-        // dropped mid-failure learns the typed error from the hello alone.
         frame_json(ServerFrame::Hello {
             session_id: &self.id,
             status: &snapshot.status,
@@ -380,12 +339,9 @@ impl HostedInitSession {
     pub(super) fn push_event(&self, event: ServerEvent) {
         let frame = {
             let mut inner = lock_unpoisoned(&self.inner);
-            // Symmetric with `apply_state_signal`: once the session is terminal
-            // the client has treated the terminal frame as the last word. This
-            // method (progress only) had no such barrier, so a wizard thread
-            // still running after a cancel/expire kept streaming progress while
-            // every signal was frozen — the exact "a progress line arrived, then
-            // nothing" asymmetry that misdirected the hosted-init crash triage.
+            // Once terminal, the client has treated the terminal frame as the
+            // last word; a wizard thread still running after cancel/expire must
+            // not keep streaming progress past it.
             if is_terminal_status(&inner.status) {
                 return;
             }
@@ -394,10 +350,8 @@ impl HostedInitSession {
         let _ = self.events.send(frame.to_string());
     }
 
-    /// Record a typed event, absorbing the single failure mode a frame has.
-    /// A payload that will not encode parks the session as errored through the
-    /// normal error path: the transition it described is lost, so continuing
-    /// would leave a client's fold permanently behind the wizard.
+    /// Record a typed event; a payload that will not encode parks the session as
+    /// errored rather than leaving a client's fold behind the wizard.
     pub(super) fn emit_event_locked(&self, inner: &mut SessionInner, event: ServerEvent) -> Value {
         let event_type = event.type_str();
         match event.payload() {
@@ -408,10 +362,8 @@ impl HostedInitSession {
                     error = %error,
                     "hosted init event payload could not be encoded; parking the session as errored"
                 );
-                // Record the error directly rather than through
-                // `set_error_locked`: the encode-failure park wants nothing but
-                // the error frame, not the step-finish signal set_error would
-                // emit for a lane's blame.
+                // Bypasses `set_error_locked`: the encode-failure park wants the
+                // error frame alone, not a step-finish signal.
                 self.record_error_locked(
                     inner,
                     FRAME_ENCODE_FAILED_CODE,
@@ -422,25 +374,20 @@ impl HostedInitSession {
     }
 
     /// Record a `signal` event and keep a copy for the hello/status replay.
-    /// Every signal is a distinct fact, so there is no dedup: the client folds
-    /// the stream, and a fact the fold ends up ignoring (an outranked verdict)
-    /// still belongs on the wire so a late joiner reconstructs the same view.
+    /// Deliberately undeduped so a late joiner folds the identical stream.
     fn emit_signal_locked(&self, inner: &mut SessionInner, payload: Map<String, Value>) -> Value {
         let frame = self.emit_event_locked(inner, ServerEvent::Signal(payload));
         inner.signal_log.push(frame.clone());
         frame
     }
 
-    /// Publish one raw init state signal. Called from the wizard thread via the
-    /// hosted prompt driver; the instance no longer folds a category view, it
-    /// just forwards the fact and lets the client fold it.
+    /// Forward one raw init state signal; the client folds the category view.
     pub(super) fn apply_state_signal(&self, signal: InitStateSignal) {
         let frame = {
             let mut inner = lock_unpoisoned(&self.inner);
-            // The frontier freezes with the session. A cancel while a prompt is
-            // pending unwinds the wizard thread, which keeps emitting signals on
-            // the way out; forwarding them would extend the stream past the
-            // terminal frame the client already treated as the last word.
+            // A cancel unwinds the wizard thread, which keeps emitting signals on
+            // the way out; those must not extend the stream past the terminal
+            // frame.
             if is_terminal_status(&inner.status) {
                 return;
             }
@@ -479,9 +426,6 @@ impl HostedInitSession {
             inner.status = "waiting_for_input".to_owned();
             inner.pending_response = None;
             inner.pending_input = Some(public.clone());
-            // The prompt is the whole signal that a category is awaiting input:
-            // the client derives `awaiting_input` from `pending_input.kind`, so
-            // no separate state frame announces it.
             self.emit_event_locked(
                 &mut inner,
                 ServerEvent::InputRequired {
@@ -500,9 +444,6 @@ impl HostedInitSession {
                 {
                     inner.status = "running".to_owned();
                     inner.pending_input = None;
-                    // The answer itself settles nothing: settlement comes from
-                    // the config-write sites, which know what was actually
-                    // written and never carry a secret value.
                     break answer;
                 }
                 inner = self
@@ -514,8 +455,6 @@ impl HostedInitSession {
         Ok(Some(answer))
     }
 
-    /// Answer shorthand for tests that do not exercise the `deferred` sibling.
-    /// The wire path always goes through `submit_answer`.
     #[cfg(test)]
     pub(super) fn submit_input(
         &self,
@@ -558,21 +497,16 @@ impl HostedInitSession {
         let mut result_json = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_owned());
         {
             let mut inner = lock_unpoisoned(&self.inner);
-            // Refuse any terminal status, not just cancelled/closed. An already
-            // `errored` session has emitted its terminal `error` frame; letting a
-            // late failed handoff (from `KeyHandover`'s drop) overwrite it to
-            // `completed_awaiting_ack` would publish `result_ready` after the
-            // error frame and flip `terminal_result` from Err to Ok — a failed
-            // bootstrap exiting zero. The spec'd failed result still fires on a
-            // NON-terminal (`running`) session, so this only blocks the reorder.
+            // Refuse ANY terminal status, not just cancelled/closed: letting a
+            // late failed handoff overwrite an `errored` session would publish
+            // `result_ready` after the error frame and flip `terminal_result`
+            // from Err to Ok, exiting zero on a failed bootstrap.
             if is_terminal_status(&inner.status) {
                 result_json.zeroize();
                 return;
             }
             inner.status = "completed_awaiting_ack".to_owned();
             inner.result_json = Some(result_json);
-            // Clear the prompt slot so a client stops deriving its category as
-            // `awaiting_input` once the result is ready.
             inner.pending_input = None;
             let frame = self.emit_event_locked(&mut inner, ServerEvent::ResultReady);
             drop(inner);
@@ -586,9 +520,8 @@ impl HostedInitSession {
 
     pub(super) fn result_frame(&self) -> Option<String> {
         let inner = lock_unpoisoned(&self.inner);
-        // The borrow lives entirely inside the guard: the frame points
-        // straight at the stored result, so the plaintext handoff is never
-        // copied into an intermediate buffer just to be serialized.
+        // Borrowed under the guard so the plaintext handoff is never copied into
+        // an intermediate buffer.
         let result = inner.result_json.as_ref()?;
         match ResultFrame::new(&self.id, result).and_then(|frame| frame.to_json()) {
             Ok(frame) => Some(frame),
@@ -626,11 +559,8 @@ impl HostedInitSession {
     pub(super) fn cancel(&self, reason: &str) {
         let Some(frame) = ({
             let mut inner = lock_unpoisoned(&self.inner);
-            // `errored` is excluded like `completed_awaiting_ack`: a cancel
-            // racing a parked failure must not overwrite the typed error the
-            // backend is entitled to (`terminal_result` would report a
-            // generic cancellation). The backend releases a parked failure
-            // with `ack_error`; only the internal reapers may expire it.
+            // A cancel racing a parked failure must not overwrite the typed
+            // error; the backend releases one with `ack_error` instead.
             if is_terminal_status(&inner.status) {
                 return;
             }
@@ -651,10 +581,8 @@ impl HostedInitSession {
         self.shutdown.notify_one();
     }
 
-    /// Force the session terminal on behalf of the internal lifetime
-    /// reapers. Unlike backend-driven `cancel`, this also fires from
-    /// `completed_awaiting_ack`: an abandoned session holding an un-acked
-    /// result must not pin the server forever. The un-acked result carries
+    /// Force the session terminal for the lifetime reapers. Unlike `cancel` this
+    /// also fires from `completed_awaiting_ack`; the un-acked result carries
     /// plaintext handoff keys, so it is zeroized before the session closes.
     pub(super) fn expire(&self, reason: &str) {
         let Some(frame) = ({
@@ -663,11 +591,9 @@ impl HostedInitSession {
                 return;
             }
             if inner.status == "errored" {
-                // A parked failure the backend never acknowledged: mark it
-                // acked and fire shutdown while KEEPING status `errored`, so
-                // `terminal_result` reports the typed failure instead of a
-                // generic cancellation. Without this branch the reaper would
-                // stop without ever releasing the terminal waiter.
+                // Mark acked and fire shutdown while KEEPING status `errored`, so
+                // `terminal_result` reports the typed failure rather than a
+                // generic cancellation.
                 if inner.error_acked {
                     return;
                 }
@@ -704,11 +630,9 @@ impl HostedInitSession {
         self.shutdown.notify_one();
     }
 
-    /// Record a failure and park the session. Unlike `cancel`/`expire`, this
-    /// does NOT notify shutdown: the broadcast `error` frame may have zero
-    /// receivers (dropped socket, REST-polling backend), so the server stays
-    /// up in `errored` until `ack_error`, cancel, or the error-ack grace
-    /// reaper — symmetric with how `set_result` waits for `ack_result`.
+    /// Record a failure and park the session. Deliberately does NOT notify
+    /// shutdown: the `error` frame may have zero receivers, so the server stays
+    /// up until `ack_error`, cancel, or the error-ack grace reaper.
     pub(super) fn set_error(&self, code: &str, message: String) {
         let frames = {
             let mut inner = lock_unpoisoned(&self.inner);
@@ -719,10 +643,8 @@ impl HostedInitSession {
         }
     }
 
-    /// Lock-held `set_error`. Returns the frames to broadcast in order: the
-    /// step-finish signal badging the running step's lane first (when one is in
-    /// flight), then the terminal `error` frame, which is the last thing a
-    /// client should see for this transition.
+    /// Lock-held `set_error`. Returns frames in broadcast order: the running
+    /// step's finish signal first, then the terminal `error` frame last.
     pub(super) fn set_error_locked(
         &self,
         inner: &mut SessionInner,
@@ -730,21 +652,14 @@ impl HostedInitSession {
         message: String,
     ) -> Vec<Value> {
         if is_terminal_status(&inner.status) {
-            // A session already parked on a typed failure keeps the first
-            // error: it is the one that explains what actually broke, and
-            // whatever the wizard thread propagated afterwards is downstream
-            // of it.
+            // Keep the first error; later ones are downstream of it.
             return Vec::new();
         }
         let mut frames = Vec::new();
         if let Some(step) = inner.current_step.filter(|_| inner.step_in_flight) {
-            // Finish the running step with this error rather than emitting a bare
-            // `category_failed`: a client folds it through the same `step_finished`
-            // path a normally-failing step takes, so the fold applies the identical
-            // don't-double-blame and don't-badge-an-absent-lane guards. A
-            // between-steps failure (no live step) emits nothing. In production the
-            // step's own `step_finished` has already fired by the time a run errors
-            // out, so this only fires if a future caller parks a session mid-step.
+            // Finish the running step rather than emitting a bare
+            // `category_failed`, so the client's fold applies the same
+            // don't-double-blame guards a normally-failing step gets.
             let payload = InitStateSignal::StepFinished {
                 kind: step,
                 disposition: StepDisposition::Executed,
@@ -758,10 +673,8 @@ impl HostedInitSession {
         frames
     }
 
-    /// Park the session on a failure and record the `error` event. Split out so
-    /// the frame-encode path can park without emitting the step-finish signal
-    /// set_error would, and always records the event: a session that was already
-    /// terminal still owes the client a contiguous history.
+    /// Park the session on a failure and record the `error` event. Records the
+    /// event even when already terminal: the client is owed a contiguous history.
     fn record_error_locked(&self, inner: &mut SessionInner, code: &str, message: String) -> Value {
         if !is_terminal_status(&inner.status) {
             inner.status = "errored".to_owned();
@@ -772,9 +685,8 @@ impl HostedInitSession {
                 message: message.clone(),
             });
         }
-        // Routing back through `emit_event_locked` cannot re-enter this
-        // function: `ServerEvent::Error` builds its payload with the
-        // infallible `error_payload`, so the encode arm is unreachable for it.
+        // Cannot re-enter through `emit_event_locked`: `ServerEvent::Error` has
+        // an infallible payload, so that function's encode arm is unreachable.
         let frame = self.emit_event_locked(
             inner,
             ServerEvent::Error {
@@ -783,8 +695,7 @@ impl HostedInitSession {
             },
         );
         // Fired under the lock so no failure path can park the session without
-        // releasing a wizard thread blocked in `request_input`; the waiter
-        // wakes once this caller drops the guard.
+        // releasing a wizard thread blocked in `request_input`.
         self.input_ready.notify_all();
         frame
     }
@@ -805,9 +716,6 @@ impl HostedInitSession {
         let frame = {
             let mut inner = lock_unpoisoned(&self.inner);
             if inner.status == "errored" && inner.error_acked {
-                // Lost the race to the grace reaper (or a duplicate ack);
-                // the end state is what the backend wanted, so say so
-                // instead of implying no error ever existed.
                 return Err("init error was already acknowledged or expired".to_owned());
             }
             if inner.status != "errored" {
@@ -835,9 +743,8 @@ impl HostedInitSession {
     }
 }
 
-/// The statuses after which nothing new may be said about the run's shape. The
-/// terminal frame is the last word a client gets, so signal emission stops here
-/// and the step tracking stops moving.
+/// Statuses after which nothing new may be said about the run: signal emission
+/// and step tracking both stop here.
 fn is_terminal_status(status: &str) -> bool {
     matches!(
         status,
@@ -845,9 +752,8 @@ fn is_terminal_status(status: &str) -> bool {
     )
 }
 
-/// The statuses a wizard thread waiting on a prompt must give up on. `errored`
-/// is one of them: a session parked by a frame-encode failure has to release
-/// the thread, since no client will be asked to answer anything again.
+/// Statuses a wizard thread waiting on a prompt must give up on, `errored`
+/// included: no client will be asked to answer anything again.
 fn terminal_status_error(inner: &SessionInner) -> Result<()> {
     match inner.status.as_str() {
         "cancelled" | "closed" => Err(StackError::InvalidParam {
@@ -865,12 +771,10 @@ fn terminal_status_error(inner: &SessionInner) -> Result<()> {
     }
 }
 
-/// Track the running step so a failure that parks the session can badge the
-/// step's lane. This is the only session state a signal still moves: the
-/// category view itself is folded by the client from the forwarded stream.
-/// `current_step` is left in place after a step finishes so the attribution
-/// guard can tell a mid-step failure from a between-steps one via
-/// `step_in_flight`.
+/// Track the running step so a failure that parks the session can badge its
+/// lane. `current_step` deliberately survives a step's finish so
+/// `step_in_flight` alone distinguishes a mid-step failure from a between-steps
+/// one.
 fn track_step(inner: &mut SessionInner, signal: &InitStateSignal) {
     match signal {
         InitStateSignal::StepStarted { kind } => {

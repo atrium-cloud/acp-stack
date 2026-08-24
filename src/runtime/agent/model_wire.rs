@@ -1,9 +1,5 @@
 //! Per-model wire-shape mapping for providers whose model listings carry no
-//! wire metadata (see `data/endpoints.toml`'s header for provenance and the
-//! refresh ritual).
-//!
-//! The mapping is embedded data, not Rust control flow, mirroring
-//! `provider_keys`: runtime code only parses, validates, and queries it.
+//! wire metadata; the mapping is embedded data, never Rust control flow.
 
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
@@ -42,9 +38,8 @@ struct ProviderWireTable {
 
 #[derive(Debug, Deserialize)]
 struct RawProviderWireTable {
-    // Parsed (and thereby validated as a known wire) but not stored: the
-    // provisioning fallback lives in providers.toml, so keeping a second copy
-    // here would invite drift.
+    // Parsed to validate it names a known wire, but never stored: the
+    // provisioning fallback lives in providers.toml and must stay single-copy.
     #[allow(dead_code)]
     default: ModelWire,
     #[serde(default)]
@@ -96,9 +91,8 @@ impl ModelWireMapping {
         Ok(Self { providers })
     }
 
-    /// The wire `model_id` speaks on `provider_id`. `None` means "no entry"
-    /// — an unlisted model, or a provider with no table at all — so the
-    /// caller falls back to the provider-level default.
+    /// The wire `model_id` speaks on `provider_id`; `None` means no entry, so
+    /// the caller falls back to the provider-level default.
     pub fn model_wire(&self, provider_id: &str, model_id: &str) -> Option<ModelWire> {
         self.providers
             .get(provider_id)?
@@ -146,8 +140,7 @@ mod tests {
             model_wire("opencode-go", "grok-4.5"),
             Some(ModelWire::Responses)
         );
-        // Unlisted models (the default wire needs no entry) and unknown
-        // providers both resolve to None so the caller falls back.
+        // Unlisted models and unknown providers both resolve to None.
         assert_eq!(model_wire("opencode", "glm-5.2"), None);
         assert_eq!(model_wire("opencode", "brand-new-model"), None);
         assert_eq!(model_wire("openai", "gpt-5.5"), None);

@@ -7,7 +7,6 @@ use common::api::{SESSION_KEY, ServerHarness, seed_command, seed_session};
 #[tokio::test]
 async fn logs_events_returns_array_envelope() {
     let harness = ServerHarness::spawn().await;
-    // Seed an event so the array is non-empty.
     {
         let guard = harness.state.lock().await;
         guard
@@ -24,8 +23,6 @@ async fn logs_events_returns_array_envelope() {
     let body: Value = response.json().await.expect("json");
     let events = body["data"]["events"].as_array().expect("events array");
     assert!(!events.is_empty());
-    // `kind` matches the seeded value; the source column round-trips into the
-    // response envelope; the next_cursor key is always present.
     assert!(events.iter().any(|e| e["kind"] == "test.kind"));
     assert!(events.iter().any(|e| e["source"].is_string()));
     assert!(body["data"].get("next_cursor").is_some());
@@ -132,7 +129,6 @@ async fn logs_events_pagination_cursor_advances_page() {
         .expect("json");
     let second_events = second["data"]["events"].as_array().expect("events array");
     assert_eq!(second_events.len(), 2);
-    // The cursor must not echo back in the next page.
     assert!(
         second_events
             .iter()
@@ -258,7 +254,7 @@ async fn api_request_middleware_records_event_with_status_and_duration() {
         .expect("send");
     assert_eq!(response.status(), StatusCode::OK);
 
-    // Inspect SQLite directly — the writer runs inside the response future.
+    // Inspect SQLite directly: the writer runs inside the response future.
     let guard = harness.state.lock().await;
     let rows = guard
         .query_events(acp_stack::state::LogFilter {
@@ -285,8 +281,8 @@ async fn api_request_middleware_records_event_with_status_and_duration() {
 #[tokio::test]
 async fn api_request_middleware_skips_status_routes() {
     let harness = ServerHarness::spawn().await;
-    // Hit /v1/status repeatedly; the skip list must keep `api.request` rows
-    // out of SQLite for this path so polling clients don't bloat the table.
+    // The skip list must keep `api.request` rows out of SQLite for this path so
+    // polling clients cannot bloat the table.
     for _ in 0..3 {
         let _ = reqwest::Client::new()
             .get(format!("{}/v1/status", harness.base_url))
@@ -614,9 +610,8 @@ async fn logs_security_legacy_after_still_pages_when_specific_cursor_absent() {
 
 #[tokio::test]
 async fn logs_events_limit_is_capped() {
-    // Seed 1500 events; even with `limit=10000`, the handler must cap rows
-    // at MAX_LOGS_LIMIT (1000) so an authenticated session cannot ask sqlite
-    // for billions of rows.
+    // Even with `limit=10000` the handler must cap at MAX_LOGS_LIMIT (1000) so
+    // an authenticated session cannot ask sqlite for unbounded rows.
     let harness = ServerHarness::spawn().await;
     {
         let guard = harness.state.lock().await;

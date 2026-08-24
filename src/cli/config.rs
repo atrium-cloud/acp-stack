@@ -148,10 +148,8 @@ fn run_config_import(args: ConfigImportArgs, output: OutputFormat) -> Result<()>
     };
 
     let mut payload = load_config_import_payload(source)?;
-    // An imported kilo config that omits the KILO_API_KEY declaration would
-    // spawn the harness without a variable it requires even with a non-Kilo
-    // provider; seed the declaration like init does so the written config is
-    // self-sufficient. In-memory only — a dry run still writes nothing.
+    // Kilo requires KILO_API_KEY present even with a non-Kilo provider, so seed
+    // the declaration as init does. In-memory only: a dry run still writes nothing.
     if crate::cli::agent::seed_kilo_mapped_key_env_declaration(&mut payload.config.agent) {
         let canonical = payload.config.to_canonical_toml()?;
         payload.config = config::load_config_from_str(&canonical)?;
@@ -187,8 +185,8 @@ fn run_config_import(args: ConfigImportArgs, output: OutputFormat) -> Result<()>
                 path: target.clone(),
             });
         }
-        // This is only needed to find a running daemon for best-effort runtime
-        // notification. A broken existing file must not block a forced import.
+        // Only needed to locate a running daemon; a broken existing file must
+        // not block a forced import.
         Config::load_from_path(&target).ok()
     } else {
         None
@@ -241,14 +239,9 @@ fn run_config_import(args: ConfigImportArgs, output: OutputFormat) -> Result<()>
         }
     }
 
-    // Fill the seeded key's value so the imported config works without a
-    // separate `secrets set`: Kilo requires the variable present even with a
-    // non-Kilo provider and accepts it empty. Opening the store is
-    // best-effort — a machine whose secret store is not openable here (e.g.
-    // init has not run yet) records the placeholder during init's secrets
-    // phase instead — but once the store is open, a recording failure
-    // surfaces: the placeholder is the whole point of the import for kilo,
-    // and a silently missing one would stall the harness later.
+    // Opening the store is best-effort (init may not have run yet, which
+    // records the placeholder in its own secrets phase), but once open a
+    // recording failure must surface: a missing placeholder stalls the harness.
     if let Ok(mut store) = SecretStore::open(&home_dir()?) {
         for placeholder in crate::cli::agent::record_empty_key_placeholders_for_provider_native_env(
             &mut store,

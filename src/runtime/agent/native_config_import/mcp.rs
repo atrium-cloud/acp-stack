@@ -39,10 +39,8 @@ fn goose_extension_server(
     if object.get("enabled").and_then(JsonValue::as_bool) == Some(false) {
         return Err(BlockedReason::McpUnmappable);
     }
-    // Goose tags each extension with a `type`. Only `stdio` and the remote
-    // `streamable_http`/`sse` transports have anything acps can launch; the
-    // rest (`builtin`, `platform`, `frontend`, `inline_python`) run inside the
-    // Goose process, so there is no external server to import.
+    // Only `stdio` and the remote transports have an external server to import;
+    // the rest run inside the Goose process.
     let extension_type = object
         .get("type")
         .and_then(JsonValue::as_str)
@@ -67,11 +65,9 @@ fn goose_stdio_extension(
         Some(value) => json_string_array(value).ok_or(BlockedReason::McpUnmappable)?,
         None => Vec::new(),
     };
-    // `envs` is a literal `KEY: value` map. acps stdio `env` entries are
-    // secret-store reference NAMES, so a literal env table cannot be
-    // represented; classify by key name so a credential-bearing table surfaces
-    // as credentials rather than a generic mapping failure. An empty `envs`
-    // carries nothing and does not block.
+    // acps stdio `env` entries are secret-store reference NAMES, so a literal
+    // env table cannot be represented; classify by key name so a
+    // credential-bearing table surfaces as credentials, not a mapping failure.
     if let Some(envs) = object.get("envs") {
         let envs = envs.as_object().ok_or(BlockedReason::McpUnmappable)?;
         if !envs.is_empty() {
@@ -81,18 +77,15 @@ fn goose_stdio_extension(
             return Err(BlockedReason::McpUnmappable);
         }
     }
-    // `env_keys` forwards variable NAMES resolved from the Goose keyring/secrets
-    // store at launch — the same shape as Codex `env_vars`. acps satisfies those
-    // names from its own secret store at session attach.
+    // `env_keys` forwards variable NAMES, not values; acps satisfies them from
+    // its own secret store at session attach.
     let env = match object.get("env_keys") {
         Some(value) => json_string_array(value).ok_or(BlockedReason::McpUnmappable)?,
         None => Vec::new(),
     };
-    // `cwd` changes what `cmd` resolves against and acps cannot express it, so
-    // dropping it would corrupt the server. `available_tools` is a tool filter:
-    // dropping it would silently re-enable tools the user turned off. Both stay
-    // outside the allowlist so such servers keep blocking. `timeout`/`bundled`/
-    // `description`/`name`/`display_name` are launch metadata acps ignores.
+    // `cwd` and `available_tools` stay OUT of this allowlist deliberately:
+    // dropping `cwd` corrupts command resolution, and dropping the tool filter
+    // would silently re-enable tools the user turned off.
     let allowed: BTreeSet<&str> = [
         "type",
         "name",
@@ -126,9 +119,8 @@ fn goose_remote_extension(
     name: &str,
     object: &JsonMap<String, JsonValue>,
 ) -> std::result::Result<McpServerConfig, BlockedReason> {
-    // A literal `headers` table carries auth material acps http servers express
-    // only as secret-store references, so any headers block (credentials when a
-    // header key is sensitive, otherwise an unmappable literal table).
+    // A literal `headers` table carries auth material acps expresses only as
+    // secret-store references, so any non-empty headers table blocks.
     if let Some(headers) = object.get("headers") {
         let headers = headers.as_object().ok_or(BlockedReason::McpUnmappable)?;
         if !headers.is_empty() {
@@ -141,8 +133,7 @@ fn goose_remote_extension(
             return Err(BlockedReason::McpUnmappable);
         }
     }
-    // Same literal-`envs` reasoning as the stdio path: acps cannot carry a
-    // literal env table on an http server, so a non-empty one blocks.
+    // Same literal-`envs` reasoning as the stdio path.
     if let Some(envs) = object.get("envs") {
         let envs = envs.as_object().ok_or(BlockedReason::McpUnmappable)?;
         if !envs.is_empty() {
@@ -156,10 +147,8 @@ fn goose_remote_extension(
         .get("uri")
         .and_then(JsonValue::as_str)
         .ok_or(BlockedReason::McpUnmappable)?;
-    // `socket` re-points the transport at a Unix domain socket acps http
-    // servers cannot express; `env_keys` names launch-time secrets an http
-    // server has no field for. Both stay outside the allowlist so such servers
-    // keep blocking.
+    // `socket` and `env_keys` stay OUT of this allowlist: neither is
+    // expressible on an acps http server, so such servers must keep blocking.
     let allowed: BTreeSet<&str> = [
         "type",
         "name",
@@ -236,12 +225,9 @@ fn json_mcp_server(
     if object.get("enabled").and_then(JsonValue::as_bool) == Some(false) {
         return Err(BlockedReason::McpUnmappable);
     }
-    // Amp remote servers may carry a literal `headers` object. acps http
-    // `headers` value positions are secret-store indirections (whole-value
-    // `value_ref` or a `${NAME}` template that must contain at least one
-    // ref), so a literal header table still cannot be represented; classify
-    // by key name so a credential-bearing table surfaces as credentials
-    // rather than a generic mapping failure.
+    // acps http header values are secret-store indirections, so Amp's literal
+    // header table cannot be represented; classify by key name so a
+    // credential-bearing table surfaces as credentials, not a mapping failure.
     if matches!(dialect, JsonMcpDialect::Amp)
         && let Some(headers) = object.get("headers")
     {
@@ -296,11 +282,7 @@ fn json_mcp_server(
         }
         _ => return Err(BlockedReason::McpUnmappable),
     };
-    // Amp stdio servers carry a literal `env` object of KEY=value
-    // pairs. acps stdio `env` entries are secret-store reference NAMES, so a
-    // literal env table cannot be represented; classify by key name so a
-    // credential-bearing table surfaces as credentials rather than a generic
-    // mapping failure.
+    // Same literal-`env` reasoning as the Goose stdio path.
     if matches!(dialect, JsonMcpDialect::Amp)
         && let Some(env) = object.get("env")
     {
@@ -313,8 +295,8 @@ fn json_mcp_server(
     let allowed: BTreeSet<&str> = match dialect {
         JsonMcpDialect::Claude => ["command", "args", "type"].into_iter().collect(),
         JsonMcpDialect::OpenCode => ["command", "type", "enabled"].into_iter().collect(),
-        // Amp's `includeTools` carries semantics acps cannot express, so it
-        // stays outside the allowlist and blocks.
+        // `includeTools` stays out: dropping a tool filter would silently
+        // re-enable tools the user turned off.
         JsonMcpDialect::Amp => ["command", "args", "type"].into_iter().collect(),
     };
     if object.keys().any(|key| !allowed.contains(key.as_str())) {
@@ -369,9 +351,8 @@ pub(super) fn toml_mcp_server(
         return Err(BlockedReason::McpUnmappable);
     }
     if let Some(url) = table.get("url").and_then(TomlValue::as_str) {
-        // Timeouts and `required` are launch tuning with Codex-side defaults;
-        // auth material (`bearer_token_env_var`, `http_headers`, …) stays
-        // outside the allowlist so those servers keep blocking.
+        // Auth material (`bearer_token_env_var`, `http_headers`, …) stays out
+        // of this allowlist so those servers keep blocking.
         let allowed: BTreeSet<&str> = [
             "url",
             "enabled",
@@ -404,11 +385,7 @@ pub(super) fn toml_mcp_server(
         Some(value) => toml_string_array(value).ok_or(BlockedReason::McpUnmappable)?,
         None => Vec::new(),
     };
-    // Codex `env` is an inline table of literal KEY=value pairs. The acps MCP
-    // schema has no literal-env representation (stdio `env` entries are
-    // secret-store references), so a server carrying one cannot be imported;
-    // classify by key name so credential-bearing tables surface as
-    // credentials instead of a generic mapping failure.
+    // Same literal-`env` reasoning as the other dialects.
     if let Some(env) = table.get("env") {
         let env = env.as_table().ok_or(BlockedReason::McpUnmappable)?;
         if env.keys().any(|key| sensitive_field_reason(key).is_some()) {
@@ -416,25 +393,18 @@ pub(super) fn toml_mcp_server(
         }
         return Err(BlockedReason::McpUnmappable);
     }
-    // Codex `cwd` changes what the launched command resolves against, and the
-    // acps MCP schema cannot express it, so dropping it would corrupt the
-    // server rather than degrade it.
+    // Dropping `cwd` would corrupt command resolution rather than degrade it.
     if table.get("cwd").is_some() {
         return Err(BlockedReason::McpUnmappable);
     }
-    // Codex `env_vars` forwards variable NAMES from the launching
-    // environment, either as strings or `{ name, source? }` objects. acps
-    // satisfies those names from the secret store at session attach.
+    // `env_vars` forwards variable NAMES, not values, as strings or
+    // `{ name, source? }` objects.
     let env = match table.get("env_vars") {
         Some(value) => toml_env_var_names(value).ok_or(BlockedReason::McpUnmappable)?,
         None => Vec::new(),
     };
-    // Startup/tool timeouts and `required` are launch tuning with Codex-side
-    // defaults; acps cannot express them and the server behaves identically
-    // apart from timeout margins and Codex's own startup strictness, so they
-    // are accepted and dropped. `enabled_tools`/`disabled_tools` stay outside
-    // the allowlist: dropping a tool filter would silently re-enable tools
-    // the user turned off.
+    // `enabled_tools`/`disabled_tools` stay OUT of this allowlist: dropping a
+    // tool filter would silently re-enable tools the user turned off.
     let allowed: BTreeSet<&str> = [
         "command",
         "args",
@@ -511,10 +481,8 @@ pub(super) fn mcp_http_url_is_credential_free(value: &str) -> bool {
     })
 }
 
-/// Tokens embedded as URL path segments (`https://host/mcp/sk-…`) carry no
-/// field name to classify, so match the widely used key prefixes instead.
-/// The length floor keeps ordinary words that share a prefix (for example
-/// `sk-learn`) out of the match.
+/// Tokens embedded as URL path segments carry no field name to classify, so
+/// match key prefixes; the length floor excludes words like `sk-learn`.
 pub(super) fn path_segment_looks_like_credential(segment: &str) -> bool {
     let lowered = segment.to_ascii_lowercase();
     CREDENTIAL_PATH_SEGMENT_PREFIXES
@@ -540,8 +508,7 @@ pub(super) fn command_args_contain_literal_credentials(args: &[String]) -> bool 
     })
 }
 
-/// Header-style credentials arrive as values rather than flag names
-/// (`-H "Authorization: Bearer …"`, `--header "x-api-key: …"`), so the
+/// Header-style credentials arrive as values rather than flag names, so the
 /// name-based flag scan alone misses them.
 pub(super) fn argument_carries_header_credential(argument: &str) -> bool {
     if argument
@@ -743,10 +710,8 @@ impl InspectionBuilder {
     }
 
     pub(super) fn finish_yaml(mut self, residual: Vec<u8>) -> Result<InspectedNativeConfig> {
-        // Paths are collected from the JSON projection of the residual so the
-        // dotted-path shape matches the JSON harnesses. The residual is stored
-        // as YAML, so re-parse it through the same non-string-key guard used on
-        // input before projecting.
+        // Projected through JSON so the dotted-path shape matches the JSON
+        // harnesses; re-parsed via the same non-string-key guard used on input.
         let text = std::str::from_utf8(&residual)
             .map_err(|_| native_error("agent.native_config_invalid"))?;
         let root = parse_goose_root(text)?;

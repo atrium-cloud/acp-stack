@@ -9,12 +9,7 @@ use crate::config::secret_template::{
 use crate::config::validate::primitives::validate_secret_ref_name_value;
 use crate::error::{Result, StackError};
 
-/// MCP HTTP URLs obey the shared endpoint rule in
-/// [`crate::config::validate::primitives::check_endpoint_url`], with
-/// MCP-specific wording. Query strings and fragments stay legal here: an MCP
-/// endpoint is a full request URL, not an API base. Shared by config
-/// validation and the init declaration paths so a hand-edited config and an
-/// init flag obey the same rule.
+/// The shared endpoint rule with MCP-specific wording. Query strings and fragments stay legal because an MCP endpoint is a full request URL, not an API base.
 pub(crate) fn validate_mcp_http_url(field: &'static str, name: &str, url: &str) -> Result<()> {
     use crate::config::{EndpointUrlProblem, check_endpoint_url};
 
@@ -58,7 +53,6 @@ pub(crate) fn validate_mcp(mcp: &McpConfig) -> Result<()> {
 }
 
 /// Every per-server rule a declaration must pass, including the name check.
-/// Shared by the daemon-startup partition below.
 fn validate_server(server: &McpServerConfig) -> Result<()> {
     let name = server.name();
     if name.trim().is_empty() {
@@ -107,11 +101,7 @@ fn validate_server_shape(server: &McpServerConfig) -> Result<()> {
     Ok(())
 }
 
-/// Per-server looks-like-a-secret screening, mirroring the config-wide sweep
-/// in `validate_secret_refs_not_looking_like_values`. Shared by that sweep
-/// and the daemon-startup partition below: screening must run before any
-/// name-shape validation so a screening rejection redacts the offending value
-/// while a shape rejection echoes it.
+/// Per-server looks-like-a-secret screening. Callers MUST run this before any name-shape validation: a screening rejection redacts the offending value while a shape rejection echoes it.
 pub(crate) fn screen_server(server: &McpServerConfig) -> Result<()> {
     match server {
         McpServerConfig::Stdio(s) => {
@@ -133,16 +123,8 @@ pub(crate) fn screen_server(server: &McpServerConfig) -> Result<()> {
     Ok(())
 }
 
-/// Partition declarations into the servers that pass every per-server rule
-/// (keeping the first valid declaration of each name) and those that do not.
-/// Daemon startup uses this to degrade: one bad declaration drops just that
-/// server — the caller logs a warning per drop — instead of bricking the
-/// whole runtime. Screening runs before shape validation so a dropped
-/// declaration never echoes a pasted credential into that warning.
-/// Cross-server and cross-source rules (a whole-value ref duplicated against
-/// `agent.env`, Supabase, etc.) still fail startup: those are config-level
-/// conflicts, not one bad declaration. Candidate-config write paths keep the
-/// fail-fast [`validate_mcp`] behavior.
+/// Split declarations into those passing every per-server rule and those that do not, so daemon startup drops one bad server instead of bricking the runtime.
+/// Cross-server and cross-source conflicts still fail startup; candidate-config write paths keep the fail-fast [`validate_mcp`] behavior.
 pub(crate) fn partition_valid_servers(
     servers: Vec<McpServerConfig>,
 ) -> (Vec<McpServerConfig>, Vec<(String, String)>) {

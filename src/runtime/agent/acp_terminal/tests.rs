@@ -2,23 +2,18 @@ use super::*;
 
 #[test]
 fn keep_newest_retains_tail_at_char_boundary() {
-    // Under limit: whole string, untruncated.
     assert_eq!(keep_newest("hello", 10), ("hello", false));
     assert_eq!(keep_newest("hello", 5), ("hello", false));
-    // Over limit: newest bytes retained.
     assert_eq!(keep_newest("hello", 3), ("llo", true));
-    // Multibyte: cutoff lands mid-'é' (2 bytes) and rounds UP past it,
-    // so the result stays within the limit and on a boundary.
+    // A cutoff landing mid-char rounds UP past it, so the result stays within
+    // the limit and on a boundary.
     let (kept, truncated) = keep_newest("héllo", 4);
     assert!(truncated);
     assert_eq!(kept, "llo");
     assert!(kept.len() as u64 <= 4);
-    // 4-byte emoji: limit 6 can hold one emoji (4 bytes) but not one and
-    // a half; cutoff rounds up to the next full glyph.
     let (kept, truncated) = keep_newest("🚀🚀🚀", 6);
     assert!(truncated);
     assert_eq!(kept, "🚀");
-    // Limit 0 drops everything.
     let (kept, truncated) = keep_newest("hello", 0);
     assert_eq!(kept, "");
     assert!(truncated);
@@ -49,7 +44,6 @@ fn buffer_append_trims_to_cap_during_accumulation() {
         );
     }
     assert!(buffer.truncated);
-    // The newest chunk survived; the oldest did not.
     assert!(buffer.data.contains("chunk-099"));
     assert!(!buffer.data.contains("chunk-000"));
 }
@@ -59,9 +53,8 @@ fn terminal_environment_excludes_provider_keys() {
     let agent_env = vec![EnvVariable::new("MY_FLAG", "1")];
     let env = terminal_environment(&agent_env);
     assert_eq!(env.get("MY_FLAG").map(String::as_str), Some("1"));
-    // Only the managed baseline plus agent vars — nothing else can be
-    // present because composition starts from an empty map, never from
-    // the agent process env (which carries provider API keys).
+    // Composition starts from an empty map, never the agent process env,
+    // which carries provider API keys.
     let allowed = ["PATH", "HOME", "MY_FLAG"];
     for key in env.keys() {
         assert!(allowed.contains(&key.as_str()), "unexpected env var {key}");
@@ -103,9 +96,9 @@ async fn registered_terminal_captures_output_and_exit_code() {
     assert_eq!(status.exit_code, Some(7));
     assert_eq!(status.signal, None);
 
-    // The owner drains the pipes before publishing exit, so the full
-    // output must be visible the moment wait_for_exit resolves — no
-    // polling allowed here; that would mask a drain regression.
+    // The owner drains the pipes before publishing exit, so output must be
+    // visible the moment wait_for_exit resolves. Polling here would mask a
+    // drain regression.
     let output = handle.buffer.lock().await.data.clone();
     assert_eq!(output, "hi-from-terminal");
 
@@ -187,8 +180,8 @@ async fn create_terminal_defaults_cwd_to_session_cwd() {
             cwd: session_dir.to_string_lossy().into_owned(),
         }),
     };
-    // No cwd on the request: the handler must fall back to the session's
-    // recorded cwd, not the workspace root.
+    // No cwd on the request: the handler falls back to the session's recorded
+    // cwd, not the workspace root.
     let request = CreateTerminalRequest::new(SessionId::new("sess_agent"), "/bin/pwd");
     let response = handle_create_terminal(&context, request)
         .await
@@ -226,9 +219,8 @@ async fn create_terminal_start_failure_finalizes_command_row() {
     let db_path = state_dir.path().join("state.sqlite");
     let store = StateStore::open(db_path.clone()).expect("state open");
     store.migrate().expect("migrate");
-    // Force start_command to fail while append_command (INSERT) and the
-    // failure finalization (UPDATE to `failed`) still succeed: block only
-    // the pending -> running transition.
+    // Block only the pending -> running transition, so the INSERT and the
+    // failure finalization still succeed.
     {
         let conn = rusqlite::Connection::open(&db_path).expect("second conn");
         conn.execute_batch(
@@ -305,9 +297,8 @@ async fn kill_finalizes_command_row_as_canceled() {
     let status = handle.wait_for_exit().await;
     assert_eq!(status.signal.as_deref(), Some("SIGTERM"));
 
-    // Kill-intent exits finalize as `cancelled` with no exit status,
-    // matching the gateway's operator-cancel mapping; the ACP-side
-    // TerminalExitStatus above still carries the signal.
+    // Kill-intent exits finalize as `cancelled` with no exit status, matching
+    // the gateway's operator-cancel mapping.
     let guard = state.lock().await;
     let commands = guard
         .query_commands(crate::state::CommandFilter {
@@ -357,9 +348,8 @@ async fn closed_registry_rejects_registration_and_kills_child() {
         registered.is_none(),
         "closed registry must refuse registration"
     );
-    // register() reaps the child before returning None, so the pid must
-    // already be gone (ESRCH) — a live process here is the shutdown
-    // orphan this path exists to prevent.
+    // register() reaps the child before returning None, so a live process
+    // here is the shutdown orphan this path exists to prevent.
     let alive = unsafe { libc::kill(pid, 0) } == 0;
     assert!(!alive, "child survived closed-registry registration");
 }

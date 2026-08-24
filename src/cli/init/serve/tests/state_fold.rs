@@ -1,19 +1,8 @@
-//! Reference client fold for the init `signal` stream.
+//! Reference client fold for the init `signal` stream, and the derivation a real client ports.
 //!
-//! The instance emits raw `signal` events and no longer derives a category
-//! view; the fold that turns those facts into rendered categories — authority
-//! ordering, the three-tier retraction, the status precedence ladder, the
-//! dependency graph — is the client's responsibility now. This module is a
-//! faithful port of that derivation (it was `serve/state.rs` before the
-//! reshape), kept test-only so the surface tests can assert that folding the
-//! emitted stream reproduces the exact view the instance used to compute, and
-//! that a late joiner folding `hello` reaches the same place as a full-stream
-//! client. It is also the reference a real client (webui/console) ports.
-
-//! Note on strictness: this oracle panics on an unknown category id,
-//! applicability source, or signal name because it asserts the exact current
-//! contract. A real ported client must instead ignore unrecognized values (see
-//! the forward-compat rule in api.md) so the stream can gain variants.
+//! This oracle panics on an unknown category id, applicability source, or signal name because it
+//! pins the exact current contract; a ported client MUST instead ignore unrecognized values, per
+//! the forward-compat rule in api.md, so the stream can gain variants.
 
 use serde_json::{Map, Value, json};
 
@@ -21,9 +10,8 @@ use super::super::*;
 use crate::cli::init::prompt::ALL_HOSTED_PROMPT_KINDS;
 use crate::cli::init::state_signal::{ApplicabilitySource, InitCategory};
 
-/// Canonical wire order of the category list, and a topological order of the
-/// dependency table below — which is what lets `derive_snapshot` resolve
-/// `blocked_on` in a single forward pass.
+/// Canonical wire order, and a topological order of the dependency table below, which is what
+/// lets `derive_snapshot` resolve `blocked_on` in a single forward pass.
 const CATEGORY_ORDER: [InitCategory; CATEGORY_COUNT] = [
     InitCategory::Agent,
     InitCategory::Provider,
@@ -222,9 +210,8 @@ impl CategoryMap {
     }
 }
 
-/// Map a pending prompt's wire `kind` to the category awaiting it, mirroring
-/// `HostedPromptKind::category` by reverse-looking-up the wire string. The
-/// instance no longer sends this; the client derives it from `pending_input`.
+/// Map a pending prompt's wire `kind` to the category awaiting it; the client derives this from
+/// `pending_input` rather than receiving it.
 pub(super) fn awaiting_category(pending_kind: Option<&str>) -> Option<InitCategory> {
     let kind = pending_kind?;
     ALL_HOSTED_PROMPT_KINDS
@@ -233,9 +220,7 @@ pub(super) fn awaiting_category(pending_kind: Option<&str>) -> Option<InitCatego
         .and_then(|prompt_kind| prompt_kind.category())
 }
 
-/// Fold the ordered `signal` events into the category view. `signals` are the
-/// raw signal payloads (each the object under a `signal` frame); `awaiting` is
-/// the category the pending prompt occupies, already resolved by the caller.
+/// Fold the ordered raw `signal` payloads into the category view.
 pub(super) fn fold_state(signals: &[Value], awaiting: Option<InitCategory>) -> Value {
     let mut map = CategoryMap::default();
     let mut current_step: Option<String> = None;

@@ -1,15 +1,6 @@
-//! Dependency-apply run records.
-//!
-//! `deps_apply_runs` holds one row per dependency-apply invocation, keyed by
-//! the same `apply_run_id` that groups the per-action `installer_runs` rows.
-//! A partial unique index on `status = 'running'` makes "at most one live
-//! apply" a transactional guarantee across processes — the daemon, the CLI,
-//! a synchronous init step, and a detached init child all claim through the
-//! same table, so none of them can interleave install snippets.
-//!
-//! Liveness is judged by the caller: every claim and reconcile takes an
-//! `is_live(pid, boot_id)` predicate so the state layer stays free of
-//! process-probing syscalls and tests can inject fake liveness.
+//! Dependency-apply run records. A partial unique index on `status = 'running'`
+//! makes "at most one live apply" a cross-process transactional guarantee;
+//! liveness itself is judged by a caller-supplied `is_live(pid, boot_id)`.
 
 use std::time::Duration;
 
@@ -21,8 +12,7 @@ use super::core::StateStore;
 use super::ids::current_timestamp;
 use super::rows::validate_json_payload;
 
-/// Terminal and in-flight status sentinels persisted to
-/// `deps_apply_runs.status`.
+/// Status sentinels persisted to `deps_apply_runs.status`.
 pub const DEPS_APPLY_RUN_RUNNING: &str = "running";
 pub const DEPS_APPLY_RUN_SUCCEEDED: &str = "succeeded";
 pub const DEPS_APPLY_RUN_FAILED: &str = "failed";
@@ -35,16 +25,12 @@ pub const DEPS_APPLY_ORIGIN_INIT_BACKGROUND: &str = "init_background";
 pub const DEPS_APPLY_ORIGIN_CLI: &str = "cli";
 pub const DEPS_APPLY_ORIGIN_API: &str = "api";
 
-/// `error_code` stamped on a `running` row whose owning process is gone.
-/// An abandoned row reads as `failed` and retryable; without this reconcile
-/// the partial unique index would block every future apply.
+/// `error_code` stamped on a `running` row whose owning process is gone; without
+/// the reconcile the partial unique index would block every future apply.
 pub const DEPS_APPLY_ABANDONED_ERROR_CODE: &str = "deps.apply_abandoned";
 
-/// A `running` row with `pid IS NULL` older than this is abandoned. Every
-/// in-process apply stamps its own pid inside the claim transaction, and the
-/// detached path stamps the child pid immediately after spawn — so a null pid
-/// can only mean a parent that died in the claim-to-spawn gap, which this
-/// window comfortably covers.
+/// A `running` row with `pid IS NULL` older than this is abandoned; only a
+/// parent that died in the claim-to-spawn gap can leave one.
 pub const DEPS_APPLY_NULL_PID_GRACE: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,16 +59,14 @@ pub struct DepsApplyRunRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewDepsApplyRun<'a> {
-    /// The apply_run_id (`dap_*`) — caller-generated via
-    /// [`super::ids::next_deps_apply_run_id`] so the per-action
-    /// `installer_runs.apply_run_id` values match this row's key.
+    /// The apply_run_id (`dap_*`), matching the per-action
+    /// `installer_runs.apply_run_id` values.
     pub id: &'a str,
     pub origin: &'a str,
     pub init_run_id: Option<&'a str>,
     pub feature: Option<&'a str>,
-    /// Owning pid. In-process applies stamp their own pid at claim time; the
-    /// detached-spawn path claims with `None` and stamps the child pid via
-    /// [`StateStore::stamp_deps_apply_child`] right after the spawn.
+    /// Owning pid; `None` only for a detached spawn, until
+    /// [`StateStore::stamp_deps_apply_child`] runs.
     pub pid: Option<i64>,
     pub boot_id: Option<&'a str>,
     pub total: i64,
@@ -130,9 +114,7 @@ fn row_to_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<DepsApplyRunRecord> {
     })
 }
 
-/// Whether a `running` row no longer has a live owner. `is_live` judges a
-/// stamped pid (with its boot id); a null pid is abandoned once older than
-/// [`DEPS_APPLY_NULL_PID_GRACE`].
+/// Whether a `running` row no longer has a live owner.
 fn row_is_abandoned(
     started_at: &str,
     pid: Option<i64>,
@@ -146,16 +128,15 @@ fn row_is_abandoned(
                 let age = chrono::Utc::now().signed_duration_since(started);
                 age.num_seconds() >= DEPS_APPLY_NULL_PID_GRACE.as_secs() as i64
             }
-            // An unparseable timestamp cannot age out of the grace window;
-            // treat it as abandoned so it cannot wedge the claim forever.
+            // An unparseable timestamp can never age out, so treat it as
+            // abandoned rather than let it wedge the claim forever.
             Err(_) => true,
         },
     }
 }
 
-/// Mark every abandoned `running` row `failed` with
-/// [`DEPS_APPLY_ABANDONED_ERROR_CODE`]. Shared by the claim transaction and
-/// the standalone reconcile so both apply one rule.
+/// Mark every abandoned `running` row `failed`, shared by the claim transaction
+/// and the standalone reconcile so both apply one rule.
 fn reconcile_in_connection(
     connection: &Connection,
     is_live: &dyn Fn(i64, Option<&str>) -> bool,
@@ -217,11 +198,9 @@ fn is_unique_violation(error: &rusqlite::Error) -> bool {
 }
 
 impl StateStore {
-    /// Claim the single live apply slot: reconcile abandoned rows, then insert
-    /// a `running` row — all inside one `BEGIN IMMEDIATE` transaction so two
-    /// processes cannot both pass the reconcile and race the insert. A
-    /// surviving live row surfaces as [`StackError::DepsApplyInFlight`]
-    /// carrying its apply_run_id.
+    /// Claim the single live apply slot. The reconcile and the insert MUST stay
+    /// inside one `BEGIN IMMEDIATE` transaction so two processes cannot both
+    /// pass the reconcile and race the insert.
     pub fn claim_deps_apply_run(
         &self,
         input: NewDepsApplyRun<'_>,
@@ -295,8 +274,8 @@ impl StateStore {
                         |row| row.get(0),
                     )
                     .optional()?;
-                // Commit so the reconcile above still lands even though this
-                // claim lost the slot.
+                // Commit so the reconcile still lands even though this claim
+                // lost the slot.
                 transaction.commit()?;
                 return Err(StackError::DepsApplyInFlight {
                     apply_run_id: live.unwrap_or_default(),
@@ -308,12 +287,10 @@ impl StateStore {
         Ok(record)
     }
 
-    /// Standalone reconcile for read paths (status probes, per-run reads) so
-    /// an abandoned apply surfaces as failed-retryable without waiting for
-    /// the next claim. Returns the number of rows reconciled. The common case
-    /// (no running row) stays a plain read: `/v1/status` polls this, and
-    /// taking SQLite's write lock per poll would serialize every status hit
-    /// against the audit middleware and any in-flight apply writes.
+    /// Standalone reconcile for read paths, so an abandoned apply surfaces as
+    /// failed-retryable without waiting for the next claim. The no-running-row
+    /// case deliberately stays a plain read: `/v1/status` polls this, and taking
+    /// the write lock per poll would serialize every status hit.
     pub fn reconcile_stale_deps_apply_runs(
         &self,
         is_live: &dyn Fn(i64, Option<&str>) -> bool,
@@ -333,8 +310,7 @@ impl StateStore {
         Ok(reconciled)
     }
 
-    /// Stamp the detached child's identity onto a claimed row. Until this
-    /// lands the row's null pid is covered by [`DEPS_APPLY_NULL_PID_GRACE`].
+    /// Stamp the detached child's identity onto a claimed row.
     pub fn stamp_deps_apply_child(
         &self,
         apply_run_id: &str,
@@ -405,14 +381,10 @@ impl StateStore {
         Ok(())
     }
 
-    /// Force-settle every `running` row this process itself owns (matching pid
-    /// AND boot id) to `failed`. The API apply path calls this while holding the
-    /// in-process `deps_apply_lock`, which proves no in-process apply is live —
-    /// so a surviving self-owned `running` row can only be a prior apply whose
-    /// terminal write failed. The daemon's pid stays live for its whole
-    /// lifetime, so the liveness reconcile never frees such a row; without this
-    /// it would block every future apply until the daemon restarts. Returns the
-    /// number of rows settled.
+    /// Force-settle every `running` row this process owns (pid AND boot id) to
+    /// `failed`. Callers MUST hold the in-process `deps_apply_lock`, which is
+    /// what proves a surviving self-owned row is a prior apply whose terminal
+    /// write failed rather than a live one.
     pub fn fail_self_owned_stale_deps_apply_runs(
         &self,
         pid: i64,
@@ -464,8 +436,8 @@ impl StateStore {
             .optional()?)
     }
 
-    /// The live `running` row, if any. Does not reconcile — callers that need
-    /// an honest answer pair this with [`Self::reconcile_stale_deps_apply_runs`].
+    /// The live `running` row, if any. Does not reconcile; callers needing an
+    /// honest answer pair this with [`Self::reconcile_stale_deps_apply_runs`].
     pub fn running_deps_apply_run(&self) -> Result<Option<DepsApplyRunRecord>> {
         Ok(self
             .connection()

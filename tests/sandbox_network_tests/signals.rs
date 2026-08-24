@@ -40,10 +40,8 @@ fn sigterm_reaches_a_cooperating_workload_and_teardown_runs() {
     let markdir = tmp.path();
     let provider = write_provider_script(markdir, "touch \"$markdir/$phase-ran\"\nexit 0");
 
-    // The workload is PID 1 of its PID namespace, and a namespace init only
-    // receives signals it has handlers for — so a graceful shutdown requires a
-    // cooperating workload, like every real agent harness. `sleep & wait` lets
-    // the shell run the trap immediately instead of after sleep finishes.
+    // As PID 1 of its namespace the workload only receives signals it has
+    // handlers for, so graceful shutdown needs a cooperating workload.
     let status = sigterm_supervised_workload(
         markdir,
         &provider,
@@ -75,9 +73,8 @@ fn sigterm_escalates_to_kill_for_a_stubborn_workload() {
     let markdir = tmp.path();
     let provider = write_provider_script(markdir, "touch \"$markdir/$phase-ran\"\nexit 0");
 
-    // No trap: as namespace init the workload discards the SIGTERM entirely,
-    // so the supervisor's grace window must expire and SIGKILL the chain —
-    // shutdown never hangs on an uncooperative workload.
+    // No trap: as namespace init the workload discards SIGTERM, so the grace
+    // window must expire and SIGKILL the chain.
     let started = Instant::now();
     let status = sigterm_supervised_workload(
         markdir,
@@ -118,9 +115,8 @@ fn provider_env_is_exactly_the_contract() {
         &["/bin/true"],
     )
     .env("ACPS_TEST_AGENT_SECRET", "leak-me-if-you-can")
-    // The provider must not inherit the workload environment it sets up for,
-    // `workload_env` proxy variables included: it configures the namespace,
-    // it does not route through it.
+    // The provider configures the namespace, it does not route through it, so
+    // it must not inherit `workload_env`.
     .env("HTTPS_PROXY", "http://127.0.0.1:3128")
     .status()
     .expect("run supervise");
@@ -150,9 +146,8 @@ fn provider_env_is_exactly_the_contract() {
         !teardown_env.contains("ACPS_SANDBOX_NETWORK_PID="),
         "the pid is not guaranteed during teardown and must not be exposed"
     );
-    // Nothing beyond the contract; the shell itself adds PATH (the script's own
-    // export) and bookkeeping vars like PWD/SHLVL/_ depending on which shell
-    // backs /bin/sh.
+    // The shell itself adds PATH and bookkeeping vars like PWD/SHLVL/_,
+    // depending on which shell backs /bin/sh.
     let shell_managed = ["PATH", "PWD", "OLDPWD", "SHLVL", "_"];
     for line in setup_env.lines() {
         let key = line.split('=').next().unwrap_or_default();
@@ -174,8 +169,8 @@ fn provider_runs_from_a_trusted_cwd() {
     let markdir = tmp.path();
     let provider = write_provider_script(markdir, "pwd > \"$markdir/cwd-$phase\"\nexit 0");
 
-    // The supervisor itself runs from an agent-writable cwd (as it does for
-    // mediated commands); the privileged provider must not inherit it.
+    // The supervisor runs from an agent-writable cwd; the privileged provider
+    // must not inherit it.
     let status = supervise_command(
         &[provider.to_str().unwrap(), markdir.to_str().unwrap()],
         "10s",

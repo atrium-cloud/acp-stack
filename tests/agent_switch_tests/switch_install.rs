@@ -72,8 +72,7 @@ async fn agent_switch_installs_target_and_returns_model_choices() {
         body["data"]["install"]["outcome"].as_str(),
         Some("installed" | "already_present")
     ));
-    // Same `{value, display_name?}` shape `/v1/models` serves; ACP-advertised
-    // values carry no display name.
+    // Same `{value, display_name?}` shape `/v1/models` serves.
     assert_eq!(body["data"]["models"][0]["value"], "kimi/kimi-k3");
     assert!(body["data"]["models"][0].get("display_name").is_none());
 

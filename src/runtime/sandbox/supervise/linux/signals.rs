@@ -125,11 +125,9 @@ pub(super) fn wait_for_ready(
     }
 }
 
-/// Wait for the workload, forwarding SIGINT/SIGTERM to the chain. The
-/// first forwarded signal arms a grace deadline that escalates to SIGKILL
-/// on the unshare process (cascading to the workload via `--kill-child`),
-/// so the supervisor can never hang on shutdown even if the workload
-/// ignores the signal.
+/// Wait for the workload, forwarding SIGINT/SIGTERM to the chain. The first
+/// forwarded signal arms a grace deadline that escalates to SIGKILL, so the
+/// supervisor cannot hang on a workload that ignores the signal.
 pub(super) fn wait_for_child(
     child: &mut Child,
     unshare_pid: i32,
@@ -165,11 +163,9 @@ pub(super) fn wait_for_child(
     }
 }
 
-/// Deliver a shutdown signal to the workload chain. `unshare --fork`
-/// ignores SIGINT/SIGTERM while waiting for its child (verified against
-/// util-linux 2.41), so the signal must go to unshare's direct child (the
-/// workload, post-exec) as well; unshare itself then propagates a
-/// signal-death upward by re-raising it.
+/// Deliver a shutdown signal to the workload chain. `unshare --fork` ignores
+/// SIGINT/SIGTERM while waiting for its child (util-linux 2.41), so the signal
+/// must also go to unshare's direct child.
 fn forward_shutdown_signal(
     unshare_pid: i32,
     workload_pidfd: Option<&WorkloadPidFd>,
@@ -211,8 +207,6 @@ pub(super) fn terminate_child(
         }
     } else {
         forward_shutdown_signal(unshare_pid, workload_pidfd, signo, diag);
-        // Give the chain a moment to exit on the forwarded signal, then
-        // escalate so the supervisor never hangs on shutdown.
         let deadline = Instant::now() + SIGNAL_KILL_GRACE;
         loop {
             match child.try_wait() {
@@ -231,10 +225,8 @@ pub(super) fn terminate_child(
     }
 }
 
-/// Terminate the supervisor mirroring the workload's status, surfacing a
-/// teardown failure per the contract: workload success + failed teardown is
-/// an error exit; a workload failure is preserved with the teardown error
-/// only reported.
+/// Terminate mirroring the workload's status: success plus a failed teardown
+/// exits with an error, while a workload failure is preserved as-is.
 pub(super) fn mirror_status(status: ExitStatus, teardown_error: Option<String>, diag: &Diag) -> ! {
     if let Some(message) = &teardown_error {
         diag.line(message);

@@ -39,24 +39,16 @@ pub(super) struct InitHandoffContext {
     pub(super) agent_name: String,
     pub(super) native_config_import:
         Option<crate::runtime::agent::native_config_import::NativeConfigOperation>,
-    /// Configured features the capability probe determined the agent cannot
-    /// honor. Machine lanes surface these so the platform knows what was
-    /// routed around; hosted end users never see them.
+    /// Configured features the capability probe determined the agent cannot honor.
     pub(super) ignored_features: Vec<crate::runtime::agent::acp_bridge::IgnoredFeature>,
-    /// The `deps_apply_runs` id of a background install launched by
-    /// `--deps-apply-async`. The install outlives init, so the handoff is the
-    /// machine surface that tells the platform what to poll via
-    /// `GET /v1/deps/apply/runs/{id}` once the daemon is up.
+    /// The `deps_apply_runs` id of a `--deps-apply-async` install, which outlives
+    /// init and is polled via `GET /v1/deps/apply/runs/{id}`.
     pub(super) deps_apply_run_id: Option<String>,
 }
 
-/// Drop guard that performs the session/admin key handover as the very last
-/// thing the operator sees. Holding the plaintext across the whole run (instead
-/// of printing at generation time) keeps the keys from scrolling off-screen
-/// behind install/workspace/testflight output; rendering on Drop means a fresh
-/// run that fails AFTER key generation still surfaces the otherwise
-/// unrecoverable, non-regenerable admin key before init exits. In handoff JSON
-/// mode, preserved keys are reported without reprinting plaintext material.
+/// Drop guard that performs the session/admin key handover last. Rendering on Drop
+/// means a run that fails AFTER key generation still surfaces the otherwise
+/// unrecoverable, non-regenerable admin key before init exits.
 pub(super) struct KeyHandover {
     pub(super) keys: Option<FreshKeys>,
     pub(super) output_mode: InitOutputMode,
@@ -102,8 +94,8 @@ impl KeyHandover {
             self.record(store, run_id)?;
             self.print_text();
         }
-        // Success-only hint: the Drop guard also renders keys on failed runs,
-        // where pointing the operator at `acps serve` would be misleading.
+        // Success-only hint: on a failed run the Drop guard still renders keys, but
+        // pointing the operator at `acps serve` would be misleading.
         println!("{NEXT_STEP_HINT}");
         Ok(())
     }

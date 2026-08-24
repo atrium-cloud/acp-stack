@@ -117,9 +117,8 @@ exit 99
 
 #[test]
 fn unpinned_npm_install_accepts_array_version_output() {
-    // Fresh hosts have been observed getting a JSON array from
-    // `npm view <pkg> version --json` (e.g. `["1.18.7"]`); npm orders it
-    // ascending, so the last element is the version to install.
+    // `npm view <pkg> version --json` returns a JSON array on some hosts, ordered ascending, so the
+    // last element is the version to install.
     let tempdir = TempDir::new().expect("tempdir");
     let dest_dir = tempdir.path().join("bin");
     std::fs::create_dir(&dest_dir).expect("create bin dir");

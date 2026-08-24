@@ -1,6 +1,5 @@
 // `serde_json::json!` expands one recursion level per key, and the init resume
-// record (`cli::init::resume`) enumerates every replayable flag in one literal;
-// the default limit of 128 is not enough for it.
+// record enumerates every replayable flag in one literal; 128 is not enough.
 #![recursion_limit = "256"]
 
 pub mod api;
@@ -18,9 +17,7 @@ pub mod http_hardening;
 pub mod local_listener;
 pub mod ownership;
 pub mod runtime;
-// Derives the published `/v1` JSON Schema contract from the wire DTOs. Exists
-// only under `dev-tools`; the `generate-api-schema` bin is its only caller and
-// nothing in the shipped binary references it.
+// Derives the published `/v1` JSON Schema contract from the wire DTOs.
 #[cfg(feature = "dev-tools")]
 pub mod schema_export;
 pub mod secrets;

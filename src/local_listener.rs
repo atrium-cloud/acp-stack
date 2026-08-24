@@ -1,8 +1,6 @@
-//! Internal Unix-domain-socket listener for keyless local `acps` routes.
-//!
-//! The local listener exposes an explicit allowlist of operations from the API
-//! router on a separate Unix-domain socket. Access control is filesystem based:
-//! the socket file is mode `0600` inside an owner-only parent directory.
+//! Internal Unix-domain-socket listener serving an allowlist of keyless local
+//! `acps` routes. Access control is filesystem based: the socket is mode `0600`
+//! inside an owner-only parent directory.
 
 mod router;
 mod socket;

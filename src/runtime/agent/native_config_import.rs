@@ -1,8 +1,6 @@
-//! Semantic import support for agent-native global configuration files.
-//!
-//! Uploaded documents are parsed into a redacted review manifest, canonical
-//! `acps` candidates, and an unmanaged residual. Managed and security-owned
-//! paths never survive in the residual, even when they are not selected.
+//! Semantic import of agent-native global config files into a redacted review manifest, canonical
+//! `acps` candidates, and an unmanaged residual. Managed and security-owned paths never survive in
+//! the residual, even when they are not selected.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -43,9 +41,8 @@ use crate::secrets::SecretStore;
 pub const INSPECTION_TTL_SECONDS: u64 = 15 * 60;
 pub const MAX_MANIFEST_PATHS: usize = 256;
 pub const APPLIED_ROLLBACK_RETENTION_SECONDS: u64 = 15 * 60;
-// Terminal records outlive the rollback window so a temporarily unavailable
-// API consumer (the platform reconciler polls every 30s) can still observe the
-// outcome long after cancel-of-applied has expired.
+// Terminal records outlive the rollback window so a temporarily unavailable API consumer can still
+// observe the outcome long after cancel-of-applied has expired.
 pub const TERMINAL_RETENTION_SECONDS: u64 = 24 * 60 * 60;
 const JOURNAL_DIR_NAME: &str = "native-config-imports";
 const JOURNAL_FILE_LIMIT: usize = (IMPORT_SIZE_LIMIT * 4) + (256 * 1024);
@@ -395,8 +392,7 @@ mod mcp;
 mod serde_utils;
 mod transaction;
 
-// Cross-seam helpers keep `pub(super)` visibility; re-import them here so each
-// sibling's `use super::*;` resolves items defined in the other siblings.
+// Re-imported here so each sibling's `use super::*;` resolves items defined in the other siblings.
 use self::inspect::*;
 use self::mcp::*;
 use self::serde_utils::*;
@@ -444,13 +440,11 @@ fn validate_native_config_filename(harness: &str, filename: &str) -> Result<()> 
         "codex" => filename == "config.toml",
         "opencode" => matches!(filename, "opencode.json" | "opencode.jsonc"),
         "amp" => filename == "settings.json",
-        // Only `settings.json` is accepted: `models.json`/`auth.json` carry
-        // literal credentials and `!shell-command` exec semantics acps must
-        // not import, and `trust.json`/`mcp.json` are out of scope by design.
+        // `settings.json` only: `models.json`/`auth.json` carry literal credentials and
+        // `!shell-command` exec semantics acps must never import.
         "pi" => filename == "settings.json",
-        // Only `config.yaml` is accepted: `secrets.yaml` holds keyring-fallback
-        // API keys and `permission.yaml` carries per-tool approval levels, both
-        // of which acps must never import.
+        // `config.yaml` only: `secrets.yaml` holds keyring-fallback API keys and `permission.yaml`
+        // carries per-tool approval levels, neither of which acps may import.
         "goose" => filename == "config.yaml",
         _ => return Err(native_error("agent.native_config_harness_unsupported")),
     };

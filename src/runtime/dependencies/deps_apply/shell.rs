@@ -1,17 +1,11 @@
-//! Process-execution plumbing for install actions: spawning the shell
-//! (optionally under `sudo -n`), bounded output capture, timeout kill and
-//! reap, plus the PATH/env helpers those depend on.
+//! Process-execution plumbing for install actions: shell spawn (optionally under `sudo -n`), bounded output capture, and timeout kill/reap.
 
 use super::*;
 
-/// Per-stream cap on captured output before we start dropping bytes.
-/// Reuses the state-layer constant so a future bump in installer_runs
-/// row size automatically applies to deps_apply too.
+/// Per-stream cap on captured output before bytes are dropped.
 const STREAM_CAP_BYTES: usize = INSTALLER_OUTPUT_CAP_BYTES;
 
-/// Return tuple: `(exit_code, stdout, stderr_prefix, timed_out,
-/// stderr_tail)` — see `read_to_cap_with_tail` for why `stderr_tail`
-/// is computed separately.
+/// Runs one install script, returning `(exit_code, stdout, stderr_prefix, timed_out, stderr_tail)`.
 pub(crate) fn run_shell(
     shell_program: &str,
     script: &str,
@@ -37,11 +31,8 @@ pub(crate) fn run_shell(
     command.env_clear().envs(scrubbed_env());
     apply_non_interactive_env(&mut command);
 
-    // `run_captured` owns the piped stdio, the session detachment (so a
-    // timeout kill reaches every grandchild the shell forked and a dep script
-    // probing /dev/tty cannot prompt), the capped reader threads and the
-    // bounded wait; only the timeout reap policy below is specific to
-    // deps apply.
+    // `run_captured` owns the piped stdio, session detachment, capped reader threads and bounded
+    // wait; only the timeout reap policy below is specific to deps apply.
     let outcome =
         crate::runtime::process_runner::run_captured(&mut command, timeout, STREAM_CAP_BYTES)
             .map_err(|source| StackError::AgentSpawnFailed { source })?;
@@ -58,30 +49,20 @@ pub(crate) fn run_shell(
             stdout_reader,
             stderr_reader,
         } => {
-            // On escalated runs the child is root-owned, so our SIGKILL is
-            // refused with EPERM and an unbounded `wait()` would hang the
-            // apply; the bounded reap (plus the bounded reader joins below)
-            // keeps the outcome reported as a timeout Failed either way.
+            // On escalated runs the child is root-owned, so SIGKILL is refused with EPERM and an
+            // unbounded `wait()` would hang the apply.
             kill_process_group(&mut child);
             if reap_with_grace(&mut child, KILL_REAP_GRACE).is_none() {
-                // Root-owned (escalated) children ignore our SIGKILL, so the
-                // unreaped child lingers as a zombie until the process exits.
-                // Surface it rather than leak silently.
                 tracing::warn!(
                     "dep install action outlived its timeout kill and was abandoned unreaped (pid={})",
                     child.id(),
                 );
-                // Still alive after the grace, so it may hold the pipes open;
-                // signal the group once more before the bounded joins.
+                // Still alive after the grace, so it may hold the pipes open.
                 kill_process_group(&mut child);
             }
-            // Bounded join: a double-forked daemon that escaped the process
-            // group could still hold our pipe descriptors open. We can't
-            // SIGKILL it (we don't have a pid), so we wait `READER_JOIN_GRACE`
-            // for the close to land and then abandon the thread if it didn't.
-            // Abandoning is fine here — the OS reaps the orphaned thread when
-            // `acps` exits, and dropping the captured output is preferable to
-            // hanging the entire `deps apply` call.
+            // Bounded join: a double-forked daemon that escaped the process group can still hold
+            // our pipe descriptors open and has no pid to signal, so the thread is abandoned rather
+            // than allowed to hang the whole `deps apply`.
             let stdout = stdout_reader
                 .and_then(join_reader_bounded)
                 .unwrap_or_default();
@@ -103,10 +84,7 @@ pub(crate) fn run_shell(
     Ok((status.code(), stdout, stderr, timed_out, stderr_tail))
 }
 
-/// Bounded reap after a group kill. A root-owned (escalated) child cannot be
-/// signalled by a non-root parent, so a plain `wait()` would block forever.
-/// Returns `None` when the child outlives the grace; callers already treat
-/// that as a timeout and the pipe-reader joins are separately bounded.
+/// Bounded reap after a group kill, returning `None` when the child outlives the grace. A root-owned child cannot be signalled by a non-root parent, so a plain `wait()` would block forever.
 pub(crate) fn reap_with_grace(
     child: &mut std::process::Child,
     grace: Duration,
@@ -156,11 +134,7 @@ pub(crate) fn resolve_command(name: &str) -> Option<std::path::PathBuf> {
     None
 }
 
-/// True when `path` is a regular file that has at least one execute
-/// bit set on Unix. A failed `chmod` after an `install` action would
-/// otherwise let the postcheck report success against a non-executable
-/// placeholder. On non-Unix targets, fall back to `is_file()` since
-/// there's no mode bit semantic.
+/// True when `path` is a regular file with at least one execute bit set; without the mode check a failed `chmod` would let the postcheck pass against a non-executable placeholder.
 fn is_executable_file(path: &Path) -> bool {
     if !path.is_file() {
         return false;

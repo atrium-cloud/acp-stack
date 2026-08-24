@@ -97,8 +97,7 @@ async fn agent_switch_links_skills_into_target_link_dir() {
     let body: Value = serde_json::from_str(&body_text).expect("switch json");
 
     assert_eq!(body["data"]["agent_id"], "amp");
-    // Shared install root: nothing to copy, but the link dir still gets a
-    // symlink for every installed skill.
+    // Shared install root: nothing to copy, but every installed skill still gets a symlink.
     assert_eq!(body["data"]["skills_port"]["status"], "shared");
     assert_eq!(body["data"]["skills_link"]["linked"][0]["name"], "repo-map");
     let link = tempdir.path().join(".amp/skills/repo-map");
@@ -119,8 +118,8 @@ async fn agent_switch_reports_skills_link_error_without_failing() {
         "repo-map",
         "# Source Repo Map\n",
     );
-    // A regular file where the link dir's parent should be makes the link
-    // refresh fail; the switch itself must still succeed and report why.
+    // A file where the link dir's parent belongs fails the refresh; the switch must still
+    // succeed and report why.
     std::fs::write(tempdir.path().join(".amp"), "not a directory\n").expect("amp file");
     let mut secrets =
         acp_stack::secrets::SecretStore::open_or_create(tempdir.path()).expect("secret store");

@@ -78,8 +78,6 @@ fn agent_provider_credential_select_blocks_deleting_selected_alias() {
     seed_provider_credential(tempdir.path(), "openrouter", &["OPENROUTER_API_KEY"]);
     seed_named_secret(tempdir.path(), "OR_BACKUP_SOURCE", "or-backup-secret");
 
-    // Select the aliasless provider as the primary lane, then promote it
-    // (auto-selecting `primary` for the target that uses it).
     acps_command()
         .env("HOME", tempdir.path())
         .args(["agent", "provider", "use", "openrouter"])
@@ -103,7 +101,6 @@ fn agent_provider_credential_select_blocks_deleting_selected_alias() {
         .assert()
         .success();
 
-    // Switch the target's selection to `backup` via the select command.
     acps_command()
         .env("HOME", tempdir.path())
         .args([
@@ -143,8 +140,6 @@ fn agent_provider_set_active_prunes_selected_alias_for_dropped_provider() {
     seed_provider_credential(tempdir.path(), "openrouter", &["OPENROUTER_API_KEY"]);
     seed_named_secret(tempdir.path(), "OR_BACKUP_SOURCE", "or-backup-secret");
 
-    // Establish a primary provider, activate both, then promote openrouter so
-    // the target holds a selected alias for it.
     acps_command()
         .env("HOME", tempdir.path())
         .args(["agent", "provider", "use", "openai"])
@@ -173,7 +168,7 @@ fn agent_provider_set_active_prunes_selected_alias_for_dropped_provider() {
         .assert()
         .success();
 
-    // Drop openrouter from the active set; its stale alias selection must be pruned.
+    // Dropping openrouter from the active set must prune its stale alias.
     acps_command()
         .env("HOME", tempdir.path())
         .args(["agent", "provider", "set-active", "openai"])
@@ -184,7 +179,6 @@ fn agent_provider_set_active_prunes_selected_alias_for_dropped_provider() {
         .expect("updated config should be readable");
     assert!(!config.contains("openrouter"));
 
-    // With the selection pruned, the previously blocked alias can now be deleted.
     acps_command()
         .env("HOME", tempdir.path())
         .args([
@@ -213,7 +207,6 @@ fn agent_provider_list_active_reports_configured_state_offline() {
         .assert()
         .success();
 
-    // No daemon is running, so live state is unknown but configured state resolves.
     acps_command()
         .env("HOME", tempdir.path())
         .args(["agent", "provider", "list-active"])

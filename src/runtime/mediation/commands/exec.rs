@@ -1,9 +1,7 @@
-//! Process-execution primitives shared by the command supervisor and the ACP
-//! terminal handlers. These are the mechanics that must behave identically for
-//! every daemon-mediated child: sandbox wrapping, TOCTOU-safe cwd entry,
-//! env-cleared spawn under a fresh process group, and grace-escalated kill.
-//! Policy (permissions, review flags) stays with each caller — this module
-//! never decides whether to run, only how.
+//! Process-execution mechanics shared by the command supervisor and the ACP
+//! terminal handlers: sandbox wrapping, TOCTOU-safe cwd entry, env-cleared
+//! spawn under a fresh process group, and grace-escalated kill. Policy stays
+//! with each caller; this module never decides whether to run, only how.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -18,10 +16,8 @@ use crate::runtime::process_runner::kill_tokio_process_group;
 use super::policy::ResolvedCommandCwd;
 use super::process::send_terminate;
 
-/// Resolve the program + argv to spawn, applying the sandbox backend. `off`
-/// runs the program verbatim; other modes wrap it the same way the agent
-/// harness is wrapped, so a mediated child cannot read the daemon's secrets
-/// either.
+/// Resolve the program + argv to spawn, wrapping it in the sandbox backend so
+/// a mediated child cannot read the daemon's secrets.
 pub(crate) fn sandboxed_program(
     program: &Path,
     args: &[String],
@@ -82,10 +78,8 @@ pub(crate) fn spawn_child(
     let diag_handle =
         crate::runtime::sandbox::wire_supervise_diag_fd(sandbox, network, &mut cmd, args)?;
     cmd.env_clear();
-    // One composed map rather than two passes over `cmd`: the network
-    // provider's declaration must land after the caller's env so it wins on
-    // conflict, and a caller that passes no env still needs the namespace's
-    // egress variables to reach the workload.
+    // The network provider's declaration must land after the caller's env so
+    // it wins on conflict.
     let mut workload_env = env.cloned().unwrap_or_default();
     crate::extensions::apply_workload_env(&mut workload_env, network);
     for (key, value) in &workload_env {
@@ -94,9 +88,7 @@ pub(crate) fn spawn_child(
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
-    // SIGKILL the child if the owning task is ever dropped — daemon shutdown,
-    // tokio runtime exit, or a panic in the owner itself. Without this a
-    // running child can outlive `acps serve`.
+    // Without this a running child can outlive `acps serve`.
     cmd.kill_on_drop(true);
     #[cfg(unix)]
     cmd.process_group(0);
@@ -109,12 +101,9 @@ pub(crate) fn spawn_child(
 }
 
 pub(crate) enum GraceKillOutcome {
-    /// The child exited (or `wait` failed) within the grace window after
-    /// SIGTERM. Carries the wait result so callers can distinguish a clean
-    /// exit from a wait error.
+    /// The child exited (or `wait` failed) within the grace window.
     ExitedWithinGrace(std::io::Result<std::process::ExitStatus>),
-    /// The grace window elapsed; the whole process group was SIGKILLed and
-    /// the child reaped.
+    /// The grace window elapsed; the process group was SIGKILLed and reaped.
     KilledAfterGrace,
 }
 

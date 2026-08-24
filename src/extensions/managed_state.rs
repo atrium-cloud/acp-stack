@@ -1,15 +1,6 @@
-//! The managed-state extension contract.
-//!
-//! A `type = "managed-state"` instance grants an external orchestrator
-//! ownership of one named state namespace, applied through the fixed admin
-//! endpoint `POST /v1/admin/extensions/{name}/apply`. The request carries a
-//! monotonically increasing registry revision and a `desired` payload limited
-//! to concepts acp-stack already models generically; revision semantics
-//! (idempotent replay, stale rejection) and ownership enforcement live in the
-//! secret store so no endpoint can bypass them.
-//!
-//! This module is transport-free: DTOs plus the apply orchestration against
-//! [`SecretStore`], unit-testable without the HTTP layer.
+//! The managed-state extension contract: DTOs and apply orchestration for
+//! `POST /v1/admin/extensions/{name}/apply`. Revision and ownership semantics live in
+//! [`SecretStore`] so no endpoint can bypass them.
 
 use std::collections::BTreeMap;
 
@@ -50,14 +41,8 @@ pub struct ApplyRequest {
 #[schemars(transform = require_selection_key)]
 pub enum DesiredState {
     ProviderCredential {
-        // `selection` is a required key that may be null: silently defaulting
-        // an absent key to `None` would read a malformed body as a
-        // destructive clear. The `deserialize_with` marker removes serde's
-        // implicit Option default so a missing key is a parse error instead.
-        // schemars sees only the `Option` and would drop the key from
-        // `required`; the `require_selection_key` transform adds it back
-        // without touching the field schema, so it stays nullable while
-        // generated clients must send the key.
+        // `selection` is a required key that may be null: defaulting an absent key to `None`
+        // would read a malformed body as a destructive clear, so a missing key must parse-error.
         #[serde(deserialize_with = "deserialize_required_selection")]
         selection: Option<CredentialSelection>,
     },
@@ -140,8 +125,7 @@ pub struct CredentialSelection {
 
 impl std::fmt::Debug for CredentialSelection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Never leak values via Debug; env names and ref names are not secret.
-        // A base URL is an endpoint, not a secret, so it is safe to show.
+        // Never leak values via Debug; env names, ref names, and the base URL are not secret.
         f.debug_struct("CredentialSelection")
             .field("provider_id", &self.provider_id)
             .field("env_names", &self.values.keys().collect::<Vec<_>>())
@@ -282,9 +266,7 @@ fn resolve_selection(
             "desired.selection.values",
         )?;
     } else {
-        // Rejection happens before any watermark or catalog persist, so an
-        // orchestrator that applied before init wrote the custom provider can
-        // retry the same revision once the config lands.
+        // Rejecting before any watermark or catalog persist keeps the revision retryable.
         return Err(StackError::InvalidParam {
             field: "desired.selection.provider_id",
             reason: format!(

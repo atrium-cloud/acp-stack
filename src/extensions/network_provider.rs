@@ -1,17 +1,6 @@
-//! The network-provider extension contract.
-//!
-//! Declaring a `network-provider` instance switches every sandboxed spawn
-//! (agent harness and each mediated command alike) to a fresh, per-spawn
-//! network namespace. With an empty provider argv the namespace is deny-all:
-//! acp-stack configures nothing, not even loopback. All network policy — veth
-//! devices, routes, DNS, gateways, proxies — belongs to the external provider
-//! executable; acp-stack never configures interfaces, resolves DNS, or
-//! inspects traffic.
-//!
-//! The provider wire contract (setup/teardown verbs, `ACPS_SANDBOX_NETWORK_*`
-//! env vars, protocol version, timeouts, fail-closed exits) is implemented by
-//! the supervisor mechanism in `crate::runtime::sandbox::supervise`; this
-//! module owns the resolved policy the sandbox seam consumes.
+//! The network-provider extension contract: the resolved policy the sandbox seam consumes when a
+//! `network-provider` instance puts every spawn in a fresh network namespace. An empty provider
+//! argv leaves that namespace deny-all, down to loopback; all policy belongs to the provider.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -28,8 +17,7 @@ pub struct NetworkProviderExtension {
     pub provider_timeout: Option<String>,
     /// Where provider stderr goes. Stdout is always discarded.
     pub provider_stderr: SandboxProviderStderr,
-    /// Environment injected into every workload spawned inside the namespace.
-    /// Applied by [`apply_workload_env`]; never reaches the provider process.
+    /// Environment injected into every workload in the namespace; never reaches the provider.
     pub workload_env: BTreeMap<String, String>,
 }
 
@@ -50,9 +38,7 @@ impl NetworkProviderExtension {
             .unwrap_or(DEFAULT_NETWORK_PROVIDER_TIMEOUT)
     }
 
-    /// The `__sandbox-supervise` argv fragment carrying this instance's
-    /// provider policy: timeout, stderr routing, and one `--provider-arg` per
-    /// argv token. The sandbox wrapper appends the workload chain after it.
+    /// The `__sandbox-supervise` argv fragment carrying this instance's provider policy.
     pub fn supervise_argv_fragment(&self) -> Vec<String> {
         let mut out = vec![
             "--provider-timeout".to_owned(),
@@ -68,16 +54,9 @@ impl NetworkProviderExtension {
     }
 }
 
-/// Overlay a network-provider instance's `workload_env` onto a workload's
-/// resolved environment. Called at every seam that spawns inside the provider's
-/// namespace, *after* the caller's own env, so the declaration wins on conflict
-/// — including over runtime-managed rewrites such as the Kimi/Hermes launch
-/// keys. That precedence is deliberate: the declaration is infrastructure
-/// config from the operator that owns the namespace, and a workload whose
-/// egress env is half-overridden reaches no network at all.
-///
-/// `PATH` and `HOME` are refused at config load, so they cannot appear here;
-/// the guard below keeps the invariant local to the seam that relies on it.
+/// Overlay a network-provider instance's `workload_env` onto a workload's environment. MUST run
+/// after the caller's own env so the operator declaration wins on conflict, including over
+/// runtime-managed rewrites: a half-overridden egress env reaches no network at all.
 pub fn apply_workload_env(
     env: &mut HashMap<String, String>,
     provider: Option<&NetworkProviderExtension>,

@@ -109,8 +109,7 @@ async fn array_status_reports_daemon_targets() {
 
 #[tokio::test]
 async fn array_status_rejects_admin_key() {
-    // Strict tiering: the read-only array status route is session-tier and must
-    // reject a valid admin key with auth.wrong_kind (no admin superset).
+    // Strict tiering: session-tier routes reject a valid admin key; there is no admin superset.
     let harness = AgentHarness::spawn().await;
     let client = http().await;
     let response = client
@@ -126,7 +125,6 @@ async fn array_status_rejects_admin_key() {
 
 #[tokio::test]
 async fn array_capabilities_rejects_admin_key() {
-    // Session-tier per-target capabilities route also rejects admin keys.
     let harness = AgentHarness::spawn().await;
     let client = http().await;
     let response = client
@@ -145,10 +143,8 @@ async fn array_capabilities_rejects_admin_key() {
 
 #[tokio::test]
 async fn array_target_mutations_reject_session_key() {
-    // The four state-altering per-target routes are admin-tier; a session key
-    // must never gain the power to install/start/stop/restart an agent process.
-    // The require_admin layer rejects before the handler routes on target_id,
-    // so this guards against an accidental downgrade into the session router.
+    // A session key must never gain the power to install/start/stop/restart an agent process;
+    // this guards against an accidental downgrade of these routes into the session router.
     let harness = AgentHarness::spawn().await;
     let client = http().await;
     for action in ["install", "start", "stop", "restart"] {
@@ -176,8 +172,6 @@ async fn array_target_mutations_reject_session_key() {
 
 #[tokio::test]
 async fn array_target_stop_and_restart_lifecycle() {
-    // Exercise the previously-untested stop/restart routes for a secondary
-    // target: start -> running, stop -> stopped, restart -> running.
     let mut config = test_config();
     config.array.enabled = true;
     add_codex_placebo_target(&mut config);

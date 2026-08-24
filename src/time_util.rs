@@ -1,14 +1,8 @@
-//! Lightweight helpers for parsing human-friendly time spans used by the log
-//! query UX and metrics summary. The accepted suffixes intentionally cover
-//! the cases operators tend to type: seconds, minutes, hours, days, weeks.
-//! Anything more exotic should pass an RFC3339 timestamp instead.
+//! Helpers for parsing human-friendly time spans used by log queries and the metrics summary.
 
 use chrono::Duration;
 
-/// Parse a duration suffix in the shapes `Ns` / `Nm` / `Nh` / `Nd` / `Nw`
-/// (e.g. `30s`, `15m`, `1h`, `2d`, `1w`). Returns `None` for any unparseable
-/// input — the caller is expected to fall back to a parse-as-RFC3339 path or
-/// surface an error.
+/// Parse a duration suffix in the shapes `Ns` / `Nm` / `Nh` / `Nd` / `Nw`; `None` when unparseable.
 pub fn parse_duration_suffix(input: &str) -> Option<Duration> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -29,9 +23,8 @@ pub fn parse_duration_suffix(input: &str) -> Option<Duration> {
     }
 }
 
-/// Parse history-window suffixes for session range views. `mo` is a fixed
-/// 30-day month and `y` is a fixed 365-day year so range filtering is
-/// deterministic and independent of calendar boundaries.
+/// Parse history-window suffixes for session range views; `mo` is a fixed 30-day month and `y`
+/// a fixed 365-day year, so filtering stays independent of calendar boundaries.
 pub fn parse_coarse_duration_suffix(input: &str) -> Option<Duration> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -59,9 +52,7 @@ pub fn parse_coarse_duration_suffix(input: &str) -> Option<Duration> {
     }
 }
 
-/// Resolve a duration range relative to `now` while rejecting ranges that
-/// would precede the Unix epoch. This keeps user-supplied numeric ranges
-/// finite and aligned with the timestamp domain used by runtime records.
+/// Resolve a duration range relative to `now`, rejecting anything preceding the Unix epoch.
 pub fn resolve_since_after_unix_epoch(
     duration: Duration,
     now: chrono::DateTime<chrono::Utc>,

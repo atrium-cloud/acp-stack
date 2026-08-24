@@ -226,9 +226,8 @@ async fn cancel_session_settles_prompt_with_cancelled_stop_reason() {
         .expect("new");
     let session_id = response.session_id;
 
-    // The fake agent only checks the cancel flag after it emits its
-    // notifications, so firing the notification first and then sending the
-    // prompt deterministically returns `cancelled`.
+    // The fake agent checks the cancel flag only after emitting notifications,
+    // so notify-then-prompt deterministically returns `cancelled`.
     bridge
         .cancel_session(session_id.clone())
         .await

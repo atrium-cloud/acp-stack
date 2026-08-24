@@ -51,12 +51,9 @@ pub(crate) async fn agent_update_handler(
             "agent is running",
         )));
     }
-    // No await between the successful `try_begin_update` and `tokio::spawn`,
-    // and the whole update-and-release sequence runs in a detached task: a
-    // client disconnect cancels only this handler future, while the task keeps
-    // running to completion, releases the supervisor lock, and closes the
-    // lifecycle trail. Awaiting the sequence inline instead would strand the
-    // supervisor in `Updating` whenever the caller hangs up mid-update.
+    // Must stay a detached task with no await between `try_begin_update` and
+    // `spawn`: a client disconnect cancels only this handler future, so an
+    // inline await would strand the supervisor in `Updating`.
     let update_task = tokio::spawn(run_update_and_release(
         state.clone(),
         target.supervisor.clone(),
@@ -136,9 +133,8 @@ async fn run_update_and_release(
             Err(err)
         }
         Err(err) => {
-            // The blocking update task panicked or was cancelled. Pair the
-            // earlier `agent.update.started` row with a terminal failure so
-            // the SQLite trail is never left open-ended.
+            // Pair the earlier `agent.update.started` row with a terminal
+            // failure so the SQLite trail is never left open-ended.
             append_update_lifecycle(
                 &state,
                 "agent.update.failed",
@@ -186,9 +182,8 @@ pub(crate) async fn agent_update_status_handler(
     let registry = load_active_registry()?;
     let agent_id = config.agent.id.clone();
     let pinned = config.agent.harness_version.clone();
-    // An absent `[agent.auto_update]` section means disabled (the timer treats
-    // it that way); report a concrete default frequency so the caller always
-    // has a value to render.
+    // An absent `[agent.auto_update]` section means disabled, matching the
+    // timer; a concrete frequency is still reported so callers can render one.
     let auto_update = match config.agent.auto_update.as_ref() {
         Some(auto_update) => AgentAutoUpdatePolicyJson {
             enabled: auto_update.enabled,
@@ -217,9 +212,8 @@ pub(crate) async fn agent_update_status_handler(
         let store = state.state.lock().await;
         store.latest_successful_installer_runs_for_agent(&agent_id)?
     };
-    // The upstream lookups are blocking HTTP (npm has a hardcoded 30s
-    // timeout); a lookup failure degrades that component to `unknown` inside
-    // the report rather than failing the route.
+    // Upstream lookups are blocking HTTP; a failure degrades that component to
+    // `unknown` in the report rather than failing the route.
     let agent_config = config.agent.clone();
     let report = tokio::task::spawn_blocking(move || {
         build_agent_check_report(

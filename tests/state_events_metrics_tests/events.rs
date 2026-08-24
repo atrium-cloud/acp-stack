@@ -174,7 +174,6 @@ fn event_ids_stay_sorted_when_appended_in_quick_succession() {
             ..EventFilter::default()
         })
         .expect("events should query");
-    // Newest-first ordering should match the reverse insertion order.
     assert_eq!(descending.len(), 200);
     for window in descending.windows(2) {
         assert!(

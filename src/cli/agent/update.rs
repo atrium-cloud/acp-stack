@@ -48,12 +48,9 @@ fn run_agent_update_set(args: AgentUpdateSetArgs) -> Result<()> {
     }
     let config_path = crate::config::default_config_path()?;
     let mut config = Config::load_from_path(&config_path)?;
-    // Auto-update drives registry-managed harness/adapter steps. An escape-hatch
-    // agent (`[agent.install]`, no registry entry) has nothing to update, so none
-    // of --auto-on/--auto-off/--frequency apply — reject up front rather than
-    // writing an `[agent.auto_update]` block the daemon would only ever skip.
-    // A placeholder id keeps its own "select a real agent" error, matching
-    // `agent check`/`agent update`.
+    // An escape-hatch agent (`[agent.install]`, no registry entry) has nothing
+    // to auto-update, so reject up front rather than writing an
+    // `[agent.auto_update]` block the daemon would only ever skip.
     let home = home_dir()?;
     let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
     match registry.lookup_required(&config.agent.id) {
@@ -113,10 +110,8 @@ fn run_agent_update_execute(
 ) -> Result<()> {
     let home = home_dir()?;
     let config = Config::load_from_default_path()?;
-    // A custom (non-registry) agent has nothing to update. Resolve membership
-    // before any daemon interaction so --restart never stops and restarts a
-    // running agent for a guaranteed no-op (and never prompts for the admin key).
-    // A placeholder id keeps its own error rather than degrading to a skip.
+    // Resolve registry membership BEFORE any daemon interaction, so --restart
+    // never stops and restarts a running agent for a guaranteed no-op.
     let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
     match registry.lookup_required(&config.agent.id) {
         Ok(_) => {}
@@ -229,8 +224,6 @@ fn update_agent_offline(
     set_owner_only_file(&state_path)?;
 
     let registry = RegistryCatalog::load_with_override(&operator_registry_override(home))?;
-    // `run_agent_update_execute` filters non-registry agents before calling here,
-    // so this only resolves registry agents; a placeholder id still errors.
     let entry = registry.lookup_required(&config.agent.id)?;
     let workspace_root = PathBuf::from(config.workspace.root.clone());
     let local_bin = local_bin_dir(home);

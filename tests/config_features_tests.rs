@@ -69,10 +69,8 @@ fn rejects_duplicate_mcp_server_names() {
 
 #[test]
 fn rejects_duplicate_mcp_server_names_across_kinds() {
-    // Cross-transport name collisions (stdio + http with the same `name`) must
-    // also be rejected: the agent identifies servers by name regardless of
-    // transport, so allowing duplicates would silently overwrite the first
-    // entry's wiring.
+    // The agent identifies servers by name regardless of transport, so a
+    // cross-transport collision would silently overwrite the first entry's wiring.
     let updated = VALID_CONFIG.replace(
         "[agent]",
         concat!(
@@ -299,8 +297,6 @@ fn enable_supabase(input: &str) -> String {
 
 #[test]
 fn supabase_disabled_skips_url_check() {
-    // VALID_CONFIG ships with enabled = false, so even a non-https url must
-    // parse cleanly until external logging is actually turned on.
     let updated = VALID_CONFIG.replace(
         r#"url = "https://example.supabase.co""#,
         r#"url = "http://insecure.example""#,
@@ -491,8 +487,6 @@ fn rejects_agent_auto_update_zero_frequency() {
 
 #[test]
 fn agent_auto_update_frequency_accepts_hours_but_not_minutes() {
-    // The managed agent updater's smallest unit is an hour, unlike the stack
-    // self-update's day, so a 12h cadence loads while 30m is rejected.
     let config_text = format!(
         "{VALID_CONFIG}\n\
          [agent.auto_update]\n\
@@ -583,8 +577,7 @@ fn rejects_stack_update_sub_day_frequency() {
 
 #[test]
 fn rejects_stack_update_overflowing_frequency() {
-    // A day/week count that overflows `Duration` passes the unit check but must
-    // still be rejected so config validation matches the runtime parser.
+    // Overflowing `Duration` passes the unit check, so validation must catch it.
     let config_text = format!(
         "{VALID_CONFIG}\n\
          [updates.acp_stack]\n\
@@ -601,8 +594,7 @@ fn rejects_stack_update_overflowing_frequency() {
 
 #[test]
 fn rejects_stack_update_frequency_exceeding_epoch() {
-    // `9999w` (~192 years) is representable as a `Duration` but longer than the
-    // time since 1970-01-01, so it must be rejected by the shared epoch hardstop.
+    // `9999w` is a valid `Duration` but longer than the time since 1970-01-01.
     let config_text = format!(
         "{VALID_CONFIG}\n\
          [updates.acp_stack]\n\
@@ -706,8 +698,7 @@ fn rejects_prompts_with_unparsable_duration() {
 
 #[test]
 fn rejects_duration_field_exceeding_epoch_floor() {
-    // The 1970 hardstop is shared by every duration field, not just the stack
-    // frequency: `30000d` (~82 years) exceeds the time since the Unix epoch.
+    // The 1970 hardstop is shared by every duration field, not just the stack one.
     let config_text = format!(
         "{VALID_CONFIG}\n\
          [prompts]\n\
@@ -724,8 +715,6 @@ fn rejects_duration_field_exceeding_epoch_floor() {
 
 #[test]
 fn removed_sandbox_network_block_gets_migration_error() {
-    // The former `[workspace.sandbox.network]` block moved to the extensions
-    // framework; any occurrence must fail fast with a pointer at the new form.
     let config_text = format!(
         "{VALID_CONFIG}\n\
          [workspace.sandbox]\n\
@@ -807,8 +796,7 @@ fn rejects_relative_network_provider_executable() {
 
 #[test]
 fn rejects_capability_on_network_provider_extension() {
-    // A managed-state field on a network-provider instance would look
-    // configured while enforcing nothing.
+    // A managed-state field there would look configured while enforcing nothing.
     let config_text = format!(
         "{VALID_CONFIG}\n\
          [workspace.sandbox]\n\
@@ -1082,8 +1070,6 @@ fn network_provider_extension_round_trips_and_defaults() {
 
 #[test]
 fn network_provider_and_managed_state_extensions_coexist() {
-    // `resolve_network_provider` filters by type; a managed-state sibling
-    // must not affect resolution and both must survive the round-trip.
     let config_text = format!(
         "{VALID_CONFIG}\n\
          [workspace.sandbox]\n\

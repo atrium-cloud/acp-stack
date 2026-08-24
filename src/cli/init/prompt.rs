@@ -1,20 +1,8 @@
 //! Shared interactive prompt helpers for `acps init`, built on `cliclack`.
 //!
-//! Every helper takes an `interactive: bool` and checks it FIRST. When it is
-//! false (a `--non-interactive` run or a non-TTY stdin) the helper returns its
-//! skip/default value WITHOUT touching `cliclack`, so the documented
-//! non-interactive contract holds and the wizard is never driven without a
-//! terminal. The caller computes `interactive` once via `prompts_enabled` in
-//! `init.rs` (`is_terminal() && !args.non_interactive`).
-//!
-//! Esc/cancel surfaces from `cliclack::interact()` as
-//! `io::ErrorKind::Interrupted`; this is a deliberate init abort. Optional
-//! prompts must expose an explicit Skip item instead of treating cancellation as
-//! a hidden skip.
-//!
-//! `--format json` is rejected for `init`, and `--handoff-json` disables prompts
-//! before these helpers run, so terminal UI never collides with structured
-//! output.
+//! Every helper checks `interactive` FIRST and returns its skip/default value
+//! without touching `cliclack`, so the wizard is never driven without a
+//! terminal.
 
 use std::cell::RefCell;
 use std::io;
@@ -23,17 +11,12 @@ use std::sync::Arc;
 use crate::error::{Result, StackError};
 use crate::runtime::agent::native_config_import::{NativeConfigInspection, NativeConfigSelection};
 
-use super::state_signal::InitStateSignal;
-// `HostedPromptKind::category` maps a prompt to the category it settles, which
-// only the client-side fold and its tests still need after the state reshape.
 #[cfg(test)]
 use super::state_signal::InitCategory;
+use super::state_signal::InitStateSignal;
 
-/// One variant per prompt site in the init wizard. There is deliberately no
-/// catch-all: `should_handle_hosted_prompt` matches exhaustively, so a new
-/// prompt cannot be added without deciding whether it streams to hosted
-/// clients. `as_str` is shared wire surface — hosted clients key rendering off
-/// it — so a rename is a wire break, not a refactor.
+/// One variant per prompt site in the init wizard. `as_str` is shared wire
+/// surface hosted clients key rendering off, so a rename is a wire break.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum HostedPromptKind {
     Agent,
@@ -168,14 +151,8 @@ impl HostedPromptKind {
         }
     }
 
-    /// Which category is waiting on this prompt. `None` means the prompt does
-    /// not move any category's frontier: either it never streams (the whole
-    /// non-hostable set) or it is a cross-cutting ask — a secret value can be
-    /// requested for an MCP server, a data source, or a provider, and the
-    /// testflight confirm settles nothing.
-    ///
-    /// Only the client-side fold reference and its tests derive `awaiting_input`
-    /// from a pending prompt now, so this mapping is test-only in the instance.
+    /// Which category is waiting on this prompt; `None` for prompts that never
+    /// stream or that cut across several categories.
     #[cfg(test)]
     pub(super) fn category(self) -> Option<InitCategory> {
         match self {
@@ -245,9 +222,7 @@ impl HostedPromptKind {
     }
 }
 
-/// Hand-maintained roster for the wire-string uniqueness test. Drift here only
-/// narrows that test; the exhaustive matches on `HostedPromptKind` are what
-/// force a decision for every new variant.
+/// Hand-maintained roster for the wire-string uniqueness test.
 #[cfg(test)]
 pub(super) const ALL_HOSTED_PROMPT_KINDS: &[HostedPromptKind] = &[
     HostedPromptKind::Agent,
@@ -314,9 +289,8 @@ pub(super) const ALL_HOSTED_PROMPT_KINDS: &[HostedPromptKind] = &[
     HostedPromptKind::AgentEnvRefName,
 ];
 
-/// A pickable item. `id` is the stable wire identity a hosted client answers
-/// with; `value` is the in-process choice the terminal path resolves to. They
-/// are separate because `label` is display text that may be reworded freely.
+/// A pickable item: `id` is the stable wire identity a hosted client answers
+/// with, `value` the in-process choice, `label` freely reworded display text.
 #[derive(Debug, Clone)]
 pub(super) struct PromptItem<T> {
     pub(super) value: T,
@@ -373,10 +347,8 @@ pub(super) enum HostedPromptOutcome<T> {
     Unhandled,
 }
 
-/// A confirm answer plus the hosted-only `deferred` sibling flag carried on the
-/// answer frame. A hosting backend that intends to run the confirmed work later
-/// answers `false` so this run does not do it inline, which is indistinguishable
-/// from an operator declining unless the flag rides along.
+/// A confirm answer plus the hosted-only `deferred` flag, which is what tells a
+/// backend deferring the work apart from an operator declining it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ConfirmAnswer {
     pub(super) value: bool,
@@ -396,9 +368,7 @@ impl ConfirmAnswer {
 pub(super) trait HostedPromptDriver: Send + Sync {
     fn select(&self, request: HostedPromptRequest) -> Result<HostedPromptOutcome<Option<usize>>>;
     fn confirm(&self, request: HostedPromptRequest) -> Result<HostedPromptOutcome<bool>>;
-    /// Confirm answer with the frame's `deferred` sibling preserved. Defaulted
-    /// through `confirm` so only the driver that actually reads client frames
-    /// has to know about the flag.
+    /// Confirm answer with the frame's `deferred` sibling preserved.
     fn confirm_with_deferral(
         &self,
         request: HostedPromptRequest,
@@ -421,22 +391,17 @@ pub(super) trait HostedPromptDriver: Send + Sync {
     }
     fn progress(&self, message: String);
     fn result(&self, payload: serde_json::Value);
-    /// Machine-readable counterpart to `progress`. Defaulted to a no-op so a
-    /// driver that only renders prompts and text needs no state map.
+    /// Machine-readable counterpart to `progress`.
     fn state_signal(&self, _signal: InitStateSignal) {}
-    /// Whether the caller that installed this driver declared it will supply a
-    /// custom provider's credential out-of-band after init. Defaulted false so
-    /// only a driver built from a start request that says so opts in; every
-    /// other driver, and every terminal run, keeps the hard failure.
+    /// Whether this driver declared it will supply a custom provider's
+    /// credential out-of-band after init.
     fn defer_provider_credentials(&self) -> bool {
         false
     }
 }
 
-/// Shared test double: captures state signals the way the hosted session will,
-/// and leaves every prompt `Unhandled` so a driven prompt behaves as if no
-/// client answered. Lives here rather than in one module's test mod because
-/// several init modules assert on the signals they emit.
+/// Shared test double: captures state signals and leaves every prompt
+/// `Unhandled`, as if no client answered.
 #[cfg(test)]
 #[derive(Default)]
 pub(super) struct RecordingPromptDriver {
@@ -447,8 +412,7 @@ pub(super) struct RecordingPromptDriver {
 
 #[cfg(test)]
 impl RecordingPromptDriver {
-    /// A driver that declared it will push provider credentials out-of-band,
-    /// for tests exercising the deferral path.
+    /// A driver that declared it will push provider credentials out-of-band.
     pub(super) fn deferring_provider_credentials() -> Self {
         Self {
             defer_provider_credentials: true,
@@ -463,8 +427,7 @@ impl RecordingPromptDriver {
             .clone()
     }
 
-    /// The password prompts this driver was asked to stream, for asserting
-    /// that a deferral path never emitted a secret-value prompt.
+    /// The password prompts this driver was asked to stream.
     pub(super) fn recorded_password_prompts(&self) -> Vec<String> {
         self.password_prompts
             .lock()
@@ -542,9 +505,7 @@ pub(super) fn hosted_driver_active() -> bool {
 }
 
 /// Whether the active hosted driver declared that provider credentials arrive
-/// out-of-band after init. False with no driver installed (terminal runs) and
-/// false for a hosted driver whose start request did not declare it, so a
-/// missing custom-provider ref stays a hard failure unless the caller opted in.
+/// out-of-band; false everywhere else, so a missing ref stays a hard failure.
 pub(super) fn defer_provider_credentials() -> bool {
     HOSTED_DRIVER.with(|slot| {
         slot.borrow()
@@ -559,8 +520,7 @@ pub(super) fn emit_progress(message: impl Into<String>) {
     }
 }
 
-/// Signals are built lazily: a terminal run has no driver, and the derivations
-/// behind these (registry lookups, joined name lists) are pure overhead there.
+/// Emit one state signal, built lazily so terminal runs skip the derivation.
 pub(super) fn emit_state_signal(build: impl FnOnce() -> InitStateSignal) {
     if let Some(driver) = HOSTED_DRIVER.with(|slot| slot.borrow().clone()) {
         driver.state_signal(build());
@@ -620,8 +580,7 @@ fn cancelled() -> StackError {
     }
 }
 
-/// Single-choice picker. Returns the chosen value, or `None` when not
-/// interactive or when there is nothing to choose.
+/// Single-choice picker; `None` when not interactive or nothing to choose.
 pub(super) fn select<T: Clone + Eq>(
     kind: HostedPromptKind,
     interactive: bool,
@@ -647,9 +606,8 @@ fn select_inner<T: Clone + Eq>(
     items: &[PromptItem<T>],
     searchable: bool,
 ) -> Result<Option<T>> {
-    // Answers may address an option by id, so a collision would make one of
-    // the colliding options unreachable over the wire — invisible in the
-    // terminal path, hence the assertion at the shared entry point.
+    // Answers address options by id, so a collision makes one of them
+    // unreachable over the wire while the terminal path looks fine.
     debug_assert!(
         items
             .iter()
@@ -700,8 +658,7 @@ fn select_inner<T: Clone + Eq>(
     }
 }
 
-/// Yes/no confirm. Returns `default` when not interactive, so the caller picks
-/// the right polarity (`false` for opt-in prompts, `true` for default-yes ones).
+/// Yes/no confirm; returns `default` when not interactive.
 pub(super) fn confirm(
     kind: HostedPromptKind,
     interactive: bool,
@@ -711,9 +668,8 @@ pub(super) fn confirm(
     confirm_with_deferral(kind, interactive, prompt, default).map(|answer| answer.value)
 }
 
-/// `confirm` for the one caller that must tell an operator's "no" apart from a
-/// hosting backend deferring the work to itself. Terminal answers are never
-/// deferred.
+/// `confirm` that preserves the hosted `deferred` flag; terminal answers are
+/// never deferred.
 pub(super) fn confirm_with_deferral(
     kind: HostedPromptKind,
     interactive: bool,
@@ -745,9 +701,8 @@ pub(super) fn confirm_with_deferral(
     }
 }
 
-/// Free-text line. `required` re-prompts on empty input. Returns `None` when
-/// not interactive; the caller decides whether `None` is a skip or a hard error
-/// for its field.
+/// Free-text line; `required` re-prompts on empty input, `None` when not
+/// interactive.
 pub(super) fn text(
     kind: HostedPromptKind,
     interactive: bool,
@@ -780,9 +735,8 @@ pub(super) fn text(
     }
 }
 
-/// Run `work` while showing an animated spinner with `message`. The spinner
-/// stops with a success line on `Ok` and an error line on `Err`. Only call this
-/// on the interactive path — cliclack writes the spinner to the terminal.
+/// Run `work` under a spinner; interactive path only, since cliclack writes the
+/// spinner straight to the terminal.
 pub(super) fn with_spinner<T>(message: &str, work: impl FnOnce() -> Result<T>) -> Result<T> {
     if hosted_driver_active() {
         emit_progress(message.to_owned());
@@ -802,10 +756,8 @@ pub(super) fn with_spinner<T>(message: &str, work: impl FnOnce() -> Result<T>) -
     }
 }
 
-/// Masked secret entry. Returns `None` when not interactive. `required` is
-/// hosted-wire metadata only: it tells the client whether a `null` answer
-/// skips cleanly (declared-ref collection) or leads to a hard failure
-/// (provider key refs); the server accepts `null` either way.
+/// Masked secret entry; `None` when not interactive. `required` is hosted-wire
+/// metadata only — the server accepts a `null` answer either way.
 pub(super) fn password(
     kind: HostedPromptKind,
     interactive: bool,
@@ -867,9 +819,6 @@ fn hosted_request<T>(
 mod tests {
     use super::*;
 
-    // The load-bearing invariant: non-interactive helpers return the skip /
-    // default value WITHOUT touching stdin or cliclack.
-
     #[test]
     fn select_returns_none_when_not_interactive() {
         let items = [item(1u8, "one", "one", "")];
@@ -901,9 +850,6 @@ mod tests {
         );
     }
 
-    // The wire strings are shared API surface with hosted clients, so two kinds
-    // resolving to the same string would make them indistinguishable on the
-    // wire while still compiling.
     #[test]
     fn hosted_prompt_kind_wire_strings_are_unique() {
         let mut seen = std::collections::BTreeSet::new();
@@ -938,8 +884,6 @@ mod tests {
             ),
             (HostedPromptKind::McpAdd, Some(InitCategory::Mcp)),
             (HostedPromptKind::McpHttpHeaders, Some(InitCategory::Mcp)),
-            // Cross-cutting: the same masked prompt collects refs for MCP
-            // servers, S3 data sources, and providers alike.
             (HostedPromptKind::SecretRefValue, None),
             (HostedPromptKind::TestflightConfirm, None),
             (HostedPromptKind::SkillsSelect, None),
@@ -950,8 +894,6 @@ mod tests {
         }
     }
 
-    // Every non-hostable prompt is invisible to a hosted client, so claiming a
-    // category for one would park that category on `awaiting_input` forever.
     #[test]
     fn non_hostable_kinds_have_no_category() {
         for kind in ALL_HOSTED_PROMPT_KINDS {

@@ -1,12 +1,7 @@
 #![cfg(feature = "test-fixtures")]
 
-//! End-to-end coverage for the manual agent-update routes: the admin-tier
-//! `POST /v1/agent/update` trigger and the session-tier
-//! `GET /v1/agent/update/status` version-visibility read.
-//!
-//! Upstream "latest" lookups are redirected through
-//! `ACP_STACK_GITHUB_API_BASE`; the npm path has no such seam, so npm-backed
-//! updates stay out of this suite.
+//! End-to-end coverage for the manual agent-update routes, with upstream
+//! "latest" lookups redirected through `ACP_STACK_GITHUB_API_BASE`.
 
 use reqwest::StatusCode;
 use serde_json::Value;
@@ -25,9 +20,8 @@ const GITHUB_API_BASE_ENV: &str = "ACP_STACK_GITHUB_API_BASE";
 const PINNED_TAG: &str = "v1.2.3";
 const MOCK_LATEST_TAG: &str = "v0.4.2";
 
-/// Registry override that backs the default `opencode` agent with a
-/// github-release install, so update targeting resolves through the
-/// `ACP_STACK_GITHUB_API_BASE` seam.
+/// Registry override backing the default `opencode` agent with a
+/// github-release install, so updates resolve through the API-base seam.
 fn write_opencode_github_override(config_dir: &std::path::Path) {
     let body = r#"
 [[agents]]
@@ -55,9 +49,7 @@ aarch64 = "aarch64"
     std::fs::write(config_dir.join("agents.toml"), body).expect("registry override");
 }
 
-/// A config whose agent id is absent from every registry (the operator
-/// override merges into the embedded catalog, so hiding a known id is not
-/// possible): a genuine escape-hatch agent.
+/// A config whose agent id is absent from every registry: an escape-hatch agent.
 fn custom_agent_config() -> acp_stack::config::Config {
     let mut config = test_config();
     config.agent.id = "custom-agent".to_owned();
@@ -92,18 +84,15 @@ async fn seed_installed_row(harness: &AgentHarness, step: &str, method: &str, ve
         .expect("seed installer row");
 }
 
-/// Server-side half of a gated fixture: signals each incoming request and
-/// holds the response until the test flips `released`.
+/// Signals each incoming request and holds the response until the test flips
+/// `released`.
 struct FixtureGate {
     released: std::sync::Arc<std::sync::atomic::AtomicBool>,
     hit_tx: std::sync::mpsc::Sender<()>,
 }
 
-/// Serve a fixed raw body for every request. The github asset download path
-/// needs bytes that pass the installer's spawn gate (a shebang script), which
-/// the JSON-only models fixture cannot provide; with `gate`, each response
-/// waits until the test releases it, so a caller parked mid-request provably
-/// still holds whatever lock it took before the upstream call.
+/// Serve a fixed raw body for every request, optionally holding each response
+/// until the test releases the `gate`.
 fn spawn_raw_body_server(
     body: &'static [u8],
     content_type: &'static str,
@@ -197,7 +186,6 @@ async fn update_skips_non_registry_agent() {
     let _home = HomeEnvGuard::set(tempdir.path());
 
     let harness = AgentHarness::spawn_with_config(custom_agent_config()).await;
-    // Empty body exercises the optional-request default (`force: false`).
     let response = http()
         .await
         .post(format!("{}/v1/agent/update", harness.base_url))
@@ -225,8 +213,7 @@ async fn update_reports_up_to_date_at_pinned_version() {
 
     let harness = AgentHarness::spawn_with_config(config).await;
     seed_installed_row(&harness, "install", "github", "1.2.3").await;
-    // The mock advertises a different latest release; a pinned agent already
-    // at its pin must come back `up_to_date` without ever consulting it.
+    // The mock advertises a different latest release; the pin must win.
     let mock_base = spawn_provider_models_server(serde_json::json!({
         "tag_name": MOCK_LATEST_TAG,
         "assets": [],
@@ -296,9 +283,8 @@ async fn update_skips_while_agent_running_and_releases_lock_on_stop() {
         .expect("stop");
     assert_eq!(stop.status(), StatusCode::OK);
 
-    // A stopped agent must take the supervisor's update lock and release it:
-    // the skip reason flips from busy to the non-registry skip, proving
-    // `finish_update` ran.
+    // The skip reason flipping from busy to non-registry proves `finish_update`
+    // released the supervisor's update lock.
     let response = client
         .post(format!("{}/v1/agent/update", harness.base_url))
         .header("Authorization", admin_bearer())
@@ -311,7 +297,6 @@ async fn update_skips_while_agent_running_and_releases_lock_on_stop() {
     assert_eq!(body["data"]["skipped"], true);
     assert_eq!(body["data"]["reason"], NON_REGISTRY_SKIP_REASON);
 
-    // Both attempts left an audit trail tagged with the API trigger.
     let status_body: Value = client
         .get(format!("{}/v1/agent/status", harness.base_url))
         .header("Authorization", session_bearer())
@@ -375,8 +360,8 @@ async fn update_status_reports_installed_latest_pin_and_policy() {
     assert_eq!(body["data"]["agent_id"], "opencode");
     assert_eq!(body["data"]["managed"], true);
     assert_eq!(body["data"]["pinned"], PINNED_TAG);
-    // No `[agent.auto_update]` section in the fixture config: disabled with
-    // the default frequency reported so the caller has a value to render.
+    // No `[agent.auto_update]` in the fixture config: disabled, but the default
+    // frequency is still reported so the caller has a value to render.
     assert_eq!(body["data"]["auto_update"]["enabled"], false);
     assert_eq!(body["data"]["auto_update"]["frequency"], "1d");
     let components = body["data"]["components"].as_array().expect("components");
@@ -454,7 +439,7 @@ async fn update_force_reinstalls_when_version_matches() {
     // Installed already matches the mock's latest: without `force` this
     // update would short-circuit as up_to_date.
     seed_installed_row(&harness, "install", "github", "0.4.2").await;
-    // The "binary" is a shebang script so the installer's spawn gate passes.
+    // A shebang script so the installer's spawn gate passes.
     let download_base =
         spawn_raw_body_server(b"#!/bin/sh\nexit 0\n", "application/octet-stream", None);
     let mock_base = spawn_provider_models_server(serde_json::json!({
@@ -489,7 +474,6 @@ async fn update_force_reinstalls_when_version_matches() {
     assert_eq!(steps[0]["status"], "updated", "body: {body}");
     assert_eq!(steps[0]["latest"], MOCK_LATEST_TAG);
     assert_eq!(steps[0]["installed"], "0.4.2");
-    // The reinstall really ran: the managed binary is the served script.
     let binary = tempdir.path().join(".local").join("bin").join("true");
     let content = std::fs::read(&binary).expect("reinstalled binary");
     assert_eq!(content, b"#!/bin/sh\nexit 0\n");
@@ -503,8 +487,8 @@ async fn update_returns_ok_with_failed_step_when_asset_missing() {
 
     let harness = AgentHarness::spawn_with_config(test_config()).await;
     seed_installed_row(&harness, "install", "github", "0.1.0").await;
-    // The release resolves but carries no asset matching `asset_pattern`: the
-    // step must degrade to `failed` while the route still answers 200.
+    // No asset matches `asset_pattern`, so the step must degrade to `failed`
+    // while the route still answers 200.
     let mock_base = spawn_provider_models_server(serde_json::json!({
         "tag_name": MOCK_LATEST_TAG,
         "assets": [],
@@ -545,8 +529,8 @@ async fn update_skips_while_another_update_is_in_flight() {
 
     let harness = AgentHarness::spawn_with_config(test_config()).await;
     seed_installed_row(&harness, "install", "github", "0.1.0").await;
-    // Gate the release lookup: once the fixture reports a hit, the first
-    // update provably holds the supervisor's update lock.
+    // Once the gated fixture reports a hit, the first update provably holds
+    // the supervisor's update lock.
     let released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (hit_tx, hit_rx) = std::sync::mpsc::channel::<()>();
     let mock_base = spawn_raw_body_server(
@@ -575,8 +559,8 @@ async fn update_skips_while_another_update_is_in_flight() {
                 .expect("send first update")
         })
     };
-    // Blocking wait for the fixture hit runs off the async executor: the
-    // in-process server shares this runtime.
+    // The blocking wait MUST run off the async executor: the in-process
+    // fixture server shares this runtime.
     tokio::task::spawn_blocking(move || {
         hit_rx
             .recv_timeout(std::time::Duration::from_secs(15))

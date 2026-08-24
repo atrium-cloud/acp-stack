@@ -16,9 +16,8 @@ use crate::state::{StateStore, default_state_path};
 
 use super::core::{CliMethod, OutputFormat, local_daemon_json_response, print_json};
 
-// `acps status` should not hang behind a dead listener or half-open tunnel.
-// Other daemon-facing commands can wait for their operation; status is a
-// diagnostic surface, so keep the live probe bounded and report unavailable.
+// Status is a diagnostic surface, so it reports unavailable rather than
+// hanging behind a dead listener or half-open tunnel.
 const STATUS_DAEMON_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(super) fn run_status(output: OutputFormat) -> Result<()> {
@@ -131,10 +130,8 @@ fn prompts_status_json(store: &StateStore, config: &Config) -> Result<serde_json
     }))
 }
 
-// Mirror `runtime/health.rs::collect_prompts` so the CLI surface stays in
-// step with `/v1/health/ready`. The threshold is read from the operator's
-// `[prompts]` block (or its defaults) so a deployment that tunes the
-// sweeper sees the same window reflected here.
+// Mirrors `runtime/health.rs::collect_prompts` so the CLI stays in step with
+// `/v1/health/ready`.
 fn print_prompts_status(store: &StateStore, config: &Config) -> Result<()> {
     let threshold = config.prompts.effective_stale_threshold();
     let threshold_secs = threshold.as_secs();
@@ -211,10 +208,8 @@ fn sink_status_json(store: &StateStore, config: &Config) -> Result<serde_json::V
     }))
 }
 
-// Mirror the lookup used in `runtime/health.rs::collect_deps`: new
-// `acps deps apply` rows share an exact apply_run_id, while legacy rows fall
-// back to the old timestamp cluster. The CLI surfaces a one-line summary of
-// the most-recent row plus a hint when the surrounding cluster had failures.
+// Mirrors `runtime/health.rs::collect_deps`: new `acps deps apply` rows share
+// an exact apply_run_id, while legacy rows fall back to a timestamp cluster.
 fn print_deps_status(store: &StateStore) -> Result<()> {
     let rows: Vec<_> = store
         .query_installer_runs_filtered(Some(DEPS_APPLY_AGENT_ID), DEPS_RECENT_ROW_LIMIT)?
@@ -234,9 +229,8 @@ fn print_deps_status(store: &StateStore) -> Result<()> {
         .map(|code| format!(", exit={code}"))
         .unwrap_or_default();
     let suffix = if cluster_has_failure && !deps_status_is_failure(&latest.status) {
-        // Most recent row looks fine but an older row in the same apply
-        // cluster failed — surface that so the operator does not interpret
-        // the latest-row status as the whole apply being healthy.
+        // An older row in the same cluster failed, so the latest-row status
+        // must not read as the whole apply being healthy.
         ", recent cluster had failures"
     } else {
         ""

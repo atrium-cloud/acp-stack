@@ -1,7 +1,5 @@
-//! Command execution coverage: submit/exit status recording, auto-mode
-//! shell-composition escalation, env allowlisting, cwd containment, cancel,
-//! timeout, output truncation/replay, progress events, and the WebSocket
-//! command/logs topics.
+//! Command execution coverage: status recording, escalation, env allowlisting,
+//! cwd containment, cancel, timeout, output replay, and the WebSocket topics.
 
 mod common;
 
@@ -704,10 +702,8 @@ async fn truncated_noisy_command_still_emits_progress_events() {
 #[tokio::test]
 async fn websocket_streams_command_stdout_and_exit() {
     let harness = Harness::spawn().await;
-    // `commands.{id}` is per-row, so the id has to exist before subscribing.
-    // We slow the command itself with `sleep 0.3` so the supervisor's events
-    // (`command.started`, stdout chunk from `echo`, `command.exited`) fire
-    // AFTER the WebSocket subscription is registered.
+    // `commands.{id}` is per-row, so the id must exist before subscribing; the
+    // `sleep 0.3` keeps the supervisor's events after the subscription lands.
     let response = submit(
         &harness,
         serde_json::json!({"command": "sh -c 'sleep 0.3 && echo streamed'"}),
@@ -717,8 +713,7 @@ async fn websocket_streams_command_stdout_and_exit() {
     let id = body["data"]["id"].as_str().unwrap().to_owned();
     let topic = format!("commands.{id}");
     let mut stream = open_ws(&harness.base_url, &[topic.as_str()]).await;
-    // Subscribe is async; give the server a brief moment to register the
-    // topic before the supervisor begins emitting.
+    // Subscribe is async, so let the server register the topic first.
     tokio::time::sleep(Duration::from_millis(50)).await;
     let _final_body = wait_for_terminal(&harness, &id).await;
     let events = collect_until(&mut stream, |value| {

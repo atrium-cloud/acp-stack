@@ -1,6 +1,5 @@
 //! Public data model shared by the skill install, port, link, and day-2
-//! surfaces: source selections, resolved sources, and the reports the CLI and
-//! HTTP routes serialize.
+//! surfaces.
 
 use super::*;
 

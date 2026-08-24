@@ -1,5 +1,5 @@
-//! `http.wildcard_origin_public_bind` rule. A wildcard CORS origin on a public
-//! bind is a critical finding — anyone can hit the API from any origin.
+//! `http.wildcard_origin_public_bind`: a wildcard CORS origin on a public bind lets any origin
+//! reach the API, so it is a critical finding.
 
 use crate::security::SecurityCheckInputs;
 use crate::security::findings::{SecurityFinding, bind_is_public};

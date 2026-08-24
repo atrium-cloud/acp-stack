@@ -15,8 +15,6 @@ mod skills;
 mod starter_config;
 mod state_signal;
 
-// Lift the init schema def-producers one level further, toward `crate::cli`, so
-// `schema_export` reaches them without the private `serve` module on the path.
 #[cfg(feature = "dev-tools")]
 pub(crate) use self::serve::{init_request_defs, init_response_defs};
 mod testflight;
@@ -115,9 +113,7 @@ pub use self::args::{InitArgs, InitCommand};
 pub(super) use self::run::run_init;
 pub(super) use self::run::run_init_command;
 
-// Cross-seam items keep `pub(super)` visibility in their sibling; re-import them
-// here so other siblings can still reach them via `super::` and so this module's
-// own body and tests resolve them unqualified.
+// Re-imported so sibling modules reach these `pub(super)` items via `super::`.
 use self::args::*;
 use self::handoff::*;
 use self::preprocess::*;

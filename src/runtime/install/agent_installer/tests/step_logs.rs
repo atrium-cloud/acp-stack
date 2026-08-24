@@ -96,10 +96,8 @@ fn installer_log_persist_failure_prevents_history_row() {
     .expect_err("log persistence failure must fail install wrapper");
 
     assert!(matches!(err, StackError::AgentInstallerLogPersist { .. }));
-    // The step's `running` row is inserted at step start by design; when the
-    // audit-log write then fails, the row is finalized as `error` (never a
-    // success status) and carries no `log_dir` — history must not claim a
-    // completed run whose audit copy was lost.
+    // History must never claim a completed run whose audit copy was lost: the `running` row
+    // finalizes as `error` with no `log_dir`.
     let runs = store.query_installer_runs(10).expect("query");
     assert_eq!(runs.len(), 1, "the running row is finalized in place");
     assert_eq!(runs[0].status, "error");

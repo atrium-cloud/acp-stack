@@ -1,9 +1,7 @@
-//! Time-and-sequence-based ID generation for durable records.
-//!
-//! Every record table gets monotonically-sortable IDs of the form
+//! Monotonically-sortable record IDs of the form
 //! `{prefix}_{nanos:020}_{sequence:010}_{pid:010}`. The atomics reset on
-//! process start; the PID disambiguates IDs generated in the same nanosecond
-//! by concurrent `acps` invocations.
+//! process start, so the PID is what disambiguates concurrent `acps`
+//! invocations landing in the same nanosecond.
 
 use chrono::{SecondsFormat, Utc};
 use rand::RngExt;
@@ -29,13 +27,9 @@ pub(super) fn current_timestamp() -> String {
 }
 
 pub(super) fn next_event_id() -> String {
-    // timestamp_nanos_opt() returns Option; for real clocks since 1970 it is always
-    // Some and positive. Falling back to 0 keeps IDs sortable on a wildly skewed clock.
+    // Falling back to 0 keeps IDs sortable on a wildly skewed clock.
     let nanos = Utc::now().timestamp_nanos_opt().unwrap_or(0).max(0) as u128;
     let sequence = EVENT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    // PID disambiguates events from concurrent acps invocations that land in the same
-    // nanosecond with the same per-process sequence value, since EVENT_SEQUENCE resets
-    // on every process start.
     let pid = std::process::id();
     format!("evt_{nanos:020}_{sequence:010}_{pid:010}")
 }

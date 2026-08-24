@@ -1,14 +1,10 @@
 //! Cross-domain dispatch for [`StackError`]: error code, public message,
-//! remediation hint, and HTTP status. Each accessor fans out to the
-//! per-domain helper modules so the variant-to-value tables stay next to
-//! the domain that owns them.
+//! remediation hint, and HTTP status, each fanning out to per-domain helpers.
 
 use super::*;
 
 impl StackError {
-    /// Dotted-namespace code suitable for the HTTP error envelope at
-    /// `docs/specs/api/api.md:29-48`. Delegates to per-domain helpers so the
-    /// variant-to-code table lives next to the matching domain.
+    /// Dotted-namespace code for the HTTP error envelope.
     pub fn error_code(&self) -> &str {
         if let Self::NativeAgentConfigOperationFailed { code } = self {
             return code;
@@ -34,10 +30,8 @@ impl StackError {
             .expect("StackError variant should be claimed by exactly one error domain")
     }
 
-    /// Human-readable message safe to expose through the public HTTP API.
-    /// `Display` remains intentionally detailed for CLI diagnostics and local
-    /// logs; this method avoids leaking local filesystem paths, OS errors, or
-    /// secret-store metadata to remote clients.
+    /// Message safe to expose through the public HTTP API: no local paths, OS
+    /// errors, or secret-store metadata. `Display` stays detailed for the CLI.
     pub fn public_message(&self) -> String {
         config::public_message(self)
             .or_else(|| state::public_message(self))
@@ -101,8 +95,7 @@ impl StackError {
                     "the install directory may hold a partial binary set; reinstall with the install script"
                 }
             }
-            // Unreachable: the early return above handles this variant so
-            // the hint can name the surface-specific retry command.
+            // Unreachable: the early return above handles this variant.
             StackError::DepsApplyFailed { .. } => {
                 "inspect `acps installer history --agent deps_apply` and fix the failing install action"
             }
@@ -128,9 +121,8 @@ impl StackError {
         .to_owned())
     }
 
-    /// HTTP status code for this error when rendered through the API envelope.
-    /// Coarse mapping: client-provided invalid input is 4xx; failures the
-    /// server hits internally (filesystem, sqlite, age decrypt) are 5xx.
+    /// HTTP status for the API envelope: invalid client input is 4xx, internal
+    /// failures are 5xx.
     pub fn http_status(&self) -> StatusCode {
         config::http_status(self)
             .or_else(|| state::http_status(self))

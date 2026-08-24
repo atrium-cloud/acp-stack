@@ -1,20 +1,4 @@
-//! Dev tool: regenerate the published `/v1` JSON Schema contract from the wire
-//! DTOs. Not shipped in release artifacts.
-//!
-//! Usage:
-//!
-//! ```sh
-//! cargo run --features dev-tools --bin generate-api-schema             # write
-//! cargo run --features dev-tools --bin generate-api-schema -- --check  # verify
-//! cargo run --features dev-tools --bin generate-api-schema -- --coverage
-//! ```
-//!
-//! `--check` compares the freshly generated output against the checked-in files
-//! and exits non-zero on any drift, without writing. `--coverage` prints how
-//! completely the schema covers the discoverable `/v1` handler wire types and
-//! exits non-zero if any are uncovered. The canonical enforcement is the drift
-//! and coverage tests in `acp_stack::schema_export`, which run under
-//! `--all-features` in CI and the release gate; the flags are local conveniences.
+//! Dev tool: regenerate the published `/v1` JSON Schema contract from the wire DTOs. Not shipped in release artifacts.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -49,8 +33,7 @@ fn main() -> ExitCode {
     }
 }
 
-/// Parse the single optional mode flag, rejecting anything unrecognized rather
-/// than silently ignoring it.
+/// Parse the single optional mode flag, rejecting anything unrecognized.
 fn parse_args() -> Result<Mode, String> {
     let mut mode = Mode::Write;
     for argument in std::env::args().skip(1) {
@@ -63,8 +46,7 @@ fn parse_args() -> Result<Mode, String> {
     Ok(mode)
 }
 
-/// Print request/response coverage and fail if any handler wire type is absent
-/// from the schema.
+/// Print request/response coverage and fail if any handler wire type is absent from the schema.
 fn report_coverage() -> Result<(), Box<dyn std::error::Error>> {
     let report = schema_export::coverage_report();
     for namespace in [&report.request, &report.response] {

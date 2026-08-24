@@ -16,8 +16,8 @@ use crate::envelope::ApiError;
 // ----- Middleware -----------------------------------------------------------
 
 /// Extract `Authorization: Bearer <key>`, classify it against the cached
-/// session / admin keys, tag the request with the resolved `KeyKind`. On any
-/// failure, write an `auth_failures` row and return 401.
+/// session / admin keys, and tag the request with the resolved `KeyKind`. Every
+/// failure writes an `auth_failures` row before returning 401.
 pub(super) async fn authenticate(
     State(state): State<AppState>,
     mut req: Request<Body>,
@@ -35,8 +35,7 @@ pub(super) async fn authenticate(
         .and_then(|ip| ip.parse::<std::net::IpAddr>().ok());
     let client_ip = origin.client_ip.as_deref();
 
-    // Short-circuit blocked IPs before bearer comparison. The blocker entry
-    // is reset on successful authenticate via record_success below.
+    // Short-circuit blocked IPs before bearer comparison.
     if let Some(ip) = resolved_ip
         && let Some(until) = state.auth_failure_blocker.check(ip)
     {
@@ -66,9 +65,8 @@ pub(super) async fn authenticate(
         );
     }
 
-    // Per-IP rate limit ticks on every request before bearer parsing. This is
-    // the always-on cap; bursts that exceed it cost the attacker zero local
-    // CPU since we reject before constant-time compare runs.
+    // Per-IP rate limit ticks before bearer parsing, so a burst is rejected
+    // ahead of the constant-time compare.
     if let Some(ip) = resolved_ip
         && let Err(scope) = state.rate_limiter.check_per_ip(ip)
     {
@@ -80,11 +78,8 @@ pub(super) async fn authenticate(
         );
     }
 
-    // Spec hardening (`docs/specs/security.md`): reject duplicate or malformed
-    // Authorization headers. `headers().get_all` exposes every value, so we
-    // can count them and refuse anything other than exactly one. Without this
-    // check, a request with two Authorization headers would silently take the
-    // first value, which is an auth ambiguity attackers can exploit.
+    // Spec hardening (`docs/specs/security.md`): exactly one Authorization
+    // header. Taking the first of two silently is an auth ambiguity.
     let mut auth_values = req.headers().get_all(AUTHORIZATION).iter();
     let header = match (auth_values.next(), auth_values.next()) {
         (None, _) => {
@@ -170,9 +165,8 @@ pub(super) async fn authenticate(
 
     match matched {
         Some(kind) => {
-            // Per-key rate limit. Fingerprint is sha256 of the bearer truncated
-            // to 16 hex chars; the raw key never enters the limiter map or any
-            // event payload.
+            // The raw key never enters the limiter map or any event payload;
+            // only this truncated sha256 fingerprint does.
             let fingerprint = crate::http_hardening::key_fingerprint(&bearer);
             if let Err(scope) = state.rate_limiter.check_per_key(&fingerprint) {
                 if let Some(ip) = resolved_ip {
@@ -225,10 +219,9 @@ pub(super) async fn authenticate(
     }
 }
 
-/// Check the unauthenticated rate limit and return a 429 response if the
-/// IP's unauthenticated bucket is exhausted. Called from every auth-failure
-/// branch so floods of bad credentials are throttled below the
-/// auth-failure-block threshold without burning bearer-compare CPU.
+/// Return a 429 when the IP's unauthenticated bucket is exhausted. Called from
+/// every auth-failure branch so credential floods are throttled below the
+/// auth-failure-block threshold.
 async fn check_unauthenticated_rate(
     state: &AppState,
     resolved_ip: Option<std::net::IpAddr>,
@@ -249,9 +242,8 @@ async fn check_unauthenticated_rate(
     }
 }
 
-/// Append a `security.rate_limited` durable event with scope label and
-/// (when authenticated) the truncated key fingerprint. The raw bearer is
-/// never persisted.
+/// Append a `security.rate_limited` durable event. The raw bearer is never
+/// persisted, only its truncated fingerprint.
 async fn persist_rate_limit_event(
     state: &AppState,
     route: &str,
@@ -284,7 +276,7 @@ async fn persist_rate_limit_event(
 }
 
 /// Per-route tier gate: rejects valid keys of the wrong tier with 401 and
-/// records a `wrong_kind` auth-failure row. Session-tier in this batch.
+/// records a `wrong_kind` auth-failure row.
 pub(super) async fn require_session(
     State(state): State<AppState>,
     req: Request<Body>,
@@ -310,12 +302,8 @@ pub(crate) async fn track_active_requests(
     next.run(req).await
 }
 
-/// Per-completed-request audit event. Emits one `api.request` row into the
-/// durable `events` table with `{method, path, status, duration_ms, key_kind}`.
-/// Skips routes that the metrics layer should ignore — WS upgrades and the
-/// high-cardinality `/v1/status*` polls — so request volume stays bounded.
-///
-/// The event powers the `api_connections` block in `/v1/metrics/summary`.
+/// Emit one durable `api.request` audit row per completed request, powering the
+/// `api_connections` block in `/v1/metrics/summary`.
 pub(crate) async fn log_api_request(
     State(state): State<AppState>,
     req: Request<Body>,
@@ -332,8 +320,7 @@ pub(crate) async fn log_api_request(
         crate::http_hardening::request_origin(req.headers(), peer, &state.config)
     };
     // Prefer the matched path template (e.g. `/v1/sessions/{id}`) to keep
-    // event cardinality bounded. Falls back to the raw path for routes that
-    // don't have a matched template (rare; mostly framework fallbacks).
+    // event cardinality bounded.
     let path = req
         .extensions()
         .get::<axum::extract::MatchedPath>()
@@ -341,18 +328,14 @@ pub(crate) async fn log_api_request(
         .unwrap_or_else(|| raw_path.clone());
     let resolved_kind = req.extensions().get::<KeyKind>().copied();
     let key_kind_label = resolved_kind.map(|k| k.as_wire_str());
-    // Pick the `events.source` label up-front so the audit row's `source`
-    // column reflects the caller tier (`local` for internal UDS calls,
-    // `api` otherwise). The handler runs next; the source decision is fixed
-    // at this point because the tier tag is set by `authenticate` /
-    // `tag_local` BEFORE this middleware sees the request.
+    // Fixed before the handler runs: `authenticate`/`tag_local` set the tier tag
+    // on an inner layer, so the caller tier is already known here.
     let event_source = AppState::event_source_for(resolved_kind);
 
     let response = next.run(req).await;
 
-    // The cardinality skip (`/v1/status*`, `/v1/ws`) targets public-API
-    // polling. Local UDS calls arrive as one-shot operations and should remain
-    // attributable as local activity, so keep the audit row in that case.
+    // The cardinality skip targets public-API polling; local UDS calls are
+    // one-shot and stay attributable.
     let is_local_caller = matches!(resolved_kind, Some(KeyKind::Local));
     if !is_local_caller
         && (should_skip_api_request_log(&path) || should_skip_api_request_log(&raw_path))
@@ -373,8 +356,7 @@ pub(crate) async fn log_api_request(
         &origin,
     );
     let payload_text = payload.to_string();
-    // Best-effort: a failed audit insert must not break the response. Surface
-    // it at warn so the operator can see the divergence in tracing logs.
+    // Best-effort: a failed audit insert must not break the response.
     let store = state.state.lock().await;
     if let Err(err) =
         store.append_event_with_source("info", "api.request", event_source, "", &payload_text)
@@ -384,16 +366,9 @@ pub(crate) async fn log_api_request(
     response
 }
 
-/// Returns true when the path should not produce an `api.request` row.
-/// `/v1/ws`, `/v1/status*`, and the two `/v1/health/*` endpoints are
-/// excluded — the first generates its own `ws.client_connected` /
-/// `ws.client_disconnected` pair; `/v1/status*` is a frequent poll surface
-/// whose cardinality would dwarf real traffic; `/v1/health/live` is
-/// contracted to be a state-store-free liveness signal, so writing an audit
-/// row would defeat the purpose and stall the endpoint behind any
-/// state-store contention; `/v1/health/ready` is the canonical orchestrator
-/// poll surface (load balancers, k8s probes, Cloudflare health checks) and
-/// has the same cardinality concern as `/v1/status*`.
+/// Returns true when the path should not produce an `api.request` row: WS keeps
+/// its own connect/disconnect pair, the poll surfaces would dwarf real traffic,
+/// and `/v1/health/live` is contracted to stay state-store-free.
 fn should_skip_api_request_log(path: &str) -> bool {
     path == "/v1/ws"
         || path == "/v1/health/live"
@@ -454,8 +429,8 @@ async fn enforce_tier(
             }
         }
         None => {
-            // `authenticate` runs ahead of this and must populate the tag.
-            // Treat a missing tag as a server-side wiring bug.
+            // `authenticate` runs ahead of this and must populate the tag, so a
+            // missing one is a server-side wiring bug.
             tracing::error!(
                 route = %req.uri().path(),
                 "require_tier saw no KeyKind extension; authenticate middleware not wired ahead",
@@ -470,10 +445,8 @@ async fn enforce_tier(
 }
 
 /// Wrap framework-generated error responses in the standard `{ok:false, ...}`
-/// envelope. Responses already carrying `application/json` (handler returns,
-/// auth middleware) pass through untouched. Original HTTP semantic headers
-/// (e.g. `Allow` on a 405) are copied onto the rewrapped response so
-/// downstream method-discovery and similar conventions keep working.
+/// envelope, passing through anything already `application/json` and preserving
+/// semantic headers such as `Allow` on a 405.
 pub(crate) async fn ensure_envelope(
     State(state): State<AppState>,
     req: Request<Body>,
@@ -488,11 +461,8 @@ pub(crate) async fn ensure_envelope(
             .map(|info| info.0.ip());
         crate::http_hardening::request_origin(req.headers(), peer, &state.config)
     };
-    // Capture the caller tier from the request extensions BEFORE consuming
-    // `req` into `next.run`. The tag is set by either `authenticate` (TCP
-    // router) or `tag_local` (UDS router) on inner layers; the body limit's
-    // 413 short-circuit can fire before the tag-setting layer runs, so this
-    // may be `None` — that's fine, the helper defaults to `api`.
+    // Read BEFORE `next.run` consumes `req`. May be `None` when the body limit's
+    // 413 fires ahead of the tag-setting layer; the helper defaults to `api`.
     let caller = req.extensions().get::<KeyKind>().copied();
     let response = next.run(req).await;
     let status = response.status();
@@ -529,9 +499,7 @@ pub(crate) async fn ensure_envelope(
     }
     let (parts, _body) = response.into_parts();
     let mut new_response = ApiError::for_status(status).into_response_with(status);
-    // Preserve any non-payload headers from the original framework response.
-    // Skip content-type/content-length because we're replacing the body with
-    // a JSON envelope; let axum's response builder set those fresh.
+    // Content-type/length are skipped so axum sets them fresh for the new body.
     for (name, value) in parts.headers.iter() {
         if name == http::header::CONTENT_TYPE || name == http::header::CONTENT_LENGTH {
             continue;
@@ -543,9 +511,8 @@ pub(crate) async fn ensure_envelope(
     new_response
 }
 
-/// Reject disallowed browser HTTP origins before `CorsLayer` handles the
-/// request so the denial is both JSON-shaped and durable. WebSocket upgrades
-/// are left to `ws_handler`, which publishes `security.ws_origin_denied`.
+/// Reject disallowed browser HTTP origins ahead of `CorsLayer` so the denial is
+/// JSON-shaped and durable. WS upgrades are left to `ws_handler`.
 pub(super) async fn enforce_http_origin(
     State(state): State<AppState>,
     req: Request<Body>,
@@ -626,14 +593,9 @@ async fn log_failure(
     origin: &crate::http_hardening::RequestOrigin,
     route: &str,
 ) -> std::result::Result<(), Response> {
-    // Hold the lock only long enough to insert one row. record_auth_failure
-    // is blocking sqlite work but lasts microseconds for a single INSERT.
-    //
-    // The hardening contract requires every rejected auth attempt to leave
-    // a durable `auth_failures` row. If we can't write it (state DB locked,
-    // corrupt, or full), failing closed with 500 is safer than silently
-    // returning 401: the operator's monitoring sees the failure, and an
-    // attacker cannot brute-force keys against an unrecorded server.
+    // Every rejected auth attempt MUST leave a durable `auth_failures` row, so
+    // an unwritable state DB fails closed with 500 rather than returning a
+    // silent 401 an attacker could brute-force against unrecorded.
     let store = state.state.lock().await;
     if let Err(err) =
         record_auth_failure_with_origin(&store, kind, reason, client_ip, Some(route), Some(origin))
@@ -646,9 +608,7 @@ async fn log_failure(
         ));
     }
     drop(store);
-    // Tick the in-memory blocker. If this failure just tripped the threshold,
-    // emit a security.ip_block_applied event so operators see the block via
-    // GET /v1/logs/security.
+    // Tick the in-memory blocker; tripping the threshold emits a durable event.
     if let Some(ip_str) = client_ip
         && let Ok(ip) = ip_str.parse::<std::net::IpAddr>()
         && state.auth_failure_blocker.record_failure(ip)
@@ -674,14 +634,8 @@ async fn log_failure(
     Ok(())
 }
 
-/// Append a `security.*` event. Best-effort: if the events table write fails,
-/// log a warning rather than failing the surrounding request. The event lands
-/// on the `logs` WS topic and is merged into `GET /v1/logs/security`.
-///
-/// `source` lets the caller attribute the event to either the public API
-/// (`EVENT_SOURCE_API`) or the local UDS (`EVENT_SOURCE_LOCAL`) so a security
-/// event triggered by a local UDS call lands with `source = "local"` to match
-/// its `api.request` row.
+/// Append a `security.*` event, best-effort, attributed to the caller's tier via
+/// `source` so it matches the request's `api.request` row.
 pub(super) async fn persist_security_event(
     state: &AppState,
     source: &'static str,
@@ -727,8 +681,7 @@ mod tests {
         let path = tempdir.path().join("state.sqlite");
         let store = StateStore::open(&path).expect("state open");
         store.migrate().expect("migrate");
-        // tempdir is dropped at the end of scope; for unit tests we leak it
-        // because the AppState holds the StateStore (and its sqlite handle).
+        // Leaked because the returned AppState keeps the sqlite handle open.
         std::mem::forget(tempdir);
         AppState::new(test_config(), store, session.to_owned(), admin.to_owned())
     }
@@ -741,8 +694,6 @@ mod tests {
     #[tokio::test]
     async fn require_admin_rejects_session_keys_end_to_end() {
         let state = new_state("acps_session_abc", "acps_admin_xyz");
-        // Synthetic admin-tier sub-router for proving require_admin works,
-        // even though no admin-tier route ships externally in this batch.
         let admin_only = Router::new()
             .route("/ping", get(|| async { "pong" }))
             .route_layer(middleware::from_fn_with_state(state.clone(), require_admin))

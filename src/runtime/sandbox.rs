@@ -1,31 +1,5 @@
-//! Isolation backends for the agent harness and mediated shells.
-//!
-//! The daemon holds the runtime's secrets (the age key, decrypted secret store),
-//! its config, and its local control socket. When the workload is untrusted
-//! (a prompt-injected or malicious agent), running it as the same process tree as
-//! the daemon means any in-runtime policy is bypassable and the secrets are one
-//! `cat` away. A sandbox backend wraps each spawn so the workload runs isolated.
-//! The `unshare` and `bwrap` backends mask the daemon's sensitive paths and socket
-//! directly; the `custom` backend delegates isolation to an operator-supplied
-//! wrapper, so there the masking guarantee is the operator's responsibility.
-//!
-//! No single OS mechanism is portable, so the backend is selected by
-//! `[workspace.sandbox].mode`:
-//!
-//! * `off` — no wrapping (single-process behavior, unchanged).
-//! * `unshare` — new mount/pid/ipc/uts namespaces via `unshare(1)`, a fresh
-//!   `/proc`, the sensitive paths masked with `tmpfs`, then all capabilities and
-//!   `no_new_privs` dropped via `setpriv(1)` before exec. Requires the daemon to
-//!   hold `CAP_SYS_ADMIN` (privileged container) — the masking `mount(2)` is done
-//!   by the [`run_exec`] helper, which the wrapper re-invokes inside the namespaces.
-//! * `bwrap` — `bubblewrap` with the same masking, for hosts with unprivileged
-//!   user namespaces.
-//! * `custom` — an operator-supplied wrapper argv, for any other environment
-//!   (`systemd-run`, `firejail`, …).
-//!
-//! Regardless of backend, the set of the daemon's own sensitive paths is derived
-//! here from the runtime path helpers (never from operator config), so an operator
-//! cannot misconfigure away the protection.
+//! Isolation backends (`off`/`unshare`/`bwrap`/`custom`) that wrap each agent
+//! spawn so an untrusted workload cannot reach the daemon's secrets or socket.
 
 #[cfg(target_os = "linux")]
 use std::ffi::CString;
@@ -44,23 +18,15 @@ pub mod supervise;
 // CONSTANTS
 
 /// Internal subcommand the `unshare` wrapper re-invokes (`acps __sandbox-exec`).
-/// Hidden from `--help`; it performs the in-namespace `tmpfs` masking that no
-/// stock tool can do without euid 0, then execs the privilege-drop chain.
 pub const SANDBOX_EXEC_SUBCOMMAND: &str = "__sandbox-exec";
 
-/// Internal subcommand that supervises a network-isolated spawn
-/// (`acps __sandbox-supervise`). It owns the per-spawn network namespace
-/// lifecycle: spawn the `unshare --net` chain, hold the namespace fd, run the
-/// operator's provider setup/teardown, and gate workload exec on setup success.
+/// Internal subcommand that supervises a network-isolated spawn (`acps __sandbox-supervise`).
 pub const SANDBOX_SUPERVISE_SUBCOMMAND: &str = "__sandbox-supervise";
 
-/// Internal subcommand that keeps a provider and all of its descendants in a
-/// liveness-monitored process group (`acps __sandbox-provider-supervise`).
+/// Internal subcommand that keeps a provider and its descendants in a liveness-monitored process group.
 pub const SANDBOX_PROVIDER_SUPERVISE_SUBCOMMAND: &str = "__sandbox-provider-supervise";
 
-/// Fixed child fd number the spawn sites dup the daemon's stderr onto, so the
-/// supervisor's diagnostics (and provider stderr in `daemon` mode) reach the
-/// operator even when the workload's own stderr is a captured pipe.
+/// Fixed child fd the spawn sites dup the daemon's stderr onto, so supervisor diagnostics reach the operator even when the workload's stderr is a captured pipe.
 pub const SANDBOX_DIAG_FD: i32 = 3;
 
 const UNSHARE_FLAGS: &[&str] = &[
@@ -75,8 +41,7 @@ const UNSHARE_FLAGS: &[&str] = &[
     "private",
 ];
 
-/// `setpriv` flags that drop every capability set plus `no_new_privs` so a
-/// setuid binary (e.g. `sudo`) inside the sandbox cannot regain privilege.
+/// Drops every capability set plus `no_new_privs`, so a setuid binary inside the sandbox cannot regain privilege.
 const SETPRIV_DROP_FLAGS: &[&str] = &[
     "--clear-groups",
     "--inh-caps=-all",
@@ -102,8 +67,6 @@ const BWRAP_BASE_FLAGS: &[&str] = &[
 
 const STANDARD_BIN_DIRS: &[&str] = &["/usr/bin", "/bin", "/usr/local/bin", "/usr/sbin", "/sbin"];
 
-/// Capability bit for `CAP_SYS_ADMIN`, which the `unshare` backend needs to
-/// create namespaces and mount a fresh `/proc` + the masking `tmpfs`.
 #[cfg(target_os = "linux")]
 const CAP_SYS_ADMIN_BIT: u32 = 21;
 
@@ -114,9 +77,7 @@ pub struct WrappedCommand {
     pub args: Vec<String>,
 }
 
-/// The daemon's own paths that must be unreadable from inside the sandbox: the
-/// config dir (config + `age.key`) and the state dir (secret store, state db, and
-/// the local control socket). Operator `mask_paths` are appended.
+/// The daemon's own paths that must be unreadable from inside the sandbox; derived from the runtime path helpers, never from operator config.
 pub fn sensitive_mask_paths(home: &Path, sandbox: &SandboxConfig) -> Vec<PathBuf> {
     let mut paths = vec![
         crate::secrets::config_dir(home),
@@ -126,11 +87,7 @@ pub fn sensitive_mask_paths(home: &Path, sandbox: &SandboxConfig) -> Vec<PathBuf
     paths
 }
 
-/// Wrap `program`/`args` according to `sandbox`. With `mode = off` the command is
-/// returned unchanged. `network` is the declared network-provider extension, if
-/// any (`unshare` only): its presence switches each wrapped spawn into an
-/// isolated network namespace. The caller still sets cwd/env (secrets via
-/// `Command::env`, which every backend forwards to the harness) and stdio.
+/// Wrap `program`/`args` according to `sandbox`; a declared `network` extension (`unshare` only) also moves the spawn into an isolated network namespace.
 #[allow(clippy::too_many_arguments)]
 pub fn wrap(
     sandbox: &SandboxConfig,
@@ -189,10 +146,8 @@ fn wrap_unshare(
     })
 }
 
-/// The argv passed to `unshare` (everything after the `unshare` binary itself):
-/// namespace flags, the in-namespace masking helper, the privilege-drop chain,
-/// and finally the workload. `isolated_network` adds `--net`; the supervisor
-/// injects `--sync-fd` at runtime because the fd number does not exist yet.
+/// The argv passed to `unshare`: namespace flags, masking helper, privilege-drop chain, workload.
+/// `--sync-fd` is absent here and injected by the supervisor at runtime, because the fd number does not exist yet.
 #[allow(clippy::too_many_arguments)]
 fn unshare_chain_args(
     sandbox: &SandboxConfig,
@@ -210,7 +165,7 @@ fn unshare_chain_args(
     }
     out.extend(UNSHARE_FLAGS.iter().map(|s| s.to_string()));
     out.push("--".to_owned());
-    // The masking helper runs inside the namespaces while still holding caps.
+    // Masking must run inside the namespaces while caps are still held, i.e. before the setpriv drop below.
     out.push(self_exe.to_string_lossy().into_owned());
     out.push(SANDBOX_EXEC_SUBCOMMAND.to_owned());
     for path in sensitive_mask_paths(home, sandbox) {
@@ -218,7 +173,6 @@ fn unshare_chain_args(
         out.push(path.to_string_lossy().into_owned());
     }
     out.push("--".to_owned());
-    // Privilege drop, then the real harness.
     out.push(resolve_bin("setpriv").to_string_lossy().into_owned());
     out.push(format!("--reuid={uid}"));
     out.push(format!("--regid={gid}"));
@@ -276,16 +230,9 @@ fn wrap_custom(sandbox: &SandboxConfig, program: &Path, args: &[String]) -> Resu
     })
 }
 
-/// When the sandbox config asks for network isolation and `args` is a
-/// `__sandbox-supervise` invocation, duplicate the daemon's stderr and register
-/// a `pre_exec` that installs it at [`SANDBOX_DIAG_FD`] in the child. The
-/// supervisor's diagnostics (and provider stderr in `daemon` mode) must reach
-/// the operator's stderr even when the workload's own stderr is a captured pipe
-/// (mediated commands). The config gate keeps a workload whose own argv merely
-/// starts with the subcommand token from ever receiving the daemon's stderr.
-/// Returns the parent-side handle, which must stay open across the spawn and be
-/// dropped afterwards; the dup is close-on-exec so the child only ever sees the
-/// fixed fd.
+/// Installs the daemon's stderr at [`SANDBOX_DIAG_FD`] in a `__sandbox-supervise` child.
+/// The sandbox-config gate keeps a workload whose own argv merely starts with the subcommand token from ever receiving the daemon's stderr.
+/// The returned handle MUST stay open across the spawn.
 #[cfg(unix)]
 pub fn wire_supervise_diag_fd(
     sandbox: &SandboxConfig,
@@ -300,10 +247,8 @@ pub fn wire_supervise_diag_fd(
     if args.first().map(String::as_str) != Some(SANDBOX_SUPERVISE_SUBCOMMAND) {
         return Ok(None);
     }
-    // SAFETY: duplicating our own stderr; the result is immediately owned. The
-    // minimum-fd floor keeps the dup off SANDBOX_DIAG_FD itself: dup2(fd, fd)
-    // is a no-op that would leave close-on-exec set, and exec would close the
-    // diagnostic fd before the supervisor starts.
+    // SAFETY: duplicating our own stderr; the result is immediately owned. The minimum-fd floor keeps the dup off
+    // SANDBOX_DIAG_FD itself, where dup2(fd, fd) would no-op and leave close-on-exec set, closing the fd at exec.
     let raw = unsafe {
         libc::fcntl(
             libc::STDERR_FILENO,
@@ -317,8 +262,7 @@ pub fn wire_supervise_diag_fd(
     // SAFETY: raw is a fresh fd owned solely by this handle.
     let stderr_dup = unsafe { OwnedFd::from_raw_fd(raw) };
     let dup_fd = stderr_dup.as_raw_fd();
-    // SAFETY: dup2 is async-signal-safe; dup_fd outlives the spawn because the
-    // caller holds the handle across it.
+    // SAFETY: dup2 is async-signal-safe; dup_fd outlives the spawn because the caller holds the handle across it.
     unsafe {
         command.pre_exec(move || {
             if libc::dup2(dup_fd, SANDBOX_DIAG_FD) == -1 {
@@ -345,18 +289,12 @@ fn find_bin(name: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-/// [`find_bin`], falling back to the bare `name` (resolved against PATH at exec
-/// time) so the harness command still works when the daemon's PATH is narrowed.
+/// [`find_bin`], falling back to the bare `name` so exec-time PATH resolution still applies.
 fn resolve_bin(name: &str) -> PathBuf {
     find_bin(name).unwrap_or_else(|| PathBuf::from(name))
 }
 
-/// Whether the configured backend can actually run on this host. `Ok(())` for
-/// `off` and for a usable backend; `Err(reason)` names exactly what is missing.
-/// Consumed by `serve` startup (fail-closed: the daemon refuses to start when a
-/// configured backend is unusable) and the security self-check (which surfaces
-/// the reason as a finding), instead of letting the first agent spawn fail
-/// indirectly.
+/// Whether the configured backend can run on this host; `serve` startup is fail-closed on `Err(reason)`.
 pub fn preflight(
     sandbox: &SandboxConfig,
     network: Option<&NetworkProviderExtension>,
@@ -375,12 +313,8 @@ pub fn preflight(
             }
             if let Some(network) = network {
                 supervise::preflight_pidfd_support()?;
-                // A configured provider that cannot be found would otherwise
-                // fail closed only at the first spawn. Config validation
-                // already requires an absolute path. Nothing else is required
-                // for isolated networking: `--net` is covered by
-                // CAP_SYS_ADMIN, and tools like `ip`/`nsenter` are the
-                // provider's own dependencies.
+                // Nothing else is required for isolated networking: `--net` is covered by CAP_SYS_ADMIN,
+                // and tools like `ip`/`nsenter` are the provider's own dependencies.
                 if let Some(provider) = network.provider.first()
                     && !Path::new(provider).is_file()
                 {
@@ -413,9 +347,7 @@ pub fn preflight(
     }
 }
 
-/// Whether this host could run the `unshare` backend (binaries present and
-/// `CAP_SYS_ADMIN` held). Used to nudge operators who left `mode = off` on a host
-/// that is capable of sandboxing.
+/// Whether this host could run the `unshare` backend (binaries present and `CAP_SYS_ADMIN` held).
 pub fn host_supports_unshare() -> bool {
     find_bin("unshare").is_some() && find_bin("setpriv").is_some() && host_has_cap_sys_admin()
 }
@@ -450,11 +382,7 @@ fn host_has_cap_sys_admin() -> bool {
     false
 }
 
-/// `acps __sandbox-exec --mask <dir>… -- <cmd> <args…>`: runs inside the
-/// namespaces created by `unshare`, still holding `CAP_SYS_ADMIN`. Masks each
-/// `--mask` directory with a fresh `tmpfs` (a direct `mount(2)`, which needs the
-/// capability but not euid 0), then execs the command — which is the `setpriv`
-/// privilege-drop chain ending in the harness. Never returns on success.
+/// `acps __sandbox-exec --mask <dir>… -- <cmd> <args…>`: masks each directory with a fresh `tmpfs` inside the `unshare` namespaces, then execs the privilege-drop chain. Never returns on success.
 pub fn run_exec(raw_args: Vec<String>) -> Result<()> {
     let mut masks: Vec<String> = Vec::new();
     let mut sync_fd: Option<i32> = None;
@@ -498,29 +426,21 @@ pub fn run_exec(raw_args: Vec<String>) -> Result<()> {
     for path in &masks {
         mask_with_tmpfs(Path::new(path))?;
     }
-    // Network-isolated spawns pause here (masking is mount-ns work and does not
-    // depend on the netns) until the supervisor confirms provider setup, so the
-    // workload never runs with a half-configured namespace. Fail-closed: if the
-    // supervisor dies or setup fails, the read sees EOF and we never exec.
+    // Fail-closed gate: block until the supervisor confirms provider setup, so the workload never runs
+    // with a half-configured namespace. A dead supervisor means EOF here and no exec at all.
     if let Some(fd) = sync_fd {
         supervise::wait_for_release(fd)?;
     }
-    // Replace this process with the privilege-drop chain; env is inherited.
     let error = Command::new(&command[0]).args(&command[1..]).exec();
     Err(StackError::SandboxFailed {
         reason: format!("exec `{}` failed: {error}", command[0]),
     })
 }
 
-/// Mount a fresh empty `tmpfs` over `path`, hiding its contents inside the mount
-/// namespace. A missing path is nothing to protect, so it is skipped. Any other
-/// failure is fatal — fail closed rather than run the workload unmasked.
+/// Mount a fresh empty `tmpfs` over `path`. A missing path is skipped; any other failure is fatal rather than run the workload unmasked.
 #[cfg(target_os = "linux")]
 fn mask_with_tmpfs(path: &Path) -> Result<()> {
     if !path.exists() {
-        // Nothing to protect, but warn (to the agent's stderr / daemon log) so a
-        // typo in an operator `mask_paths` entry is visible rather than silently
-        // leaving that path unprotected.
         eprintln!(
             "acps sandbox: mask path {} does not exist; skipping",
             path.display()
@@ -532,8 +452,7 @@ fn mask_with_tmpfs(path: &Path) -> Result<()> {
             reason: format!("mask path {} contains a NUL byte", path.display()),
         })?;
     let fstype = CString::new("tmpfs").expect("static string has no NUL");
-    // SAFETY: all pointers are valid C strings for the duration of the call; a
-    // null `data` is valid for tmpfs.
+    // SAFETY: all pointers are valid C strings for the duration of the call; a null `data` is valid for tmpfs.
     let rc = unsafe {
         libc::mount(
             fstype.as_ptr(),
@@ -623,10 +542,8 @@ mod tests {
         assert!(w.program.ends_with("unshare"));
         assert!(line.contains("--mount-proc"));
         assert!(line.contains(SANDBOX_EXEC_SUBCOMMAND));
-        // Both sensitive dirs are masked, derived not from config.
         assert!(line.contains("--mask /home/u/.config/acp-stack"));
         assert!(line.contains("--mask /home/u/.local/share/acp-stack"));
-        // Privilege drop + the real harness at the end.
         assert!(line.contains("--reuid=1001"));
         assert!(line.contains("--no-new-privs"));
         assert!(line.trim_end().ends_with("/home/u/.local/bin/claude acp"));
@@ -671,7 +588,6 @@ mod tests {
         assert_eq!(w.program, PathBuf::from("systemd-run"));
         assert_eq!(w.args, vec!["--scope", "/bin/claude", "acp"]);
 
-        // Empty wrapper is rejected fail-fast.
         let err = wrap(
             &cfg(SandboxMode::Custom),
             None,
@@ -687,9 +603,7 @@ mod tests {
 
     #[test]
     fn host_network_wrapper_is_byte_identical_to_legacy() {
-        // The pre-network wrapper, frozen: any drift here is a regression for
-        // every existing unshare deployment. No declared network-provider
-        // extension means host networking and must not change a single token.
+        // Frozen argv: drift here is a regression for every existing unshare deployment.
         let sandbox = cfg(SandboxMode::Unshare);
         let w = wrap(
             &sandbox,
@@ -750,8 +664,6 @@ mod tests {
         )
         .unwrap();
         let line = run(&w);
-        // The supervisor is the direct child (self exe), the unshare chain its
-        // argument, with --net ahead of the legacy namespace flags.
         assert_eq!(w.program, std::env::current_exe().unwrap());
         assert_eq!(w.args[0], SANDBOX_SUPERVISE_SUBCOMMAND);
         assert!(line.contains(&format!("--diag-fd {SANDBOX_DIAG_FD}")));
@@ -761,13 +673,11 @@ mod tests {
         assert!(line.contains("--provider-arg --config"));
         assert!(line.contains("--provider-arg /etc/provider.toml"));
         assert!(line.contains("--net --mount"));
-        // The inner chain is intact: masking helper, privilege drop, workload.
         assert!(line.contains(SANDBOX_EXEC_SUBCOMMAND));
         assert!(line.contains("--mask /home/u/.config/acp-stack"));
         assert!(line.contains("--reuid=1001"));
         assert!(line.trim_end().ends_with("/home/u/.local/bin/claude acp"));
-        // The sync fd is a runtime value injected by the supervisor, never
-        // baked into the wrapper argv.
+        // The sync fd is injected by the supervisor at runtime, never baked into the wrapper argv.
         assert!(!line.contains("--sync-fd"));
     }
 
@@ -813,7 +723,6 @@ mod tests {
     #[test]
     fn preflight_off_is_ok_custom_requires_wrapper() {
         assert!(preflight(&cfg(SandboxMode::Off), None).is_ok());
-        // Custom with an empty wrapper is unusable regardless of host.
         assert!(preflight(&cfg(SandboxMode::Custom), None).is_err());
     }
 }

@@ -1,9 +1,4 @@
 //! Prompt/session input parsing and path resolution helpers.
-//!
-//! These are the pure, mostly-synchronous conversions the supervisor performs
-//! at request boundaries: client JSON into typed ACP values, settled prompt
-//! results into the persisted failure taxonomy, and raw cwd strings into paths
-//! validated against `workspace.root`.
 
 use super::*;
 
@@ -13,7 +8,7 @@ pub(super) enum Outcome {
 }
 
 /// Owned fields the spawned prompt task hands to the state store on settle.
-/// Built before the await on the state mutex so we never hold the lock while
+/// Built BEFORE awaiting the state mutex so the lock is never held while
 /// constructing JSON payloads.
 pub(super) struct TerminalOutcome {
     pub(super) status: PromptStatus,
@@ -26,7 +21,6 @@ pub(super) struct TerminalOutcome {
 }
 
 /// Companion session-scoped event emitted alongside the terminal status write.
-/// Cancellation produces no event because cancellation is not a failure.
 pub(super) struct TerminalSessionEvent {
     pub(super) level: &'static str,
     pub(super) kind: &'static str,
@@ -34,10 +28,7 @@ pub(super) struct TerminalSessionEvent {
     pub(super) payload_json: String,
 }
 
-/// Build the persisted taxonomy + session event for a settled prompt task.
-/// The `prompt_id` is threaded through the spawned task and embedded into the
-/// session-event payload so dashboards can join on it; the row itself already
-/// carries the prompt_id, but the event lives in a separate index.
+/// Build the persisted taxonomy and session event for a settled prompt task.
 pub(super) fn build_terminal_outcome_with_prompt_id(
     outcome: Outcome,
     prompt_id_for_event: Option<&str>,
@@ -102,10 +93,8 @@ pub(super) fn build_terminal_outcome_with_prompt_id(
                 }
                 err => {
                     let Some(failure_class) = failure_class_for_prompt_error(err) else {
-                        // Other terminal errors: persist with no failure_class
-                        // (the taxonomy intentionally has gaps until callers add
-                        // the right entry) but still emit the generic errored
-                        // event so observers see the transition.
+                        // The taxonomy has deliberate gaps; still emit the
+                        // generic errored event so observers see the transition.
                         let payload = json!({
                             "prompt_id": prompt_id_for_event,
                             "error_code": code,
@@ -186,15 +175,13 @@ fn stop_reason_str(reason: StopReason) -> String {
         StopReason::Refusal => "refusal".to_owned(),
         StopReason::Cancelled => "cancelled".to_owned(),
         // StopReason is #[non_exhaustive]; future SDK additions surface as
-        // the wire string verbatim until we add a typed mapping for them.
+        // the wire string verbatim until a typed mapping is added.
         other => format!("{other:?}").to_lowercase(),
     }
 }
 
-/// Convert client-supplied prompt JSON into the typed `ContentBlock` vec the
-/// ACP SDK requires. The accepted shape is `[{ "type": "text", "text": "..." }]`
-/// (camelCase) or a bare string for convenience. Other ACP content variants
-/// (resource, resource_link, image, audio) round-trip through `serde_json::from_value`.
+/// Convert client-supplied prompt JSON (a bare string, or an array of ACP
+/// content blocks) into the typed `ContentBlock` vec the ACP SDK requires.
 pub fn parse_prompt_blocks(prompt: &Value) -> Result<Vec<ContentBlock>> {
     let blocks = match prompt {
         Value::String(text) => vec![ContentBlock::Text(
@@ -247,11 +234,9 @@ pub fn parse_mcp_servers(value: Option<&Value>) -> Result<Vec<McpServer>> {
         .map_err(|err| StackError::PromptBodyInvalid(format!("mcp_servers invalid: {err}")))
 }
 
-/// Hash `[agent].command` and compare against `expected_sha256`. Returns
-/// `AgentSha256Mismatch` on mismatch and `AgentSpawnFailed` if the file
-/// cannot be read. Path resolution mirrors what `tokio::process::Command`
-/// will do at spawn time: bare names look up `$PATH`, relative paths with
-/// a `/` resolve against `cwd`, absolute paths are used as-is.
+/// Hash `[agent].command` and compare against `expected_sha256`. Path
+/// resolution MUST mirror what `tokio::process::Command` does at spawn time,
+/// or the hash covers a different file than the one that runs.
 pub(super) fn verify_agent_binary_sha256(
     command: &str,
     cwd: &std::path::Path,
@@ -274,9 +259,7 @@ pub(super) fn verify_agent_binary_sha256(
     Ok(())
 }
 
-/// Resolve `[agent].env` names against the secret store. Returns an empty
-/// map when the list is empty so the secret store is never opened by
-/// no-secret agents (relevant for tests and stripped-down deployments).
+/// Resolve `[agent].env` names against the secret store.
 pub fn resolve_agent_env(
     agent: &AgentConfig,
     secrets: &SecretStore,

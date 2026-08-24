@@ -65,7 +65,6 @@ fn install_from_extracted_root_copies_multiple_skills() {
             .is_file()
     );
     assert!(destination.join("code-review").join("script.sh").is_file());
-    // Installed skills carry the managed marker recording the source id.
     assert_eq!(
         std::fs::read_to_string(destination.join("repo-map").join(MANAGED_SKILL_MARKER))
             .expect("marker"),

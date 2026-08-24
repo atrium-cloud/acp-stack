@@ -1,11 +1,5 @@
-//! Durable runtime state backed by SQLite.
-//!
-//! Each domain table lives in its own leaf module (`sessions`, `events`,
-//! `commands`, `permissions`, `auth`, `agent`, `metrics`). Cross-cutting
-//! primitives live in `ids` (id generators + timestamp), `records` (shared
-//! filter DTOs), `rows` (json validation + the unified `events` query
-//! predicate builder), and `schema` (migration runner). The `StateStore`
-//! struct and its connection lifecycle live in `core`.
+//! Durable runtime state backed by SQLite, with one leaf module per domain
+//! table and the `StateStore` connection lifecycle in `core`.
 
 mod agent;
 mod auth;

@@ -13,9 +13,8 @@ use crate::state::StateStore;
 
 const DISABLED_POLL_INTERVAL: Duration = Duration::from_secs(60);
 /// Grace window for `shutdown` to wait on an in-flight update before detaching.
-/// An update runs inside `spawn_blocking` and cannot be cancelled cooperatively,
-/// so without this bound a SIGTERM mid-update would hold daemon shutdown hostage
-/// for the full per-command timeout.
+/// An update runs inside `spawn_blocking` and cannot be cancelled, so without
+/// this bound a SIGTERM mid-update would hold daemon shutdown hostage.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 pub struct AgentAutoUpdater {
@@ -55,10 +54,8 @@ impl AgentAutoUpdater {
                 {
                     continue;
                 }
-                // Conservative by design: the auto-updater only updates when the
-                // agent is already stopped and never stops a running agent. A
-                // 24/7 agent is skipped every cycle; operators apply updates to a
-                // live agent explicitly with `acps agent update --restart`.
+                // The auto-updater only updates an already-stopped agent and
+                // never stops a running one; a live agent is skipped every cycle.
                 if !agent_supervisor.try_begin_update().await {
                     if let Err(err) = append_update_lifecycle(
                         &state,
@@ -138,9 +135,8 @@ impl AgentAutoUpdater {
                         }
                     }
                     Err(err) => {
-                        // The blocking update task panicked or was cancelled. Pair
-                        // the earlier `agent.update.started` row with a terminal
-                        // failure so the SQLite trail is never left open-ended.
+                        // A panicked task must still pair its earlier
+                        // `agent.update.started` row with a terminal failure.
                         if let Err(record_err) = append_update_lifecycle(
                             &state,
                             "agent.update.failed",
@@ -170,10 +166,8 @@ impl AgentAutoUpdater {
         let Some(handle) = self.handle.take() else {
             return;
         };
-        // The loop only observes cancellation at the top `select!`; an update
-        // already running inside `spawn_blocking` can't be interrupted. Bound
-        // the wait so shutdown stays prompt, then detach (drop the handle) and
-        // let the daemon exit — the blocking work is reaped when the process does.
+        // Cancellation is only observed at the top `select!`, so bound the wait
+        // and detach; the blocking work is reaped when the process exits.
         match tokio::time::timeout(SHUTDOWN_GRACE, handle).await {
             Ok(Ok(())) => {}
             Ok(Err(err)) => {
@@ -225,8 +219,7 @@ mod tests {
     use super::*;
     use crate::runtime::agent::supervisor::AgentSupervisor;
 
-    // A minimal valid config; the auto-updater only reads `agent.auto_update`,
-    // but loading goes through full validation so every required section is here.
+    // Loading goes through full validation, so every required section is here.
     const BASE_CONFIG: &str = r#"
 [api]
 bind = "127.0.0.1:7700"
@@ -308,9 +301,8 @@ restart = "on-crash"
     #[tokio::test]
     async fn spawn_then_shutdown_returns_promptly() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        // Disabled auto-update => the loop parks on the 60s poll interval and
-        // never performs work; shutdown must cancel that sleep immediately
-        // rather than wait out the interval.
+        // Disabled auto-update parks the loop on the 60s poll interval, which
+        // shutdown must cancel rather than wait out.
         let config_path = write_config(
             &tempdir,
             "\n[agent.auto_update]\nenabled = false\nfrequency = \"1d\"\n",

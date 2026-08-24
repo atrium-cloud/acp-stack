@@ -3,15 +3,10 @@
 
 use super::*;
 
-/// Symlink every skill under the agent's install root into its
-/// `agent_skills_link_dir`, for harnesses that only discover skills from
-/// their own directory (e.g. Claude Code reads `~/.claude/skills`, not the
-/// shared `~/.agents/skills`). Linking is a one-way mirror: the managed
-/// install root is the source of truth and the link dir only receives
-/// symlinks. Idempotent: correct links are kept, stale links are repointed,
-/// dangling top-level links into the install root are pruned, and real
-/// files or directories already at a link path are left alone and reported
-/// as conflicts instead of failing.
+/// Idempotently symlink every skill under the agent's install root into its
+/// `agent_skills_link_dir`, for harnesses that only discover skills from their own directory.
+/// The mirror is one-way: the install root is the source of truth and real files at a link path
+/// are reported as conflicts, never overwritten.
 pub fn link_agent_skills(home: &Path, entry: &RegistryEntry) -> Result<Option<SkillLinkReport>> {
     let Some(link_dir) = entry.agent_skills_link_dir.as_deref() else {
         return Ok(None);
@@ -22,9 +17,8 @@ pub fn link_agent_skills(home: &Path, entry: &RegistryEntry) -> Result<Option<Sk
     let Some(install_root) = agent_skill_root(&home, entry)? else {
         return Ok(None);
     };
-    // Resolve symlinked ancestors (e.g. a dotfiles-managed `~/.agents`) the
-    // same way the link root is resolved, so linking works there instead of
-    // failing the no-symlink-ancestor check that copy flows require.
+    // Resolve symlinked ancestors (e.g. a dotfiles-managed `~/.agents`) so linking works there
+    // instead of failing the no-symlink-ancestor check that copy flows require.
     let install_root = resolve_existing_prefix(&install_root)?;
     if !install_root.is_dir() {
         return Ok(None);
@@ -45,9 +39,7 @@ pub fn link_agent_skills(home: &Path, entry: &RegistryEntry) -> Result<Option<Sk
         ensure_directory_no_symlink_ancestors(&link_root, true)?;
     }
     for (skill_name, install_dir) in candidates {
-        // One bad skill must not take down the rest of the refresh: per-skill
-        // failures are collected and reported, linking continues, and the
-        // prune below still runs.
+        // One bad skill must not take down the rest of the refresh, and the prune below still runs.
         match link_one_skill(&link_root, &skill_name, &install_dir) {
             Ok(SkillLinkDisposition::Linked(entry)) => report.linked.push(entry),
             Ok(SkillLinkDisposition::Unchanged(entry)) => report.unchanged.push(entry),
@@ -81,9 +73,8 @@ enum SkillLinkDisposition {
     Conflict(SkillInstallEntry),
 }
 
-/// Link one skill into the link root: create the symlink, repoint a stale
-/// one, keep a correct one, or leave a real file/directory in place as a
-/// conflict. Failures are the caller's to downgrade to per-skill errors.
+/// Link one skill: create the symlink, repoint a stale one, keep a correct one, or leave a real
+/// file in place as a conflict.
 fn link_one_skill(
     link_root: &Path,
     skill_name: &str,
@@ -129,11 +120,8 @@ fn link_one_skill(
     }
 }
 
-/// Best-effort wrapper for install/switch flows: a failed link refresh must
-/// not abort an otherwise successful operation — the skills stay installed
-/// in the shared root and only harness discovery is degraded, so the
-/// failure is logged and returned for the caller to surface instead of
-/// propagated.
+/// Best-effort wrapper for install/switch flows: a failed link refresh only degrades harness
+/// discovery, so it is logged and returned rather than propagated.
 pub fn link_agent_skills_best_effort(home: &Path, entry: &RegistryEntry) -> SkillLinkOutcome {
     match link_agent_skills(home, entry) {
         Ok(report) => SkillLinkOutcome {
@@ -150,11 +138,8 @@ pub fn link_agent_skills_best_effort(home: &Path, entry: &RegistryEntry) -> Skil
     }
 }
 
-/// Canonicalize the longest existing prefix of `path` and re-append the
-/// missing tail. A dotfiles-managed home commonly symlinks the harness
-/// config directory itself (e.g. `~/.claude` -> `~/dotfiles/claude`);
-/// resolving it up front lets the no-symlink-ancestor checks operate on the
-/// real directory instead of rejecting the whole link step.
+/// Canonicalize the longest existing prefix of `path` and re-append the missing tail, so a
+/// dotfiles-managed harness config directory does not fail the no-symlink-ancestor checks.
 fn resolve_existing_prefix(path: &Path) -> Result<PathBuf> {
     let mut prefix = path.to_path_buf();
     let mut tail: Vec<std::ffi::OsString> = Vec::new();
@@ -183,14 +168,9 @@ fn resolve_existing_prefix(path: &Path) -> Result<PathBuf> {
     }
 }
 
-/// Remove symlinks under the link root that point into the install root
-/// but whose target no longer exists — the leftover of an uninstalled
-/// skill. Linking is a one-way mirror: symlinks pointing into the managed
-/// install root are ours wherever they sit, so real directories are
-/// recursed into (nested skills live in group directories the linker
-/// created), and a directory left empty by pruning is removed with them.
-/// Everything else — real files, links pointing elsewhere, directories
-/// with any content left — is user-owned and left completely alone.
+/// Remove symlinks under the link root that point into the install root but whose target is gone.
+/// Only links into the managed install root, and group directories this prune emptied, are touched;
+/// real files, links pointing elsewhere, and non-empty directories are user-owned and left alone.
 fn prune_dangling_skill_links(
     link_root: &Path,
     directory: &Path,
@@ -220,8 +200,7 @@ fn prune_dangling_skill_links(
             let dangling = match std::fs::symlink_metadata(&target) {
                 Ok(_) => false,
                 Err(source) if source.kind() == std::io::ErrorKind::NotFound => true,
-                // A target that cannot be stat'd for another reason (e.g. an
-                // unreadable ancestor) may still exist; keep the link.
+                // A target that cannot be stat'd for another reason may still exist; keep the link.
                 Err(source) => {
                     tracing::warn!(
                         path = %entry_path.display(),
@@ -250,8 +229,6 @@ fn prune_dangling_skill_links(
             prune_dangling_skill_links(link_root, &entry_path, install_root, pruned)?;
         }
     }
-    // Remove a group directory only when this prune emptied it; without a
-    // prune, or with any content left (user-owned or not), it stays.
     if directory != link_root && pruned.len() > pruned_before {
         let mut remaining = std::fs::read_dir(directory)
             .map_err(|source| skill_io_err("re-read skill link directory", directory, source))?;

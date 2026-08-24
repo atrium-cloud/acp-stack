@@ -51,14 +51,9 @@ pub(super) fn resolve_init_run(args: &InitArgs, store: &StateStore) -> Result<In
         "skip_workspace_init": args.skip_workspace_init(),
         "testflight": args.testflight,
         "skip_testflight": args.skip_testflight,
-        // Post-creation intents a bare `--resume` would otherwise drop: the
-        // deps-apply request and the stack-update choice run in late steps, and
-        // `--agent-env-ref` verification is deferred past several failure points,
-        // so its names are replayed and re-verified on resume. The custom-agent
-        // flags and `--dep`/`--dep-system` declarations are NOT recorded — they
-        // are written into the on-disk config at creation, before any step can
-        // fail, so resume recovers them from disk. (Interactive env values are
-        // in-memory only and cannot be replayed.)
+        // Post-creation intents a bare `--resume` would otherwise drop. Custom-agent flags and
+        // `--dep` declarations are deliberately absent: they land in on-disk config at creation,
+        // so resume recovers them from disk.
         "agent_env_ref": args.agent_env_ref,
         "deps_apply": args.deps_apply,
         "deps_apply_yes": args.deps_apply_yes,
@@ -149,10 +144,8 @@ pub(super) struct RecordedInitArgs {
     pub(super) rotate_keys: bool,
 }
 
-// Arguments that existed in earlier releases but can no longer be replayed.
-// Unknown recorded keys are otherwise tolerated (several current keys are
-// intentionally absent from `RecordedInitArgs`), so removed requests must be
-// rejected explicitly instead of resuming without them.
+// Unknown recorded keys are otherwise tolerated, so args that can no longer be replayed must be
+// rejected explicitly instead of silently resuming without them.
 const REMOVED_RECORDED_ARGS: &[&str] = &["plugins", "plugins_source"];
 
 pub(super) fn recorded_init_args(run: &InitRunRecord) -> Result<RecordedInitArgs> {
@@ -199,9 +192,8 @@ pub(super) fn finalize_with_error(
         .query_init_steps(&run.id)
         .ok()
         .and_then(failed_step_for_report);
-    // Print the failure context BEFORE the fallible settle write: a store that
-    // fails at `finalize_run` must not swallow the operator-facing diagnostics
-    // (the original form bailed on `?` here, printing nothing on a broken store).
+    // Print the diagnostics BEFORE the fallible settle write, so a store that fails at
+    // `finalize_run` cannot swallow them.
     eprintln!("init failed in run {}", run.id);
     if let Some(step) = failed_step {
         eprintln!("failed step: {}", step.kind);
@@ -212,9 +204,7 @@ pub(super) fn finalize_with_error(
         }
     }
     eprintln!("retry: acps init --resume --run-id {}", run.id);
-    // Settle the run row as failed. A write failure here is a genuine
-    // local-state problem, but it must never mask the body error that triggered
-    // finalization, so it is logged rather than propagated.
+    // A settle failure is logged rather than propagated: it must not mask the body error.
     if let Err(settle_error) = finalize_run(store, &run.id, INIT_RUN_FAILED) {
         tracing::error!(
             run_id = %run.id,
@@ -246,11 +236,8 @@ fn step_report_timestamp(step: &InitStepRecord) -> &str {
         .unwrap_or("")
 }
 
-/// Freshly generated API key plaintext, returned from a first-run
-/// `secrets_init` so the driver can defer the operator handover to the very end
-/// of init instead of printing it at generation time, where the install /
-/// workspace / testflight scroll buries it. `Zeroizing` wipes the plaintext on
-/// drop.
+/// Freshly generated API key plaintext, carried so the driver can defer the operator handover
+/// to the end of init. `Zeroizing` wipes the plaintext on drop.
 pub(super) struct FreshKeys {
     pub(super) session_value: Zeroizing<String>,
     pub(super) admin_value: Zeroizing<String>,
@@ -266,20 +253,16 @@ pub(super) struct AuthInitOutcome {
     pub(super) rotated_keys: bool,
 }
 
-/// What `secrets_init` does when verifier rows already exist. Hosted init
-/// always rotates: the backend has no other way to recover credentials for an
-/// instance whose state predates this session, and a preserved run would
-/// deliver a keyless result frame the backend cannot accept.
+/// What `secrets_init` does when verifier rows already exist. Hosted init always rotates: a
+/// preserved run delivers a keyless result frame the backend cannot accept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum KeyPolicy {
     PreserveExisting,
     RotateExisting,
 }
 
-/// `secret_store` must be the caller's live handle: later init steps persist
-/// that handle's full in-memory map, so writing the rotated legacy refs
-/// through a separate `SecretStore::open` would be silently rolled back to
-/// the pre-rotation snapshot on the next persist.
+/// `secret_store` MUST be the caller's live handle: later steps persist that handle's whole
+/// in-memory map, so rotated refs written through a separate `open` are silently rolled back.
 pub(super) fn perform_auth_init(
     store: &StateStore,
     legacy_auth: Option<&LegacyAuthConfig>,
@@ -300,14 +283,9 @@ pub(super) fn perform_auth_init(
                 let session_value = generate_api_key();
                 let admin_value = generate_api_key();
                 let verifiers = AuthVerifierSet::create(&session_value, &admin_value);
-                // Rewrite legacy secret-store entries BEFORE replacing the
-                // verifier rows (a future backfill would otherwise resurrect
-                // the retired plaintexts). The order is load-bearing: a
-                // failed rewrite here leaves the old keys valid, while a
-                // failed replace below leaves inert refs — the reverse order
-                // could invalidate the old keys and then lose the new
-                // plaintexts to the error path, the exact wedge rotation
-                // exists to close.
+                // Legacy secret-store entries MUST be rewritten BEFORE the verifier rows are
+                // replaced: a failed rewrite here leaves the old keys valid, whereas the reverse
+                // order could invalidate them and then lose the new plaintexts to the error path.
                 if let Some(legacy_auth) = legacy_auth {
                     secret_store.set_many([
                         (legacy_auth.session_key_ref.as_str(), session_value.as_str()),
@@ -546,7 +524,6 @@ mod tests {
             admin_key_ref: "legacy_admin".to_owned(),
         };
 
-        // Make the secret-store persist fail so the legacy rewrite errors.
         let store_dir = secret_store
             .store_path()
             .parent()
@@ -564,8 +541,7 @@ mod tests {
         std::fs::set_permissions(&store_dir, std::fs::Permissions::from_mode(0o755))
             .expect("restore store dir permissions");
 
-        // The rewrite failed BEFORE the verifier replace: the old keys must
-        // still verify, or the failed rotation would itself be a key wedge.
+        // The rewrite failed before the verifier replace, so the old keys must still verify.
         assert!(
             result.is_err(),
             "rotation must fail when the legacy rewrite fails"
@@ -605,14 +581,12 @@ mod tests {
         .expect("outcome");
         let fresh = outcome.fresh_keys.expect("rotation must return plaintext");
 
-        // A later init step persisting through the same live handle must not
-        // roll the rotated refs back to the pre-rotation snapshot.
+        // A later persist through the same handle must not roll the rotated refs back.
         secret_store
             .set("unrelated", "value")
             .expect("later write through the same handle");
 
-        // A future legacy backfill reads these refs; stale plaintexts here
-        // would resurrect the retired keys.
+        // A future legacy backfill reads these refs; stale plaintexts would resurrect old keys.
         let reopened = SecretStore::open(tempdir.path()).expect("reopen secrets");
         assert_eq!(
             reopened.get("legacy_session").expect("session secret"),

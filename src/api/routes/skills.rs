@@ -1,27 +1,8 @@
 //! `/v1/agent/skills` — day-2 Agent Skills management for the active agent.
 //!
-//! Reads are session-tier: `list` (installed skills), `catalog` (built-in
-//! catalog plus configured user sources), and `source` (live inspection of one
-//! source's offered skills). Mutations are admin-tier and declared in the admin
-//! sub-router: `add`/`remove` install and uninstall skills, and
-//! `sources/add`/`sources/remove` register and drop `[[skills.sources]]`
-//! entries in config.
-//!
-//! `add` and `source` download and extract a GitHub archive off the async
-//! runtime; `add` fetches *before* taking the config-mutation lock so a slow
-//! download cannot block `agent switch`, then holds the lock only for the copy,
-//! re-resolving the active agent under it in case a switch landed mid-fetch.
-//! `remove` validates input before locking and holds the lock only for the
-//! delete. Both refresh the harness symlink mirror after the lock is released.
-//! The `sources/*` mutations take the same lock to serialize config writes and
-//! validate before writing atomically.
-//!
-//! Every handler loads config leniently, dropping individually invalid
-//! declarations the same way daemon boot does: one bad hand-edited
-//! `[[skills.sources]]` entry must not 400 the whole skills surface —
-//! `sources/remove` in particular is the route that repairs it. A `sources/*`
-//! write canonicalizes that lenient view back to disk, which heals dropped
-//! entries out of the file; each healed entry is warned about at write time.
+//! Every handler loads config leniently so one bad hand-edited
+//! `[[skills.sources]]` entry cannot 400 the whole surface; `sources/remove`
+//! is the route that repairs it.
 
 use std::path::PathBuf;
 
@@ -172,14 +153,10 @@ pub(crate) async fn skills_add_handler(
         return Err(StackError::MissingField { field: "skills" });
     }
     let skills = parse_skill_names(&body.skills)?;
-    // Reject unknown selectors before spending a download (mirrors the
-    // fail-fast `install_from_github` did when it validated ahead of fetching).
     validate_requested_skills(&source, &skills)?;
 
-    // Download + extract to a private tempdir *without* the config-mutation lock:
-    // the fetch touches no shared state and can stall to the read timeout, which
-    // must not block `agent switch` or other config writers. Blocking work, so
-    // park it off the async runtime.
+    // Fetch outside the config-mutation lock: it can stall to the read timeout,
+    // which must not block `agent switch` or other config writers.
     let fetch_source = source.clone();
     let (archive, archive_root) =
         tokio::task::spawn_blocking(move || fetch_and_extract_source(&fetch_source))
@@ -188,10 +165,8 @@ pub(crate) async fn skills_add_handler(
                 reason: format!("skill fetch thread join failed: {err}"),
             })??;
 
-    // Only the copy into the shared skill dir must serialize with switch. An
-    // `agent switch` may have landed during the fetch, so re-resolve the active
-    // agent and its install dir under the lock rather than trusting the
-    // pre-fetch config.
+    // An `agent switch` may have landed during the fetch, so re-resolve the
+    // active agent under the lock rather than trusting the pre-fetch config.
     let (agent_id, entry, install) = {
         let _mutation = state.lock_agent_config_mutation().await?;
         let config = Config::load_lenient_from_path(&state.runtime_paths.config_path)?;
@@ -214,14 +189,8 @@ pub(crate) async fn skills_add_handler(
         (config.agent.id.clone(), entry.clone(), install)
     };
 
-    // The link refresh rewrites only the harness's discovery dir, not config,
-    // so it runs after the mutation lock is released.
     let link_outcome = link_agent_skills_best_effort(&home, &entry);
-    // Audit trail for "which skills has acp-stack installed": day-2 mutations
-    // are recorded as events (init-time installs are already durable in the
-    // agent_skills_install step payload). The payload carries no filesystem
-    // paths — events are session-tier readable. A logging failure must not
-    // fail an install that already happened.
+    // The payload carries no filesystem paths: events are session-tier readable.
     let installed: Vec<&str> = install
         .installed
         .iter()
@@ -273,8 +242,7 @@ pub(crate) async fn skills_remove_handler(
     Json(body): Json<SkillsRemoveRequest>,
 ) -> std::result::Result<ApiSuccess<SkillsRemoveResponse>, StackError> {
     // Validate before taking the lock so malformed requests don't serialize
-    // with `agent switch`. Bad client input maps to a 400 here; the installer
-    // keeps its own `SkillInstallFailed` for the same check deeper down.
+    // with `agent switch`.
     validate_install_target_name(&body.skill).map_err(|_| StackError::InvalidParam {
         field: "skill",
         reason: format!("`{}` is not a valid skill install name", body.skill),
@@ -288,8 +256,7 @@ pub(crate) async fn skills_remove_handler(
     }
     let (agent_id, entry, remove) = {
         let _mutation = state.lock_agent_config_mutation().await?;
-        // Re-check under the lock: the active agent may have changed since the
-        // pre-check above.
+        // Re-check under the lock: the active agent may have changed.
         let config = Config::load_lenient_from_path(&state.runtime_paths.config_path)?;
         let registry = load_active_registry()?;
         let entry = registry.lookup_required(&config.agent.id)?;
@@ -365,9 +332,8 @@ pub(crate) async fn skills_source_get_handler(
     let config = Config::load_lenient_from_path(&state.runtime_paths.config_path)?;
     let catalog = SkillCatalog::load_embedded()?;
     let source = resolve_source_ref(&query.source, &config.skills.sources, &catalog)?;
-    // Trust follows whichever source `resolve_source_ref` actually picked.
-    // Catalog wins over a colliding user alias, so a catalog resolution reports
-    // the curated source's trust; otherwise fall back to the user source's flag.
+    // Trust follows whichever source `resolve_source_ref` picked; catalog wins
+    // over a colliding user alias.
     let trusted = if source.catalog_managed {
         catalog
             .lookup_alias(query.source.trim())
@@ -430,8 +396,8 @@ pub(crate) async fn skills_source_add_handler(
     let _mutation = state.lock_agent_config_mutation().await?;
     let (mut config, dropped) =
         Config::load_lenient_from_path_reporting(&state.runtime_paths.config_path)?;
-    // Reject shadowing a curated catalog alias. This check needs the catalog,
-    // which the config layer deliberately does not load, so it lives here.
+    // Reject shadowing a curated catalog alias. Lives here because the config
+    // layer deliberately does not load the catalog.
     let catalog = SkillCatalog::load_embedded()?;
     let alias = body.alias.trim().to_owned();
     if catalog.lookup_alias(&alias).is_some() {
@@ -452,7 +418,7 @@ pub(crate) async fn skills_source_add_handler(
     };
     config.skills.sources.push(source.clone());
     // Canonicalize and reload so alias syntax/uniqueness and github shape are
-    // fully validated (the config layer's own rules) before the file is written.
+    // validated before the file is written.
     let canonical = config.to_canonical_toml()?;
     crate::config::load_config_from_str(&canonical)?;
     warn_dropped_declarations_healed(&dropped);
@@ -502,8 +468,6 @@ pub(crate) async fn skills_source_remove_handler(
     if config.skills.sources.len() == before {
         return Err(StackError::SkillSourceNotConfigured { alias });
     }
-    // Removing from a valid config yields a valid config, but re-validate for
-    // symmetry with the add path so both mutations share one write contract.
     let canonical = config.to_canonical_toml()?;
     crate::config::load_config_from_str(&canonical)?;
     warn_dropped_declarations_healed(&dropped);

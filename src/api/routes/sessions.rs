@@ -30,8 +30,8 @@ pub(crate) mod prompts;
 pub(crate) mod status;
 pub(crate) mod teardown;
 
-// Router wiring (`api::core`, `local_listener::router`) imports handlers as
-// `sessions::<handler>`; re-export them so the split is invisible to callers.
+// Router wiring imports handlers as `sessions::<handler>`; re-export them so
+// the submodule split is invisible to callers.
 pub(crate) use commands::{sessions_commands_handler, sessions_commands_run_handler};
 pub(crate) use config_options::{
     sessions_config_options_handler, sessions_config_options_set_handler,

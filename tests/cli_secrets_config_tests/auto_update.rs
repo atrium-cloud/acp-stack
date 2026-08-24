@@ -98,8 +98,7 @@ fn agent_update_set_accepts_sub_day_frequency() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
 
-    // Unlike the stack self-update (day minimum), managed agent updates accept
-    // hour granularity so eager operators can keep harnesses fresh.
+    // Unlike the stack self-update's day minimum, agent updates accept hours.
     acps_command()
         .env("HOME", tempdir.path())
         .args(["agent", "update", "set", "--frequency", "12h"])
@@ -197,9 +196,8 @@ fn agent_update_set_rejects_non_registry_agent() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
-    // An escape-hatch agent id that the embedded registry does not resolve has
-    // nothing to auto-update, so every `set` variant is rejected — writing a
-    // block would only leave the daemon loop skipping it forever.
+    // An unresolvable agent id has nothing to auto-update, so every `set` is
+    // rejected; a written block would leave the daemon loop skipping forever.
     let escape_hatch = VALID_CONFIG.replace(r#"id = "opencode""#, r#"id = "custom-private-agent""#);
     fs::write(config_dir.join("acps-config.toml"), escape_hatch).expect("config should be written");
 
@@ -231,9 +229,8 @@ fn agent_check_and_update_still_error_for_placeholder_agent() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
-    // The legacy `placeholder` sentinel is NOT a custom agent: it must keep its
-    // own "select a real agent" signal, not degrade to the non-registry skip
-    // (check/update) or the escape-hatch rejection (update set).
+    // The legacy `placeholder` sentinel is NOT a custom agent: it keeps its own
+    // "select a real agent" signal rather than degrading to the skip path.
     let placeholder = VALID_CONFIG.replace(r#"id = "opencode""#, r#"id = "placeholder""#);
     fs::write(config_dir.join("acps-config.toml"), placeholder).expect("config should be written");
 
@@ -278,8 +275,8 @@ fn agent_update_execute_skips_non_registry_agent() {
     let escape_hatch = VALID_CONFIG.replace(r#"id = "opencode""#, r#"id = "custom-private-agent""#);
     fs::write(config_dir.join("acps-config.toml"), escape_hatch).expect("config should be written");
 
-    // A one-shot `acps agent update` for an escape-hatch agent is a clean no-op:
-    // it reports the skip and exits 0 rather than erroring on a missing entry.
+    // A one-shot update for an escape-hatch agent reports the skip and exits 0
+    // rather than erroring on a missing entry.
     acps_command()
         .env("HOME", tempdir.path())
         .args(["agent", "update"])

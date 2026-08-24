@@ -1,15 +1,5 @@
-//! Category clustering for the durable `security.*` event kinds.
-//!
-//! The runtime emits a flat namespace of `security.*` event kinds from
-//! `src/api/auth.rs` and `src/api/ws.rs`. The category enum here groups those
-//! flat kinds into operator-facing buckets so `GET /v1/logs/security?category=`
-//! and `acps logs query --category` can scope a query without forcing callers
-//! to memorize the exact kind names.
-//!
-//! Each `SecurityCategory` resolves to a fixed slice of kinds; adding a new
-//! kind that belongs in an existing bucket means extending the corresponding
-//! `KINDS_*` constant below. Adding a new bucket means adding a variant plus a
-//! match arm in `as_str`, `kinds`, and the `FromStr` impl.
+//! Category clustering that groups the flat `security.*` event kinds into the operator-facing
+//! buckets `?category=` and `--category` accept.
 
 use crate::error::StackError;
 use std::str::FromStr;
@@ -22,20 +12,16 @@ const CATEGORY_ORIGIN_CORS: &str = "origin_cors";
 const CATEGORY_IP_BLOCK: &str = "ip_block";
 const CATEGORY_OVERSIZED_REQUEST: &str = "oversized_request";
 
-/// Kinds emitted by the rate limiter at `src/api/auth.rs`.
+/// Kinds emitted by the rate limiter.
 const KINDS_RATE_LIMIT: &[&str] = &["security.rate_limited"];
-/// Kinds emitted when an HTTP or WebSocket origin fails the configured CORS
-/// allowlist (see `src/api/auth.rs` for HTTP and `src/api/ws.rs` for WS).
+/// Kinds emitted when an HTTP or WebSocket origin fails the configured CORS allowlist.
 const KINDS_ORIGIN_CORS: &[&str] = &["security.cors_origin_denied", "security.ws_origin_denied"];
-/// Kinds emitted by the IP-block ladder: the active block rejection and the
-/// post-failure block-applied marker (see `src/api/auth.rs`).
+/// Kinds emitted by the IP-block ladder: the block rejection and the block-applied marker.
 const KINDS_IP_BLOCK: &[&str] = &["security.ip_block_active", "security.ip_block_applied"];
-/// Kind emitted by the request-size limiter (`src/api/auth.rs`).
+/// Kind emitted by the request-size limiter.
 const KINDS_OVERSIZED_REQUEST: &[&str] = &["security.request_oversized"];
 
-/// Operator-facing category label used by HTTP `?category=` and the CLI
-/// `--category` flag. The label-to-kind mapping is the single source of truth;
-/// `from_str` parses operator input and `kinds` returns the SQL `IN (...)` set.
+/// Operator-facing category label; `kinds` returns the SQL `IN (...)` set it maps to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecurityCategory {
     RateLimit,
@@ -64,9 +50,8 @@ impl SecurityCategory {
     }
 }
 
-/// Parse an operator-supplied category label. Returns `InvalidParam` for any
-/// value outside the closed set so the API surfaces a 4xx instead of silently
-/// returning the unfiltered stream.
+/// Parses an operator-supplied label; anything outside the closed set is `InvalidParam`, so the
+/// API 4xxs rather than silently returning the unfiltered stream.
 impl FromStr for SecurityCategory {
     type Err = StackError;
 

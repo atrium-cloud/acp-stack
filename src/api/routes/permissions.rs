@@ -54,11 +54,8 @@ pub(crate) async fn permissions_approve_handler(
     StackError,
 > {
     let Json(body) = body.unwrap_or_default();
-    // The deciding principal is the bearer-token tier. These routes are
-    // session-tier (per docs/specs/security.md:26); the principal is always
-    // "session-key" and that's what's recorded in `permission_decisions`. If
-    // the tier policy ever splits approve vs deny across keys, surface the
-    // resolved KeyKind from the request extension here.
+    // These routes are session-tier, so the principal recorded in `permission_decisions` is always
+    // "session-key"; splitting approve/deny across tiers would mean surfacing the resolved KeyKind here.
     let decision = state
         .permissions
         .approve(&id, body.option_id, body.reason, "session-key")
@@ -75,8 +72,7 @@ pub(crate) async fn permissions_deny_handler(
     StackError,
 > {
     let Json(body) = body.unwrap_or_default();
-    // Hardcoded "session-key" mirrors `permissions_approve_handler`; see the
-    // rationale comment there.
+    // Hardcoded "session-key" mirrors `permissions_approve_handler`.
     let decision = state
         .permissions
         .deny(&id, body.reason, "session-key")

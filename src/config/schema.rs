@@ -1,13 +1,5 @@
-//! TOML schema types for `acps-config.toml`.
-//!
-//! The nested config structs are grouped into the domain submodules below and
-//! glob re-exported here, so both `crate::config::X` and
-//! `crate::config::schema::X` resolve exactly as they did before the split.
-//! The root `Config` aggregator and the `RawConfig` deserialization shim stay
-//! in `src/config.rs` because they own load-time orchestration. Default impls
-//! and small `default_*` helper functions used by `#[serde(default = "...")]`
-//! annotations are co-located with the struct they belong to so each domain
-//! module is self-contained.
+//! TOML schema types for `acps-config.toml`, grouped into domain submodules and
+//! glob re-exported here.
 
 mod agent;
 mod deps;
@@ -38,9 +30,7 @@ pub use self::updates::*;
 
 // CONSTANTS
 
-/// Fallback custom-model limits used when an operator does not provide agent
-/// config values. They match the documented defaults for the custom provider
-/// setup flow and keep the literals centralized across CLI and init paths.
+/// Fallback custom-model limits used when an operator supplies no agent values.
 pub const DEFAULT_CUSTOM_MODEL_CONTEXT: u64 = 200_000;
 pub const DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS: u64 = 65_536;
 

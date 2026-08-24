@@ -1,8 +1,5 @@
-//! Permission-store error helpers (`permission.*` namespace).
-//!
-//! Also handles the assorted `config.invalid` variants that live in the
-//! permissions / MCP / dependencies config domain — they share a section with
-//! permission-runtime errors but never grew their own dotted code prefix.
+//! Permission-store error helpers (`permission.*`), plus the `config.invalid`
+//! variants from the permissions / MCP / dependencies config domain.
 
 use http::StatusCode;
 
@@ -54,9 +51,8 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
     use StackError::*;
     Some(match err {
         PermissionNotFound { .. } => StatusCode::NOT_FOUND,
-        // The request is well-formed; the resource is already in a terminal
-        // state. 409 tells the client "the decision race is lost / the
-        // command is gone" rather than "your request was malformed".
+        // The request is well-formed but the row is already terminal, so 409
+        // reads as "decision race lost", not "malformed request".
         InvalidPermissionTransition { .. } => StatusCode::CONFLICT,
         InvalidTimeoutAction
         | InvalidTrustedProxy { .. }

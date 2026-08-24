@@ -105,7 +105,6 @@ fn second_claim_while_one_is_live_is_rejected_with_the_live_id() {
         }
         other => panic!("expected DepsApplyInFlight, got {other:?}"),
     }
-    // The losing claim must not disturb the live row.
     let live = store
         .running_deps_apply_run()
         .expect("running")
@@ -134,8 +133,8 @@ fn dead_pid_row_reconciles_as_abandoned_and_frees_the_claim() {
 
 #[test]
 fn boot_id_is_the_liveness_predicate_input() {
-    // The state layer hands the stored boot id to the predicate verbatim; a
-    // pid-reuse-across-reboot policy lives entirely in the caller.
+    // The state layer hands the stored boot id to the predicate verbatim; reuse policy is the
+    // caller's.
     let (_dir, store) = open_store();
     claim(&store, "dap_boot", Some(4242), &always_live).expect("claim");
     let saw = std::cell::RefCell::new(None);
@@ -200,12 +199,10 @@ fn stamp_child_records_pid_boot_and_log_dir() {
 #[test]
 fn self_owned_stale_row_is_force_failed_but_foreign_rows_are_left_alone() {
     let (_dir, store) = open_store();
-    // A running row this process "owns" (matching pid + boot id) whose terminal
-    // write never landed. The liveness reconcile can never free it — the owner
-    // pid is still live — so the API path settles it before its next claim.
+    // A row this process owns whose terminal write never landed: the liveness reconcile can never
+    // free it (the owner pid is live), so the API path settles it before its next claim.
     claim(&store, "dap_self", Some(4242), &always_live).expect("claim self");
 
-    // Foreign pid: not ours, left running.
     assert_eq!(
         store
             .fail_self_owned_stale_deps_apply_runs(9999, Some("boot-a"))
@@ -213,8 +210,7 @@ fn self_owned_stale_row_is_force_failed_but_foreign_rows_are_left_alone() {
         0,
         "a foreign pid must not be settled"
     );
-    // Same pid, different boot id: a previous-boot row is the liveness
-    // reconcile's job, not this one.
+    // Same pid, different boot id: a previous-boot row is the liveness reconcile's job.
     assert_eq!(
         store
             .fail_self_owned_stale_deps_apply_runs(4242, Some("boot-other"))
@@ -231,7 +227,6 @@ fn self_owned_stale_row_is_force_failed_but_foreign_rows_are_left_alone() {
         DEPS_APPLY_RUN_RUNNING
     );
 
-    // Ours: matching pid + boot id.
     assert_eq!(
         store
             .fail_self_owned_stale_deps_apply_runs(4242, Some("boot-a"))
@@ -248,7 +243,6 @@ fn self_owned_stale_row_is_force_failed_but_foreign_rows_are_left_alone() {
         Some(DEPS_APPLY_ABANDONED_ERROR_CODE)
     );
     assert!(settled.finished_at.is_some());
-    // The single-flight slot is free again: a fresh apply can claim.
     assert!(store.running_deps_apply_run().expect("running").is_none());
     let next = claim(&store, "dap_after", Some(4242), &always_live)
         .expect("a freed slot must accept a new claim");
@@ -257,9 +251,8 @@ fn self_owned_stale_row_is_force_failed_but_foreign_rows_are_left_alone() {
 
 #[test]
 fn self_owned_clear_matches_a_null_boot_id_row() {
-    // The macOS-dev daemon claims with no boot id; the `boot_id IS ?` predicate
-    // must still match a NULL-boot row against a NULL probe, and never against a
-    // non-null one.
+    // The macOS-dev daemon claims with no boot id, so `boot_id IS ?` must match a NULL-boot row
+    // against a NULL probe and never against a non-null one.
     let (_dir, store) = open_store();
     store
         .claim_deps_apply_run(

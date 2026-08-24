@@ -280,9 +280,8 @@ fn agent_set_hermes_accepts_exact_model_and_updates_hermes_yaml() {
         &[("OPENROUTER_API_KEY", "test-openrouter-key")],
     );
 
-    // No ACP config-options fixture: Hermes advertises only the pre-1.0
-    // models/modes session state, so the model is taken verbatim and the
-    // command must succeed without spawning the agent.
+    // No ACP config-options fixture: Hermes advertises only the pre-1.0 models/modes session state,
+    // so the model is taken verbatim and the command must succeed without spawning the agent.
     acps_command()
         .env("HOME", tempdir.path())
         .args(["agent", "set", "--model", "z-ai/glm-5.1"])

@@ -82,9 +82,8 @@ async fn install_then_start_then_capabilities_then_stop() {
     let harness = AgentHarness::spawn().await;
     let client = http().await;
 
-    // Install — admin key required. The fake config uses `shell = "true"`
-    // and `creates = "true"`, which both resolve in /usr/bin on every test
-    // host; we expect `already_present` since precheck wins.
+    // The fake config's `shell`/`creates` both resolve to /usr/bin/true on
+    // every test host, so precheck wins with `already_present`.
     let response = client
         .post(format!("{}/v1/agent/install", harness.base_url))
         .header("Authorization", admin_bearer())
@@ -97,7 +96,6 @@ async fn install_then_start_then_capabilities_then_stop() {
     let outcome = body["data"]["outcome"].as_str().expect("outcome present");
     assert!(matches!(outcome, "installed" | "already_present"));
 
-    // Start — agent process spawns and ACP `initialize` returns.
     let start = client
         .post(format!("{}/v1/agent/start", harness.base_url))
         .header("Authorization", admin_bearer())
@@ -105,12 +103,10 @@ async fn install_then_start_then_capabilities_then_stop() {
         .await
         .expect("send start");
     if start.status() != StatusCode::OK {
-        // Surface the body to make CI failures actionable.
         let body = start.text().await.unwrap_or_default();
         panic!("start failed: {body}");
     }
 
-    // Capabilities — session key, returns the persisted snapshot.
     let caps = client
         .get(format!("{}/v1/agent/capabilities", harness.base_url))
         .header("Authorization", session_bearer())
@@ -126,7 +122,6 @@ async fn install_then_start_then_capabilities_then_stop() {
         "https://github.com/agentclientprotocol/codex-acp"
     );
 
-    // Stop.
     let stop = client
         .post(format!("{}/v1/agent/stop", harness.base_url))
         .header("Authorization", admin_bearer())
@@ -135,7 +130,6 @@ async fn install_then_start_then_capabilities_then_stop() {
         .expect("send stop");
     assert_eq!(stop.status(), StatusCode::OK);
 
-    // Lifecycle rows captured the trail.
     let store = harness.state.lock().await;
     let lifecycle = store.query_agent_lifecycle(20).expect("lifecycle query");
     drop(store);

@@ -16,10 +16,8 @@ fn agent_status_surfaces_installed_versions_from_state() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
 
-    // Seed installer_runs rows so `acps agent status` surfaces the versions.
-    // The latest-successful query buckets by `step`, so a 'harness' row with
-    // a recorded version and an 'adapter' row without a version exercise both
-    // the "show version" and "version unknown" branches of the surface.
+    // A `harness` row with a version and an `adapter` row without one exercise both the
+    // "show version" and "version unknown" branches.
     let state_path = default_state_path(tempdir.path());
     fs::create_dir_all(state_path.parent().expect("state parent dir"))
         .expect("state dir should be created");
@@ -237,10 +235,8 @@ fn agent_test_reports_prompt_failure_stage() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     write_fake_agent_home(tempdir.path(), &["--prompt-error"]);
 
-    // Phase 2 sanitization: the prompt-failure path now drops the raw upstream
-    // message (which could embed URLs, headers, or secrets) and surfaces a
-    // fixed `"prompt request failed"` string instead. Assert on the sanitized
-    // form rather than the agent-supplied text.
+    // The prompt-failure path drops the raw upstream message, which could embed URLs, headers, or
+    // secrets, in favor of a fixed string.
     acps_command()
         .env("HOME", tempdir.path())
         .args(["agent", "test", "--prompt", "hello"])
@@ -279,9 +275,8 @@ fn agent_test_reports_progress_timeout_after_stall() {
         ));
 }
 
-/// Run `agent test --format json` and return the parsed stdout document.
-/// `expect_success` pins the process exit status, which is the other half of
-/// the machine contract: a failing run still prints its document to stdout.
+/// Run `agent test --format json` and return the parsed stdout document. `expect_success` pins the
+/// exit status: a failing run still prints its document to stdout.
 fn agent_test_json(home: &std::path::Path, extra_args: &[&str], expect_success: bool) -> Value {
     let mut command = acps_command();
     command
@@ -398,8 +393,7 @@ fn agent_test_json_document_leaks_no_prompt_path_or_secret() {
     );
     assert!(!raw.contains("workspace"), "{raw}");
     assert!(!raw.contains("sk-test-secret"), "{raw}");
-    // Reason strings embed argv and workspace paths; codes are the only
-    // machine channel the document carries.
+    // Reason strings embed argv and workspace paths, so codes are the only machine channel.
     assert!(!raw.contains("\"reason\""), "{raw}");
 }
 
@@ -415,7 +409,6 @@ fn agent_test_json_failure_document_reports_phase_and_code() {
     assert_eq!(document["code"], "session_create_failed");
     assert_eq!(document["stop_reason"], Value::Null);
     assert!(!document.to_string().contains("fake session/new failure"));
-    // Nothing was created, so nothing was deleted; the process still went down.
     assert_eq!(document["cleanup"]["session_delete"], "skipped");
     assert_eq!(document["cleanup"]["process"], "terminated");
 }
@@ -453,9 +446,8 @@ fn agent_test_json_reports_progress_timeout_code() {
 
     assert_eq!(document["phase"], "prompt");
     assert_eq!(document["code"], "progress_timeout");
-    // The agent is still wedged in the stalled prompt on its single event loop,
-    // so the bounded session delete cannot complete — but the process is still
-    // reclaimed, and a failed delete does not flip the verdict's own code.
+    // The stalled prompt wedges the agent's single event loop, so the bounded delete cannot
+    // complete; the process is still reclaimed and the verdict code is unaffected.
     assert_eq!(document["cleanup"]["session_delete"], "cleanup_failed");
     assert_eq!(document["cleanup"]["process"], "terminated");
 }
@@ -477,8 +469,7 @@ fn agent_test_json_failed_delete_session_does_not_flip_the_verdict() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     write_fake_agent_home(tempdir.path(), &["--fail-delete-session"]);
 
-    // The verdict is prompt completion plus the fs check; a working agent with
-    // a flaky delete must not read as a failed test.
+    // A working agent with a flaky delete must not read as a failed test.
     let document = agent_test_json(tempdir.path(), &["--prompt", "hello"], true);
 
     assert_eq!(document["ok"], true);
@@ -499,8 +490,7 @@ fn agent_test_writes_no_session_row() {
         .assert()
         .success();
 
-    // `agent test` is disposable: it opens no state store, so the run must not
-    // leave a database — let alone a session row — behind.
+    // `agent test` is disposable: it opens no state store, so no database is left behind.
     let state_path = tempdir.path().join(".local/share/acp-stack/state.sqlite");
     assert!(
         !state_path.exists(),

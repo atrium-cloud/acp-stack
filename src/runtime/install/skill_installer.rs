@@ -43,17 +43,14 @@ pub const SOURCE_CUSTOM_GITHUB_PREFIX: &str = "github:";
 const CUSTOM_SKILLS_REPO: &str = "skills";
 const CUSTOM_SKILLS_DIRECTORY: &str = "skills";
 const SKILL_DESCRIPTOR: &str = "SKILL.md";
-/// Marker file inside each acp-stack-installed skill dir proving the runtime
-/// manages it. `remove` and switch-port overwrite refuse unmarked dirs, so
-/// skills a user placed in the install root by hand are never deleted. The
-/// content is the id of the source the skill was installed from.
+/// Marker file proving the runtime manages a skill dir. `remove` and
+/// switch-port overwrite refuse unmarked dirs, so hand-placed skills are never
+/// deleted; the content is the id of the source it came from.
 pub(crate) const MANAGED_SKILL_MARKER: &str = ".acp-stack-managed";
 const GITHUB_ARCHIVE_MAX_BYTES: u64 = 200 * 1024 * 1024;
 
 /// The installer's dominant failure shape: an operation, the path it was
-/// attempted on, and the underlying error. Kept as one helper so every
-/// filesystem failure in this module reads identically in logs and API
-/// responses.
+/// attempted on, and the underlying error.
 fn skill_io_err(verb: &str, path: &Path, source: impl std::fmt::Display) -> StackError {
     StackError::SkillInstallFailed {
         reason: format!("{verb} `{}`: {source}", path.display()),

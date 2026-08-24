@@ -1,17 +1,10 @@
-//! Session management: ACP `session/*` dispatch plus the durable `sessions`
-//! rows that mirror it.
-//!
-//! Everything here runs against a live bridge obtained from the supervisor's
-//! state machine, and every method persists only after the agent confirms —
-//! the agent's `session_id` is authoritative, so a local row must never exist
-//! for a session the agent rejected.
+//! ACP `session/*` dispatch and the durable `sessions` rows that mirror it. Every method
+//! persists only after the agent confirms; a local row must never exist for a rejected session.
 
 use super::*;
 
 impl AgentSupervisor {
-    /// Sync sessions discoverable via ACP `session/list` into durable local
-    /// state. This is discovery only: newly learned sessions are marked
-    /// `available` until a caller explicitly loads or resumes them.
+    /// Sync ACP `session/list` results into local state; discovery only, rows land `available`.
     pub async fn sync_listed_sessions(
         &self,
         target_id: &str,
@@ -105,14 +98,8 @@ impl AgentSupervisor {
         })
     }
 
-    /// `POST /v1/sessions`. Dispatches ACP `session/new`, persists a new
-    /// `sessions` row, and returns a `SessionAttachOutcome`: the record, the
-    /// names of the MCP servers actually sent to the agent (after transport
-    /// partitioning, so the caller's `mcp.session_attached` event cannot
-    /// claim skipped servers), and an `ignored` list of configured mode/model/effort
-    /// values the agent did not advertise — those sessions proceed on the
-    /// agent's default. `cwd` defaults to `workspace.root` when the client
-    /// omits it.
+    /// `POST /v1/sessions`. Dispatches ACP `session/new` and persists a `sessions` row;
+    /// mode/model/effort values the agent did not advertise land in `ignored`, not an error.
     pub async fn create_session(
         &self,
         target_id: &str,
@@ -131,9 +118,8 @@ impl AgentSupervisor {
         let response = bridge.new_session(cwd_path, accepted).await?;
         let agent_session_id = response.session_id.0.to_string();
         let mut ignored: Vec<IgnoredFeature> = Vec::new();
-        // The last refreshed option list from a successful set; the stored
-        // per-session snapshot must reflect what was actually applied, not
-        // the pre-provisioning `session/new` state.
+        // The snapshot must reflect what was applied, not the pre-provisioning
+        // `session/new` state.
         let mut latest_options: Option<Vec<SessionConfigOption>> = None;
         if let Some(mode) = agent.mode.as_deref()
             && let Some(refreshed) = provision_session_option(
@@ -160,18 +146,13 @@ impl AgentSupervisor {
                 .and_then(|provider| provider.model.as_deref())
         }) {
             if model_value_is_explicit_without_discovery(agent) {
-                // The harness reads this pin from its on-disk config at
-                // process start; the adapter's advertised list is an echo of
-                // it at best, so an exact-match set here can only fail
-                // spuriously.
+                // The harness reads this pin from on-disk config at process start, so the
+                // adapter's advertised list is an echo at best and a set can only fail spuriously.
                 tracing::debug!(
                     model,
                     "model provisioned on disk; skipping session/set_config_option"
                 );
             } else {
-                // Judged against the freshest advertised list, like the effort
-                // lane and generic map below: the mode set above may have
-                // refreshed the option set.
                 let lookup = session_config_id_for_value(
                     latest_options
                         .as_deref()
@@ -194,10 +175,8 @@ impl AgentSupervisor {
                 }
             }
         }
-        // Applied after the model and judged against the freshest advertised
-        // list: adapters advertise effort levels for the currently selected
-        // model, so an effort option that appears only once the configured
-        // model is set must be visible here. A miss still lands in `ignored`.
+        // Must run after the model: adapters advertise effort levels for the currently
+        // selected model, so an effort option can appear only once the model is set.
         if let Some(effort) = agent.effort.as_deref()
             && let Some(refreshed) = provision_session_option(
                 &bridge,
@@ -218,12 +197,8 @@ impl AgentSupervisor {
         {
             latest_options = Some(refreshed);
         }
-        // The generic `[agent.config_options]` map applies last, deliberately:
-        // the typed lanes stay authoritative for their categories, and each
-        // map entry is judged against the freshest advertised list so a
-        // model-dependent option observes the model set above. Any miss —
-        // unknown id, unadvertised select value, kind mismatch — is an
-        // ignored record, never an error.
+        // The generic map applies last so the typed lanes stay authoritative for their
+        // categories; any miss is an ignored record, never an error.
         for (option_id, configured) in &agent.config_options {
             let advertised = latest_options
                 .as_deref()
@@ -258,9 +233,7 @@ impl AgentSupervisor {
             }
         }
 
-        // Persist after the agent confirms. If we inserted first and the
-        // agent rejected, we'd leave a phantom row. The agent's `session_id`
-        // is authoritative; we mirror it into our `sessions` table.
+        // Persist only after the agent confirms; inserting first would leave a phantom row.
         let record = NewSessionRecord {
             id: next_session_id(),
             agent_id: agent.id.clone(),
@@ -286,9 +259,7 @@ impl AgentSupervisor {
         )?;
         append_mcp_skipped_event(&guard, &inserted.id, &skipped)?;
         append_capability_ignored_event(&guard, &inserted.id, &ignored)?;
-        // Seed the per-session config-option snapshot from the freshest list
-        // in hand. A snapshot failure must not undo an already-confirmed
-        // session; the raw events remain the source of truth.
+        // A snapshot failure must not undo an already-confirmed session.
         let advertised = latest_options
             .or(response.config_options)
             .unwrap_or_default();
@@ -320,10 +291,7 @@ impl AgentSupervisor {
         })
     }
 
-    /// `POST /v1/sessions/{id}/load`. Capability-gated by the bridge. Returns
-    /// the session record plus the MCP server names actually sent to the
-    /// agent. `ignored` is always empty: mode/model/effort provisioning happens only
-    /// at create.
+    /// `POST /v1/sessions/{id}/load`. `ignored` is always empty: provisioning happens at create.
     pub async fn load_session(
         &self,
         session_id: &str,
@@ -343,9 +311,7 @@ impl AgentSupervisor {
         .await
     }
 
-    /// `POST /v1/sessions/{id}/resume`. Returns the session record plus the
-    /// MCP server names actually sent to the agent. `ignored` is always
-    /// empty: mode/model/effort provisioning happens only at create.
+    /// `POST /v1/sessions/{id}/resume`. `ignored` is always empty: provisioning happens at create.
     pub async fn resume_session(
         &self,
         session_id: &str,
@@ -365,8 +331,7 @@ impl AgentSupervisor {
         .await
     }
 
-    /// Shared body of [`Self::load_session`] and [`Self::resume_session`],
-    /// which differ only in the ACP method sent and the event recorded.
+    /// Shared body of [`Self::load_session`] and [`Self::resume_session`].
     async fn attach_session(
         &self,
         session_id: &str,
@@ -434,9 +399,7 @@ impl AgentSupervisor {
         })
     }
 
-    /// `POST /v1/sessions/{id}/fork`. Returns the child session record plus
-    /// the MCP server names actually sent to the agent. `ignored` is always
-    /// empty: mode/model/effort provisioning happens only at create.
+    /// `POST /v1/sessions/{id}/fork`. `ignored` is always empty: provisioning happens at create.
     pub async fn fork_session(
         &self,
         parent_session_id: &str,
@@ -543,13 +506,8 @@ impl AgentSupervisor {
         })
     }
 
-    /// `DELETE /v1/sessions/{id}`. Closes the agent-side session and marks
-    /// the local row `closed`.
-    ///
-    /// Order matters: send `session/close` to the agent first, and only on
-    /// success cancel local in-flight prompts and mark the row closed.
-    /// Otherwise a failed bridge call would leave the agent still running
-    /// the session while we mark it closed locally.
+    /// `DELETE /v1/sessions/{id}`. Ordering matters: `session/close` goes to the agent first,
+    /// and only on success are local prompts cancelled and the row marked closed.
     pub async fn close_session(
         &self,
         session_id: &str,
@@ -569,7 +527,6 @@ impl AgentSupervisor {
         bridge
             .close_session(AcpSessionId::new(agent_session_id.clone()))
             .await?;
-        // Bridge confirmed the close — now it's safe to settle local state.
         self.cancel_prompts_for_session(session_id).await;
         let guard = state.lock().await;
         guard.update_session_status(session_id, SESSION_STATUS_CLOSED)?;
@@ -587,14 +544,8 @@ impl AgentSupervisor {
             })
     }
 
-    /// `POST /v1/sessions/{id}/delete`. Forwards ACP `session/delete` to the
-    /// agent, then hard-deletes the local session row with its prompts and
-    /// events. An unknown id returns `Ok(None)` without touching the agent —
-    /// ACP specifies repeat deletes succeed silently.
-    ///
-    /// Same ordering rule as close: the agent confirms the delete first, and
-    /// only then is local state settled. A failed bridge call must not strand
-    /// a session the agent still lists without any local record of it.
+    /// `POST /v1/sessions/{id}/delete`. The agent confirms first, then the local row and its
+    /// prompts/events are hard-deleted; an unknown id returns `Ok(None)` per ACP's silent-repeat rule.
     pub async fn delete_session(
         &self,
         session_id: &str,
@@ -616,11 +567,8 @@ impl AgentSupervisor {
         guard.delete_session(session_id)
     }
 
-    /// `POST /v1/sessions/{id}/config-options`. Forwards one
-    /// `session/set_config_option` to the live agent and rewrites the stored
-    /// per-session snapshot from the refreshed list in the response. Unlike
-    /// session-create provisioning there is no ignored softening here: the
-    /// caller asked for exactly this set, so a failure is the answer.
+    /// `POST /v1/sessions/{id}/config-options`. Forwards one `session/set_config_option` and
+    /// rewrites the stored snapshot; unlike create-time provisioning, a failure is not softened.
     pub async fn set_session_config_option(
         &self,
         session_id: &str,
@@ -638,8 +586,6 @@ impl AgentSupervisor {
             )
             .await?;
         let guard = state.lock().await;
-        // A live set changes agent behavior for the rest of the session, so
-        // it leaves a durable trace like create-time provisioning does.
         guard.append_session_event(
             session_id,
             "info",
@@ -647,10 +593,8 @@ impl AgentSupervisor {
             "session config option set",
             &json!({ "config_id": config_id }).to_string(),
         )?;
-        // Same lax-adapter guard as session-create provisioning: an empty
-        // response right after a successful set must not wipe the snapshot —
-        // such agents refresh through `config_option_update` notifications
-        // instead, which the session sink projects as they arrive.
+        // Lax adapters return an empty list after a successful set and refresh via
+        // `config_option_update` instead; that must not wipe the snapshot.
         if response.config_options.is_empty() {
             return Ok(Vec::new());
         }
@@ -672,17 +616,14 @@ impl AgentSupervisor {
     }
 }
 
-/// Which ACP method [`AgentSupervisor::attach_session`] sends for an existing
-/// session and which event it records afterwards.
+/// Which ACP method [`AgentSupervisor::attach_session`] sends for an existing session.
 #[derive(Clone, Copy)]
 enum SessionAttachKind {
     Load,
     Resume,
 }
 
-/// Fetch a session row and refuse closed ones. Runs before any bridge call:
-/// returning 404 for an unknown id beats letting the agent reject with an
-/// opaque error.
+/// Fetch a session row and refuse closed ones, before any bridge call is made.
 async fn fetch_open_session(
     state: &Arc<TokioMutex<StateStore>>,
     session_id: &str,
@@ -698,19 +639,8 @@ async fn fetch_open_session(
     Ok(record)
 }
 
-/// Apply one resolved session config option (mode, model, or effort) to a freshly
-/// created session.
-///
-/// Mode/model provisioning must not make sessions uncreatable when the agent
-/// simply does not advertise the option: the session proceeds on the agent's
-/// default and the omission is recorded in `ignored`. Only the
-/// `AgentConfigProvision` lookup failure is softened — an error from
-/// `set_session_config_option` itself means the agent advertised the option and
-/// then failed the RPC, which stays a hard failure.
-///
-/// Returns the refreshed option list from the agent's response (`None` when
-/// the set was skipped as ignored), so the caller's config-option snapshot
-/// can reflect what was actually applied.
+/// Apply one resolved session config option to a freshly created session. Only an
+/// `AgentConfigProvision` lookup failure is softened into `ignored`; a failed RPC still errors.
 async fn provision_session_option(
     bridge: &AcpBridge,
     session_id: &AcpSessionId,
@@ -736,10 +666,8 @@ async fn provision_session_option(
     .await
 }
 
-/// Resolve one `[agent.config_options]` entry against the advertised list.
-/// Every miss shape — unknown id, kind mismatch, unadvertised select value —
-/// is an `AgentConfigProvision` error, which the provisioning path softens
-/// into an ignored record.
+/// Resolve one `[agent.config_options]` entry against the advertised list; every miss shape
+/// is an `AgentConfigProvision` error, which the provisioning path softens into `ignored`.
 fn resolve_generic_config_option(
     advertised: Option<&[SessionConfigOption]>,
     option_id: &str,
@@ -789,10 +717,7 @@ fn resolve_generic_config_option(
     }
 }
 
-/// Kind-generic twin of `provision_session_option`, shared with the
-/// `[agent.config_options]` map apply. `option_id` rides into the ignored
-/// record for map entries, where `feature` alone cannot say which option was
-/// dropped.
+/// Kind-generic twin of `provision_session_option`, shared with the `[agent.config_options]` map.
 #[allow(clippy::too_many_arguments)]
 async fn provision_session_option_value(
     bridge: &AcpBridge,
@@ -810,10 +735,8 @@ async fn provision_session_option_value(
             let response = bridge
                 .set_session_config_option_value(session_id.clone(), &config_id, value)
                 .await?;
-            // A lax adapter may respond with an empty list and carry the
-            // refreshed state only in a `config_option_update` notification;
-            // an empty "full set" right after a successful set is
-            // contradictory, so it must not become the snapshot.
+            // Lax adapters answer with an empty list and carry the refreshed state only in a
+            // `config_option_update`; that must not become the snapshot.
             Ok((!response.config_options.is_empty()).then_some(response.config_options))
         }
         Err(StackError::AgentConfigProvision { reason, .. }) => {

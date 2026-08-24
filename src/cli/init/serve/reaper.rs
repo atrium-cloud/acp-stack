@@ -1,7 +1,6 @@
 use super::*;
 
-/// Parse a duration-suffix flag (`30s`, `15m`, `1h`); `0s` maps to `None`
-/// (disabled). Mirrors the `acps logs --since` parsing.
+/// Parse a duration-suffix flag (`30s`, `15m`, `1h`); `0s` means disabled.
 pub(super) fn parse_optional_duration(
     raw: &str,
     field: &'static str,
@@ -21,14 +20,10 @@ pub(super) fn parse_optional_duration(
     Ok(Some(duration))
 }
 
-/// Expire the hosted session once it has been idle (no connected WebSocket
-/// client and no API activity) for `timeout`. A server that never received a
-/// session idles out on the same clock — measured from the last authenticated
-/// API call, not just server start — so an abandoned bootstrap process cannot
-/// pin the bind port indefinitely while an actively polling backend can.
-/// `None` disables the idle clock but not the loop: the error-ack grace check
-/// is unconditional, since an unacked parked failure would otherwise keep the
-/// process alive forever.
+/// Expire the hosted session once it has been idle for `timeout`, so an
+/// abandoned bootstrap cannot pin the bind port. `None` disables the idle
+/// clock but not the loop: the error-ack grace check stays unconditional,
+/// since an unacked parked failure would keep the process alive forever.
 pub(super) async fn reap_idle_session(
     manager: Arc<HostedInitManager>,
     timeout: Option<std::time::Duration>,
@@ -37,9 +32,8 @@ pub(super) async fn reap_idle_session(
         tokio::time::sleep(IDLE_REAPER_TICK).await;
         match manager.session_current() {
             Some(session) => {
-                // A parked failure is owned by the ack grace alone: the idle
-                // clock must not pre-empt it, so the backend is guaranteed
-                // the full grace to retrieve and acknowledge the error.
+                // A parked failure is owned by the ack grace alone; the idle
+                // clock must not pre-empt it.
                 if let Some(age) = session.unacked_error_age() {
                     if age >= ERROR_ACK_GRACE {
                         session.expire("error_ack_timeout");

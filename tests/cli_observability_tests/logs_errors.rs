@@ -351,9 +351,8 @@ fn cli_error_payload_handles_control_bytes_in_argument() {
         .assert()
         .success();
 
-    // Path that mixes a stray ANSI escape sequence and a bare control byte. The runtime
-    // must strip ANSI, encode the remaining bytes via serde_json, and still produce a
-    // valid JSON payload that survives json_valid() in SQLite.
+    // Mixing a stray ANSI escape with a bare control byte: the runtime must strip ANSI and
+    // still produce a payload that survives SQLite's json_valid().
     let bad_path = OsString::from_vec(b"/tmp/acp\x1b[31m-missing\x07\x08-file.toml".to_vec());
 
     acps_command()

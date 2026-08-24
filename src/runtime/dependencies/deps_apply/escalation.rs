@@ -9,18 +9,15 @@ use super::*;
 /// on stdin or a controlling terminal.
 pub(crate) const SUDO_PROGRAM: &str = "sudo";
 pub(crate) const SUDO_NON_INTERACTIVE_FLAG: &str = "-n";
-/// Upper bound on the `sudo -n true` probe. A healthy probe returns in
-/// milliseconds; the bound exists so a wedged sudoers backend (LDAP/SSSD)
+/// Bounds the `sudo -n true` probe so a wedged sudoers backend (LDAP/SSSD)
 /// cannot stall an apply before a single dep has run.
 const SUDO_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Grace period for reaping a killed action. An escalated action runs as
 /// root, so a non-root parent's SIGKILL is refused with EPERM; an unbounded
 /// `wait()` there would hang the whole apply.
 pub(crate) const KILL_REAP_GRACE: Duration = Duration::from_secs(5);
-/// Provenance line prepended to the persisted stdout of an escalated
-/// action. Keeps `installer_runs.method` stable at `shell` (health and
-/// `acps status` pivot on it) while `acps installer history` still shows
-/// sudo was used.
+/// Provenance line prepended to an escalated action's persisted stdout, so
+/// `installer_runs.method` can stay `shell` while history still shows sudo.
 pub(crate) const ESCALATED_STDOUT_MARKER: &str = "[acps] escalated via `sudo -n`";
 
 /// How the apply runner reaches root for `scope = "system"` actions.
@@ -28,12 +25,10 @@ pub(crate) const ESCALATED_STDOUT_MARKER: &str = "[acps] escalated via `sudo -n`
 pub enum PrivilegeEscalation {
     /// euid == 0 — system-scope actions run directly.
     NotNeeded,
-    /// euid != 0 but `sudo -n true` succeeded. `sudo_path` is resolved
-    /// once at probe time so the probe and the actual run cannot pick
-    /// different binaries.
+    /// euid != 0 but `sudo -n true` succeeded. `sudo_path` is resolved once at
+    /// probe time so probe and run cannot pick different binaries.
     Sudo { sudo_path: PathBuf, uid: u32 },
-    /// euid != 0 and passwordless sudo is unavailable (missing binary,
-    /// password required, or probe timeout).
+    /// euid != 0 and passwordless sudo is unavailable.
     Unavailable { uid: u32 },
 }
 
@@ -52,18 +47,15 @@ impl PrivilegeEscalation {
     }
 }
 
-/// Probe how system-scope actions can reach root. Never returns Err: a
-/// missing `sudo`, a password-gated sudoers rule, and a hung probe are all
-/// environment facts, not acps failures — they collapse to `Unavailable`.
-/// Not cached process-wide: a long-lived daemon must not pin sudoers state
-/// across a config change, so callers probe once per apply invocation.
+/// Probe how system-scope actions can reach root; environment facts collapse
+/// to `Unavailable` rather than Err. Deliberately uncached, so a long-lived
+/// daemon cannot pin stale sudoers state across a config change.
 pub fn probe_privilege_escalation() -> PrivilegeEscalation {
     probe_privilege_escalation_with(current_uid(), resolve_command(SUDO_PROGRAM))
 }
 
-/// Testable core of [`probe_privilege_escalation`]: uid and resolved sudo
-/// path are injected so tests don't have to mutate the process-global PATH
-/// (which races with parallel tests spawning shells).
+/// Testable core of [`probe_privilege_escalation`]; uid and sudo path are
+/// injected so tests need not mutate the process-global PATH.
 pub(crate) fn probe_privilege_escalation_with(
     uid: u32,
     sudo_path: Option<PathBuf>,
@@ -92,8 +84,8 @@ pub(crate) fn probe_privilege_escalation_with(
         Ok(Some(status)) if status.success() => PrivilegeEscalation::Sudo { sudo_path, uid },
         Ok(Some(_)) => PrivilegeEscalation::Unavailable { uid },
         Ok(None) | Err(_) => {
-            // Timed out or wait failed — the probe child may still be
-            // alive; reap the group so it cannot outlive the probe.
+            // The probe child may still be alive; reap the group so it cannot
+            // outlive the probe.
             kill_process_group(&mut child);
             if reap_with_grace(&mut child, KILL_REAP_GRACE).is_none() {
                 tracing::warn!(
@@ -116,13 +108,10 @@ pub(crate) fn escalation_for(config: &Config, feature: Option<&str>) -> Privileg
     }
 }
 
-/// sudo resets the environment (`env_reset` in sudoers), so the
-/// non-interactive vars set on the child are dropped before the operator's
-/// script runs — `apt-get` would go back to prompting. Re-export them inside
-/// the escalated shell instead of asking sudoers for `setenv`/`--preserve-env`
-/// permission we may not have. Names and values come from the compile-time
-/// [`NON_INTERACTIVE_ENV`] table (never operator input), so no quoting is
-/// needed; the operator's script is appended verbatim.
+/// Re-export the non-interactive vars inside the escalated shell, since
+/// sudoers `env_reset` drops them before the operator's script runs. Names and
+/// values come from the compile-time [`NON_INTERACTIVE_ENV`] table, never
+/// operator input, so no quoting is needed.
 pub(crate) fn escalated_script(script: &str) -> String {
     let mut out = String::new();
     for (name, value) in NON_INTERACTIVE_ENV {
@@ -158,8 +147,7 @@ fn shell_single_quote(value: &str) -> String {
 }
 
 /// Operator-facing escalation notice shared by `acps init` and `acps deps
-/// apply` so the two confirmation prompts cannot drift. Empty when no
-/// system-scope candidate is pending.
+/// apply` so the two confirmation prompts cannot drift.
 pub fn escalation_notice_lines(
     escalation: &PrivilegeEscalation,
     shell_program: &str,
@@ -187,8 +175,6 @@ pub fn escalation_notice_lines(
                     manual = manual_privileged_command(shell_program, candidate),
                 ));
             }
-            // The follow-up instruction (resume vs re-run) is
-            // caller-specific; init and `acps deps apply` append their own.
             lines
         }
     }

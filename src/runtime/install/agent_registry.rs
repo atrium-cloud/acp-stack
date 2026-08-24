@@ -1,18 +1,5 @@
-//! Hand-curated catalog of ACP-speaking agents and their adapters.
-//!
-//! The embedded `data/agents.toml` is the runtime source of truth for
-//! `acps agent install`. It supersedes the upstream
-//! `cdn.agentclientprotocol.com/registry/v1/latest/registry.json` so the
-//! runtime can make conservative support claims. The embedded catalog includes
-//! Goose, OpenCode, Amp, Pi, Codex, Claude Code, Kimi Code, and
-//! Hermes Agent as curated headless targets.
-//! The schema supports entries that need both an ACP adapter and the upstream
-//! harness it wraps.
-//!
-//! Operators can override entries or add private ones by placing a
-//! `~/.config/acp-stack/agents.toml` file alongside the main config.
-//! Override semantics are full-entry-by-id: an override with the same `id`
-//! replaces the embedded entry; new `id`s are added.
+//! Hand-curated catalog of ACP-speaking agents and their adapters, embedded from
+//! `data/agents.toml` and overridable via `~/.config/acp-stack/agents.toml`.
 
 mod specs;
 
@@ -46,17 +33,13 @@ pub struct RegistryCatalog {
 }
 
 impl RegistryCatalog {
-    /// Parse the binary-embedded registry. Surfaced as a fallible call so
-    /// the compile-time `include_str!` failure is the only way to ship an
-    /// invalid registry; runtime parse failures bubble up as
-    /// `StackError::RegistryLoad` for tests that swap in alternate TOML.
+    /// Parse the binary-embedded registry.
     pub fn load_embedded() -> Result<Self> {
         Self::from_toml(EMBEDDED_REGISTRY)
     }
 
-    /// Load the embedded registry, then layer an operator override file on
-    /// top if it exists at `override_path`. A missing override file is not
-    /// an error — it is the common case for fresh installs.
+    /// Load the embedded registry, then layer the operator override file at
+    /// `override_path` on top if it exists.
     pub fn load_with_override(override_path: &Path) -> Result<Self> {
         let mut catalog = Self::load_embedded()?;
         #[cfg(feature = "test-fixtures")]
@@ -126,17 +109,16 @@ impl RegistryCatalog {
         &self.agents
     }
 
-    /// An agent absent from the catalog is not in the registry at all, so
-    /// acp-stack manages none of its native config and has nowhere to write an
-    /// endpoint — the same answer as a registry agent without the flag.
+    /// Whether the agent's native config has a per-provider endpoint field
+    /// acp-stack can write; an agent absent from the catalog answers false.
     pub fn supports_provider_base_url(&self, id: &str) -> bool {
         self.lookup(id)
             .is_some_and(|entry| entry.set_provider_base_url)
     }
 
-    /// Full-entry replacement by id; new ids are appended. The override file
-    /// is intentionally coarse: a partial-field merge would invite drift
-    /// where an upstream rename silently kept an operator's stale harness.
+    /// Full-entry replacement by id; new ids are appended. Deliberately coarse:
+    /// a partial-field merge would let an upstream rename silently keep an
+    /// operator's stale harness.
     fn merge(&mut self, overlay: RegistryCatalog) {
         for entry in overlay.agents {
             match self.agents.iter().position(|e| e.id == entry.id) {
@@ -284,10 +266,9 @@ impl RegistryCatalog {
 pub struct RegistryEntry {
     pub id: String,
     pub name: String,
-    /// Catalog-declared kind. Lanes that branch on this to drive install,
-    /// update, version-check, or adapter metadata must resolve through
-    /// [`effective_registry_entry`] first: an `[agent.adapter_override]`
-    /// block rewrites the effective kind to `Adapter`.
+    /// Catalog-declared kind. Lanes branching on this MUST resolve through
+    /// [`effective_registry_entry`] first: an `[agent.adapter_override]` block
+    /// rewrites the effective kind to `Adapter`.
     pub kind: RegistryKind,
     #[serde(default)]
     pub headless_compatible: bool,
@@ -299,9 +280,7 @@ pub struct RegistryEntry {
     pub set_model: bool,
     #[serde(default)]
     pub allow_custom_provider: bool,
-    /// The agent's native config has a per-provider endpoint field acp-stack
-    /// can write, so a managed credential may carry a `base_url` that routes
-    /// this provider somewhere other than its vendor default.
+    /// The agent's native config has a per-provider endpoint field acp-stack can write.
     #[serde(default)]
     pub set_provider_base_url: bool,
     #[serde(default)]
@@ -314,32 +293,25 @@ pub struct RegistryEntry {
     pub supports_agent_skills: bool,
     #[serde(default)]
     pub agent_skills_install_dir: Option<String>,
-    /// Directory the harness actually discovers skills from when it differs
-    /// from the shared install dir; each installed skill gets a symlink here
-    /// (e.g. Claude Code only reads `~/.claude/skills`).
+    /// Directory the harness discovers skills from when it differs from the
+    /// shared install dir; each installed skill gets a symlink here.
     #[serde(default)]
     pub agent_skills_link_dir: Option<String>,
     #[serde(default)]
     pub subagents: bool,
     #[serde(default)]
     pub subagent_alias: Option<String>,
-    /// Free auxiliary/subagent models exposed via `acps subagent free`. Order
-    /// is significant for env-fallback resolution: the first entry whose
-    /// canonical env ref is present in `[agent].env` wins when no provider id
-    /// or main api_key_ref directly matches.
+    /// Free auxiliary/subagent models exposed via `acps subagent free`. ORDER IS
+    /// SIGNIFICANT: the first entry whose canonical env ref is present in
+    /// `[agent].env` wins the env-fallback resolution.
     #[serde(default)]
     pub subagent_free_models: Vec<SubagentFreeModel>,
-    /// The upstream ACP registry index does not list this agent yet even
-    /// though the ACP project documents it as an ACP agent. Maintainer-only
-    /// escape hatch for `sync-registry-check`; it has no runtime effect.
-    /// Remove the flag once the upstream index carries the id.
+    /// Maintainer-only escape hatch for `sync-registry-check` when the upstream
+    /// ACP registry index does not list this agent yet; no runtime effect.
     #[serde(default)]
     pub sync_exempt: bool,
-    /// Upstream ACP registry id when it differs from the catalog id. The
-    /// catalog id doubles as the launch command, so it follows the installed
-    /// binary name rather than upstream's naming (e.g. `antigravity` vs the
-    /// upstream `antigravity-acp`). Only consulted by the sync/fact-check
-    /// binaries; it has no runtime effect.
+    /// Upstream ACP registry id when it differs from the catalog id (which
+    /// follows the installed binary name). Sync/fact-check binaries only.
     #[serde(default)]
     pub sync_id: Option<String>,
     #[serde(default)]
@@ -350,22 +322,14 @@ pub struct RegistryEntry {
     pub github: Option<String>,
     #[serde(default)]
     pub support_doc: Option<String>,
-    /// Real-prompt text sent during `acps agent test` / init testflight
-    /// when the operator did not pass `--prompt`. Should be deterministic and
-    /// cheap; for filesystem-tool-capable agents it should ask the agent to
-    /// create the `testflight_expect_fs` path so the runtime can verify the
-    /// agent actually did the work and did not just hallucinate a reply.
+    /// Default prompt for `acps agent test` / init testflight.
     #[serde(default)]
     pub testflight_prompt: Option<String>,
-    /// Workspace-relative path the testflight prompt is expected to create
-    /// (or modify). `acps agent test` resolves this against `workspace.root`
-    /// and asserts the file exists with non-zero size after the prompt
-    /// completes. `None` means the testflight only verifies session/prompt
-    /// completion; useful for agents that don't expose filesystem tools.
+    /// Workspace-relative path the testflight prompt is expected to create, so
+    /// the runtime can verify the agent did the work rather than hallucinating a reply.
     #[serde(default)]
     pub testflight_expect_fs: Option<String>,
-    /// Catalog-declared adapter. Like `kind`, install/update/version-check
-    /// and adapter-metadata lanes must read this through
+    /// Catalog-declared adapter. Like `kind`, read through
     /// [`effective_registry_entry`] so operator overrides are honored.
     #[serde(default)]
     pub adapter: Option<AdapterSpec>,
@@ -405,11 +369,8 @@ pub enum RegistryStdioFraming {
     JsonLines,
 }
 
-/// Reject registry-declared testflight FS paths that would escape the
-/// workspace root. `acps agent test` joins this onto `workspace.root`, so an
-/// absolute path or one containing `..` would either bypass the workspace
-/// (absolute) or traverse outside it (`..`). The intended use is a stable
-/// in-workspace marker like `.acp-stack-testflight.txt`.
+/// Reject testflight FS paths that would escape `workspace.root` once joined:
+/// absolute paths bypass it, `..` segments traverse out of it.
 fn validate_testflight_expect_fs(agent_id: &str, value: &str) -> Result<()> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -527,10 +488,7 @@ struct RegistryFile {
 }
 
 /// Build a registry `AdapterSpec` from an operator `[agent.adapter_override]`
-/// block. The override's `command` becomes the adapter id (launch command and
-/// native-update probe target are the same name by construction). The spec is
-/// run through the same validation the catalog applies, so the install lanes
-/// downstream can trust it like any curated adapter.
+/// block, validated exactly as a curated catalog adapter would be.
 pub fn adapter_spec_from_override(
     agent_id: &str,
     override_config: &crate::config::AgentAdapterOverrideConfig,
@@ -590,12 +548,7 @@ pub fn adapter_spec_from_override(
 }
 
 /// Resolve the registry entry the install/update/version-check/metadata lanes
-/// should actually drive for `agent`. With `[agent.adapter_override]` set the
-/// entry is rewritten to `kind = Adapter` carrying the operator's adapter
-/// spec; the harness block and every other registry-derived field (support
-/// flags, skills dirs, provider flags, testflight metadata) stay untouched,
-/// so day-2 behavior for the harness remains managed. An entry that is
-/// already adapter-kind simply gets its adapter spec replaced.
+/// should drive for `agent`, applying any `[agent.adapter_override]` on top.
 pub fn effective_registry_entry<'a>(
     entry: &'a RegistryEntry,
     agent: &crate::config::AgentConfig,

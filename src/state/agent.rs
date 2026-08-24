@@ -53,13 +53,10 @@ pub struct InstallerRun {
     pub version: Option<String>,
     pub operation: String,
     pub method: Option<String>,
-    /// On-disk directory holding the unbounded stdout/stderr capture (each
-    /// stream as a single `stdout` / `stderr` file). The 64 KiB columns above
-    /// are previews; this points to the audit-grade copy. `None` for legacy
-    /// rows and for capture sites that did not provide a log base.
+    /// On-disk directory holding the unbounded stdout/stderr capture; the columns
+    /// above are only previews.
     pub log_dir: Option<String>,
-    /// Groups rows written by one `acps deps apply` invocation. `None` for
-    /// legacy rows and installer rows unrelated to deps apply.
+    /// Groups rows written by one `acps deps apply` invocation.
     pub apply_run_id: Option<String>,
 }
 
@@ -81,13 +78,11 @@ pub struct InstallerRunInput<'a> {
 }
 
 /// Final state written over a `running` installer row when its step finishes.
-/// Identity fields (agent, step, operation, apply_run_id) were fixed at INSERT
-/// time and are deliberately not updatable here.
+/// Identity fields fixed at INSERT time are deliberately not updatable here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallerRunFinish<'a> {
-    /// The step's own start timestamp; re-written so the row carries the
-    /// execution layer's canonical value rather than the (microseconds
-    /// earlier) insert-time one.
+    /// The step's own start timestamp, re-written so the row carries the execution
+    /// layer's canonical value rather than the insert-time one.
     pub started_at: &'a str,
     pub finished_at: Option<&'a str>,
     pub status: &'a str,
@@ -100,9 +95,7 @@ pub struct InstallerRunFinish<'a> {
 
 pub const INSTALLER_OPERATION_INSTALL: &str = "install";
 pub const INSTALLER_OPERATION_UPDATE: &str = "update";
-/// In-flight step marker: the row was inserted when the step started and is
-/// updated in place to its terminal status when the step finishes. A row that
-/// stays `running` means the daemon died (or was killed) mid-step.
+/// In-flight step marker; a row left `running` means the daemon died mid-step.
 pub const INSTALLER_STATUS_RUNNING: &str = "running";
 pub const INSTALLER_METHOD_SHELL: &str = "shell";
 pub const INSTALLER_METHOD_NPM: &str = "npm";
@@ -110,9 +103,7 @@ pub const INSTALLER_METHOD_GITHUB: &str = "github";
 pub const INSTALLER_METHOD_APT: &str = "apt";
 pub const INSTALLER_METHOD_NATIVE: &str = "native";
 
-/// Canonical on-disk location for installer step logs. Lives alongside
-/// `state.sqlite` under the operator's home so log rotation and backup can
-/// happen at the same level. Each step gets its own subdirectory under here.
+/// Canonical on-disk location for installer step logs, alongside `state.sqlite`.
 pub fn default_installer_log_base(home: &std::path::Path) -> std::path::PathBuf {
     home.join(".local")
         .join("share")
@@ -121,7 +112,6 @@ pub fn default_installer_log_base(home: &std::path::Path) -> std::path::PathBuf 
 }
 
 /// Per-stream byte cap applied before INSERT to keep installer_runs rows bounded.
-/// A runaway installer that streams MB to stdout would otherwise bloat SQLite.
 pub const INSTALLER_OUTPUT_CAP_BYTES: usize = 64 * 1024;
 
 pub(super) fn row_to_agent_lifecycle(
@@ -155,9 +145,7 @@ fn row_to_installer_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<InstallerRu
     })
 }
 
-/// Defense-in-depth cap on installer_runs row size. The agent_installer module
-/// caps as it captures; this re-truncates so a future regression upstream
-/// cannot still bloat SQLite. Truncates on a UTF-8 char boundary.
+/// Defense-in-depth cap on installer_runs row size, on a UTF-8 char boundary.
 fn truncate_for_storage(input: &str) -> String {
     if input.len() <= INSTALLER_OUTPUT_CAP_BYTES {
         return input.to_owned();
@@ -236,9 +224,7 @@ impl StateStore {
         message: &str,
         payload_json: &str,
     ) -> Result<AgentLifecycleEvent> {
-        // Reuse the events table's json_valid invariant via the same helper.
-        // The agent_lifecycle table has its own CHECK constraint, but failing
-        // here gives a clearer error than letting sqlite reject the row.
+        // The table has its own CHECK constraint; failing here is clearer.
         validate_json_payload(self.connection(), payload_json)?;
         let event = AgentLifecycleEvent {
             id: next_agent_lifecycle_id(),
@@ -311,9 +297,8 @@ impl StateStore {
         Ok(out)
     }
 
-    /// Upsert the latest capabilities for an agent. We keep one row per agent_id;
-    /// history lives in `agent_lifecycle` (`agent.started` events). `ON CONFLICT`
-    /// ensures re-initialization after a restart simply refreshes the snapshot.
+    /// Upsert the latest capabilities for an agent; one row per agent_id, with
+    /// history living in `agent_lifecycle`.
     pub fn upsert_agent_capabilities(
         &self,
         agent_id: &str,
@@ -368,9 +353,7 @@ impl StateStore {
             .optional()?)
     }
 
-    /// Append a row to `installer_runs`. Caller is responsible for capping
-    /// stdout/stderr at `INSTALLER_OUTPUT_CAP_BYTES`; we re-truncate here as
-    /// defense-in-depth so a buggy installer module cannot bloat the table.
+    /// Append a row to `installer_runs`, re-truncating stdout/stderr defensively.
     pub fn append_installer_run(&self, input: InstallerRunInput<'_>) -> Result<InstallerRun> {
         let stdout = truncate_for_storage(input.stdout);
         let stderr = truncate_for_storage(input.stderr);
@@ -418,10 +401,8 @@ impl StateStore {
         Ok(run)
     }
 
-    /// Update the row a `running` insert created with the step's terminal
-    /// state. Matching on `status = 'running'` keeps a double-finish (or a
-    /// finish against a historical row id) from silently rewriting a
-    /// completed audit row; zero matched rows surfaces as an error instead.
+    /// Settle a `running` installer row. Matching on `status = 'running'` keeps a
+    /// double-finish from rewriting a completed audit row; zero matches errors.
     pub fn finish_installer_run(&self, id: &str, finish: InstallerRunFinish<'_>) -> Result<()> {
         let stdout = truncate_for_storage(finish.stdout);
         let stderr = truncate_for_storage(finish.stderr);
@@ -451,9 +432,7 @@ impl StateStore {
         Ok(())
     }
 
-    /// In-flight installer steps (`status = 'running'`), oldest first so a
-    /// progress view renders steps in start order. `agent_id` scopes the
-    /// result to one agent when provided.
+    /// In-flight installer steps (`status = 'running'`), oldest first.
     pub fn query_active_installer_runs(&self, agent_id: Option<&str>) -> Result<Vec<InstallerRun>> {
         if let Some(agent_id) = agent_id {
             let mut statement = self.connection().prepare(
@@ -487,8 +466,6 @@ impl StateStore {
     }
 
     /// Like [`query_installer_runs`] but filters by agent id when provided.
-    /// Passing `None` returns rows for every agent (including legacy rows that
-    /// predate the `agent_id` column being written, which carry NULL there).
     pub fn query_installer_runs_filtered(
         &self,
         agent_id: Option<&str>,
@@ -541,10 +518,7 @@ impl StateStore {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Return the most recent successful installer row for each `step` of the
-    /// given agent. Used by `acps agent status` to render the installed
-    /// harness/adapter versions. Legacy rows without `agent_id` are ignored
-    /// because they cannot be safely attributed to the active config.
+    /// The most recent successful installer row for each `step` of the given agent.
     pub fn latest_successful_installer_runs_for_agent(
         &self,
         agent_id: &str,

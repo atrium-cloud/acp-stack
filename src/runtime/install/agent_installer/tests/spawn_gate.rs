@@ -45,8 +45,8 @@ fn spawn_gate_failure_advances_fallback_chain_to_npm() {
     let tempdir = TempDir::new().expect("tempdir");
     let dest_dir = tempdir.path().join("bin");
     std::fs::create_dir(&dest_dir).expect("create bin dir");
-    // Shell path drops a stub for a different name than npm's `creates` so the
-    // npm step's postcheck cannot accidentally resolve the shell leftovers.
+    // The shell stub uses a different name than npm's `creates`, so npm's
+    // postcheck cannot accidentally resolve the shell leftovers.
     let stub_path = dest_dir.join("chain-agent-stub");
     let shell_script = format!(
         "{write} && cp {stub} {creates_path}",
@@ -195,11 +195,9 @@ fn declared_pin_keeps_step_gate_from_executing_binary() {
     let tempdir = TempDir::new().expect("tempdir");
     let dest_dir = tempdir.path().join("bin");
     let binary_path = dest_dir.join("pin-agent");
-    // The installed script passes the header check (`#!`) but a spawn probe
-    // would deterministically fail: the interpreter does not exist. So if the
-    // step-level gate ever regressed to probing under a declared pin, the
-    // outcome would be AgentInstallerBinaryUnrunnable instead of the pin
-    // mismatch — the assertion below proves the probe never ran.
+    // The script passes the header check but its interpreter does not exist, so
+    // a pin mismatch (rather than AgentInstallerBinaryUnrunnable) proves the
+    // step gate never probed under a declared pin.
     let script = format!(
         "mkdir -p {bin} && printf '#!/nonexistent/acp-stack-test-interpreter\\nexit 0\\n' > {binary} && chmod 755 {binary}",
         bin = shell_quote_path(&dest_dir),
@@ -298,8 +296,7 @@ fn spawn_gate_probe_runs_exec_only_binary_when_header_read_is_denied() {
     std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o111))
         .expect("chmod exec-only script");
     if std::fs::File::open(&binary).is_ok() {
-        // Root can read a mode-0111 file, so there is no denied read for the
-        // header check to skip on; the scenario this test covers is absent.
+        // Root can read a mode-0111 file, so this scenario is unreachable here.
         return;
     }
 

@@ -1,25 +1,5 @@
-//! Command Gateway — daemon-mediated shell execution.
-//!
-//! Responsibilities:
-//!   * Resolve a submitted command against `[permissions]` policy (deny/review
-//!     glob lists) before any subprocess is spawned.
-//!   * Spawn a child via `workspace.default_shell -c <cmd>` with cwd resolved
-//!     under `workspace.root` and env restricted to `commands.env_allowlist`.
-//!     Process-group leader so a hung grandchild is reaped on cancel/timeout.
-//!   * Stream stdout/stderr as `command.stdout` / `command.stderr` events into
-//!     SQLite via `StateStore::append_command_output`. Each chunk is also fed
-//!     to the `commands.{id}` WebSocket topic. A per-command byte cap stops
-//!     persistence (but not draining) once exceeded.
-//!   * Track running commands so `POST /v1/commands/{id}/cancel` can SIGTERM
-//!     the process group, wait `commands.cancel_grace`, then SIGKILL.
-//!
-//! What this is NOT: a permissions-approval queue. Phase 1 only honors static
-//! `deny` and `review` glob lists. Full review/approval lands later.
-//!
-//! Layout: the root file keeps `SubmitRequest` + `CommandGateway` (the public
-//! surface) and the cross-cutting `RunningCommand` registry value. The
-//! supervisor task, output streaming primitives, policy evaluation, and
-//! process-control helpers live in sibling submodules.
+//! Command Gateway: daemon-mediated shell execution, from `[permissions]`
+//! policy resolution through spawn, output streaming, and cancellation.
 
 pub(crate) mod exec;
 pub(crate) mod output;
@@ -43,11 +23,8 @@ use crate::state::{CommandRecord, NewCommandRecord, StateStore};
 use self::policy::{PolicyDecision, evaluate_policy, resolve_cwd_under_workspace};
 use self::supervisor::SupervisorTask;
 
-/// Decision reasons recorded when command teardown settles a permission row
-/// that is still pending. Only `PERMISSION_REASON_WAITER_LOST` names a real
-/// anomaly (the in-memory waiter vanished without a durable decision); the
-/// rest are race-safe no-ops on the corresponding path and exist so a genuine
-/// orphan always records the true cause.
+/// Decision reasons recorded when command teardown settles a still-pending
+/// permission row; only `PERMISSION_REASON_WAITER_LOST` names a real anomaly.
 pub(crate) const PERMISSION_REASON_COMMAND_CANCELED: &str = "command-cancelled";
 pub(crate) const PERMISSION_REASON_DENIED: &str = "command-permission-denied";
 pub(crate) const PERMISSION_REASON_WAITER_LOST: &str = "command-permission-waiter-lost";
@@ -56,8 +33,8 @@ pub(crate) const PERMISSION_REASON_SPAWN_FAILED: &str = "command-spawn-failed";
 pub(crate) const PERMISSION_REASON_PERSISTENCE_FAILED: &str = "command-persistence-failed";
 pub(crate) const PERMISSION_REASON_COMMAND_FINISHED: &str = "command-finished";
 
-/// Inputs for `CommandGateway::submit`. Mirror the HTTP request body shape
-/// (`docs/specs/api/api.md#commands`), pre-parsed by the handler.
+/// Inputs for `CommandGateway::submit`, mirroring the HTTP request body in
+/// `docs/specs/api/api.md#commands`.
 #[derive(Debug, Clone)]
 pub struct SubmitRequest {
     pub command: String,
@@ -66,9 +43,7 @@ pub struct SubmitRequest {
     pub timeout_override: Option<String>,
 }
 
-/// Live registry entry the gateway keeps per running command. Owned by the
-/// gateway; the supervisor task only needs to remove its own entry on exit.
-/// Shared between this root and `supervisor.rs` via `pub(super)`.
+/// Live registry entry the gateway keeps per running command.
 pub(super) struct RunningCommand {
     pub(super) cancel_tx: watch::Sender<bool>,
 }
@@ -80,9 +55,8 @@ pub struct CommandGateway {
     config: Arc<Config>,
     running: Arc<TokioMutex<HashMap<String, RunningCommand>>>,
     permissions: PermissionService,
-    /// Map command id → pending permission id, so cancel() can also cancel the
-    /// permission row when a caller cancels a command that is still awaiting
-    /// approval. Cleared by the supervisor task once the decision lands.
+    /// Command id → pending permission id, so `cancel` can settle the
+    /// permission row too. Cleared by the supervisor once the decision lands.
     awaiting_permission: Arc<TokioMutex<HashMap<String, String>>>,
 }
 
@@ -104,13 +78,7 @@ impl CommandGateway {
     }
 
     /// Validate, persist a `commands` row, and spawn the supervisor task.
-    /// Returns the freshly-inserted record (status = pending → running once
-    /// the supervisor confirms the spawn).
     pub async fn submit(&self, request: SubmitRequest) -> Result<CommandRecord> {
-        // 1. Policy. `deny` rejects synchronously; `review`/`locked` route
-        //    through the permission pipeline so an out-of-band approver can
-        //    decide before the subprocess is spawned. The row is still
-        //    inserted in `pending` so the caller has an id to poll/cancel.
         let decision = evaluate_policy(&request.command, &self.config.permissions);
         let mode = self.config.permissions.mode.as_str();
         let review_flagged = matches!(decision, PolicyDecision::Review) && mode == "auto";
@@ -125,16 +93,12 @@ impl CommandGateway {
             PolicyDecision::Allow => mode == "locked",
         };
 
-        // 2. cwd resolution under workspace.root (must stay inside).
         let workspace_root_path = Path::new(&self.config.workspace.root);
         let execution_cwd = match &request.cwd {
             Some(cwd) => resolve_cwd_under_workspace(workspace_root_path, cwd)?,
             None => resolve_cwd_under_workspace(workspace_root_path, &self.config.workspace.root)?,
         };
 
-        // 3. env allow-list enforcement. Reject any name that is not on the
-        //    configured allow-list, so submitting a request cannot inject an
-        //    arbitrary env name into the child.
         if let Some(env) = &request.env {
             for name in env.keys() {
                 if !self
@@ -149,15 +113,12 @@ impl CommandGateway {
             }
         }
 
-        // Persist only the env *names* in the durable row. Values commonly
-        // carry credentials (API tokens, OAuth secrets); storing them in
-        // SQLite would expand the secret-at-rest surface beyond the
-        // age-encrypted secret store. Names are still useful for audit —
-        // "this command was given $GITHUB_TOKEN" — without leaking values.
+        // Persist only env names: values commonly carry credentials, and the
+        // durable row must not widen the secret-at-rest surface.
         let env_json = match &request.env {
             Some(env) if !env.is_empty() => {
                 let mut names: Vec<&String> = env.keys().collect();
-                names.sort(); // stable serialization for diff/audit
+                names.sort();
                 Some(
                     serde_json::to_string(&names).map_err(|_| StackError::CommandDenied {
                         reason: "env names could not be serialized",
@@ -167,7 +128,6 @@ impl CommandGateway {
             _ => None,
         };
 
-        // 4. Resolve per-command timeout.
         let timeout_duration = match &request.timeout_override {
             Some(text) => parse_duration_string(text).ok_or(StackError::InvalidDurationField {
                 field: "command.timeout",
@@ -189,7 +149,6 @@ impl CommandGateway {
                 field: "commands.progress_interval",
             })?;
 
-        // 5. Insert the pending row.
         let cwd_owned = request.cwd.as_ref().map(|_| execution_cwd.display_path());
         let record = {
             let store = self.state.lock().await;
@@ -202,17 +161,14 @@ impl CommandGateway {
             })?
         };
 
-        // 6. Register the cancel channel and spawn the supervisor.
         let (cancel_tx, cancel_rx) = watch::channel(false);
         {
             let mut running = self.running.lock().await;
             running.insert(record.id.clone(), RunningCommand { cancel_tx });
         }
 
-        // 7. If policy needs approval, create a pending permission row tied to
-        //    this command. The row's `detail_json` lists the command, cwd, and
-        //    env *names* — never values — so the durable record cannot leak
-        //    secrets even if the events table is replicated downstream.
+        // `detail_json` lists env names, never values, so a replicated events
+        // table cannot leak secrets.
         let pending_permission = if needs_approval {
             let env_names: Vec<String> = request
                 .env
@@ -293,20 +249,12 @@ impl CommandGateway {
         })
     }
 
-    /// Signal the running command to cancel. The supervisor task is
-    /// responsible for issuing SIGTERM, waiting `cancel_grace`, and SIGKILLing
-    /// if the child has not exited. Returns the latest stored row. If the
-    /// command is still awaiting a permission decision, also cancels the
-    /// permission row so its durable status reflects the operator's intent.
+    /// Signal the running command to cancel and return the latest stored row.
     pub async fn cancel(&self, id: &str) -> Result<CommandRecord> {
-        // Cancel the permission row first if any — the supervisor's select!
-        // on perm_rx will resolve as Canceled and finalize the command row
-        // without ever spawning a child.
-        // `cancel_if_pending` because the map entry now lives until the
-        // supervisor deregisters: cancelling a command whose permission was
-        // already approved must not log a spurious transition error. Read,
-        // don't take — the supervisor's deregister owns removal, and taking
-        // the entry here would orphan the row if this cancel errors out.
+        // Cancel the permission row first so the supervisor settles the command
+        // without spawning a child. Read, don't take: the supervisor's
+        // deregister owns removal, and taking here would orphan the row if this
+        // cancel errors out.
         let perm_id = self.awaiting_permission.lock().await.get(id).cloned();
         if let Some(perm_id) = perm_id
             && let Err(error) = self
@@ -328,10 +276,6 @@ impl CommandGateway {
         match sender {
             Some(tx) => {
                 if let Err(error) = tx.send(true) {
-                    // The supervisor task dropped its receiver while we held
-                    // a live entry — a race between supervisor teardown and a
-                    // simultaneous cancel. Surface it: the project's
-                    // error-handling rule forbids silent discard.
                     tracing::warn!(
                         error = %error,
                         command_id = %id,
@@ -340,9 +284,6 @@ impl CommandGateway {
                 }
             }
             None => {
-                // No live supervisor: either the command never ran or it
-                // already finished. Surface 404 if there is no row at all;
-                // otherwise let the caller see the terminal state.
                 let store = self.state.lock().await;
                 return store
                     .get_command(id)?

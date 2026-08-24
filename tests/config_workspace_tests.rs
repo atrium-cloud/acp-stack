@@ -308,8 +308,6 @@ fn rejects_relative_workspace_default_shell() {
 
 #[test]
 fn accepts_empty_workspace_sources() {
-    // The default starter config declares no code or data sources; loading
-    // must succeed because Phase 4 lanes are optional.
     load_config_from_str(VALID_CONFIG).expect("starter config without sources should load");
 }
 

@@ -82,8 +82,7 @@ async fn require_bootstrap_auth(
             "invalid bearer token",
         );
     }
-    // Only authenticated calls count as API activity; unauthenticated probes
-    // must not keep an abandoned bootstrap server alive.
+    // Only authenticated calls count as activity, so probes cannot keep an abandoned server alive.
     state.manager.touch_activity();
     next.run(req).await
 }
@@ -162,9 +161,8 @@ async fn session_status_handler(
 ) -> Response {
     match state.manager.session(&id) {
         Some(session) => {
-            // Snapshot before touching: the reported `last_activity_age_secs`
-            // is the idle time leading up to this poll, not the ~0 the poll's
-            // own activity would produce.
+            // Snapshot before touching, so `last_activity_age_secs` reports the idle time leading
+            // up to this poll rather than the ~0 the poll itself would produce.
             let snapshot = session.status_snapshot();
             session.touch();
             ApiSuccess::new(snapshot).into_response()
@@ -298,10 +296,8 @@ async fn session_ws_handler(
 }
 
 async fn init_ws_connection(socket: WebSocket, session: Arc<HostedInitSession>) {
-    // A connected client is liveness on its own: the idle reaper must not
-    // fire while a backend holds the socket, even if it only listens during
-    // long init steps. The guard keeps the count correct on every early
-    // return below.
+    // A connected client is liveness on its own, so the idle reaper must not fire while a backend
+    // holds the socket; the guard keeps the count correct on every early return below.
     struct ConnectionGuard {
         session: Arc<HostedInitSession>,
     }
@@ -315,10 +311,8 @@ async fn init_ws_connection(socket: WebSocket, session: Arc<HostedInitSession>) 
         session: session.clone(),
     };
     let (mut sender, mut receiver) = socket.split();
-    // Subscribe before snapshotting hello so no signal can slip between the two.
-    // A frame emitted in that window rides the live stream and the client dedups
-    // it against the hello replay by seq; the alternative order drops it from
-    // both, and a raw-signal stream has no later full snapshot to self-correct.
+    // Subscribe before snapshotting hello: a frame emitted in that window then rides the live
+    // stream and dedups by seq, while the reverse order drops it from both with no later snapshot.
     let mut events = session.subscribe();
     let hello = session.hello_frame();
     if sender.send(Message::Text(hello.into())).await.is_err() {
@@ -354,22 +348,16 @@ async fn init_ws_connection(socket: WebSocket, session: Arc<HostedInitSession>) 
                         if sender.send(Message::Text(frame.into())).await.is_err() {
                             break;
                         }
-                        // A terminal session (reaper-cancelled, errored, or
-                        // acked on another connection) means the server is on
-                        // its way down; close instead of waiting for the
-                        // client so a hung backend holding the socket cannot
-                        // pin the process past --max-lifetime.
+                        // A terminal session means the server is on its way down; close rather
+                        // than let a hung backend pin the process past --max-lifetime.
                         if !session.is_active() {
                             let _ = sender.send(Message::Close(None)).await;
                             break;
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        // A lagged receiver skipped frames it can never get back
-                        // from this stream. Re-send hello so the client re-folds
-                        // the full signal-log replay: with raw signals a skipped
-                        // frame is otherwise a permanent hole. The lag notice
-                        // goes first so the client knows why a fresh hello landed.
+                        // Re-send hello so the client re-folds the full signal-log replay: with
+                        // raw signals a skipped frame is otherwise a permanent hole.
                         if sender
                             .send(Message::Text(ws_lagged_frame().into()))
                             .await
@@ -381,8 +369,7 @@ async fn init_ws_connection(socket: WebSocket, session: Arc<HostedInitSession>) 
                         {
                             break;
                         }
-                        // A lagged receiver can miss the terminal event itself;
-                        // check the session state directly.
+                        // A lagged receiver can miss the terminal event itself.
                         if !session.is_active() {
                             let _ = sender.send(Message::Close(None)).await;
                             break;
@@ -395,8 +382,8 @@ async fn init_ws_connection(socket: WebSocket, session: Arc<HostedInitSession>) 
     }
 }
 
-/// Extracted from the WebSocket loop because the only way to reach it there is
-/// to fall a full broadcast buffer behind, which no test can drive reliably.
+/// The `init.ws_lagged` frame, extracted so tests can reach it without falling a broadcast buffer
+/// behind.
 pub(super) fn ws_lagged_frame() -> String {
     frame_json(ServerFrame::ProtocolError {
         code: "init.ws_lagged",

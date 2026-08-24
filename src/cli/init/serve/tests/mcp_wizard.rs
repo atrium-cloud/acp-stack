@@ -1,11 +1,8 @@
-//! MCP wizard tests: the streamed add sequence, capability gating, and the
-//! secret-ref collection that follows it.
+//! MCP wizard tests: the streamed add sequence, capability gating, and secret-ref collection.
 
 use super::super::*;
 use super::support::*;
 
-// The two init-side seams the MCP hosted lift exercises: the wizard the
-// `mcp_configure` step drives, and the secret collection that follows it.
 use super::super::super::provider::{
     collect_mcp_secret_refs_for_init, collect_missing_provider_refs,
 };
@@ -15,9 +12,8 @@ use crate::secrets::SecretStore;
 use serde_json::json;
 use std::time::Duration;
 
-/// Answers a streamed prompt sequence one request at a time. Remembering
-/// the last request id is what keeps the poller from re-reading a prompt
-/// it already answered, before the wizard thread wakes and clears it.
+/// Answers a streamed prompt sequence one request at a time. The remembered request id keeps the
+/// poller from re-reading an answered prompt before the wizard thread wakes and clears it.
 struct HostedPromptTranscript {
     session: Arc<HostedInitSession>,
     last_request_id: Option<String>,
@@ -66,16 +62,13 @@ fn option_values(request: &PublicInputRequest) -> Vec<&str> {
         .collect()
 }
 
-/// The `offer_http` the `mcp_configure` step computes, derived from a probe
-/// fixture rather than a bare bool so the picker stays tied to the real
+/// The step's `offer_http`, derived from a probe fixture so the picker stays tied to the real
 /// capability accessor.
 fn offer_http_for(advertised: Value) -> bool {
     mcp_capabilities(advertised).supports_mcp_capability("http")
 }
 
-/// Runs the post-probe MCP step's prompt half against a hosted session, in
-/// the order `mcp_configure` drives it: the add confirmation, then the
-/// transport wizard.
+/// Runs the post-probe MCP prompts in the order `mcp_configure` drives them.
 fn hosted_mcp_wizard(
     session: Arc<HostedInitSession>,
     offer_http: bool,
@@ -94,9 +87,6 @@ fn hosted_mcp_wizard(
     })
 }
 
-// The lifted exclusion, end to end: every MCP prompt reaches the client
-// with its kind, selects address their rows by stable id, and the answers
-// land as declared servers.
 #[test]
 fn hosted_mcp_wizard_streams_the_add_sequence_with_kinds_and_stable_values() {
     let session = test_session("init_mcp_wizard");
@@ -158,8 +148,7 @@ fn hosted_mcp_wizard_streams_the_add_sequence_with_kinds_and_stable_values() {
     }
 }
 
-// Capability gating survives the lift: the transport the agent never
-// advertised is not offered to a hosted client either.
+// A transport the agent never advertised is not offered to a hosted client either.
 #[test]
 fn hosted_mcp_transport_options_follow_the_probed_capabilities() {
     let session = test_session("init_mcp_transport_options");
@@ -175,20 +164,12 @@ fn hosted_mcp_transport_options_follow_the_probed_capabilities() {
     assert!(args.prompt_mcp_http.is_empty());
 }
 
-// Refs travel as text; a client that pastes the credential itself is
-// rejected by the boundary screening, and neither the error nor the
-// stream repeats what it pasted.
+// Neither the error nor the stream may repeat a pasted credential.
 #[test]
 fn a_pasted_credential_in_a_header_ref_is_rejected_without_echoing_it() {
     const PASTED: &str = "sk-live-hosted-mcp-header-value";
-    // The four shapes a paste takes: dropped into the ref position of an
-    // otherwise well-formed entry, pasted whole where `HEADER:SECRET_REF`
-    // was asked for, and pasted into the header position of an entry that
-    // does split, with and without a scheme token in front. The last one is
-    // why the header-name error names no input at all: the screening
-    // heuristic matches credential prefixes, so `Bearer sk-...` slips past
-    // it, and only a reason that quotes nothing keeps the paste out of the
-    // terminal error frame, the reconnect hello, and replayable history.
+    // The screening heuristic matches credential prefixes, so `Bearer sk-...` slips past it and
+    // reaches the header-name check — which is why that error may quote no input at all.
     // `screened` marks the forms the heuristic itself catches.
     for (index, entry, screened) in [
         (0, format!("Authorization:{PASTED}"), true),
@@ -219,8 +200,7 @@ fn a_pasted_credential_in_a_header_ref_is_rejected_without_echoing_it() {
                 "`{entry}` was not screened: {error:?}"
             );
         } else {
-            // Pinned so the case cannot pass by failing somewhere earlier:
-            // this form reaches the header-name check specifically.
+            // Pinned so the case cannot pass by failing somewhere earlier.
             assert!(
                 error
                     .public_message()
@@ -230,8 +210,7 @@ fn a_pasted_credential_in_a_header_ref_is_rejected_without_echoing_it() {
         }
         assert!(!error.to_string().contains(PASTED));
         assert!(!error.public_message().contains(PASTED));
-        // The rejection travels as a session failure, so the surfaces it
-        // reaches are asserted through the same path a client sees.
+        // The rejection travels as a session failure, so assert it through the client's path.
         session.set_error(error.error_code(), error.public_message());
         let events = serde_json::to_string(&session.events_after(0)).expect("events");
         let status = serde_json::to_string(&session.status_snapshot()).expect("status");
@@ -244,10 +223,8 @@ fn a_pasted_credential_in_a_header_ref_is_rejected_without_echoing_it() {
     }
 }
 
-// The env-ref prompt takes bare ref names, so the same paste lands on the
-// name-shape check instead of the header parser. A dashed token matches
-// none of the screening heuristic's prefixes, which is exactly why that
-// check may not quote the entry back.
+// The env-ref prompt takes bare ref names, so a dashed token misses every screening prefix and
+// lands on the name-shape check — which is why that check may not quote the entry back.
 #[test]
 fn a_pasted_credential_in_a_stdio_env_ref_is_rejected_without_echoing_it() {
     const PASTED: &str = "xai-9f2c8b1a-4d7e-11ef-9a3b-0242ac120002";
@@ -266,9 +243,7 @@ fn a_pasted_credential_in_a_stdio_env_ref_is_rejected_without_echoing_it() {
         .join()
         .expect("wizard thread")
         .expect_err("a pasted credential must be rejected");
-    // Pinned so the case cannot pass by failing earlier: the screening
-    // heuristic does not recognize this shape, so the name-shape check is
-    // the one that has to reject it without an echo.
+    // Pinned so the case cannot pass by failing earlier.
     assert!(
         error.public_message().contains("secret ref name must use"),
         "`{PASTED}` must be rejected by the ref-name check: {error:?}"
@@ -286,8 +261,7 @@ fn a_pasted_credential_in_a_stdio_env_ref_is_rejected_without_echoing_it() {
     }
 }
 
-// The values behind those refs take the password lane, and the collected
-// secret reaches the store without ever appearing in the event history.
+// The collected secret must reach the store without appearing in the event history.
 #[test]
 fn hosted_mcp_secret_values_are_collected_as_password_prompts() {
     const SECRET: &str = "files-token-value";
@@ -348,8 +322,8 @@ fn hosted_deferral_soft_passes_custom_provider_key_without_prompting() {
             output_max_tokens: config::DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
         }),
     });
-    // No client interaction: the value prompt must never be streamed for a
-    // deferred ref, so the collection completes on this thread alone.
+    // No client interaction: a deferred ref never streams a value prompt, so the collection
+    // completes on this thread alone.
     prompt::with_hosted_driver(driver, || {
         collect_missing_provider_refs(
             true,

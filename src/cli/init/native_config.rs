@@ -292,11 +292,8 @@ pub(super) fn cancel_applied_for_init(
             code: "agent.native_config_rollback_conflict",
         });
     }
-    // Later init steps legitimately rewrite the canonical config (and may
-    // reprovision native files) after the onboarding apply, so this rollback
-    // does not gate on applied-file digests the way the runtime cancel does:
-    // the backend has already decided to fail the init, and restoring the
-    // pre-import snapshots is the safest terminal state for the instance.
+    // Unlike the runtime cancel, this does not gate on applied-file digests: later
+    // init steps legitimately rewrite the canonical config after the apply.
     let prior_config = record
         .prior_config
         .as_ref()
@@ -392,28 +389,24 @@ mod tests {
         config
     }
 
-    // Amp is provider-opaque and keeps its model in ACP session config, so
-    // its canonical config carries no provider block; the import path only
-    // appends MCP servers. Round-trips through the fixture with the agent id
-    // retargeted so no new fixture file is needed.
+    // Amp is provider-opaque, so its canonical config carries no provider block and
+    // the import path only appends MCP servers.
     fn amp_config() -> Config {
         let mut config = config_without_provider();
         config.agent.id = "amp".to_owned();
         config
     }
 
-    // Pi is provider-selecting, so its starter config carries no provider until
-    // the import applies `defaultProvider`/`defaultModel`. Retargeting the
-    // fixture to `pi` avoids a new fixture file.
+    // Pi is provider-selecting: no provider until the import applies
+    // `defaultProvider`/`defaultModel`.
     fn pi_config() -> Config {
         let mut config = config_without_provider();
         config.agent.id = "pi".to_owned();
         config
     }
 
-    // Goose is provider-selecting, so its starter config carries no provider
-    // until the import applies `GOOSE_PROVIDER`/`GOOSE_MODEL`. Retargeting the
-    // fixture to `goose` avoids a new fixture file.
+    // Goose is provider-selecting: no provider until the import applies
+    // `GOOSE_PROVIDER`/`GOOSE_MODEL`.
     fn goose_config() -> Config {
         let mut config = config_without_provider();
         config.agent.id = "goose".to_owned();
@@ -599,8 +592,6 @@ mod tests {
         assert_eq!(record.phase, NativeConfigOperationPhase::Terminal);
         assert!(record.cancelled);
 
-        // A backend retry of the same cancel must succeed without touching
-        // the restored files again.
         let repeated = cancel_applied_for_init(
             &operation.operation_id,
             &operation.revision,
@@ -687,7 +678,6 @@ mod tests {
         let (_, operation) =
             apply_for_init(&mut record, &config_path, &state_path, home.path()).expect("apply");
         assert_eq!(operation.status, NativeConfigOperationStatus::Applied);
-        // Provider stays absent for the provider-opaque harness.
         assert!(operation.agent_config.provider.is_none());
         let applied = Config::load_from_path(&config_path).expect("applied config");
         assert!(
@@ -707,13 +697,10 @@ mod tests {
 
     #[test]
     fn pi_provider_import_stages_and_applies() {
-        // Selecting the provider (not the model) keeps `imported_model` false
-        // so apply does not trigger live model discovery, exercising the full
-        // stage/apply/journal round-trip for a provider-selecting harness.
+        // Selecting the provider (not the model) keeps `imported_model` false so
+        // apply does not trigger live model discovery.
         let home = tempfile::tempdir().expect("home");
         let mut secrets = SecretStore::open_or_create(home.path()).expect("secret store");
-        // The anthropic provider lane requires `ANTHROPIC_API_KEY`; apply
-        // validates the secret ref exists before writing.
         secrets
             .set("ANTHROPIC_API_KEY", "test-key")
             .expect("seed secret");
@@ -788,7 +775,6 @@ mod tests {
                 .map(|provider| provider.id.as_str()),
             Some("anthropic")
         );
-        // The provider lane wires its API-key env ref into canonical config.
         assert!(
             applied
                 .agent
@@ -802,23 +788,16 @@ mod tests {
             serde_json::from_slice(&std::fs::read(native_path).expect("native")).expect("json");
         // The benign residual key survives alongside the provisioned settings.
         assert_eq!(native["theme"], "dark");
-        // Provisioning reapplies the canonical provider selection after the
-        // imported residual is written.
         assert_eq!(native["defaultProvider"], "anthropic");
         assert!(native.get("defaultModel").is_none());
     }
 
     #[test]
     fn goose_provider_import_stages_and_applies() {
-        // Selecting the provider (not the model) keeps `imported_model` false so
-        // apply does not trigger live model discovery, and exercises the full
-        // stage/apply/journal round-trip plus the goose YAML residual +
-        // provisioning composition (residual written first, then
-        // `GOOSE_*` provisioning merged into the same `config.yaml`).
+        // Exercises the goose YAML composition: residual written first, then
+        // `GOOSE_*` provisioning merged into the same `config.yaml`.
         let home = tempfile::tempdir().expect("home");
         let mut secrets = SecretStore::open_or_create(home.path()).expect("secret store");
-        // The anthropic provider lane requires `ANTHROPIC_API_KEY`; apply
-        // validates the secret ref exists before writing.
         secrets
             .set("ANTHROPIC_API_KEY", "test-key")
             .expect("seed secret");
@@ -917,8 +896,7 @@ mod tests {
                 0.2
             )))
         );
-        // Provisioning merged the canonical provider back in as `GOOSE_PROVIDER`
-        // (not carried from the managed import residual, which stripped it).
+        // Merged back in by provisioning; the import residual stripped it.
         assert_eq!(
             native.get(serde_norway::Value::String("GOOSE_PROVIDER".to_owned())),
             Some(&serde_norway::Value::String("anthropic".to_owned()))

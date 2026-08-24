@@ -128,8 +128,6 @@ async fn bootstrap_native_config_cancel_guards_session_state() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["error"]["code"], "init.session_not_found");
 
-    // A running session has not published a result yet, so there is no
-    // applied import to roll back.
     let app = app_with_session(test_session("init_nc_cancel"));
     let (status, body) = request_raw_json(
         app,

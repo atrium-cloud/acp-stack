@@ -290,10 +290,8 @@ pub(super) fn inspect_codex(content: &str, revision: String) -> Result<Inspected
 
 pub(super) fn inspect_amp(content: &str, revision: String) -> Result<InspectedNativeConfig> {
     let mut root = parse_json_object(content)?;
-    // Amp is provider-opaque (set_provider=false) and keeps its model in ACP
-    // session config rather than settings, so `settings.json` yields only
-    // MCP-server candidates. Its keys are flat dotted strings
-    // (`"amp.mcpServers"`), matched as literal object keys.
+    // Amp is provider-opaque and keeps its model in ACP session config, so
+    // `settings.json` yields only MCP candidates under flat dotted keys.
     let mut builder =
         InspectionBuilder::new("amp", NativeConfigFormat::Json, revision, content.len());
     if let Some(mcp) = root.remove("amp.mcpServers") {
@@ -316,11 +314,8 @@ pub(super) fn inspect_amp(content: &str, revision: String) -> Result<InspectedNa
 
 pub(super) fn inspect_pi(content: &str, revision: String) -> Result<InspectedNativeConfig> {
     let mut root = parse_json_object(content)?;
-    // Pi documents `settings.json` as strict JSON (no JSONC), so parse it the
-    // same way as amp. Pi is provider-selecting (`defaultProvider`) with
-    // a bare `defaultModel` id, so both a provider and a model candidate can be
-    // extracted. Pi has no first-class MCP in its settings file (adapter-only),
-    // so there are no MCP candidates.
+    // Pi documents `settings.json` as strict JSON, is provider-selecting via
+    // `defaultProvider`/`defaultModel`, and has no first-class MCP there.
     let mut builder =
         InspectionBuilder::new("pi", NativeConfigFormat::Json, revision, content.len());
 
@@ -355,10 +350,8 @@ pub(super) fn inspect_pi(content: &str, revision: String) -> Result<InspectedNat
             builder.block(*key, BlockedReason::Permissions);
         }
     }
-    // `httpProxy` is a bare host:port for benign routing, but a proxy URL can
-    // embed `user:pass@` credentials. Block it as credentials only when it
-    // carries userinfo, mirroring how the Claude env-proxy keys are handled;
-    // otherwise it survives into the residual.
+    // A proxy URL can embed `user:pass@`, so block `httpProxy` as credentials only
+    // when it carries userinfo; a bare host:port survives into the residual.
     if root
         .get("httpProxy")
         .and_then(JsonValue::as_str)
@@ -384,11 +377,9 @@ pub(super) fn inspect_pi(content: &str, revision: String) -> Result<InspectedNat
 }
 
 pub(super) fn inspect_goose(content: &str, revision: String) -> Result<InspectedNativeConfig> {
-    // Goose `config.yaml` root is a mapping of UPPERCASE `GOOSE_*` env-style
-    // keys (provider/model/mode/tuning) plus a lowercase `extensions:` map. It
-    // is parsed as a JSON `Map` after a YAML→JSON conversion that rejects
-    // non-string keys, so the whole sanitize/paths pipeline shared with the
-    // JSON harnesses applies unchanged; the residual is re-serialized as YAML.
+    // Parsed as a JSON `Map` via a YAML→JSON conversion that rejects non-string
+    // keys, so the sanitize pipeline shared with the JSON harnesses applies
+    // unchanged; the residual is re-serialized as YAML.
     let mut root = parse_goose_root(content)?;
     let mut builder =
         InspectionBuilder::new("goose", NativeConfigFormat::Yaml, revision, content.len());
@@ -405,10 +396,8 @@ pub(super) fn inspect_goose(content: &str, revision: String) -> Result<Inspected
             },
         );
     }
-    // Goose `GOOSE_MODEL` is a bare model id; pair it with the provider named by
-    // `GOOSE_PROVIDER` (mirroring how Codex pairs `model` with `model_provider`)
-    // so the apply step can reject a model that does not belong to the selected
-    // provider lane.
+    // `GOOSE_MODEL` is a bare model id; pair it with `GOOSE_PROVIDER` so apply can
+    // reject a model that does not belong to the selected provider lane.
     if let Some(value) = root.remove("GOOSE_MODEL") {
         let provider_hint = goose_provider_hint(&builder);
         builder.add_string_candidate(
@@ -443,10 +432,8 @@ pub(super) fn inspect_goose(content: &str, revision: String) -> Result<Inspected
     builder.finish_yaml(residual)
 }
 
-/// Resolve the provider hint for a `GOOSE_MODEL` candidate from a
-/// `GOOSE_PROVIDER` candidate already recorded on the builder. The hint is the
-/// agent-native provider id (what a `GOOSE_PROVIDER` value would read as), so
-/// the apply step can compare it against the effective provider's native id.
+/// Provider hint for a `GOOSE_MODEL` candidate, as the agent-native provider id so
+/// apply can compare it against the effective provider's native id.
 fn goose_provider_hint(builder: &InspectionBuilder) -> Option<String> {
     match builder.candidate("provider")? {
         CandidateValue::Provider(provider) => agent_provider_id_for_provider_id("goose", provider)

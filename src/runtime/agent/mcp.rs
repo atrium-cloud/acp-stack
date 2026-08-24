@@ -1,13 +1,8 @@
-//! MCP server configuration resolver.
+//! MCP server configuration resolver: converts `[mcp.servers]` blocks into the
+//! SDK's `McpServer` enum, resolving secret refs against the encrypted store.
 //!
-//! `resolve_mcp_servers` converts the project's `[mcp.servers]` config blocks
-//! into the SDK's `McpServer` enum, resolving stdio commands to absolute paths
-//! and resolving stdio env entries and HTTP header values (whole-value
-//! `value_ref`s and `${NAME}`-interpolated `value` templates) against the
-//! encrypted secret store. Secret values are pulled at session
-//! create/load/resume time and passed straight to the agent's `session/new`
-//! (or load/resume) call — they never enter SQLite, never enter any event
-//! payload, and never leave this resolver alongside the names.
+//! Resolved secret values go straight to the agent's `session/new` call; they
+//! never enter SQLite, an event payload, or leave this resolver beside names.
 
 use agent_client_protocol::schema::v1::{
     EnvVariable, HttpHeader, McpServer, McpServerHttp, McpServerStdio,
@@ -66,10 +61,8 @@ pub fn resolve_mcp_servers(config: &McpConfig, store: &SecretStore) -> Result<Ve
     Ok(out)
 }
 
-/// Validate only the secret references used by MCP configuration.
-///
-/// Native-config import uses this path so a portable bare command can be
-/// accepted before its executable is installed on the runtime host.
+/// Validate only the secret references used by MCP configuration, so native
+/// import can accept a bare command before its executable is installed.
 pub(crate) fn validate_mcp_secret_refs(config: &McpConfig, store: &SecretStore) -> Result<()> {
     for server in &config.servers {
         match server {
@@ -109,9 +102,8 @@ pub(crate) fn validate_mcp_secret_refs(config: &McpConfig, store: &SecretStore) 
     Ok(())
 }
 
-/// Build the list of server names being passed to a session. Used by
-/// `mcp.session_attached` event payloads so durable logs reflect which
-/// declared integrations the session received without leaking values.
+/// Server names passed to a session, for `mcp.session_attached` payloads:
+/// names only, never values.
 pub fn server_names(servers: &[McpServer]) -> Vec<String> {
     servers.iter().map(|s| server_name(s).to_owned()).collect()
 }

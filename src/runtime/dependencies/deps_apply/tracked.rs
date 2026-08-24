@@ -1,12 +1,6 @@
-//! Durable-run wrapper around the apply runner.
-//!
-//! Every apply surface (synchronous init step, detached init child,
-//! `acps deps apply`, `POST /v1/deps/apply`) goes through
-//! [`apply_dependencies_tracked`], which owns the `deps_apply_runs` row:
-//! claim (single-flight across processes), per-action progress updates, and
-//! terminal settlement from the report's outcome counts. The row is the
-//! observability contract for background applies, so row-write failures after
-//! the claim are warn-logged rather than allowed to abort the install.
+//! Durable-run wrapper around the apply runner: [`apply_dependencies_tracked`]
+//! owns the `deps_apply_runs` row from cross-process single-flight claim to
+//! terminal settlement.
 
 use super::*;
 use crate::runtime::process_runner::{current_boot_id, process_is_live};
@@ -23,8 +17,7 @@ pub enum TrackedApplyRun<'a> {
         origin: &'a str,
         init_run_id: Option<&'a str>,
     },
-    /// Adopt a row the spawning parent already claimed — the detached-child
-    /// path, where the claim happened before the process existed.
+    /// Adopt a row the spawning parent claimed before this process existed.
     Adopt { apply_run_id: &'a str },
 }
 
@@ -43,9 +36,8 @@ pub fn deps_run_liveness() -> impl Fn(i64, Option<&str>) -> bool {
     }
 }
 
-/// Terminal `deps_apply_runs.status` for a finished report: any failed action
-/// makes the run `failed`; otherwise any privilege skip makes it
-/// `privilege_blocked`; otherwise `succeeded`.
+/// Terminal `deps_apply_runs.status` for a finished report, in precedence
+/// order: `failed`, then `privilege_blocked`, then `succeeded`.
 pub fn run_status_for_report(report: &DepsApplyReport) -> &'static str {
     let mut privilege_blocked = false;
     for result in &report.results {
@@ -90,8 +82,8 @@ fn finish_for_report(report: &DepsApplyReport) -> DepsApplyRunFinish<'static> {
 }
 
 /// Run the apply with a durable `deps_apply_runs` row around it. The claim
-/// error ([`StackError::DepsApplyInFlight`]) propagates before any install
-/// snippet runs; row updates after the claim are best-effort.
+/// error propagates before any install snippet runs; row updates after the
+/// claim are best-effort so a row write cannot abort a half-run install.
 pub fn apply_dependencies_tracked(
     config: &Config,
     store: &StateStore,
@@ -151,8 +143,6 @@ pub fn apply_dependencies_tracked(
         escalation,
         Some(&apply_run_id),
         |current, total, name| {
-            // The row is observability, not control flow: a failed progress
-            // write must not abort a half-run install.
             if let Err(error) =
                 store.update_deps_apply_progress(&apply_run_id, (current - 1) as i64, Some(name))
             {

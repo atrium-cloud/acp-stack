@@ -1,8 +1,6 @@
 use super::*;
 
-/// Step: workspace_materialize — clone repos + download/extract data sources
-/// into /workspace/usr/. Skipped if --skip-workspace-init.
-/// Verifier: every source destination has its sentinel file.
+/// Step: workspace_materialize — clone repos and download/extract data sources into the workspace.
 pub(super) fn run_workspace_materialize_step(flow: &mut InitFlow) -> Result<()> {
     let output_mode = flow.output_mode;
     let workspace_for_verify = flow.config.workspace.clone();
@@ -28,10 +26,7 @@ pub(super) fn run_workspace_materialize_step(flow: &mut InitFlow) -> Result<()> 
         &flow.init_run.id,
     );
     create_dir_owner_only(&log_paths.run_dir)?;
-    // Pre-compute the log_dir path so a mid-clone failure still
-    // records it on the init_steps row — otherwise the operator
-    // would see `log_dir = NULL` exactly when they need the
-    // captured stderr most.
+    // Pre-computed so a mid-clone failure still records the log dir on the init_steps row.
     let log_dir_str = log_paths.run_dir.display().to_string();
     let config = &flow.config;
     let secret_store = &flow.secret_store;
@@ -64,17 +59,13 @@ pub(super) fn run_workspace_materialize_step(flow: &mut InitFlow) -> Result<()> 
     Ok(())
 }
 
-/// Step: deps_apply — run declared dependency install actions before the agent
-/// is launched for provider/model discovery, so deps the agent needs to run
-/// already exist. Opt-in: a TTY confirm, or `--deps-apply --deps-apply-yes`
-/// non-interactively.
+/// Step: deps_apply — run declared dependency install actions before the agent is launched for provider/model discovery.
 pub(super) fn run_deps_apply_step(flow: &mut InitFlow) -> Result<()> {
     let output_mode = flow.output_mode;
     let deps_candidates = pending_candidates(&flow.config, None);
     if deps_candidates.is_empty() {
-        // Re-asserted here rather than trusted from the agent-settlement
-        // derivation: the install and workspace steps in between can satisfy
-        // the last pending action.
+        // Re-asserted rather than trusted from the earlier derivation: the install and workspace
+        // steps in between can satisfy the last pending action.
         prompt::emit_state_signal(|| {
             applicability(
                 InitCategory::Deps,
@@ -84,16 +75,13 @@ pub(super) fn run_deps_apply_step(flow: &mut InitFlow) -> Result<()> {
             )
         });
     }
-    // Probe escalation once and reuse it for the preflight notice and the
-    // apply itself, so the prompt cannot promise a mode the apply won't use.
+    // Probed once and reused, so the prompt cannot promise a mode the apply won't use.
     let deps_escalation = if pending_system_candidates(&flow.config, None).is_empty() {
         PrivilegeEscalation::NotNeeded
     } else {
         probe_privilege_escalation()
     };
-    // Wrap in finalize_with_error so a confirmation error (e.g. `--deps-apply`
-    // without `--deps-apply-yes`) marks the run terminal instead of leaving it
-    // pending after the earlier steps already succeeded.
+    // finalize_with_error so a confirmation error marks the run terminal instead of leaving it pending.
     let deps_apply_requested = match should_apply_deps_for_init(
         &flow.args,
         &deps_candidates,
@@ -150,14 +138,8 @@ pub(super) fn run_deps_apply_step(flow: &mut InitFlow) -> Result<()> {
                     Ok(())
                 },
             )?;
-            // Genuine action failures fail init: the operator confirmed
-            // an apply that then broke. Privilege skips do not — an
-            // un-escalatable host is a host property, so init degrades
-            // and continues to provider/auth collection; the skipped
-            // deps stay visible via `privilege_required` audit rows and
-            // health, and a later resume re-runs them because the step
-            // verifier (`pending_candidates(...).is_empty()`) is still
-            // false for them.
+            // Action failures fail init; privilege skips do not, because an un-escalatable host is a
+            // host property. A later resume re-runs the skipped deps: the step verifier stays false for them.
             let mut failures = Vec::new();
             let mut skipped_privileged = Vec::new();
             let mut skipped_privilege_uid: Option<u32> = None;
@@ -194,11 +176,7 @@ pub(super) fn run_deps_apply_step(flow: &mut InitFlow) -> Result<()> {
                     output_mode,
                     "warning: {count} dependency install action(s) need root and were skipped (uid={uid}, no passwordless sudo)",
                     count = skipped_privileged.len(),
-                    // The outcome carries the real euid;
-                    // `deps_escalation.uid()` reports 0 under
-                    // `NotNeeded`, which can still reach
-                    // PrivilegeRequired when a system dep turned
-                    // pending between probe and apply.
+                    // The outcome carries the real euid; `deps_escalation.uid()` reports 0 under `NotNeeded`.
                     uid = skipped_privilege_uid.unwrap_or_default(),
                 );
                 for candidate in pending_system_candidates(config, None) {
@@ -228,11 +206,8 @@ pub(super) fn run_deps_apply_step(flow: &mut InitFlow) -> Result<()> {
             )))
         },
     );
-    // The background worker outlives init, so its id must reach both handoff
-    // frames before any early return: the success payload (`handoff_context`)
-    // and the failure payload the `KeyHandover` Drop renders from
-    // `failure_context`. Extracting above the error check also covers the case
-    // where the worker spawned but this step's own record write then failed.
+    // The background worker outlives init, so its id must reach both handoff frames before any
+    // early return, including when the worker spawned but this step's own record write then failed.
     let background_run_id = background_apply_run_id.into_inner();
     flow.handoff_context.deps_apply_run_id = background_run_id.clone();
     if let Some(context) = flow.key_handover.failure_context.as_mut() {
@@ -244,11 +219,7 @@ pub(super) fn run_deps_apply_step(flow: &mut InitFlow) -> Result<()> {
     Ok(())
 }
 
-/// `--deps-apply-async` branch of the deps_apply step: claim the single-flight
-/// `deps_apply_runs` row, spawn the detached `__deps-apply-run` worker, and
-/// return a background outcome (plus the apply_run_id for the handoff) so init
-/// proceeds while the install runs. On `--resume` this run's own still-live
-/// background install is adopted instead of spawning a second child.
+/// `--deps-apply-async` branch of the deps_apply step: claim the single-flight `deps_apply_runs` row and spawn the detached worker so init proceeds while the install runs.
 pub(super) fn launch_background_deps_apply(
     store: &StateStore,
     config: &Config,
@@ -264,12 +235,8 @@ pub(super) fn launch_background_deps_apply(
     let is_live = deps_run_liveness();
     store.reconcile_stale_deps_apply_runs(&is_live)?;
     if let Some(running) = store.running_deps_apply_run()? {
-        // Adopt only this init run's own background install (the resume
-        // case). A live apply owned by anything else — another init run's
-        // worker, the daemon route, the CLI — must not be adopted: recording
-        // the step against foreign work would silently skip this run's own
-        // declared deps. Rejecting keeps the fail-fast single-flight
-        // contract; resume retries once the live apply settles.
+        // Adopt only this init run's own background install: recording the step against a foreign
+        // live apply would silently skip this run's own declared deps.
         if running.origin == DEPS_APPLY_ORIGIN_INIT_BACKGROUND
             && running.init_run_id.as_deref() == Some(init_run_id)
         {
@@ -303,10 +270,8 @@ pub(super) fn launch_background_deps_apply(
         },
         &is_live,
     )?;
-    // From here the row is `running` with a null pid. Every fallible step
-    // before the worker exists — log-dir creation and config-path resolution as
-    // much as the spawn itself — must settle the row on failure, or a mid-setup
-    // error leaves the slot wedged until the null-pid grace expires.
+    // From here the row is `running` with a null pid, so every fallible step before the worker
+    // exists must settle the row on failure or the single-flight slot wedges until the grace expires.
     let spawn_result = (|| -> Result<(u32, std::path::PathBuf)> {
         let log_dir = crate::state::default_installer_log_base(&home_dir()?)
             .join("deps_apply")
@@ -326,8 +291,7 @@ pub(super) fn launch_background_deps_apply(
     let (pid, log_dir) = match spawn_result {
         Ok(value) => value,
         Err(error) => {
-            // Nothing durable started: settle the claimed row so it cannot wedge
-            // the single-flight slot, then fail the step.
+            // Nothing durable started: settle the claimed row so it cannot wedge the single-flight slot.
             let detail = error.to_string();
             if let Err(finish_error) = store.finish_deps_apply_run(
                 &apply_run_id,
@@ -352,8 +316,7 @@ pub(super) fn launch_background_deps_apply(
             });
         }
     };
-    // The worker self-stamps on startup too, so a failed stamp here only
-    // widens the window the null-pid grace already covers.
+    // The worker self-stamps on startup too, so a failed stamp here only widens the null-pid grace window.
     if let Err(error) = store.stamp_deps_apply_child(
         &apply_run_id,
         i64::from(pid),
@@ -377,10 +340,7 @@ pub(super) fn launch_background_deps_apply(
     Ok((outcome, apply_run_id))
 }
 
-/// Step: capability_probe — handshake-only spawn of the installed agent to
-/// capture its ACP `initialize` advertisement, which feeds the MCP prompt gate
-/// below, the ignored-features report, and (persisted)
-/// `GET /v1/agent/capabilities`. A failed probe never fails init.
+/// Step: capability_probe — handshake-only spawn to capture the agent's ACP `initialize` advertisement. A failed probe never fails init.
 pub(super) fn run_capability_probe_step(flow: &mut InitFlow) -> Result<()> {
     let output_mode = flow.output_mode;
     init_println!(output_mode, "progress: probing agent capabilities");
@@ -395,23 +355,16 @@ pub(super) fn run_capability_probe_step(flow: &mut InitFlow) -> Result<()> {
         &flow.init_run,
         12,
         step_kind::CAPABILITY_PROBE,
-        // Always re-probe on resume: a reinstall or update between runs can
-        // change the advertisement, and a stale "supported" is worse than one
-        // redundant short-lived spawn.
+        // Always re-probe on resume: a reinstall between runs can change the advertisement.
         || Ok(false),
         || {
             let outcome = probe_agent_capabilities_for_init(home, config);
-            // The handshake is the only authority on MCP: the registry has no
-            // MCP column, so whatever the agent just advertised (or failed to)
-            // overrides the provisional verdict.
+            // The handshake is the only authority on MCP; it overrides the provisional verdict.
             prompt::emit_state_signal(|| mcp_applicability_from_probe(&outcome));
             match outcome {
                 CapabilityProbeOutcome::Probed(capabilities) => {
                     store.upsert_agent_capabilities(&config.agent.id, &capabilities.to_json()?)?;
-                    // The ignore assessment is best-effort: an unresolvable MCP
-                    // declaration (missing secret, absent stdio binary) is a
-                    // pre-existing config condition surfaced at session time, not
-                    // a reason to fail the probe step.
+                    // Best-effort: an unresolvable MCP declaration surfaces at session time, not here.
                     match crate::runtime::agent::mcp::resolve_mcp_servers(&config.mcp, secret_store)
                         .and_then(|declared| capabilities.ignored_mcp_features(declared))
                     {
@@ -457,23 +410,13 @@ pub(super) fn run_capability_probe_step(flow: &mut InitFlow) -> Result<()> {
     Ok(())
 }
 
-/// Step: mcp_configure — interactive MCP prompting. Lives after the probe (not
-/// in the pre-install wizard) because MCP support is only knowable from the
-/// installed agent's advertisement, which also bounds the transport picker
-/// below (`advertises_mcp_support`, `offer_http`). Flag-driven runs declare MCP
-/// in the starter config and are covered by the ignored-features report. Hosted
-/// runs get the same prompts on the stream, each carrying its machine-readable
-/// kind; a session that declared MCP servers in its start request arrives here
-/// with a non-empty `config.mcp.servers` and skips prompting outright, so
-/// declaring up front still wins.
+/// Step: mcp_configure — interactive MCP prompting, which must run after the probe because MCP support is only knowable from the installed agent's advertisement.
 pub(super) fn run_mcp_configure_step(flow: &mut InitFlow) -> Result<()> {
     let output_mode = flow.output_mode;
     let mcp_prompting_active =
         mcp_prompting_enabled(&flow.args, flow.creating_config, &flow.config);
-    // `step_needs_resume`: a resumed run must still settle a prior failed
-    // `mcp_configure` row even though prompting is gated off on resume — the
-    // body then settles it without prompts (the confirm gate below is
-    // `mcp_prompting_active`, false on every resume path).
+    // `step_needs_resume`: a resumed run must still settle a prior failed row, which the body
+    // then does without prompts because `mcp_prompting_active` is false on every resume path.
     if !(mcp_prompting_active
         || step_needs_resume(&flow.prior_init_steps, step_kind::MCP_CONFIGURE))
     {
@@ -489,8 +432,7 @@ pub(super) fn run_mcp_configure_step(flow: &mut InitFlow) -> Result<()> {
         &flow.init_run,
         13,
         step_kind::MCP_CONFIGURE,
-        // Interactively-collected answers cannot be replayed; a prior
-        // succeeded row skips instead of re-driving prompts on resume.
+        // Interactively-collected answers cannot be replayed, so a prior succeeded row skips.
         || Ok(true),
         || {
             let Some(capabilities) = probed_capabilities.as_ref() else {
@@ -529,11 +471,8 @@ pub(super) fn run_mcp_configure_step(flow: &mut InitFlow) -> Result<()> {
             if offer_http {
                 transports_offered.push("http");
             }
-            // The gate stays outside the call rather than riding only the
-            // `interactive` argument: `prompt::confirm` consults the
-            // hosted driver before that flag, so an unguarded call would
-            // re-drive the wizard on a resumed hosted run, whose answers
-            // this step cannot replay.
+            // The gate must stay outside the call: `prompt::confirm` consults the hosted driver
+            // before its `interactive` argument, so an unguarded call re-drives the wizard on resume.
             if mcp_prompting_active
                 && prompt::confirm(
                     prompt::HostedPromptKind::McpAdd,
@@ -549,9 +488,7 @@ pub(super) fn run_mcp_configure_step(flow: &mut InitFlow) -> Result<()> {
             let added = merge_prompted_mcp_servers(&mut config.mcp.servers, new_servers)?;
             if !added.is_empty() {
                 let canonical = config.to_canonical_toml()?;
-                // The reassignment is what makes provider_configure and
-                // agent_headless_config see the servers: later steps read
-                // the in-memory config, not the file.
+                // Later steps read the in-memory config, not the file, so the reassignment is what makes them see the servers.
                 *config = config::load_config_from_str(&canonical)?;
                 atomic_write_owner_only(config_path, canonical.as_bytes())?;
                 let stored =

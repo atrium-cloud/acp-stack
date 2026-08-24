@@ -1,6 +1,5 @@
-//! The `--custom-provider` init flow: prompting for the four required values,
-//! parsing the optional API/token-limit overrides, and writing the resulting
-//! `[agent.provider.custom]` block back through canonical validation.
+//! The `--custom-provider` init flow, writing `[agent.provider.custom]` back
+//! through canonical validation.
 
 use super::*;
 

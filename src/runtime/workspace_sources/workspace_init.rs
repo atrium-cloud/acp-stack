@@ -1,24 +1,7 @@
-//! Seeds `<workspace.root>/usr/code/<repo>/` and `<workspace.root>/usr/data/<name>/`
-//! from `[[workspace.code_sources]]` and `[[workspace.data_sources]]` during
-//! `acps init`.
-//!
-//! Phase 4 introduces two parallel ingestion lanes:
-//!
-//! * `code` lane: Git repositories cloned via the host `git` binary.
-//! * `data` lane: local paths, HTTPS archives (Drive/Dropbox/arbitrary
-//!   hosts), and S3 buckets/prefixes.
-//!
-//! Each destination is anchored under `usr/code/` or `usr/data/`, owned by
-//! the runtime user, and never collides with `<root>/uploads/`. Init is
-//! intentionally not transactional across sources: each completed source
-//! drops a `.acp-stack-source.json` sentinel; a subsequent rerun verifies
-//! the sentinel and skips already-completed lanes. A non-empty destination
-//! without a matching sentinel is a hard failure rather than a
-//! best-effort merge — the operator is responsible for cleaning up.
-//!
-//! Archive extraction, HTTPS download, and Git invocation are all
-//! delegated to safe modules under `runtime::safe_*` so they can be tested
-//! in isolation.
+//! Seeds `<workspace.root>/usr/code/<repo>/` and `<workspace.root>/usr/data/<name>/` from the
+//! configured code and data sources during `acps init`. Materialization is not transactional across
+//! sources: each completed source drops a sentinel, and a non-empty destination without a matching
+//! sentinel is a hard failure rather than a best-effort merge.
 
 mod code_git;
 mod common;
@@ -42,8 +25,7 @@ use self::https::materialize_https;
 use self::local::materialize_local;
 use self::s3::materialize_s3;
 
-/// Sentinel filename written into each materialized destination so reruns
-/// of `acps init` can detect "already done" lanes and skip cleanly.
+/// Sentinel written into each materialized destination so reruns can skip completed lanes.
 pub const SOURCE_SENTINEL_FILE: &str = ".acp-stack-source.json";
 
 /// Subdirectory under `workspace.root` for code lanes.
@@ -58,15 +40,10 @@ pub(super) const CAPTURE_TAG_EXTRACT: &str = "extract";
 pub(super) const CAPTURE_TAG_COPY: &str = "copy";
 pub(super) const CAPTURE_TAG_S3_DOWNLOAD: &str = "s3-download";
 
-/// Cap stored stderr from materializer subprocesses (git, curl, tar) so a
-/// chatty failure does not poison the error variant. Matches the 2 KiB tail
-/// used by `agent_installer::tail_bytes` for installer-step stderr; operators
-/// expecting consistent failure ergonomics get the same envelope here.
+/// Cap on stored stderr from materializer subprocesses, matching `agent_installer::tail_bytes`.
 pub(super) const WORKSPACE_STDERR_TAIL_BYTES: usize = 2 * 1024;
 
-/// Canonical on-disk root for workspace materialization logs. Mirrors
-/// the layout used by installer step logs (`default_installer_log_base`)
-/// so backups and log rotation can target one directory.
+/// Canonical on-disk root for workspace materialization logs.
 pub fn default_workspace_init_log_base(home: &Path) -> PathBuf {
     home.join(".local")
         .join("share")
@@ -74,15 +51,10 @@ pub fn default_workspace_init_log_base(home: &Path) -> PathBuf {
         .join("workspace-init-logs")
 }
 
-/// Per-run capture location for workspace materialization. The init
-/// orchestrator constructs one of these per `init_runs.id` and passes
-/// it into [`materialize_workspace`]; each source gets a subdirectory
-/// underneath it, and each subprocess invocation writes its full
-/// stdout/stderr there.
+/// Per-run capture location for workspace materialization, one per `init_runs.id`.
 #[derive(Debug, Clone)]
 pub struct WorkspaceLogPaths {
-    /// `<log_base>/<init_run_id>/`. Becomes the `log_dir` recorded on the
-    /// init step row so the operator can drill into any source.
+    /// `<log_base>/<init_run_id>/`, recorded as the init step row's `log_dir`.
     pub run_dir: PathBuf,
 }
 
@@ -97,11 +69,9 @@ impl WorkspaceLogPaths {
 /// Outcome of a single source materialization.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MaterializeOutcome {
-    /// Newly materialized — directory was created and source content
-    /// fetched/copied from scratch.
+    /// Directory created and source content fetched from scratch.
     Created,
-    /// Sentinel matched existing config — skipped without touching the
-    /// filesystem.
+    /// Sentinel matched existing config; skipped without touching the filesystem.
     Verified,
 }
 
@@ -110,11 +80,7 @@ pub struct SourceReport {
     pub name: String,
     pub destination: PathBuf,
     pub outcome: MaterializeOutcome,
-    /// On-disk directory under `WorkspaceLogPaths.run_dir` holding this
-    /// source's capture files. Git sources persist subprocess stdout/stderr;
-    /// Rust-native data sources persist synthetic stdout/stderr audit entries.
-    /// `None` when materialization was a verifier-only skip OR when the caller
-    /// did not provide a `WorkspaceLogPaths`.
+    /// Capture directory under `WorkspaceLogPaths.run_dir`; `None` on a verifier-only skip.
     pub log_dir: Option<PathBuf>,
 }
 
@@ -124,19 +90,11 @@ pub struct MaterializeReport {
     pub uploads: PathBuf,
     pub code: Vec<SourceReport>,
     pub data: Vec<SourceReport>,
-    /// Root capture directory shared by every source in this run.
-    /// `Some(...)` whenever the caller passed a `WorkspaceLogPaths`,
-    /// even if no source actually ran (the directory is still
-    /// pre-created so audit tooling can land logs under a stable path).
+    /// Root capture directory shared by every source in this run, pre-created even if none ran.
     pub log_dir: Option<PathBuf>,
 }
 
-/// True when every declared code/data source's destination directory has
-/// the sentinel file written by a prior successful materialization. Used
-/// by the init orchestrator's resume verifier to skip the
-/// `workspace_materialize` step when nothing needs re-fetching. Failures
-/// to compute names or stat the lane root return `Err`, which the caller
-/// treats as a verifier miss (forces re-execution).
+/// Resume verifier for `workspace_materialize`: true when every declared source already has its sentinel.
 pub fn all_sources_have_sentinel(workspace: &WorkspaceConfig) -> Result<bool> {
     if !workspace_base_dirs_exist(workspace) {
         return Ok(false);
@@ -188,14 +146,9 @@ pub fn prepare_workspace_base_dirs(workspace: &WorkspaceConfig) -> Result<()> {
     ensure_workspace_base_dir(Path::new(&workspace.uploads), "workspace.uploads")
 }
 
-/// Prepare the workspace root/uploads directories and materialize every
-/// declared code and data source. When `log_paths` is `Some(...)`, every source
-/// operation writes capture pairs under
-/// `log_paths.run_dir/<source-tag>/<operation>.{stdout,stderr}`. Git
-/// operations persist the child-process streams; Rust-native data
-/// operations persist a deterministic summary on stdout and failure
-/// detail on stderr. When `None`, the existing tail-on-failure behavior
-/// is preserved (used by tests that don't need durable logs).
+/// Prepare the workspace root/uploads directories and materialize every declared code and data source.
+/// With `log_paths`, each operation writes capture pairs under `run_dir/<source-tag>/`; without it,
+/// failures only carry a stderr tail.
 pub fn materialize_workspace(
     workspace: &WorkspaceConfig,
     secrets: &SecretStore,

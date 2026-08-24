@@ -273,9 +273,8 @@ fn declared_defer_gate_defers_missing_provider_ref_but_not_flat_only_refs() {
     .expect_err("hard failure without hosted driver");
     assert!(error.to_string().contains("CUSTOM_KEY"));
 
-    // A hosted driver that did NOT declare the deferral keeps the hard failure:
-    // the transport being hosted is no longer a promise that a credential will
-    // arrive later.
+    // A hosted driver that did NOT declare the deferral keeps the hard
+    // failure; being hosted is not itself a promise of a later credential.
     let plain = Arc::new(prompt::RecordingPromptDriver::default());
     prompt::with_hosted_driver(plain, || {
         collect_missing_provider_refs(
@@ -288,9 +287,8 @@ fn declared_defer_gate_defers_missing_provider_ref_but_not_flat_only_refs() {
         .expect_err("undeclared hosted run keeps the hard failure");
     });
 
-    // Only a driver whose start request declared `defer_provider_credentials`
-    // soft-passes a missing provider ref — custom and mapped alike — and the
-    // secret-value prompt is never streamed for a deferred ref.
+    // Only a driver that declared `defer_provider_credentials` soft-passes a
+    // missing provider ref, and a deferred ref never streams a value prompt.
     let deferring = Arc::new(prompt::RecordingPromptDriver::deferring_provider_credentials());
     prompt::with_hosted_driver(deferring.clone(), || {
         collect_missing_provider_refs(
@@ -321,8 +319,7 @@ fn declared_defer_gate_defers_missing_provider_ref_but_not_flat_only_refs() {
             &["AWS_REGION".to_owned()],
         )
         .expect_err("native-auth provider refs keep the hard failure under a declared deferral");
-        // Refs without a provider context (MCP refs on the prepared-config
-        // path) never soft-pass, and still prompt.
+        // Refs without a provider context never soft-pass, and still prompt.
         collect_missing_provider_refs(true, &mut secret_store, &config, None, &required)
             .expect_err("flat-only refs keep the hard failure");
     });
@@ -339,8 +336,8 @@ fn declared_defer_gate_rejects_non_push_deliverable_refs() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let mut secret_store = SecretStore::open_or_create(tempdir.path()).expect("secret store");
 
-    // Even with the deferral declared, a ref the managed push cannot write must
-    // not soft-pass: the push carries a provider's canonical env vars only.
+    // Even with the deferral declared, a ref the managed push cannot write
+    // must not soft-pass: the push carries canonical env vars only.
     let deferring = Arc::new(prompt::RecordingPromptDriver::deferring_provider_credentials());
     prompt::with_hosted_driver(deferring.clone(), || {
         let mapped = readiness_config("opencode");
@@ -358,8 +355,7 @@ fn declared_defer_gate_rejects_non_push_deliverable_refs() {
             alias_error,
             crate::error::StackError::ProviderSecretNotPushDeliverable { .. }
         ));
-        // A `VAR=template` inner ref: the required ref is the inner secret, which
-        // the push never writes (it delivers the canonical var).
+        // The required ref is the inner secret, which the push never writes.
         let template_error = collect_missing_provider_refs(
             true,
             &mut secret_store,
@@ -373,7 +369,7 @@ fn declared_defer_gate_rejects_non_push_deliverable_refs() {
             crate::error::StackError::ProviderSecretNotPushDeliverable { .. }
         ));
         // Same for a custom provider: the push carries its configured api-key
-        // ref only, so a template inner ref behind it cannot be delivered.
+        // ref only.
         let custom = custom_provider_readiness_config();
         let custom_error = collect_missing_provider_refs(
             true,
@@ -389,8 +385,7 @@ fn declared_defer_gate_rejects_non_push_deliverable_refs() {
         ));
     });
 
-    // Each undeliverable ref falls through to the value prompt rather than being
-    // silently deferred.
+    // Each undeliverable ref falls through to the value prompt.
     assert_eq!(
         deferring.recorded_password_prompts(),
         vec![
@@ -408,9 +403,9 @@ fn declared_defer_gate_rejects_a_templated_provider_var() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let mut secret_store = SecretStore::open_or_create(tempdir.path()).expect("secret store");
 
-    // The non-prepared init paths pass bare var names to the gate; a var
-    // resolved from a `VAR=template` entry needs its inner ref, which the push
-    // never writes, so it must not soft-pass on the canonical var name alone.
+    // A var resolved from a `VAR=template` entry needs its inner ref, which
+    // the push never writes, so the canonical var name alone must not
+    // soft-pass.
     let mut config = readiness_config("opencode");
     config.agent.env = vec!["OPENAI_API_KEY=${MY_KEY}".to_owned()];
 
@@ -429,8 +424,8 @@ fn declared_defer_gate_rejects_a_templated_provider_var() {
             crate::error::StackError::ProviderSecretNotPushDeliverable { env_ref, .. } if env_ref == "MY_KEY"
         ));
     });
-    // The inner ref, not the canonical var, is prompted for (not silently
-    // deferred) so an answer lands where runtime resolution reads it.
+    // The inner ref is prompted for, not silently deferred, so an answer lands
+    // where runtime resolution reads it.
     assert_eq!(
         deferring.recorded_password_prompts(),
         vec!["MY_KEY".to_owned()]
@@ -444,8 +439,8 @@ fn templated_provider_var_gate_targets_the_inner_ref() {
     let mut config = readiness_config("opencode");
     config.agent.env = vec!["OPENAI_API_KEY=${MY_KEY}".to_owned()];
 
-    // The inner ref is what the gate requires: absent, the failure names it, so
-    // an interactive prompt targets it and an answer lands where runtime reads.
+    // The gate requires the inner ref, so the failure names it and a prompt
+    // targets it.
     let error = collect_missing_provider_refs(
         false,
         &mut secret_store,
@@ -456,8 +451,8 @@ fn templated_provider_var_gate_targets_the_inner_ref() {
     .expect_err("the missing inner ref fails the gate");
     assert!(matches!(error, crate::error::StackError::SecretNotFound { name } if name == "MY_KEY"));
 
-    // With the inner ref present, the gate is satisfied — the canonical var name
-    // is never consulted (storing it there would leave runtime unresolved).
+    // The canonical var name is never consulted; storing the secret there
+    // would leave runtime resolution unresolved.
     secret_store
         .set_many([("MY_KEY", "sk-value")])
         .expect("store inner ref");

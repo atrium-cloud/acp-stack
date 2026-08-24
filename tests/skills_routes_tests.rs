@@ -1,14 +1,7 @@
 #![cfg(feature = "test-fixtures")]
 
-//! End-to-end coverage for the day-2 Agent Skills routes: the session-tier reads
-//! `GET /v1/agent/skills`, `GET /v1/agent/skills/catalog`,
-//! `GET /v1/agent/skills/source`, and the admin-tier mutations
-//! `POST /v1/agent/skills/add` / `POST /v1/agent/skills/remove` and
-//! `POST /v1/agent/skills/sources/add` / `POST /v1/agent/skills/sources/remove`.
-//!
-//! Reads, config-source persistence, and validation/auth failures are covered
-//! here; the live fetch paths (`add`'s install and `source get`'s download +
-//! frontmatter parse) hit GitHub, so those are left to manual/e2e verification.
+//! End-to-end coverage for the day-2 Agent Skills routes. The live fetch paths
+//! hit GitHub, so those are left to manual/e2e verification.
 
 use reqwest::StatusCode;
 use serde_json::Value;
@@ -20,8 +13,8 @@ use common::agent::{
     AgentHarness, admin_bearer, http, session_bearer, test_config, write_installed_skill,
 };
 
-/// Registry override that keeps the default `opencode` agent skills-capable but
-/// adds a harness link dir, so removal exercises the symlink-mirror prune.
+/// Registry override adding a harness link dir, so removal exercises the
+/// symlink-mirror prune.
 fn write_opencode_linked_skills_override(config_dir: &std::path::Path) {
     let body = r#"
 [[agents]]
@@ -131,8 +124,6 @@ async fn skills_list_returns_installed_skills_sorted() {
         .filter_map(|skill| skill["name"].as_str())
         .collect();
     assert_eq!(names, ["code-review", "repo-map"]);
-    // Provenance: the source id recorded in the managed marker at install time
-    // is surfaced per skill.
     for skill in body["data"]["skills"].as_array().expect("skills array") {
         assert_eq!(skill["source"], "test-source", "skill: {skill}");
     }
@@ -165,8 +156,7 @@ async fn skills_list_omits_source_for_unmanaged_skill() {
 
 #[tokio::test]
 async fn skills_list_rejects_admin_key() {
-    // Strict tiering also holds in reverse: admin keys must not work on
-    // session-tier reads.
+    // Strict tiering holds in reverse: admin keys must not work on session reads.
     let harness = AgentHarness::spawn().await;
     for path in ["/v1/agent/skills", "/v1/agent/skills/catalog"] {
         let response = http()
@@ -373,8 +363,7 @@ async fn skills_remove_missing_skill_is_not_found() {
 
 #[tokio::test]
 async fn skills_remove_refuses_skill_not_installed_by_acp_stack() {
-    // A folder placed in the install root by hand has a regular SKILL.md but
-    // no managed marker: removal must refuse it and leave it in place.
+    // A hand-placed folder has a SKILL.md but no managed marker.
     let tempdir = TempDir::new().expect("tempdir");
     let _home = HomeEnvGuard::set(tempdir.path());
     let skill_dir = tempdir.path().join(".agents/skills/my-skill");
@@ -438,12 +427,10 @@ async fn skills_source_add_persists_and_appears_in_catalog() {
     assert_eq!(body["data"]["branch"], "dev");
     assert_eq!(body["data"]["sources"], 1);
 
-    // Persisted to config on disk.
     let written = std::fs::read_to_string(&harness.config_path).expect("read config");
     assert!(written.contains("[[skills.sources]]"), "config: {written}");
     assert!(written.contains(r#"alias = "my-org""#), "config: {written}");
 
-    // Surfaced in the catalog listing as a user (non-catalog) source.
     let catalog: Value = client
         .get(format!("{}/v1/agent/skills/catalog", harness.base_url))
         .header("Authorization", session_bearer())
@@ -574,9 +561,8 @@ async fn skills_source_remove_persists_and_404_when_absent() {
 
 #[tokio::test]
 async fn skills_surface_survives_invalid_source_entry_and_remove_heals_it() {
-    // A hand-edited invalid `[[skills.sources]]` entry must not brick the
-    // skills surface: reads drop it like daemon boot does, and a sources
-    // mutation both succeeds and heals the bad entry out of the file.
+    // An invalid `[[skills.sources]]` entry must not brick the skills surface:
+    // reads drop it as daemon boot does, and a mutation heals it out of the file.
     let harness = AgentHarness::spawn().await;
     let client = http().await;
     let mut config = std::fs::read_to_string(&harness.config_path).expect("read config");
@@ -679,7 +665,6 @@ async fn skills_remove_uninstalls_and_prunes_link() {
     assert!(!install_root.join("repo-map").exists());
     assert!(std::fs::symlink_metadata(link_root.join("repo-map")).is_err());
 
-    // The removal is recorded in the runtime event log for audit.
     let events: Value = http()
         .await
         .get(format!(

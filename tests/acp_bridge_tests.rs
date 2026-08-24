@@ -1,8 +1,7 @@
 #![cfg(feature = "test-fixtures")]
 
-//! Drives `AcpBridge::spawn` against the standalone placebo ACP fixture so the
-//! spawn + handshake path is exercised end-to-end without depending on a
-//! third-party agent.
+//! Drives `AcpBridge::spawn` against the placebo ACP fixture so the spawn and
+//! handshake path is exercised without a third-party agent.
 
 #[path = "acp_bridge_tests/support.rs"]
 mod support;

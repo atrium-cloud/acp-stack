@@ -1,9 +1,6 @@
-//! Secret-reference templates: `Bearer ${PARALLEL_API_KEY}`-style values in
-//! config positions (MCP HTTP headers, MCP stdio env, agent env). Templates
-//! are parsed and validated at declaration time and resolved against the
-//! `SecretStore` at the same points whole-value refs resolve today, composing
-//! the literal parts around the resolved secrets. acp-stack stays agnostic to
-//! what the referenced secret is — resolution is pure string composition.
+//! Secret-reference templates: `Bearer ${NAME}`-style values in config
+//! positions, validated at declaration time and resolved against the
+//! `SecretStore` by pure string composition.
 
 use super::validate::primitives::validate_secret_ref_name_value;
 use crate::error::{Result, StackError};
@@ -36,10 +33,8 @@ pub struct SecretTemplate {
 }
 
 impl SecretTemplate {
-    /// Parse a template. Syntax: `${NAME}` references a secret (identifier
-    /// names only), `$$` is a literal `$`, any other `$` is rejected so a
-    /// typo like `$NAME` fails loudly instead of passing through verbatim.
-    /// At least one ref is required — a pure literal in a secret position is
+    /// Parse a template (`${NAME}` ref, `$$` literal `$`, bare `$` rejected).
+    /// At least one ref is required: a pure literal in a secret position is
     /// almost always a pasted credential, which config must never carry.
     pub fn parse(field: &'static str, raw: &str) -> Result<Self> {
         let segments = parse_segments(raw)
@@ -124,9 +119,8 @@ fn parse_segments(raw: &str) -> std::result::Result<Vec<TemplateSegment>, &'stat
     Ok(segments)
 }
 
-/// Ref names inside a template, ignoring syntax errors. For report-only
-/// callers (health, init prompt collection) that run on already-validated
-/// config and must never fail a status render.
+/// Ref names inside a template, ignoring syntax errors, for report-only
+/// callers that must never fail a status render.
 pub fn ref_names_lossy(raw: &str) -> Vec<String> {
     match parse_segments(raw) {
         Ok(segments) => segments
@@ -140,11 +134,10 @@ pub fn ref_names_lossy(raw: &str) -> Vec<String> {
     }
 }
 
-/// Every literal fragment and ref name in a template, unvalidated. On a
-/// syntax error the whole raw string comes back as one piece so screening
-/// heuristics (the looks-like-a-secret check) still see the full text. Runs
-/// before name validation on purpose: a screening rejection redacts the
-/// value, a name-validation rejection echoes it.
+/// Every literal fragment and ref name in a template, unvalidated; on a syntax
+/// error the whole raw string comes back as one piece so screening still sees
+/// the full text. Must run BEFORE name validation: a screening rejection
+/// redacts the value, a name-validation rejection echoes it.
 pub fn template_pieces_lossy(raw: &str) -> Vec<String> {
     match parse_segments(raw) {
         Ok(segments) => segments
@@ -165,10 +158,9 @@ fn screen_piece(field: &'static str, piece: &str) -> Result<()> {
     Ok(())
 }
 
-/// Reject a ref name that looks like a pasted credential. Must run before any
-/// name-shape validation: a screening rejection redacts the value, while
-/// `InvalidSecretRefName` echoes it (and pasted credentials fail identifier
-/// validation precisely because of their dashes).
+/// Reject a ref name that looks like a pasted credential. Must run BEFORE any
+/// name-shape validation: this rejection redacts the value, while
+/// `InvalidSecretRefName` echoes it.
 pub fn screen_ref_name(field: &'static str, name: &str) -> Result<()> {
     screen_piece(field, name)
 }
@@ -177,8 +169,7 @@ pub fn screen_ref_name(field: &'static str, name: &str) -> Result<()> {
 /// screening-before-echo contract as [`screen_ref_name`].
 pub fn screen_template(field: &'static str, raw: &str) -> Result<()> {
     let Ok(segments) = parse_segments(raw) else {
-        // Unparseable input is screened whole so the heuristic still sees the
-        // full text (mirrors `template_pieces_lossy`).
+        // Screened whole so the heuristic still sees the full text.
         return screen_piece(field, raw);
     };
     let mut concatenated_literals = String::new();
@@ -193,10 +184,9 @@ pub fn screen_template(field: &'static str, raw: &str) -> Result<()> {
             TemplateSegment::Ref(name) => screen_piece(field, name)?,
         }
     }
-    // A credential straddling a `${}` boundary leaves no single fragment that
-    // trips the heuristic; the concatenated literals reassemble its shape
-    // (minus the ref values, which come from the store). The length ceiling
-    // of the ref-name rule is skipped here: it guards names, not static text.
+    // A credential straddling a `${}` boundary trips no single fragment, so
+    // the concatenated literals reassemble its shape. The ref-name length
+    // ceiling is skipped here: it guards names, not static text.
     if literal_count > 1 && super::validate::primitives::secret_value_shape(&concatenated_literals)
     {
         return Err(StackError::SecretRefLooksLikeValue { field });
@@ -218,11 +208,9 @@ pub fn screen_env_entry(field: &'static str, raw: &str) -> Result<()> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnvEntry {
-    /// Bare `NAME`: the ref name doubles as the env var name and the secret
-    /// value is used whole, exactly the pre-template semantics.
+    /// Bare `NAME`: the ref name doubles as the env var name.
     WholeValueRef(String),
-    /// `VAR=template`: the env var is named on the left, the value composed
-    /// from the template on the right.
+    /// `VAR=template`: var named on the left, value composed on the right.
     Templated {
         var_name: String,
         template: SecretTemplate,
@@ -253,7 +241,7 @@ pub fn parse_env_entry(field: &'static str, raw: &str) -> Result<EnvEntry> {
 }
 
 /// The env var name an entry produces: left of `=`, else the whole entry.
-/// Infallible on purpose — membership checks run on unvalidated input.
+/// Infallible on purpose: membership checks run on unvalidated input.
 pub fn env_entry_var_name(raw: &str) -> &str {
     match raw.split_once(ENV_ASSIGN) {
         Some((var_name, _)) => var_name,
@@ -487,9 +475,6 @@ mod tests {
 
     #[test]
     fn screens_credential_split_across_ref_boundary() {
-        // The `sk-` prefix itself is split across the `${}` boundary, so no
-        // single fragment trips the prefix heuristic; the concatenated
-        // literals reassemble the credential's shape.
         assert!(matches!(
             screen_template(FIELD, "sk${X}-ABCDEF0123456789"),
             Err(StackError::SecretRefLooksLikeValue { .. })
@@ -518,7 +503,7 @@ mod tests {
     #[test]
     fn long_concatenated_literals_do_not_trip_the_length_rule() {
         // Each fragment is under the 128-char name ceiling but their sum is
-        // over it: the length rule guards ref names, not static template text.
+        // over it.
         let template = format!("https://{}${{A}}{}", "x".repeat(70), "y".repeat(80));
         screen_template(FIELD, &template).expect("long static text is not a credential");
     }

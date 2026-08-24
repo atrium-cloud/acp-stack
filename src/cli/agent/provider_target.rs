@@ -38,8 +38,7 @@ use super::set::{
     resolve_agent_model_value,
 };
 
-// Keep local catalog inspection responsive when the optional live daemon
-// overlay is unavailable, matching the other CLI status probes.
+// Keeps local catalog inspection responsive when the live daemon overlay is down.
 const PROVIDER_STATUS_DAEMON_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(in crate::cli) fn run_target_provider_use(
@@ -245,10 +244,8 @@ pub(in crate::cli) fn run_target_provider_set_active(
         require_provider_in_active_set(&providers, &subagent_provider.id, "subagent")?;
     }
 
-    // Prune alias selections for providers dropped from the active set.
-    // A retained selection keeps `target_uses_provider` true for a now-inactive
-    // provider (provider_keys.rs), which would wrongly block deleting that
-    // provider's credential and leave dead selection state in the config.
+    // Prune alias selections for dropped providers: a retained selection keeps
+    // `target_uses_provider` true and would wrongly block deleting its credential.
     let mut selected_aliases = config.array.targets[target_position]
         .agent
         .providers
@@ -464,10 +461,8 @@ pub(in crate::cli) fn run_target_credential_select(
     Ok(())
 }
 
-/// Read the live provider state back from a daemon status payload. For the
-/// array route the per-target object is looked up by `id`; a missing target or
-/// absent field yields `None` rather than an error, so the CLI degrades to the
-/// configured-only view. Extracted for direct unit testing without a daemon.
+/// Read the live provider state back from a daemon status payload; a missing target or
+/// absent field yields `None` so the CLI degrades to the configured-only view.
 pub(super) fn extract_daemon_provider_state(
     data: &serde_json::Value,
     array_route: bool,

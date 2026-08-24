@@ -3,9 +3,8 @@ use acp_stack::secrets::{ManagedCredentialSelection, SecretStore};
 use std::collections::BTreeMap;
 use std::fs;
 
-/// Stage an externally-owned credential carrying an endpoint override, the way
-/// a managed-state apply would leave it, so init's agent-apply guard has a
-/// live routing decision to protect.
+/// Stage an externally-owned credential carrying an endpoint override, the way a
+/// managed-state apply would leave it.
 fn stage_endpoint_override(home: &std::path::Path, provider_id: &str) {
     let mut store = SecretStore::open_or_create(home).expect("secret store should open");
     store
@@ -46,7 +45,7 @@ fn init_rejects_an_agent_without_an_endpoint_field_while_an_override_is_stored()
     stage_endpoint_override(tempdir.path(), "openrouter");
 
     // The placebo agent declares no `set_provider_base_url`, so re-applying it
-    // would strand the stored override: rejected, config untouched.
+    // would strand the stored override.
     acps_command()
         .env("HOME", tempdir.path())
         .args([
@@ -74,9 +73,7 @@ fn init_reconfirm_of_an_endpoint_capable_agent_succeeds_with_a_stored_override()
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
-    // A placebo-backed registry override entry that DOES declare the endpoint
-    // field; the harness points at the same fixture binary the dev registry
-    // injects for every embedded agent.
+    // A placebo-backed registry entry that DOES declare the endpoint field.
     let placebo_path = env!("CARGO_BIN_EXE_placebo-agent");
     fs::write(
         config_dir.join("agents.toml"),
@@ -115,8 +112,6 @@ creates = "{placebo_path}"
 
     stage_endpoint_override(tempdir.path(), "openrouter");
 
-    // Re-confirming the same supporting agent keeps the override writable, so
-    // the re-run is allowed.
     acps_command()
         .env("HOME", tempdir.path())
         .args([

@@ -6,10 +6,6 @@ use std::fs;
 
 #[test]
 fn init_default_skips_testflight_under_non_interactive_runs() {
-    // Non-interactive default with a registered agent: no --testflight, no
-    // --skip-testflight, no stdin TTY. The runner should announce the skip
-    // rather than silently continue — operators reading the log need to see
-    // why testflight was not run.
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
     acps_command()
@@ -310,7 +306,6 @@ fn serve_rejects_dev_only_root_overrides() {
 
 #[test]
 fn init_rejects_combining_testflight_and_skip_testflight() {
-    // clap conflicts_with should fail at parse time, so init never starts.
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
     acps_command()

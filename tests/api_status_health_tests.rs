@@ -219,8 +219,6 @@ async fn health_ready_returns_200_when_subsystems_are_healthy() {
     assert_eq!(body["data"]["workspace"]["writable"], Value::Bool(true));
     assert_eq!(body["data"]["agent"]["id"], "placebo");
     assert_eq!(body["data"]["agent"]["orphaned_process_count"], 0);
-    // Default fixture has Supabase disabled; sink subsystem should still report
-    // but with `enabled=false`.
     assert_eq!(body["data"]["sink"]["enabled"], Value::Bool(false));
     assert_eq!(body["data"]["mcp"]["configured_count"], Value::from(0));
     assert_eq!(body["data"]["mcp"]["failing_count"], Value::from(0));
@@ -295,10 +293,8 @@ async fn health_ready_marks_mcp_failing_when_secret_ref_is_missing() {
 #[tokio::test]
 async fn health_ready_returns_503_when_workspace_is_not_writable() {
     let mut config = test_config();
-    // Point workspace at a tempdir child that we deliberately never create.
-    // The parent tempdir keeps the path host-agnostic, and skipping the
-    // mkdir forces the workspace probe into the failing branch without
-    // touching filesystem permissions.
+    // A never-created tempdir child fails the workspace probe without touching
+    // filesystem permissions.
     let missing_workspace = tempfile::tempdir().expect("tempdir for missing workspace");
     let missing_root = missing_workspace.path().join("never-created");
     config.workspace.root = missing_root.to_string_lossy().into_owned();
@@ -312,8 +308,6 @@ async fn health_ready_returns_503_when_workspace_is_not_writable() {
         .expect("send");
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body: Value = response.json().await.expect("json");
-    // 503 envelope follows the api.md convention: top-level `ok` is false
-    // for failing readiness, matching the HTTP status code.
     assert_eq!(body["ok"], Value::Bool(false));
     assert_eq!(body["data"]["ok"], Value::Bool(false));
     let failing = body["data"]["failing"].as_array().expect("failing array");
@@ -389,10 +383,7 @@ async fn health_ready_reports_orphaned_agent_process_groups() {
 
 #[tokio::test]
 async fn health_ready_surfaces_stuck_prompts_in_failing() {
-    // Seed an aged running prompt directly into state, then hit
-    // /v1/health/ready. The new prompts subsystem must promote
-    // "prompts" into the `failing` list and report a non-zero
-    // stuck_count without any sweeper run needed.
+    // An aged running prompt must surface without any sweeper run.
     let harness = ServerHarness::spawn().await;
     {
         let guard = harness.state.lock().await;
@@ -424,8 +415,7 @@ async fn health_ready_surfaces_stuck_prompts_in_failing() {
             )
             .expect("prompt flipped to running");
     }
-    // Force `updated_at` into the distant past so the configured
-    // threshold (default 5m) is well exceeded.
+    // Force `updated_at` past the default 5m threshold.
     let connection = Connection::open(&harness.state_path).expect("open sqlite for age override");
     connection
         .execute(
@@ -615,10 +605,7 @@ async fn metrics_summary_exposes_api_request_breakdowns() {
 
 #[tokio::test]
 async fn mark_stalled_prompts_appends_stalled_event_when_invoked_directly() {
-    // Verify the sweeper's persistence path end-to-end without spawning the
-    // background task: seed an aged row, invoke `mark_stalled_prompts`, then
-    // append the matching session event the sweeper would have emitted, and
-    // assert the event surfaces via `GET /v1/sessions/{id}/events`.
+    // Exercises the sweeper's persistence path without spawning its task.
     let harness = ServerHarness::spawn().await;
     {
         let guard = harness.state.lock().await;
@@ -707,10 +694,8 @@ async fn mark_stalled_prompts_appends_stalled_event_when_invoked_directly() {
 
 #[tokio::test]
 async fn health_live_does_not_persist_api_request_row() {
-    // `/v1/health/live` is contracted to skip the state-store touch that
-    // every other route gets through `log_api_request`. Regression test for
-    // the Codex-audit finding that the original implementation logged each
-    // liveness probe as an `api.request` row.
+    // `/v1/health/live` is contracted to skip the `log_api_request` state-store
+    // touch every other route gets.
     let harness = ServerHarness::spawn().await;
     let response = reqwest::Client::new()
         .get(format!("{}/v1/health/live", harness.base_url))
@@ -738,11 +723,8 @@ async fn health_live_does_not_persist_api_request_row() {
 
 #[tokio::test]
 async fn health_ready_does_not_persist_api_request_row() {
-    // Mirror of `health_live_does_not_persist_api_request_row`. The readiness
-    // endpoint is the canonical orchestrator poll surface (k8s probes, LBs,
-    // Cloudflare health checks), so logging an `api.request` row for each
-    // poll would dwarf real traffic — same cardinality concern as
-    // `/v1/status*`. Regression test guards the entry in the skip list.
+    // Readiness is the orchestrator poll surface, so an `api.request` row per
+    // poll would dwarf real traffic.
     let harness = ServerHarness::spawn().await;
     let response = reqwest::Client::new()
         .get(format!("{}/v1/health/ready", harness.base_url))
@@ -890,8 +872,7 @@ async fn metrics_summary_counts_existing_state_rows() {
             .expect("append lifecycle");
     }
 
-    // The default window is 24h; the seeded fixtures use fixed historical dates,
-    // so use an absolute lower bound for stable count assertions.
+    // Seeded fixtures use fixed historical dates, outside the default 24h window.
     let response = reqwest::Client::new()
         .get(format!(
             "{}/v1/metrics/summary?since=2000-01-01T00:00:00Z",
@@ -909,11 +890,9 @@ async fn metrics_summary_counts_existing_state_rows() {
     assert_eq!(counts["auth_failures"], Value::Number(1.into()));
     assert_eq!(counts["agent_lifecycle"], Value::Number(1.into()));
     assert_eq!(counts["events"], Value::Number(1.into()));
-    // The window envelope should also be present and well-formed.
     assert!(body["data"]["window"]["since"].is_string());
     assert!(body["data"]["window"]["until"].is_string());
-    // New derived blocks are always emitted even when their inputs are
-    // missing — the metrics consumer relies on the keys being present.
+    // Derived blocks are always emitted; consumers rely on the keys existing.
     assert!(body["data"]["sessions"]["active"].is_number());
     assert!(body["data"]["commands"]["total"].is_number());
     assert!(body["data"]["permissions"]["total"].is_number());

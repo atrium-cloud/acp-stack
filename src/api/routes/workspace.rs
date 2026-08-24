@@ -237,12 +237,10 @@ pub(crate) async fn files_upload_handler(
             }
             Some("file") => {
                 filename = field.file_name().map(|s| s.to_owned());
-                // Stream chunks instead of buffering the whole part: the HTTP
-                // body cap (api.max_request_bytes) may be larger than
-                // workspace.max_file_bytes, and we want to stop accumulating
-                // bytes the moment we cross the per-file limit instead of
-                // letting an authenticated client push the bigger cap of
-                // memory through this handler.
+                // Stream chunks rather than buffering the whole part:
+                // `api.max_request_bytes` may exceed
+                // `workspace.max_file_bytes`, and accumulation must stop the
+                // moment the per-file limit is crossed.
                 let max_bytes = state.config.workspace.max_file_bytes;
                 let mut buffer: Vec<u8> = Vec::new();
                 let mut field = field;
@@ -282,13 +280,10 @@ pub(crate) async fn files_upload_handler(
         return Err(StackError::WorkspaceTooLarge { limit: max_bytes });
     }
 
-    // Resolution against `workspace.root` (not against `workspace.uploads`)
-    // even though the request path is uploads-relative. This means a symlink
-    // at `workspace.uploads` that points outside the root gets caught by the
-    // resolver's canonicalize-and-starts_with check; resolving directly under
-    // `workspace.uploads` would treat it as its own containment root and let
-    // an escape slip through. The config validator already rejects an
-    // `uploads` path that is not lexically under `root`.
+    // Resolve against `workspace.root`, never `workspace.uploads`, even though
+    // the request path is uploads-relative: resolving under `uploads` would
+    // treat it as its own containment root, so a symlink there pointing
+    // outside the root would escape the canonicalize-and-starts_with check.
     if std::path::Path::new(&path).is_absolute() {
         return Err(StackError::WorkspacePathInvalid {
             reason: "upload `path` must be relative to workspace.uploads".to_owned(),
@@ -415,9 +410,8 @@ async fn publish_workspace_mutation(
     })?;
     let event = {
         let store = state.state.lock().await;
-        // `message` is empty: the kind + payload carry the structured detail,
-        // and we want sanitized logs that do not echo user paths into the
-        // text column (`logs/events` is session-tier-readable).
+        // `message` stays empty so user paths never reach the text column;
+        // `logs/events` is session-tier-readable.
         store.append_event_with_source(
             "info",
             event_kind,

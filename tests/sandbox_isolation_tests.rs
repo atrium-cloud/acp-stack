@@ -1,17 +1,10 @@
-//! End-to-end isolation guarantee for the `unshare` sandbox backend: a process
-//! spawned through the wrapper cannot read a masked path. This is the security
-//! claim the `sandbox.rs` unit tests (argv construction) do not cover.
-//!
-//! Requires Linux and `CAP_SYS_ADMIN` (a privileged container). The test is
-//! ignored by default; an explicit `--ignored` run fails hard when the runner
-//! lacks the required capability.
+//! End-to-end isolation guarantee for the `unshare` sandbox backend: a process spawned through the wrapper cannot read a masked path. Requires Linux and `CAP_SYS_ADMIN`.
 
 #![cfg(target_os = "linux")]
 
 use std::process::Command;
 
-/// True when this process can create the namespaces and mount a fresh `/proc`
-/// the `unshare` backend relies on (i.e. it holds `CAP_SYS_ADMIN`).
+/// True when this process holds the `CAP_SYS_ADMIN` the `unshare` backend relies on.
 fn unshare_usable() -> bool {
     Command::new("unshare")
         .args(["--mount", "--pid", "--fork", "--mount-proc", "--", "true"])
@@ -40,9 +33,7 @@ fn unshare_backend_masks_a_secret_from_the_workload() {
         b"TOP-SECRET-KEY-MATERIAL"
     );
 
-    // Mirror the `unshare` wrap: unshare builds the namespaces + fresh /proc,
-    // `acps __sandbox-exec` masks the dir with tmpfs (mount(2) under
-    // CAP_SYS_ADMIN), then runs the workload — here `cat` of the now-masked file.
+    // Mirrors the `unshare` wrap: namespaces + fresh /proc, tmpfs masking, then the workload.
     let acps = env!("CARGO_BIN_EXE_acps");
     let output = Command::new("unshare")
         .args([
@@ -76,7 +67,7 @@ fn unshare_backend_masks_a_secret_from_the_workload() {
         "cat of a tmpfs-masked path should fail (ENOENT), got success"
     );
 
-    // The host's view is untouched — masking happened only inside the namespace.
+    // The host's view is untouched: masking happened only inside the namespace.
     assert_eq!(
         std::fs::read(&secret).expect("read secret outside after"),
         b"TOP-SECRET-KEY-MATERIAL"

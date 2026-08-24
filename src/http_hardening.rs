@@ -1,21 +1,5 @@
-//! HTTP hardening: CORS, WebSocket origin, trusted-proxy client IP, and the
+//! HTTP hardening: CORS, WebSocket origin, trusted-proxy client IP, rate limiting, and the
 //! in-process auth-failure IP block.
-//!
-//! Layout:
-//!   * [`client_ip`] resolves the effective client IP given the socket peer,
-//!     the configured `[security.http]` block, and the request headers. If
-//!     `trust_proxy_headers` is true and the peer matches an entry in
-//!     `trusted_proxies`, parses `X-Forwarded-For` / `Forwarded`. Otherwise
-//!     returns the socket peer.
-//!   * [`build_cors_layer`] builds a `CorsLayer` from `allowed_origins`. Returns
-//!     `None` when no origins are configured (same-origin behavior).
-//!   * [`origin_allowed`] checks a `Origin` header value against the configured
-//!     allowlist. Used by the WebSocket upgrade handler.
-//!   * [`AuthFailureBlocker`] tracks per-IP auth-failure counts in a
-//!     time-windowed map. When the count crosses `auth_failures_per_minute`,
-//!     the IP is blocked for `auth_block_duration`. Used by the authenticate
-//!     middleware to short-circuit blocked IPs before they reach key
-//!     comparison.
 
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
@@ -134,9 +118,7 @@ pub fn client_ip(headers: &HeaderMap, peer: IpAddr, sec: &SecurityHttpConfig) ->
     if let Some(value) = headers.get("forwarded")
         && let Ok(text) = value.to_str()
     {
-        // Match a single `for=<ip>` segment. Real RFC 7239 parsing is more
-        // permissive (quoted, with port, multiple segments); the leftmost
-        // unquoted host is sufficient for the common case.
+        // Full RFC 7239 parsing is more permissive; the leftmost unquoted `for=<ip>` suffices here.
         for part in text.split(';') {
             let part = part.trim();
             if let Some(rest) = part.strip_prefix("for=") {
@@ -183,9 +165,8 @@ pub fn build_cors_layer(sec: &SecurityHttpConfig) -> Option<CorsLayer> {
     if sec.allowed_origins.is_empty() {
         return None;
     }
-    // Wildcard ("*") demands AllowOrigin::any() and forbids credentials. The
-    // self-check already warns about this on public binds; honor what the
-    // operator configured here without panicking.
+    // Wildcard demands AllowOrigin::any() and forbids credentials; the `http.wildcard_origin_public_bind`
+    // self-check already warns about `*` on public binds.
     let has_wildcard = sec.allowed_origins.iter().any(|origin| origin == "*");
     let layer = CorsLayer::new()
         .allow_headers([http::header::AUTHORIZATION, http::header::CONTENT_TYPE])
@@ -304,9 +285,8 @@ impl AuthFailureBlocker {
     pub fn record_failure(&self, ip: IpAddr) -> bool {
         let now = Instant::now();
         let mut entry = self.state.entry(ip).or_default();
-        // A stale blocked_until that already elapsed must not gate the
-        // re-trip logic below. Clear it here so the brute-force-after-cooldown
-        // attacker gets blocked again instead of getting a permanent pass.
+        // An already-elapsed `blocked_until` must not gate the re-trip below, or a
+        // brute-force-after-cooldown attacker gets a permanent pass.
         if let Some(until) = entry.blocked_until
             && until <= now
         {
@@ -393,15 +373,10 @@ pub struct RateLimiter {
 
 impl RateLimiter {
     pub fn from_config(sec: &SecurityHttpConfig) -> Self {
-        // `burst` is the bucket capacity; `rate_limit_per_minute` controls
-        // the steady-state refill rate. Both are required > 0 by config
-        // validation; clamping to 1 is purely defense-in-depth.
         let auth_capacity = sec.burst.max(1) as f64;
         let auth_refill_per_sec = (sec.rate_limit_per_minute.max(1) as f64) / 60.0;
-        // Unauthenticated tier is 1/4 of the authenticated tier. Conservative
-        // — high-traffic legitimate clients must be authenticated anyway.
-        // Ceiling division so a configured `burst = 4` still allows a 1-token
-        // unauth bucket.
+        // Unauthenticated tier is 1/4 of the authenticated one; ceiling division so a small
+        // configured `burst` still leaves at least one unauth token.
         let unauth_capacity = (sec.burst.div_ceil(4)).max(1) as f64;
         let unauth_refill_per_sec = (sec.rate_limit_per_minute.div_ceil(4).max(1) as f64) / 60.0;
         Self {
@@ -682,7 +657,6 @@ mod tests {
         let f3 = key_fingerprint("different");
         assert_eq!(f1, f2);
         assert_ne!(f1, f3);
-        // Same length, hex-only, and does not contain the raw key.
         assert_eq!(f1.len(), 16);
         assert!(f1.chars().all(|c| c.is_ascii_hexdigit()));
         assert!(!f1.contains("session"));
@@ -691,8 +665,6 @@ mod tests {
 
     #[test]
     fn rate_limiter_rejects_after_burst_exhausted() {
-        // burst=2, rate_limit_per_minute=60 (1/sec refill). First 2 succeed,
-        // 3rd fails before the bucket can refill enough.
         let sec = SecurityHttpConfig {
             max_request_bytes: 1024,
             rate_limit_per_minute: 60,
@@ -725,13 +697,11 @@ mod tests {
         let limiter = RateLimiter::from_config(&sec);
         assert!(limiter.check_per_key("aaaa").is_ok());
         assert_eq!(limiter.check_per_key("aaaa"), Err(RateLimitScope::PerKey));
-        // A different fingerprint has its own bucket.
         assert!(limiter.check_per_key("bbbb").is_ok());
     }
 
     #[test]
     fn rate_limiter_unauthenticated_uses_stricter_limit() {
-        // burst=8, so unauth capacity = ceil(8/4) = 2.
         let sec = SecurityHttpConfig {
             max_request_bytes: 1024,
             rate_limit_per_minute: 60,
@@ -754,11 +724,6 @@ mod tests {
 
     #[test]
     fn ip_is_re_blockable_after_initial_block_expires() {
-        // 1-second block: the test sleeps just past the expiry, then
-        // attempts to brute-force again. The blocker must re-trip rather
-        // than allow unlimited subsequent attempts. Regression for the bug
-        // where `record_failure` checked `blocked_until.is_none()` even on
-        // already-elapsed blocks.
         let sec = make_sec(false, &[], &[], 2);
         let blocker = AuthFailureBlocker::from_config(&sec);
         let ip: IpAddr = "10.0.0.1".parse().unwrap();

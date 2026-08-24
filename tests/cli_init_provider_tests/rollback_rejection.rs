@@ -4,10 +4,7 @@ use crate::common::cli::*;
 
 #[test]
 fn init_rejects_model_for_agents_without_set_model_before_discovery() {
-    // No embedded registry agent declares set_model=false anymore, so the
-    // fail-fast capability check runs against a registry override; without
-    // the gate, `--model` would be silently ignored or surface as a
-    // downstream "binary not on PATH" error.
+    // No embedded registry agent declares set_model=false, so this runs against a registry override.
     let tempdir = tempfile::tempdir().expect("tempdir");
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");

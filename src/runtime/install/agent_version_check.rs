@@ -83,8 +83,7 @@ fn resolve_upstream_version_for_step(
         )?;
         return resolver.github(&repo).map(Some);
     }
-    // Shell-recipe installs have no machine-checkable upstream; let the caller
-    // render this as "unknown, manual check required".
+    // Shell-recipe installs have no machine-checkable upstream.
     Ok(None)
 }
 
@@ -133,9 +132,8 @@ pub fn build_agent_check_report(
     installed_rows: &[InstallerRun],
     resolver: &dyn LatestVersionResolver,
 ) -> Vec<(String, AgentVersionStatus)> {
-    // An operator adapter override reshapes the expected steps (harness +
-    // adapter) and the adapter's upstream source; a failed conversion is
-    // surfaced as an Unknown verdict rather than aborting the whole report.
+    // An operator adapter override reshapes the expected steps; a failed conversion becomes an
+    // Unknown verdict rather than aborting the whole report.
     let entry =
         match crate::runtime::install::agent_registry::effective_registry_entry(entry, agent) {
             Ok(entry) => entry,

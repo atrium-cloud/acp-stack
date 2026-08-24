@@ -26,13 +26,9 @@ pub(super) const SUPABASE_EXAMPLE_URL: &str = "https://example.supabase.co";
 pub(super) const SUPABASE_DEFAULT_API_KEY_REF: &str = "SUPABASE_SECRET_KEY";
 pub(super) const SUPABASE_DEFAULT_SCHEMA: &str = "acp_stack";
 
-/// Version history of the hosted logging schema, pushed as Supabase CLI
-/// migrations. `db push` skips versions already recorded on the remote, so
-/// whenever `setup_sql` changes shape, add a NEW entry here carrying the full
-/// (idempotent) setup and demote the previous current entry to a placeholder
-/// body — existing deployments then converge by applying only the new
-/// version, while every prior version must stay listed or `db push` errors
-/// on remote-recorded versions missing from the local migrations directory.
+/// Version history of the hosted logging schema. A `setup_sql` shape change needs a
+/// NEW entry carrying the full idempotent setup, and every prior version must stay
+/// listed or `db push` errors on remote-recorded versions missing locally.
 const SUPABASE_SUPERSEDED_MIGRATIONS: &[&str] = &["20260531000000_acp_stack_logging.sql"];
 const SUPABASE_SUPERSEDED_MIGRATION_BODY: &str = "-- Superseded acp-stack logging schema version. The current version carries\n-- the full idempotent setup; this placeholder keeps the migration history\n-- aligned with deployments that applied it before it was superseded.\n";
 const SUPABASE_CURRENT_MIGRATION: &str = "20260708000000_acp_stack_logging.sql";
@@ -326,16 +322,11 @@ fn run_supabase_setup(args: SupabaseSetupArgs, output: OutputFormat) -> Result<(
         });
     }
 
-    // Reuse the already-provisioned writer password when one is stored:
-    // `db push` skips schema versions the remote has recorded, so a freshly
-    // generated password would land in the secret store without ever
-    // reaching the remote role, breaking mirroring auth on re-runs. A fresh
-    // password is generated only on first setup or when the stored URL does
-    // not round-trip the runtime shape (e.g. a manually set custom URL).
+    // Reuse a stored writer password: `db push` skips schema versions the remote has
+    // recorded, so a fresh password would never reach the remote role.
     let home = home_dir()?;
-    // The store is a whole-file read-modify-write; serialize with the daemon
-    // and other acps processes so concurrent writers cannot silently drop
-    // each other's entries. Also covers the config write later in setup.
+    // The store is a whole-file read-modify-write; serialize with the daemon and other
+    // acps processes so concurrent writers cannot drop each other's entries.
     let _mutation = acquire_agent_config_mutation_file_lock(&config::default_config_path()?)?;
     let mut store = SecretStore::open(&home)?;
     let stored_password = store
@@ -477,9 +468,8 @@ fn run_supabase_check(output: OutputFormat) -> Result<()> {
 }
 
 fn run_supabase_sql(args: SupabaseSqlArgs, output: OutputFormat) -> Result<()> {
-    // The generated DDL interpolates these identifiers into SQL (including
-    // PL/pgSQL `format()` literals), so hold CLI overrides to the same rules
-    // config-loaded values must satisfy instead of emitting corrupt SQL.
+    // The generated DDL interpolates these identifiers into SQL, so CLI overrides face
+    // the same rules config-loaded values must satisfy.
     crate::config::validate_supabase_identifiers(&args.schema, &args.table_prefix)?;
     let sql = setup_sql(&args.schema, &args.table_prefix, &args.writer_password);
     if output.is_json() {
@@ -717,10 +707,8 @@ fn runtime_writer_db_url(project_ref: &str, password: &str) -> String {
     )
 }
 
-/// Inverse of `runtime_writer_db_url`: recover the writer password from a
-/// stored runtime URL so re-running setup reuses it instead of rotating a
-/// password the remote role never receives. Returns `None` for URLs that do
-/// not match the runtime shape (e.g. a manually configured custom URL).
+/// Inverse of `runtime_writer_db_url`, returning `None` for URLs that do not match the
+/// runtime shape.
 fn writer_password_from_db_url(db_url: &str) -> Option<String> {
     let rest = db_url.strip_prefix(&format!("postgresql://{SUPABASE_WRITER_ROLE}:"))?;
     let (password, host) = rest.split_once('@')?;
@@ -893,8 +881,6 @@ mod tests {
             writer_password_from_db_url(&db_url).as_deref(),
             Some(password.as_str())
         );
-        // Custom URLs that do not match the runtime shape must not be
-        // mistaken for a reusable provisioned password.
         assert_eq!(
             writer_password_from_db_url("postgresql://someone:secret@host:5432/db"),
             None

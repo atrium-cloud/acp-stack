@@ -1,19 +1,6 @@
-//! Local delivery outbox for the Supabase logging sink.
-//!
-//! Every persistence call site that runs while external logging is enabled
-//! enqueues an outbox row in the same transaction that writes the source row,
-//! so a crash between the source INSERT and the enqueue cannot drop a row
-//! from the delivery pipeline. The background worker claims due pending rows
-//! into `sending`, POSTs them to PostgREST with
-//! `Prefer: resolution=merge-duplicates,return=minimal`, and acks or releases
-//! the claim, making replay idempotent.
-//!
-//! Source rows can change (UPDATEs on `sessions`, `commands`, prompts, ...).
-//! The outbox key is `"{source_table}:{source_id}"`, so an UPSERT flips a
-//! previously-sent — or currently `sending` — row back to `pending` and
-//! clears retry bookkeeping; the claim guards on `mark_sent`/`mark_failure`
-//! keep such a row pending so the worker re-uploads the latest row contents,
-//! and PostgREST's `merge-duplicates` collapses duplicates server-side.
+//! Local delivery outbox for the Supabase logging sink: enqueue happens in the
+//! same transaction as the source row's write, and the worker's claim/ack cycle
+//! plus PostgREST `merge-duplicates` makes replay idempotent.
 
 use crate::error::Result;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -21,15 +8,13 @@ use serde_json::{Map, Value};
 
 use super::core::StateStore;
 
-/// Most recent failure window summary. Fields: window-start RFC3339,
-/// failure count, last error message (if any), last observed-at RFC3339.
+/// Failure window summary: window start, failure count, last error, last seen.
 pub type FailureSummary = (String, i64, Option<String>, String);
 
 /// One row pulled from the outbox by the sink worker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboxRow {
-    /// `"{source_table}:{source_id}"` — both the primary key and the
-    /// upsert handle for replay.
+    /// `"{source_table}:{source_id}"`: primary key and upsert handle for replay.
     pub id: String,
     pub source_table: String,
     pub source_id: String,
@@ -41,9 +26,8 @@ fn outbox_id(source_table: &str, source_id: &str) -> String {
     format!("{source_table}:{source_id}")
 }
 
-/// Enqueue (or re-flag) a source row for delivery. Idempotent under
-/// concurrent retries: the ON CONFLICT branch resets retry bookkeeping so
-/// the worker re-uploads on the next poll.
+/// Enqueue (or re-flag) a source row for delivery; the ON CONFLICT branch
+/// resets retry bookkeeping so the worker re-uploads on the next poll.
 pub fn enqueue(
     conn: &Connection,
     source_table: &str,
@@ -70,14 +54,9 @@ pub fn enqueue(
     Ok(())
 }
 
-/// Claim at most `limit` rows that are due for delivery, flipping them to
-/// `sending` in the same statement. The claim is what makes `mark_sent` safe
-/// against a concurrent re-enqueue: `enqueue`'s ON CONFLICT resets a claimed
-/// row to `pending`, and the status guards on `mark_sent`/`mark_failure` then
-/// leave it alone so the updated source content is re-uploaded on the next
-/// poll instead of being silently acked with stale content. A worker that
-/// crashes mid-flight leaves rows in `sending`; `recover_in_flight` resets
-/// them at worker startup.
+/// Claim at most `limit` due rows, flipping them to `sending` in the same
+/// statement. The claim is what makes `mark_sent`/`mark_failure` safe against a
+/// concurrent re-enqueue.
 pub fn next_batch(conn: &Connection, limit: usize, now: &str) -> Result<Vec<OutboxRow>> {
     let mut statement = conn.prepare(
         r#"
@@ -109,10 +88,8 @@ pub fn next_batch(conn: &Connection, limit: usize, now: &str) -> Result<Vec<Outb
     Ok(batch)
 }
 
-/// Reset rows stranded in `sending` back to `pending`. The worker calls this
-/// at the top of every poll, before claiming the next batch: between polls no
-/// claim is legitimately live, so anything still `sending` was stranded by a
-/// crashed worker or a mark_* write error in the previous cycle.
+/// Reset rows stranded in `sending` back to `pending`. Safe only at the top of
+/// a poll, before the next claim: between polls no claim is legitimately live.
 pub fn recover_in_flight(conn: &Connection) -> Result<usize> {
     Ok(conn.execute(
         r#"
@@ -124,11 +101,9 @@ pub fn recover_in_flight(conn: &Connection) -> Result<usize> {
     )?)
 }
 
-/// Mark a batch of claimed rows as delivered. Idempotent: missing ids are
-/// silently skipped (a worker that retries a partially-acked batch should not
-/// crash). The `status = 'sending'` guard is load-bearing: a row re-enqueued
-/// to `pending` while its previous content was mid-POST must survive the ack
-/// so the updated content is delivered on the next poll.
+/// Mark a batch of claimed rows as delivered. The `status = 'sending'` guard is
+/// required: a row re-enqueued while its previous content was mid-POST must
+/// survive the ack so the updated content is delivered on the next poll.
 pub fn mark_sent(conn: &Connection, ids: &[String], now: &str) -> Result<()> {
     if ids.is_empty() {
         return Ok(());
@@ -153,12 +128,8 @@ pub fn mark_sent(conn: &Connection, ids: &[String], now: &str) -> Result<()> {
     Ok(())
 }
 
-/// Release a claimed batch that failed to deliver back to `pending` with
-/// bumped retry bookkeeping. The new `next_attempt_at` is computed by the
-/// caller (typically exponential backoff with jitter). Rows re-enqueued
-/// mid-flight are left alone (same guard rationale as `mark_sent`): their
-/// reset bookkeeping should not be clobbered with a failure from the stale
-/// upload.
+/// Release a failed batch back to `pending` with bumped retry bookkeeping.
+/// Rows re-enqueued mid-flight are left alone (same guard as `mark_sent`).
 pub fn mark_failure(
     conn: &Connection,
     ids: &[String],
@@ -196,17 +167,11 @@ pub fn mark_failure(
     Ok(())
 }
 
-/// Hard upper bound on `sink_failures_summary.last_error` length. Bounds
-/// state-DB growth when a Supabase response body is large and bounds the
-/// payload size of the `security check` JSON response that surfaces this
-/// value.
+/// Hard upper bound on `sink_failures_summary.last_error` length.
 const FAILURE_SUMMARY_ERROR_CAP: usize = 512;
 
-/// Roll a failure window into `sink_failures_summary`. The worker calls this
-/// on a recurring schedule so `security check` can surface the most recent
-/// failure without scanning the full outbox. Truncates `error` to a fixed
-/// cap so a noisy Supabase response body cannot bloat the table or echo
-/// upstream-injected payload back through the API.
+/// Roll a failure window into `sink_failures_summary`. `error` is truncated so
+/// an upstream response body cannot bloat the table or echo back through the API.
 pub fn record_failure_window(
     conn: &Connection,
     window_started_at: &str,
@@ -236,8 +201,7 @@ pub fn record_failure_window(
     Ok(())
 }
 
-/// Count rows that are currently in flight or queued for retry; >0 means the
-/// sink has unfinished work and `security check` should surface it.
+/// Count rows in flight or queued for retry; >0 means the sink has unfinished work.
 pub fn open_failure_count(conn: &Connection) -> Result<i64> {
     Ok(conn.query_row(
         r#"
@@ -250,9 +214,7 @@ pub fn open_failure_count(conn: &Connection) -> Result<i64> {
     )?)
 }
 
-/// Fetch the most recent failure window summary so `security check` can
-/// report the latest `last_error` text. Returns `None` if no failures have
-/// been observed yet.
+/// Fetch the most recent failure window summary, or `None` if there is none.
 pub fn latest_failure_summary(conn: &Connection) -> Result<Option<FailureSummary>> {
     Ok(conn
         .query_row(
@@ -275,10 +237,8 @@ pub fn latest_failure_summary(conn: &Connection) -> Result<Option<FailureSummary
         .optional()?)
 }
 
-/// Hydrate one source row into a JSON map ready for redaction + upload.
-/// Returns `None` if the row no longer exists (e.g. a delete raced ahead of
-/// the worker); the caller treats that as a synthetic success and `mark_sent`s
-/// the outbox row.
+/// Hydrate one source row into a JSON map ready for redaction and upload;
+/// `None` when a delete raced ahead of the worker.
 fn hydrate_row(
     conn: &Connection,
     source_table: &str,
@@ -399,11 +359,9 @@ fn hydrate_prompts(conn: &Connection, id: &str) -> Result<Option<Map<String, Val
                     let value: Option<String> = row.get(idx)?;
                     obj.insert(key.into(), value.map(Value::String).unwrap_or(Value::Null));
                 }
-                // prompt_json is an ACP block array, not an object.
-                // Preserve the raw JSON value so the redactor can stamp the
-                // real byte length before replacing it with the redacted
-                // sentinel; json_object_or_empty would coerce arrays to {}
-                // and underreport size.
+                // prompt_json is an ACP block ARRAY: json_object_or_empty would
+                // coerce it to {} and underreport the byte length the redactor
+                // stamps.
                 let raw_prompt: String = row.get(8)?;
                 let parsed_prompt: Value = serde_json::from_str(&raw_prompt).unwrap_or(Value::Null);
                 obj.insert("prompt_json".into(), parsed_prompt);
@@ -426,10 +384,8 @@ fn hydrate_prompts(conn: &Connection, id: &str) -> Result<Option<Map<String, Val
                     "failure_class".into(),
                     failure_class.map(Value::String).unwrap_or(Value::Null),
                 );
-                // failure_detail_json is a free-form JSON envelope; parse so
-                // downstream consumers see structured fields rather than a
-                // double-encoded string. Fall back to Null on parse failure
-                // to mirror prompt_json's defensive coercion.
+                // Parsed so consumers see structured fields, not a
+                // double-encoded string.
                 let raw_detail: Option<String> = row.get(12)?;
                 let detail_value = match raw_detail {
                     Some(text) => serde_json::from_str(&text).unwrap_or(Value::Null),
@@ -619,9 +575,8 @@ fn hydrate_agent_lifecycle(conn: &Connection, id: &str) -> Result<Option<Map<Str
         .optional()?)
 }
 
-/// Public-facing surface for the Supabase sink worker. Keeps `Connection`
-/// out of `runtime::logging::supabase_sink` so the worker depends only on the typed
-/// state API.
+/// Typed sink-worker surface, keeping `Connection` out of
+/// `runtime::logging::supabase_sink`.
 impl StateStore {
     pub fn next_sink_outbox_batch(&self, limit: usize, now: &str) -> Result<Vec<OutboxRow>> {
         next_batch(self.connection(), limit, now)
@@ -735,7 +690,6 @@ mod tests {
             "2026-01-01T00:00:01Z",
         )
         .expect("mark_failure");
-        // Re-enqueue (e.g. the session row was updated) should clear retry state.
         enqueue(
             store.connection(),
             "sessions",
@@ -840,7 +794,6 @@ mod tests {
         .unwrap();
         let claimed = next_batch(store.connection(), 10, "2099-01-01T00:00:00Z").unwrap();
         assert_eq!(claimed.len(), 1);
-        // The source row is updated while its previous content is mid-POST.
         enqueue(
             store.connection(),
             "sessions",
@@ -890,8 +843,6 @@ mod tests {
             "2026-01-01T00:00:06Z",
         )
         .unwrap();
-        // The stale upload's failure must not push the fresh content behind
-        // the retry backoff gate.
         let batch = next_batch(store.connection(), 10, "2026-01-01T00:00:07Z").unwrap();
         assert_eq!(batch.len(), 1);
         assert_eq!(batch[0].attempts, 0);
@@ -909,7 +860,6 @@ mod tests {
         .unwrap();
         let claimed = next_batch(store.connection(), 10, "2099-01-01T00:00:00Z").unwrap();
         assert_eq!(claimed.len(), 1);
-        // Simulated worker crash: the claim is never acked or released.
         let recovered = recover_in_flight(store.connection()).unwrap();
         assert_eq!(recovered, 1);
         let batch = next_batch(store.connection(), 10, "2099-01-01T00:00:00Z").unwrap();

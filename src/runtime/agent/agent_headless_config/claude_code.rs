@@ -11,13 +11,11 @@ pub(super) fn provision_claude_code_config(
 ) -> Result<Vec<PathBuf>> {
     let mut written = Vec::new();
     let Some(provider) = config.agent.provider.as_ref() else {
-        // A provider-less config still must not leave a previous provider's
-        // model allowlist behind — it would silently constrain every session.
+        // A provider-less config must not leave a previous provider's model allowlist behind; it
+        // would silently constrain every session.
         let settings_path = home.join(".claude").join("settings.json");
         if settings_path.exists() {
-            // Unreadable settings degrade to "nothing to strip": this path
-            // was a no-op before the allowlist existed, and a hand-broken
-            // file must not block a provider-less provision.
+            // Unreadable settings degrade to "nothing to strip" rather than blocking provision.
             match read_json_object(&settings_path) {
                 Ok(mut settings) => {
                     if settings.remove("availableModels").is_some() {
@@ -66,8 +64,8 @@ pub(super) fn cleanup_claude_code_config(
         return Ok(cleaned);
     };
     let settings_path = home.join(".claude").join("settings.json");
-    // The expected env must be rendered with the same override that wrote it,
-    // or the endpoint key fails the value match and survives the cleanup.
+    // The expected env MUST be rendered with the same override that wrote it, or the endpoint key
+    // fails the value match and survives cleanup.
     let expected_env = claude_provider_env_for_config(config, provider, &settings_path, endpoint)?;
     let expected_helper = claude_api_key_helper_for_provider(config, provider, &settings_path)?;
     if settings_path.exists() {
@@ -118,9 +116,7 @@ fn write_claude_provider_env(
     endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
 ) -> Result<()> {
     write_claude_provider_env_inner(config, provider, env, path)?;
-    // Last write wins over both the custom provider's own base URL and the
-    // profile default; `ANTHROPIC_BASE_URL` is already an acps-managed key, so
-    // no new file surface is involved.
+    // Last write wins over both the custom provider's base URL and the profile default.
     if let Some(base_url) = super::endpoint_base_url_for(endpoint, &provider.id) {
         env.insert("ANTHROPIC_BASE_URL".to_owned(), json!(base_url));
     }
@@ -167,10 +163,8 @@ fn write_claude_provider_env_inner(
     }
     if let Some(model) = configured_provider_model(config).filter(|model| !model.trim().is_empty())
     {
-        // Profile env keys such as DeepSeek's CLAUDE_CODE_SUBAGENT_MODEL stay
-        // in effect under an explicit model pin so the provider's recommended
-        // cheap subagent routing is preserved; set_subagent_model profiles
-        // still re-point the subagent at the pinned model below.
+        // Profile subagent pins survive an explicit model pin, preserving the provider's
+        // recommended cheap subagent routing.
         insert_claude_model_env(env, model, profile.set_subagent_model);
     } else {
         insert_claude_profile_default_model_env(env, profile);
@@ -178,10 +172,9 @@ fn write_claude_provider_env_inner(
     Ok(())
 }
 
-/// Env keys whose values Claude Code resolves as model ids and must therefore
-/// survive the `availableModels` allowlist. `insert_claude_model_env` writes
-/// from this same list so a new role key can never be pinned without also
-/// being unioned into the allowlist.
+/// Env keys Claude Code resolves as model ids, which must survive the `availableModels` allowlist.
+/// `insert_claude_model_env` writes from this same list, so a new role key can never be pinned
+/// without also being unioned into the allowlist.
 const CLAUDE_MODEL_ENV_KEYS: &[&str] = &[
     "ANTHROPIC_MODEL",
     "ANTHROPIC_DEFAULT_FABLE_MODEL",
@@ -192,21 +185,9 @@ const CLAUDE_MODEL_ENV_KEYS: &[&str] = &[
 ];
 const CLAUDE_SUBAGENT_MODEL_ENV_KEY: &str = "CLAUDE_CODE_SUBAGENT_MODEL";
 
-/// Surface the provider's live model catalog to the claude-agent-acp adapter.
-///
-/// Entries in settings.json `availableModels` are advertised verbatim as ACP
-/// model values, which is the only channel through which a third-party
-/// provider's models become selectable — the CLI itself never queries the
-/// provider. The key is removed rather than left stale whenever there is no
-/// catalog for the active provider (first-party Anthropic, native-auth lanes,
-/// custom providers, or an offline fetch), degrading to the builtin aliases
-/// plus the env-pinned model.
-///
-/// Claude Code treats `availableModels` as an allowlist: a pinned or role
-/// model outside it is silently dropped, not merely hidden from the picker.
-/// Profile pins use alias forms the provider's listing never returns (e.g.
-/// `kimi-k3[1m]`), so every model value the same provisioning run put into
-/// `env` is unioned in ahead of the catalog.
+/// Surface the provider's live model catalog to the claude-agent-acp adapter. Claude Code treats
+/// `availableModels` as an allowlist and silently drops any pinned or role model outside it, so
+/// every model value this run wrote into `env` is unioned in ahead of the catalog.
 fn write_claude_available_models(
     provider: &AgentProviderConfig,
     settings: &mut Map<String, serde_json::Value>,
@@ -477,8 +458,7 @@ mod tests {
 
         cleanup_claude_code_config(&config, tempdir.path(), Some(&endpoint)).expect("cleanup");
 
-        // The managed env was the file's only content, so cleanup removes the
-        // file outright rather than leaving an empty settings object.
+        // The managed env was the file's only content, so cleanup removes the file outright.
         let settings_path = tempdir.path().join(".claude").join("settings.json");
         let settings: Option<Value> = std::fs::read_to_string(&settings_path)
             .ok()
@@ -590,8 +570,7 @@ mod tests {
 
         provision_agent_headless_config(&config, tempdir.path()).expect("provision");
 
-        // The profile pins kimi-k3[1m] into env; env pins lead the list so
-        // the allowlist can never drop them, then the catalog follows.
+        // Env pins lead the list so the allowlist can never drop them; the catalog follows.
         let settings = read_settings(tempdir.path());
         assert_eq!(
             settings["availableModels"],
@@ -602,8 +581,7 @@ mod tests {
     #[test]
     fn claude_code_available_models_unions_env_pins_absent_from_catalog() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        // DeepSeek's profile pins [1m]-suffixed aliases the provider's
-        // listing endpoint never returns; they must survive the allowlist.
+        // DeepSeek's profile pins `[1m]` aliases the listing endpoint never returns.
         seed_provider_model_cache(
             tempdir.path(),
             "deepseek",
@@ -716,8 +694,7 @@ mod tests {
             json!(["kimi-k3[1m]", "kimi-k3"])
         );
 
-        // Switch to a provider with no cache entry: the stale moonshot list
-        // must not survive.
+        // Switch to a provider with no cache entry: the stale list must not survive.
         config.agent.env = vec!["DEEPSEEK_API_KEY".to_owned()];
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "deepseek".to_owned(),

@@ -70,10 +70,8 @@ pub(super) fn run_ws_command(command: WsCommand, output: OutputFormat) -> Result
                 }
                 let key =
                     resolve_admin_key(args.admin_key.clone(), std::io::stdin().is_terminal())?;
-                // No default `reason`: the event's `operator_reason` field is
-                // meaningful only when a human actually supplied one, and a
-                // boilerplate value would duplicate the machine cause on every
-                // CLI-driven disconnect.
+                // No default `reason`: `operator_reason` is meaningful only when a
+                // human supplied one.
                 let (path, body) = if !args.connection_id.is_empty() {
                     (
                         "/v1/ws/connections/disconnect",

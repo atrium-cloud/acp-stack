@@ -1,10 +1,5 @@
 //! Sink abstraction for ACP `session/update` notifications and the
 //! `StateStore`-backed implementation used by the daemon.
-//!
-//! Extracted from `acp_bridge.rs` so the bridge file can focus on the live
-//! ACP connection lifecycle. The trait and the writer plumbing have no
-//! dependency on the bridge struct itself — they only need a `StateStore`
-//! handle; the runtime `EventHub` is reached transitively through the store.
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -21,14 +16,9 @@ use crate::state::{
     MAX_SESSION_AVAILABLE_COMMANDS, PromptStatus, SessionAvailableCommand, StateStore,
 };
 
-/// Sink for ACP `session/update` notifications. The bridge writes through this
-/// trait instead of holding a `StateStore` directly, so tests can substitute
-/// an in-memory sink without standing up a SQLite file.
-///
-/// `append` returns a future so a real implementation can durably persist the
-/// event before the notification handler returns; otherwise a fast shutdown
-/// would drop in-flight writes. `flush` waits for any background writer task
-/// owned by the sink to drain; the bridge calls it during graceful shutdown.
+/// Sink for ACP `session/update` notifications. `append` must persist the
+/// event before its future resolves, and `flush` must drain any background
+/// writer, or a fast shutdown drops in-flight writes.
 pub trait SessionEventSink: Send + Sync + 'static {
     fn capture_session_update<'a>(
         &'a self,
@@ -49,10 +39,8 @@ pub trait SessionEventSink: Send + Sync + 'static {
         Box::pin(async move { Some(agent_session_id.to_owned()) })
     }
 
-    /// The locally recorded cwd of the session, used as the default working
-    /// directory for `terminal/create` requests that omit `cwd`. `None`
-    /// (sinks without session state) makes callers fall back to the
-    /// workspace root.
+    /// Default working directory for `terminal/create` requests that omit
+    /// `cwd`; `None` makes callers fall back to the workspace root.
     fn session_cwd<'a>(
         &'a self,
         agent_session_id: &'a str,
@@ -73,18 +61,9 @@ pub trait SessionEventSink: Send + Sync + 'static {
     }
 }
 
-/// `SessionEventSink` backed by the daemon's real `StateStore`.
-///
-/// Session-update writes flow through a **bounded** mpsc channel into a
-/// single background writer task. The bound provides backpressure: a noisy
-/// agent that emits updates faster than SQLite drains them blocks at
-/// `append`, which yields back to the SDK's notification handler and lets
-/// the event loop tick (it never spin-waits, since `send` is async). Without
-/// the bound a runaway agent could exhaust daemon memory before any HTTP
-/// limit kicks in.
-///
-/// `flush()` drops the sender, the writer task drains the remaining queue,
-/// and we await it during graceful shutdown so no notification rows are lost.
+/// `SessionEventSink` backed by the daemon's real `StateStore`. Writes flow
+/// through a bounded channel into one background writer task; the bound is
+/// what stops a runaway agent from exhausting daemon memory.
 pub struct StateStoreSessionSink {
     target_id: String,
     state: Arc<TokioMutex<StateStore>>,
@@ -100,8 +79,7 @@ struct SessionEventRow {
 }
 
 /// Normalize standard ACP `usage_update` notifications and the legacy usage
-/// objects emitted by older agents. Returns `None` when no recognized,
-/// non-negative usage fields are present.
+/// objects emitted by older agents.
 fn extract_usage_payload(session_id: &str, payload_json: &str) -> Option<serde_json::Value> {
     let value: serde_json::Value = serde_json::from_str(payload_json).ok()?;
     if let Some(update) = value.get("update")
@@ -175,9 +153,8 @@ fn extract_usage_payload(session_id: &str, payload_json: &str) -> Option<serde_j
     Some(serde_json::Value::Object(out))
 }
 
-/// Apply the local projection of a standard ACP `session_info_update` after
-/// its verbatim `session.update` event is durable. The raw event is the source
-/// of truth; projection failure is logged by the writer and never removes it.
+/// Project an ACP `session_info_update`; must run only after the verbatim
+/// `session.update` row is durable, since that row is the source of truth.
 fn project_session_info_update(
     store: &StateStore,
     session_id: &str,
@@ -221,12 +198,8 @@ fn project_session_info_update(
     store.update_session_info(session_id, title, agent_updated_at, info.meta.as_ref())
 }
 
-/// Apply the local projection of an ACP `available_commands_update` after its
-/// verbatim `session.update` event is durable. The advertised list is
-/// latest-wins (an empty list still replaces); the raw event remains the
-/// source of truth, so projection failure is logged by the writer and never
-/// removes it. `_meta` on individual commands is dropped by the compact
-/// stored shape.
+/// Project an ACP `available_commands_update`; latest-wins, and an empty list
+/// still replaces.
 fn project_available_commands_update(
     store: &StateStore,
     session_id: &str,
@@ -277,9 +250,8 @@ fn project_available_commands_update(
         commands.truncate(MAX_SESSION_AVAILABLE_COMMANDS);
     }
     let changed = store.replace_session_available_commands(session_id, &commands)?;
-    // Warn only when the truncated list actually landed, so a pathological
-    // agent re-advertising the same oversized list every turn does not spam
-    // the log on every no-op write.
+    // Gated on `changed` so an agent re-advertising the same oversized list
+    // every turn does not spam the log on every no-op write.
     if truncated && changed {
         tracing::warn!(
             session_id = %session_id,
@@ -291,14 +263,9 @@ fn project_available_commands_update(
     Ok(())
 }
 
-/// Project an ACP `config_option_update` into the per-session config-option
-/// snapshot, mirroring `project_available_commands_update`: latest-wins
-/// replace, capped, and never removing the verbatim event row on failure.
+/// Project an ACP `config_option_update` into the per-session snapshot.
 /// Unlike the set-response writers, an empty list is applied here: a
-/// notification is the agent's authoritative full-set advertisement (an
-/// agent may legitimately drop to none), whereas an empty list in a
-/// `session/set_config_option` response right after a successful set is
-/// contradictory and gets skipped.
+/// notification is the agent's authoritative full-set advertisement.
 fn project_config_options_update(
     store: &StateStore,
     session_id: &str,
@@ -354,15 +321,9 @@ fn project_config_options_update(
     Ok(())
 }
 
-/// Derive a `tool.execute` event when the inbound `session/update` is a
-/// `tool_call` / `tool_call_update` that identifies itself as an `execute`
-/// tool. Agents that run shell through their own built-in tools (instead of
-/// client terminals) still announce those runs as tool-call blocks; lifting
-/// them out of the generic `session.update` stream makes agent shell activity
-/// filterable in logs without payload parsing. Updates that omit `kind`
-/// (ACP only requires it on the initial `tool_call`) yield `None` — the
-/// derived stream marks command starts plus whatever transitions restate the
-/// kind; the verbatim `session.update` rows keep the full lifecycle.
+/// Derive a `tool.execute` event from an `execute`-kind tool call. Updates
+/// omitting `kind` yield `None`, since ACP only requires it on the initial
+/// `tool_call`; the verbatim `session.update` rows keep the full lifecycle.
 fn extract_execute_tool_call(session_id: &str, payload_json: &str) -> Option<serde_json::Value> {
     let value: serde_json::Value = serde_json::from_str(payload_json).ok()?;
     let update = value.get("update")?;
@@ -388,9 +349,8 @@ fn extract_execute_tool_call(session_id: &str, payload_json: &str) -> Option<ser
             out.insert(key.to_owned(), serde_json::Value::String(text.to_owned()));
         }
     }
-    // The common built-in shell tools (Claude Code, OpenCode, Pi) put the
-    // command line at `rawInput.command`; agents without that convention
-    // still carry it in `title`.
+    // The common built-in shell tools put the command line at
+    // `rawInput.command`; agents without that convention carry it in `title`.
     if let Some(command) = update
         .get("rawInput")
         .and_then(|v| v.get("command"))
@@ -428,20 +388,16 @@ fn locate_usage_object(value: &serde_json::Value) -> Option<&serde_json::Value> 
     None
 }
 
-/// Bump `updated_at` on the oldest `pending`/`running` prompt for the
-/// session so the stale-prompt sweeper does not flag an actively
-/// streaming prompt. ACP `session/update` carries no `prompt_id`, so the
-/// session-scoped lookup is the best precision available; the oldest
-/// in-flight prompt is the one currently producing updates. A session
-/// with no in-flight prompts is a benign no-op.
+/// Bump `updated_at` on the oldest in-flight prompt so the stale-prompt
+/// sweeper does not flag an actively streaming one. ACP `session/update`
+/// carries no `prompt_id`, so session-scoped is the best precision available.
 fn touch_running_prompt(store: &StateStore, session_id: &str) -> crate::error::Result<()> {
     let prompts = store.in_flight_prompts_for_session(session_id)?;
     let Some(prompt) = prompts.into_iter().next() else {
         return Ok(());
     };
-    // `update_prompt_status` advances `updated_at` regardless of the
-    // status value. Passing the existing status (Running/Pending) plus
-    // None for every other field keeps every other column intact.
+    // Re-passing the existing status advances `updated_at` while leaving
+    // every other column intact.
     let status = PromptStatus::from_str(&prompt.status)?;
     store
         .update_prompt_status(&prompt.id, status, None, None, None, None, None)
@@ -459,10 +415,7 @@ fn read_token_field(usage: &serde_json::Value, key: &str) -> Option<i64> {
     None
 }
 
-/// Backpressure buffer for unwritten ACP session updates. Sized so a typical
-/// streaming turn (text chunks, tool calls) fits comfortably without ever
-/// blocking, but small enough that a pathological agent can't grow daemon
-/// memory by gigabytes before SQLite catches up.
+/// Backpressure buffer for unwritten ACP session updates.
 pub(crate) const SESSION_EVENT_BUFFER: usize = 1024;
 
 impl StateStoreSessionSink {
@@ -475,9 +428,6 @@ impl StateStoreSessionSink {
         state: Arc<TokioMutex<StateStore>>,
         session_changes: SessionChangesHandle,
     ) -> Self {
-        // Session-update fanout now happens inside
-        // `append_session_event_with_source` itself because `StateStore` owns
-        // the live `EventHub`; the sink no longer needs its own handle.
         let (tx, mut rx) = tokio::sync::mpsc::channel::<SessionEventRow>(SESSION_EVENT_BUFFER);
         let writer_state = state.clone();
         let writer = tokio::spawn(async move {
@@ -523,14 +473,6 @@ impl StateStoreSessionSink {
                                 "failed to apply ACP config option update"
                             );
                         }
-                        // Re-touch the in-flight prompt's `updated_at` so the
-                        // stale-prompt sweeper does not flip an actively
-                        // streaming prompt to `Stalled`. ACP notifications
-                        // carry only `session_id`, so we pick the oldest
-                        // running prompt for the session (the one the agent
-                        // is currently driving) and bump it via the
-                        // status-preserving update path. Failures are
-                        // logged but do not block the event write.
                         if let Err(err) = touch_running_prompt(&guard, &row.session_id) {
                             tracing::warn!(
                                 error = %err,
@@ -538,11 +480,6 @@ impl StateStoreSessionSink {
                                 "failed to re-touch running prompt on session update"
                             );
                         }
-                        // `append_session_event_with_source` now fans the
-                        // persisted event out to both the `logs` topic and
-                        // `sessions.{id}` itself; no explicit republish here.
-                        // Persist normalized standard ACP context usage and
-                        // recognized legacy token usage; ignore unknown shapes.
                         if let Some(usage) =
                             extract_usage_payload(&row.session_id, &row.payload_json)
                             && let Ok(usage_text) = serde_json::to_string(&usage)
@@ -561,10 +498,6 @@ impl StateStoreSessionSink {
                                 "failed to persist usage.reported event"
                             );
                         }
-                        // Agent-side shell runs announced as execute-kind
-                        // tool calls get a derived `tool.execute` event so
-                        // shell activity is filterable even when the agent
-                        // never uses client terminals.
                         if let Some(execute) =
                             extract_execute_tool_call(&row.session_id, &row.payload_json)
                             && let Ok(execute_text) = serde_json::to_string(&execute)
@@ -611,10 +544,8 @@ impl SessionEventSink for StateStoreSessionSink {
         update: &'a SessionUpdate,
     ) -> futures::future::BoxFuture<'a, bool> {
         Box::pin(async move {
-            // Only tool-call updates can carry diff content. Skipping the
-            // session lookup for everything else keeps chunk-heavy streams
-            // off the state-store lock; `append` still resolves and drops
-            // unknown sessions itself.
+            // Only tool-call updates carry diff content; skipping the session
+            // lookup otherwise keeps chunk-heavy streams off the store lock.
             if !matches!(
                 update,
                 SessionUpdate::ToolCall(_) | SessionUpdate::ToolCallUpdate(_)
@@ -724,8 +655,8 @@ impl SessionEventSink for StateStoreSessionSink {
         Box::pin(async move {
             {
                 let mut guard = self.tx.lock().await;
-                // Dropping the sender lets the writer task observe EOF and
-                // drain its queue before exiting. Idempotent.
+                // Dropping the sender lets the writer observe EOF and drain
+                // its queue before exiting. Idempotent.
                 *guard = None;
             }
             let writer = self.writer.lock().await.take();

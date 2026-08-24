@@ -92,8 +92,6 @@ pub(crate) async fn sessions_commands_run_handler(
             reason: "command name must not be empty".to_owned(),
         });
     }
-    // One session fetch serves both the target assertion and the advisory
-    // check; Array-mode gating still runs through `session_agent_target`.
     let session = {
         let store = state.state.lock().await;
         store
@@ -112,10 +110,8 @@ pub(crate) async fn sessions_commands_run_handler(
         });
     }
     let target = state.session_agent_target(Some(&session.target_id)).await?;
-    // Advisory check against the last advertised list. Never a hard block:
-    // agents accept unadvertised commands and the stored list can be stale,
-    // but some agents silently no-op on commands they do not recognize, so
-    // the mismatch is worth surfacing to the caller.
+    // Never a hard block: agents accept unadvertised commands and the stored list can
+    // be stale, but some silently no-op, so the mismatch is worth surfacing.
     let advertised = stored_available_commands(&session.metadata_json)
         .map(|stored| stored.commands.iter().any(|entry| entry.name == command));
     if advertised == Some(false) {
@@ -125,8 +121,8 @@ pub(crate) async fn sessions_commands_run_handler(
             "session command not in the agent's advertised list; submitting anyway"
         );
     }
-    // Over ACP a slash command is invoked as an ordinary `session/prompt`
-    // whose text starts with `/name`; there is no dedicated method.
+    // Over ACP a slash command is an ordinary `session/prompt` whose text starts with
+    // `/name`; there is no dedicated method.
     let args = payload.args.as_deref().map(str::trim).unwrap_or_default();
     let text = if args.is_empty() {
         format!("/{command}")

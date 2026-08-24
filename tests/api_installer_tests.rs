@@ -98,8 +98,6 @@ async fn installer_runs_active_returns_only_running_rows_with_elapsed() {
     assert_eq!(run["status"], "running");
     assert!(run["started_at"].is_string());
     assert!(run["finished_at"].is_null());
-    // Elapsed is computed server-side for running rows so pollers need no
-    // clock sync with the daemon.
     let elapsed = run["elapsed_seconds"].as_i64().expect("elapsed present");
     assert!(elapsed >= 0);
     // Step metadata only: log previews and on-disk paths never leave the daemon.
@@ -133,8 +131,6 @@ async fn installer_runs_lists_history_newest_first_without_elapsed() {
     assert_eq!(status, StatusCode::OK);
     let runs = body["data"]["runs"].as_array().expect("runs array");
     assert_eq!(runs.len(), 2);
-    // History order is newest first; the finished row carries the terminal
-    // fields and no elapsed time.
     assert_eq!(runs[0]["step"], "adapter");
     assert_eq!(runs[1]["step"], "harness");
     assert_eq!(runs[1]["status"], "ran");
@@ -189,11 +185,8 @@ async fn installer_runs_is_session_tier() {
 #[tokio::test]
 async fn installer_runs_active_reads_rows_written_via_another_connection() {
     let harness = ServerHarness::spawn().await;
-    // Write through a second connection, the way deps apply effectively
-    // publishes progress while holding the daemon's shared store mutex for
-    // its whole run: the endpoint reads via its own short-lived connection
-    // and must see the autocommit `running` row without waiting on that
-    // mutex (WAL).
+    // Deps apply publishes progress while holding the daemon's shared store mutex for its whole
+    // run, so the endpoint must see the autocommit `running` row without waiting on that mutex.
     let writer = StateStore::open(&harness.state_path).expect("second connection");
     writer
         .append_installer_run(running_input(

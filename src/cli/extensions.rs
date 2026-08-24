@@ -1,9 +1,5 @@
-//! `acps extensions` — read-only status for declared extension instances.
-//!
-//! There is deliberately no mutating CLI: extension declarations are edited in
-//! the config TOML, and managed-state namespaces are written only by their
-//! external orchestrator through the admin apply endpoint. A second local
-//! writer would blur the store-level provenance the seam depends on.
+//! `acps extensions` — read-only status for declared extension instances. There is no mutating
+//! CLI: a second local writer would blur the store-level provenance the seam depends on.
 
 use clap::Subcommand;
 use serde_json::{Value, json};
@@ -32,10 +28,8 @@ pub(super) fn run_extensions_command(
 
 fn run_status(output: OutputFormat) -> Result<()> {
     let config = Config::load_from_default_path()?;
-    // The secret store only matters for managed-state watermarks; a
-    // network-provider-only config must not require an initialized store, and
-    // a declared-but-never-applied namespace on a pre-init host is simply "no
-    // watermark yet". Any other open failure still fails fast.
+    // The store only matters for managed-state watermarks, so a network-provider-only config
+    // must not require an initialized one. Any other open failure still fails fast.
     let has_managed_state = config
         .extensions
         .values()

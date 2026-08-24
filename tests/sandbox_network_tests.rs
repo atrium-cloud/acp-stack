@@ -1,12 +1,9 @@
-//! Behavior of the network-isolation supervisor (`acps __sandbox-supervise`):
-//! fail-closed setup, teardown ordering, provider env/stdio hygiene, namespace
-//! lifetime, and the end-to-end deny-all / veth-provider guarantees.
+//! Behavior of the network-isolation supervisor (`acps __sandbox-supervise`).
 //!
-//! Requires Linux and `CAP_SYS_ADMIN` (a privileged container) like the mount
-//! isolation tests; the veth case additionally needs `ip`/`nsenter` and
-//! `CAP_NET_ADMIN`. Every case is ignored by default. Privileged Linux runners invoke this test
-//! binary with `--ignored`; capability probes then fail hard so a misconfigured
-//! runner cannot report the guarantees green while asserting nothing.
+//! Requires Linux and `CAP_SYS_ADMIN`; the veth case also needs `ip`/`nsenter`
+//! and `CAP_NET_ADMIN`. Every case is ignored by default, and capability probes
+//! fail hard so a misconfigured runner cannot report green while asserting
+//! nothing.
 
 #![cfg(target_os = "linux")]
 

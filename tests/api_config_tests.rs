@@ -76,7 +76,6 @@ async fn config_validate_rejects_garbage_with_400() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body: Value = response.json().await.expect("json");
     assert_eq!(body["ok"], Value::Bool(false));
-    // ConfigToml errors carry the dotted code "config.invalid".
     assert_eq!(body["error"]["code"], "config.invalid");
 }
 
@@ -301,10 +300,9 @@ async fn config_import_oversized_body_returns_413() {
     assert_eq!(body["error"]["code"], "import.too_large");
 }
 
-/// The secret store is a whole-file read-modify-write; before the handlers
-/// took the agent-config mutation lock, concurrent set/delete requests could
-/// interleave open→mutate→persist and silently drop each other's writes.
-/// With the lock, every accepted mutation must be visible afterwards.
+/// The secret store is a whole-file read-modify-write, so without the
+/// agent-config mutation lock concurrent set/delete requests interleave
+/// open→mutate→persist and silently drop each other's writes.
 #[tokio::test]
 async fn concurrent_secret_mutations_do_not_drop_writes() {
     let home_dir = tempfile::tempdir().expect("home tempdir");

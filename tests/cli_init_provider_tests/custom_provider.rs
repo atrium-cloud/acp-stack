@@ -91,8 +91,8 @@ fn init_custom_provider_succeeds_with_catalog_only_credential() {
         .assert()
         .success();
 
-    // Lockstep guarantee: the init gate passed off the catalog, so spawn-time
-    // resolution must inject the same credential.
+    // The init gate passed off the catalog, so spawn-time resolution must inject the same
+    // credential.
     let config = load_config_from_str(
         &fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
             .expect("config should be readable"),
@@ -112,10 +112,8 @@ fn init_custom_provider_succeeds_with_catalog_only_credential() {
     assert!(snapshot.revision.is_some());
 }
 
-/// Registry ids are reserved instance-wide: every runtime and apply site
-/// classifies by registry membership before it looks at `custom`, so a custom
-/// declaration under a registry id resolves down the mapped path and fails at
-/// spawn. Codex-with-Anthropic must use a distinct id such as `anthropic-1`.
+/// Registry ids are reserved instance-wide: every site classifies by registry membership before
+/// looking at `custom`, so a custom declaration under a registry id fails at spawn.
 #[test]
 fn init_custom_codex_provider_rejects_known_mapped_provider_id() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
@@ -151,8 +149,8 @@ fn init_custom_codex_provider_rejects_known_mapped_provider_id() {
         ))
         .stderr(predicates::str::contains("anthropic-1"));
 
-    // The starter config is written before the provider step, so the file may
-    // exist; what must not exist is the rejected custom provider inside it.
+    // The starter config is written before the provider step, so the file may exist; the
+    // rejected custom provider must not be in it.
     let config_path = tempdir.path().join(".config/acp-stack/acps-config.toml");
     if config_path.exists() {
         let config = fs::read_to_string(&config_path).expect("config should be readable");

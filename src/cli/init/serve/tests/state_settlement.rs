@@ -1,6 +1,5 @@
-//! Category settlement across the state surface: the terminal sweep, the
-//! config-derived settlements a resumed or declared run reports, and the
-//! frontier's behaviour under cancel and parked failures.
+//! Category settlement across the state surface: the terminal sweep, config-derived settlements,
+//! and the frontier under cancel and parked failures.
 
 use super::super::*;
 use super::support::*;
@@ -11,10 +10,8 @@ use serde_json::json;
 
 #[test]
 fn a_cancel_mid_prompt_freezes_the_category_frontier() {
-    // The wizard thread does not stop where the cancel lands: it unwinds
-    // through the lane's own failure badge and the step's finish signal.
-    // Neither may record a frame after the terminal one, and neither may
-    // move the snapshot `hello` and the status route derive live.
+    // The wizard unwinds through the lane's failure badge and the step's finish signal after the
+    // cancel lands; neither may record a frame after the terminal one or move the snapshot.
     let session = test_session("init_state_cancel_freeze");
     session.apply_state_signal(InitStateSignal::StepStarted {
         kind: step_kind::PROVIDER_CONFIGURE,
@@ -65,9 +62,8 @@ fn a_cancel_mid_prompt_freezes_the_category_frontier() {
 
 #[test]
 fn a_cross_cutting_prompt_records_input_required_with_no_signal() {
-    // `secret_ref_value` belongs to no category, and a prompt never emits a
-    // signal anyway: the ask is announced by `input_required` alone, and the
-    // fold shows nothing awaiting because the pending kind maps to no category.
+    // `secret_ref_value` belongs to no category, so the ask is announced by `input_required` alone
+    // and the fold shows nothing awaiting.
     let session = test_session("init_state_cross_cutting");
     let driver = SessionPromptDriver {
         session: session.clone(),
@@ -154,9 +150,7 @@ fn blocked_on_follows_the_dependency_table() {
 
 #[test]
 fn a_repeated_signal_is_forwarded_but_folds_idempotently() {
-    // The instance no longer dedups — every fact is forwarded, so a repeated
-    // signal is a second event on the wire. The dedup that used to live here is
-    // the client's: folding the stream is idempotent, so the view is unchanged.
+    // The instance does not dedup; dedup is the client's, because folding the stream is idempotent.
     let session = test_session("init_state_dedup");
     let settled = || InitStateSignal::CategorySettled {
         category: InitCategory::Agent,
@@ -194,9 +188,7 @@ fn history_cap_evicts_signals_while_the_hello_replay_stays_current() {
         signal_events(&session).is_empty(),
         "the early signal should have aged out of the capped history"
     );
-    // Which is exactly why the signal log — bounded by init's structure, not by
-    // progress chatter — rides hello in full, so a late joiner still folds the
-    // settled agent.
+    // Which is why the signal log rides hello in full: a late joiner still folds the settled agent.
     assert_eq!(
         category(&folded_from_hello(&session), "agent")["value"],
         json!("opencode")
@@ -222,8 +214,7 @@ fn init_complete_settles_every_applicable_category_left_open() {
         disposition: StepDisposition::Executed,
         error_code: None,
     });
-    // The sweep is the client's: the instance forwards one `step_finished`
-    // signal for init_complete, and the fold settles every open lane from it.
+    // The sweep is the client's: one `step_finished` signal, and the fold settles every open lane.
     assert_eq!(signal_events(&session).len(), before + 1);
 
     let swept = latest_state(&session);
@@ -239,9 +230,8 @@ fn init_complete_settles_every_applicable_category_left_open() {
     assert_eq!(category(&swept, "deps")["value"], Value::Null);
 }
 
-/// The real derivation a hosted run performs the instant its agent is
-/// written, driven through the session so the wire snapshot — not just the
-/// signal list — is what gets asserted.
+/// Drives the real agent-settlement derivation through the session so the wire snapshot, not just
+/// the signal list, is what gets asserted.
 fn apply_agent_settlement(session: &HostedInitSession, agent_id: &str, args: &InitArgs) {
     let mut config = settlement_fixture_config();
     config.agent.id = agent_id.to_owned();
@@ -281,9 +271,8 @@ fn hosted_custom_agent_settles_the_agent_and_strands_no_harness_lane() {
     let state = latest_state(&session);
     assert_eq!(category(&state, "agent")["status"], json!("settled"));
     assert_eq!(category(&state, "agent")["value"], json!("housebot"));
-    // A registry-less agent takes its provider, model, mode, effort, and
-    // skills from its own environment, so a client must never render those
-    // lanes as input that is still coming.
+    // A registry-less agent takes these from its own environment, so a client must never render
+    // those lanes as input that is still coming.
     for id in ["provider", "model", "mode", "effort", "skills"] {
         assert_eq!(
             category(&state, id)["status"],
@@ -295,10 +284,8 @@ fn hosted_custom_agent_settles_the_agent_and_strands_no_harness_lane() {
     assert_eq!(category(&state, "mcp")["status"], json!("ready"));
 }
 
-// A resumed run replays its configuration steps as skipped and a declared
-// run never prompts, so no write site fires on either path. Without the
-// config-derived settlements the harness lanes would report `settled` with
-// a null value, telling a client the run configured nothing.
+// No write site fires on a resumed or declared run, so without config-derived settlements the
+// harness lanes would report `settled` with a null value.
 #[test]
 fn hosted_settlement_reports_the_harness_values_already_in_the_config() {
     let args = request_from_json(r#"{"resume": true, "agent": "opencode"}"#)
@@ -340,13 +327,10 @@ fn hosted_settlement_reports_the_harness_values_already_in_the_config() {
             "`{id}` must report what is on disk, not null"
         );
     }
-    // MCP is the exception: declaring servers says nothing about whether
-    // the installed agent can be handed any, so the lane is still open here
-    // and the probe is what closes it.
+    // MCP is the exception: declaring servers says nothing about whether the agent can take any,
+    // so only the probe closes the lane.
     assert_eq!(category(&state, "mcp")["status"], json!("ready"));
 
-    // The probe's turn. Both of its signals are what the capability step
-    // emits, in that order.
     session.apply_state_signal(super::super::super::run::mcp_applicability_from_probe(
         &super::super::super::CapabilityProbeOutcome::Probed(mcp_capabilities(
             json!({"stdio": true}),
@@ -365,9 +349,8 @@ fn hosted_settlement_reports_the_harness_values_already_in_the_config() {
     assert_eq!(category(&state, "mcp")["value"], json!("linear"));
 }
 
-// The case the probe-first ordering exists for: the servers are declared,
-// the installed agent advertises no MCP at all, and runtime will hand it
-// nothing — so the lane must read as absent, not as configured.
+// The case probe-first ordering exists for: servers are declared but the agent advertises no MCP,
+// so runtime hands it nothing and the lane must read absent rather than configured.
 #[test]
 fn a_declared_mcp_server_stays_inapplicable_when_the_agent_advertises_none() {
     let args = request_from_json(r#"{"agent": "opencode"}"#)
@@ -403,8 +386,7 @@ fn a_declared_mcp_server_stays_inapplicable_when_the_agent_advertises_none() {
     );
 }
 
-// The other model slot: an agent with no provider block keeps its model at
-// the config root, and settlement has to read it from there.
+// The other model slot: an agent with no provider block keeps its model at the config root.
 #[test]
 fn hosted_settlement_reads_a_root_model_for_a_provider_less_agent() {
     let args = request_from_json(r#"{"agent": "amp"}"#)
@@ -430,9 +412,8 @@ fn hosted_resume_settles_categories_from_replayed_steps() {
     let session = test_session("init_state_resume");
     apply_agent_settlement(&session, "opencode", &args);
 
-    // A resumed run replays already-verified rows as skipped; the category
-    // behind each one must settle exactly as an executed step settles it,
-    // or the snapshot would report work that will never be driven again.
+    // A skipped replay must settle its category exactly as an executed step does, or the snapshot
+    // reports work that will never be driven again.
     for kind in [
         step_kind::AGENT_INSTALL,
         step_kind::WORKSPACE_MATERIALIZE,
@@ -482,9 +463,8 @@ fn hosted_resume_settles_categories_from_replayed_steps() {
 
 #[test]
 fn parking_a_failure_releases_a_blocked_prompt_and_keeps_the_first_code() {
-    // The frame-encode path parks through exactly this call: a payload
-    // that will not serialize cannot be constructed from production types,
-    // so the semantics it depends on are asserted directly.
+    // A payload that will not serialize cannot be built from production types, so the frame-encode
+    // park is asserted through the call it goes through.
     let session = test_session("init_state_park");
     let driver = SessionPromptDriver {
         session: session.clone(),
@@ -516,8 +496,7 @@ fn parking_a_failure_releases_a_blocked_prompt_and_keeps_the_first_code() {
     );
     assert!(awaiting_ids(&latest_state(&session)).is_empty());
 
-    // The error the wizard propagates afterwards is downstream of the
-    // parked one and must not replace it.
+    // The wizard's later error is downstream of the parked one and must not replace it.
     session.set_error("init.invalid_param", "prompt failed".to_owned());
     assert!(
         session

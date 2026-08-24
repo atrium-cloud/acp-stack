@@ -1,15 +1,8 @@
-//! Coverage for the pending-switch journal: a failure at or after the
-//! switch's commit boundary (session rename + canonical config write) used to
-//! leave the new primary on disk with its agent stopped, and the retry was
-//! rejected as "already configured". The journal makes the same-target retry
-//! converge and the different-target retry a conflict.
+//! Coverage for the pending-switch journal: same-target retries converge past
+//! the commit boundary, different-target retries conflict.
 //!
-//! Failure injection: the switch target's command is a gated shim. The shim
-//! file exists from the start so the installer's resolve-and-spawn gate
-//! passes, but it exits 1 until a marker file appears, so the post-commit
-//! agent start fails. Creating the marker fixes the retry without touching
-//! the committed config — editing the config would change the journaled
-//! candidate fingerprint and legitimately conflict.
+//! Failure is injected with a gated shim that exists from the start (so the
+//! installer's spawn gate passes) but exits 1 until a marker file appears.
 
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -84,8 +77,7 @@ async fn target_field(harness: &AgentHarness, target_id: &str, field: &str) -> V
 }
 
 /// Harness booted on the standard opencode fixture with a kimi registry
-/// override whose harness command is `shim_path`. The kimi model discovery is
-/// stubbed through the config-options fixture.
+/// override whose harness command is `shim_path`.
 async fn spawn_kimi_switch_fixture(tempdir: &TempDir, shim_path: &std::path::Path) -> AgentHarness {
     let config_dir = tempdir.path().join(".config/acp-stack");
     std::fs::create_dir_all(&config_dir).expect("config dir");
@@ -122,8 +114,6 @@ async fn agent_switch_retry_after_post_commit_start_failure_converges() {
 
     let (status, body) = switch_request(&harness, "kimi").await;
     assert!(status.is_server_error(), "body: {body}");
-    // The commit boundary was crossed: the new primary is on disk and the
-    // journal holds the pre-commit `was_running` snapshot.
     let on_disk = std::fs::read_to_string(&harness.config_path).expect("read config");
     assert!(on_disk.contains(r#"id = "kimi""#));
     let journal = load_switch_journal(&harness.config_path)
@@ -136,8 +126,6 @@ async fn agent_switch_retry_after_post_commit_start_failure_converges() {
         "stopped"
     );
 
-    // Once the launch is fixed, the same-target retry resumes after the
-    // commit boundary and converges instead of failing "already configured".
     std::fs::write(&marker_path, b"ready\n").expect("write marker");
     let (status, body) = switch_request(&harness, "kimi").await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
@@ -145,8 +133,6 @@ async fn agent_switch_retry_after_post_commit_start_failure_converges() {
     assert_eq!(body["data"]["provider_status"], "resumed");
     assert_eq!(body["data"]["restarted"], true);
     assert_eq!(body["data"]["restart_started"], true);
-    // Pre-commit steps (install, provisioning, model discovery) are not
-    // re-run on a post-commit resume.
     assert!(body["data"].get("install").is_none());
     assert_eq!(journal_phase(&harness), SwitchJournalPhase::Completed);
     assert_eq!(
@@ -171,9 +157,8 @@ async fn agent_switch_resume_survives_process_restart() {
     let (status, body) = switch_request(&harness, "kimi").await;
     assert!(status.is_server_error(), "body: {body}");
 
-    // Simulate a daemon restart between the failed attempt and the retry: the
-    // journaled `was_running` is the only surviving record that the old
-    // primary was up.
+    // Simulate a daemon restart: the journaled `was_running` is the only
+    // surviving record that the old primary was up.
     std::fs::write(&marker_path, b"ready\n").expect("write marker");
     let harness = harness.respawn().await;
     let (status, body) = switch_request(&harness, "kimi").await;
@@ -199,9 +184,7 @@ async fn agent_switch_existing_target_resume_stops_old_target_left_running() {
     let shim_path = tempdir.path().join("kimi-shim");
     let mut config = test_config();
     config.array.enabled = true;
-    // The existing-array-target path takes the runtime command from the
-    // target's stored agent config, so the missing binary lives there. The
-    // escape-hatch install recipe does not spawn-gate the command, so the
+    // The escape-hatch install recipe does not spawn-gate the command, so the
     // switch commits and only the start fails.
     let mut kimi = config.agent.clone();
     kimi.id = "kimi".to_owned();
@@ -224,11 +207,8 @@ async fn agent_switch_existing_target_resume_stops_old_target_left_running() {
         .expect("journal present");
     assert_eq!(journal.phase, SwitchJournalPhase::Committed);
 
-    // Recreate the state a failed old-agent shutdown would leave behind: the
-    // old target's process is still up even though the new primary is
-    // committed. (The bridge teardown escalates to a process-group SIGKILL
-    // and never surfaces an error, so a genuine shutdown failure cannot be
-    // driven through the placebo fixture.)
+    // Recreate the state a failed old-agent shutdown leaves behind: the old
+    // target is still up even though the new primary is committed.
     let restart_old = http()
         .await
         .post(format!(
@@ -269,9 +249,8 @@ async fn agent_switch_rename_collision_clears_journal_and_unblocks_retry() {
     write_placebo_shim(&shim_path);
     let harness = spawn_kimi_switch_fixture(&tempdir, &shim_path).await;
 
-    // Seed the collision the rename check rejects: a session under the current
-    // primary and one under the switch's future target id sharing the same
-    // agent_session_id.
+    // Seed the collision the rename check rejects: two sessions sharing an
+    // agent_session_id across the current primary and the future target.
     {
         let store = harness.state.lock().await;
         store
@@ -305,9 +284,6 @@ async fn agent_switch_rename_collision_clears_journal_and_unblocks_retry() {
     let (status, body) = switch_request(&harness, "kimi").await;
     assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
     assert_eq!(body["error"]["code"], "session.target_rename_conflict");
-    // Nothing durable changed: the config still names the old primary, and the
-    // Planned journal the attempt persisted is gone instead of stranding an
-    // in-progress record.
     let on_disk = std::fs::read_to_string(&harness.config_path).expect("read config");
     assert!(!on_disk.contains(r#"id = "kimi""#), "config: {on_disk}");
     assert_eq!(
@@ -315,8 +291,6 @@ async fn agent_switch_rename_collision_clears_journal_and_unblocks_retry() {
         None
     );
 
-    // With the collision resolved, the retry runs as a fresh switch — a stale
-    // journal would have reproduced the collision or 409'd another target.
     {
         let store = harness.state.lock().await;
         store
@@ -345,12 +319,10 @@ async fn agent_switch_conflicting_target_is_rejected_while_journal_incomplete() 
     let (status, body) = switch_request(&harness, "kimi").await;
     assert!(status.is_server_error(), "body: {body}");
 
-    // A different target must not silently abandon the in-flight switch.
     let (status, body) = switch_request(&harness, "amp").await;
     assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
     assert_eq!(body["error"]["code"], "agent.switch_conflict");
 
-    // The conflict did not disturb the in-flight switch: it still resumes.
     std::fs::write(&marker_path, b"ready\n").expect("write marker");
     let (status, body) = switch_request(&harness, "kimi").await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
@@ -363,8 +335,6 @@ async fn agent_switch_same_primary_still_conflicts_while_foreign_journal_incompl
     let tempdir = TempDir::new().expect("tempdir");
     let _home = HomeEnvGuard::set(tempdir.path());
     let harness = AgentHarness::spawn().await;
-    // An interrupted switch to another target is still in flight; a bare
-    // request naming the current primary must not no-op past it.
     let journal = SwitchJournal {
         old_target_id: "opencode".to_owned(),
         new_target_id: "kimi".to_owned(),
@@ -385,9 +355,6 @@ async fn agent_switch_stale_completed_journal_still_noops_same_target() {
     let tempdir = TempDir::new().expect("tempdir");
     let _home = HomeEnvGuard::set(tempdir.path());
     let harness = AgentHarness::spawn().await;
-    // A Completed journal for a target this request does not name is stale
-    // context, not an in-flight switch: the bare same-target request still
-    // converges as a no-op.
     let journal = SwitchJournal {
         old_target_id: "opencode".to_owned(),
         new_target_id: "kimi".to_owned(),
@@ -418,10 +385,8 @@ async fn agent_switch_conflicts_when_resumed_candidate_differs() {
     write_placebo_shim(&shim_path);
     let harness = spawn_kimi_switch_fixture(&tempdir, &shim_path).await;
 
-    // A journaled in-flight switch whose recorded candidate no longer matches
-    // what the retry would commit: the operator edited config between
-    // attempts, so the retry must conflict rather than converge on a
-    // different switch.
+    // The operator edited config between attempts, so the journaled candidate
+    // no longer matches what the retry would commit.
     persist_switch_journal(
         &harness.config_path,
         &SwitchJournal {
@@ -450,7 +415,6 @@ async fn agent_switch_while_stopped_completes_and_same_target_retry_is_noop() {
     set_kimi_secret(&tempdir);
     write_placebo_shim(&shim_path);
     let harness = spawn_kimi_switch_fixture(&tempdir, &shim_path).await;
-    // The primary was never started: the switch must not start the target.
 
     let (status, body) = switch_request(&harness, "kimi").await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
@@ -466,7 +430,6 @@ async fn agent_switch_while_stopped_completes_and_same_target_retry_is_noop() {
     assert_eq!(body["data"]["restarted"], false);
     assert_eq!(body["data"]["restart_started"], false);
     assert!(body["data"].get("install").is_none());
-    // A no-op retry rewrites nothing and starts nothing.
     assert_eq!(
         std::fs::read(&harness.config_path).expect("read config"),
         committed
@@ -537,10 +500,8 @@ async fn agent_switch_without_journal_converges_same_target_as_noop() {
     let (status, body) = switch_request(&harness, "kimi").await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
 
-    // A daemon whose journal is absent (e.g. written before the journal
-    // existed, or reaped) must still converge a bare same-target retry as a
-    // side-effect-free no-op: callers like the platform's agent-config PATCH
-    // re-deliver the stored harness and rely on idempotent success.
+    // With no journal at all, a bare same-target retry must still converge as
+    // a side-effect-free no-op.
     let journal_path = switch_journal_path(&harness.config_path).expect("journal path");
     std::fs::remove_file(&journal_path).expect("remove journal");
     let config_before = std::fs::read_to_string(&harness.config_path).expect("config before");

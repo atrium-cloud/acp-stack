@@ -1,16 +1,9 @@
-//! Shared filter DTOs for paginated reads across multiple domain tables.
-//!
-//! Domain-specific filters (e.g. `AuthFailureFilter`) live with their domain
-//! file; what's here is the cross-cutting `LogFilter` used by the unified
-//! `events` query path and the per-domain session/command filters that share
-//! the same shape.
+//! Shared filter DTOs for paginated reads; domain-specific filters live with their domain file.
 
 use super::events::Event;
 use super::security_category::SecurityCategory;
 
-/// Sort direction for log queries. `Desc` is the default (newest-first) and
-/// matches the historical behavior; `Asc` is opt-in for follow-mode backfill
-/// and for callers that want to walk forward through history.
+/// Sort direction for log queries; `Desc` (newest-first) is the default.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum LogOrder {
     #[default]
@@ -19,8 +12,7 @@ pub enum LogOrder {
 }
 
 impl LogOrder {
-    /// SQL direction keyword used by both `ORDER BY` and the keyset cursor
-    /// comparison operator that this direction implies.
+    /// SQL direction keyword for `ORDER BY` and the keyset cursor comparison it implies.
     pub(super) fn sql_keyword(self) -> &'static str {
         match self {
             LogOrder::Desc => "DESC",
@@ -29,15 +21,8 @@ impl LogOrder {
     }
 }
 
-/// Composable filter for `events` queries. Each field is optional; absent
-/// fields don't constrain the query. `after_id` is a keyset cursor: the query
-/// uses `(created_at, id)` row-value comparison via a subquery so a paginated
-/// scan progresses past rows sharing a `created_at` (see migration 007 indexes).
-///
-/// The `command_id` and `permission_id` filters rely on `json_extract` against
-/// the payload JSON (`$.command_id`, `$.permission_id`). The permission
-/// publisher in `src/runtime/mediation/permissions.rs` writes a `permission_id` field
-/// alongside the legacy `id` field so this filter keeps working.
+/// Composable filter for `events` queries; absent fields do not constrain. `after_id` is a
+/// keyset cursor comparing `(created_at, id)` so paging clears rows sharing a `created_at`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LogFilter<'a> {
     pub limit: u32,
@@ -63,11 +48,8 @@ impl<'a> LogFilter<'a> {
         }
     }
 
-    /// Re-implements the SQL predicates in `push_event_predicates` as a Rust
-    /// matcher so live-stream consumers (WebSocket fanout, `acps logs query
-    /// --follow`) can drop frames that wouldn't have matched the durable
-    /// query. `limit`, `after_id`, and `order` are paging concerns and are
-    /// intentionally ignored here; live frames are not paginated.
+    /// Rust twin of the SQL predicates in `push_event_predicates`, so live-stream consumers drop
+    /// frames the durable query would not have matched. Paging fields are ignored here.
     pub fn matches(&self, event: &Event) -> bool {
         if let Some(level) = self.level
             && event.level != level
@@ -104,9 +86,8 @@ impl<'a> LogFilter<'a> {
         {
             return false;
         }
-        // Parse the payload exactly once and only when one of the three
-        // payload-probing fields is actually set. Avoids paying serde_json
-        // for the common case of a matcher that only uses level/kind/source.
+        // Parse once, and only when a payload-probing field is set: a level/kind/source-only
+        // matcher should not pay for serde_json.
         let payload = if self.session_id.is_some()
             || self.command_id.is_some()
             || self.permission_id.is_some()
@@ -116,9 +97,7 @@ impl<'a> LogFilter<'a> {
             None
         };
         if let Some(session_id) = self.session_id {
-            // Prefer the typed column (modern writes use
-            // `append_session_event_with_source`); fall back to `$.session_id`
-            // in the payload for legacy events that embedded the id there.
+            // The typed column wins; `$.session_id` covers legacy events that embedded the id.
             let column_hit = event.session_id.as_deref() == Some(session_id);
             let payload_hit = matches!(
                 payload.as_ref().and_then(|value| extract_string(value, "session_id")),
@@ -146,10 +125,8 @@ impl<'a> LogFilter<'a> {
     }
 }
 
-/// Probe `$.permission_id` first (the canonical field written by the modern
-/// publisher), falling back to `$.id` only on permission-shaped rows so an
-/// unrelated `$.id` cannot satisfy a permission lookup. Mirrors the SQL clause
-/// in `rows::push_event_predicates`.
+/// Probe `$.permission_id` first, falling back to `$.id` only on permission-shaped rows so an
+/// unrelated `$.id` cannot satisfy a permission lookup.
 fn permission_payload_matches(
     event: &Event,
     payload: Option<&serde_json::Value>,
@@ -179,8 +156,7 @@ fn extract_string(payload: &serde_json::Value, field: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Backward-compatible alias retained for the CLI's direct-SQLite log query
-/// path that pre-dated the unified filter. New code should use `LogFilter`.
+/// Alias retained for the CLI's direct-SQLite log query path; new code uses `LogFilter`.
 pub type EventFilter<'a> = LogFilter<'a>;
 
 #[derive(Debug, Clone, Copy, Default)]

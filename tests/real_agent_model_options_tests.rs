@@ -1,9 +1,5 @@
-//! Ignored integration tests for real ACP agents.
-//!
-//! These exercise ACP `session/new` model config options against installed
-//! agents rather than the fake test agent. Run explicitly with:
-//!
-//! `ACP_STACK_RUN_REAL_AGENT_TESTS=1 cargo test --test real_agent_model_options_tests -- --ignored`
+//! Ignored integration tests exercising ACP `session/new` config options against real installed
+//! agents. Requires `ACP_STACK_RUN_REAL_AGENT_TESTS=1` and `--ignored`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -230,10 +226,8 @@ async fn real_amp_prompt_probe_for_dashboard() {
     .await;
 }
 
-// Deterministic client-terminal acceptance probe: force one real harness into
-// a shell action and assert the command surfaced through our terminal/create
-// handler as an `acp`-origin row in the durable command log. This is the
-// milestone gate for claiming terminal support end-to-end.
+// Forces one real harness into a shell action and asserts the command surfaced through
+// `terminal/create` as an `acp`-origin row in the durable command log.
 async fn real_terminal_uname_probe(agent: AgentConfig, env: HashMap<String, String>) {
     let cwd = std::env::current_dir().expect("current dir");
     let state_dir = tempfile::tempdir().expect("tempdir");
@@ -264,8 +258,7 @@ async fn real_terminal_uname_probe(agent: AgentConfig, env: HashMap<String, Stri
     .await
     .expect("real ACP agent session/new timed out")
     .expect("real ACP agent should create a session");
-    // Pin the default test model before prompting; a fresh OpenCode session
-    // has no model selected and fails the prompt otherwise.
+    // A fresh OpenCode session has no model selected and fails the prompt without this pin.
     let values = session_model_values(&response).expect("advertised models");
     let model_value = values
         .iter()

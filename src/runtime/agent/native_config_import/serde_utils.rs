@@ -22,12 +22,8 @@ pub(super) fn parse_toml_table(content: &str) -> Result<TomlMap<String, TomlValu
     }
 }
 
-/// Parse a Goose `config.yaml` root into a JSON object. Goose config is YAML,
-/// but the whole classification/sanitize/paths pipeline is JSON-shaped, so the
-/// document is converted to JSON up front. YAML permits non-string mapping keys
-/// (numbers, booleans, sequences); those have no JSON representation and no
-/// legitimate place in a Goose config, so any mapping carrying one is rejected
-/// as invalid rather than lossily coerced.
+/// Parse a Goose `config.yaml` root into a JSON object for the JSON-shaped
+/// classification pipeline; a non-string YAML mapping key is rejected as invalid.
 pub(super) fn parse_goose_root(content: &str) -> Result<JsonMap<String, JsonValue>> {
     let value: YamlValue =
         serde_norway::from_str(content).map_err(|_| native_error("agent.native_config_invalid"))?;
@@ -52,9 +48,8 @@ fn yaml_value_to_json(value: YamlValue) -> Result<JsonValue> {
         YamlValue::Mapping(mapping) => {
             let mut object = JsonMap::with_capacity(mapping.len());
             for (key, value) in mapping {
-                // Reject non-string keys instead of stringifying them: a Goose
-                // config never uses them, and a silent coercion could collide
-                // two distinct keys or smuggle content past the sanitize pass.
+                // Stringifying a non-string key could collide two distinct keys or
+                // smuggle content past the sanitize pass.
                 let YamlValue::String(key) = key else {
                     return Err(native_error("agent.native_config_invalid"));
                 };
@@ -312,12 +307,8 @@ pub(super) fn sensitive_field_reason(key: &str) -> Option<BlockedReason> {
         || flattened.contains("passwd")
         || flattened.contains("bearer")
         || flattened.contains("authorization")
-        // A credential-style `token` either ends the key (`authToken`,
-        // `github_token`) or is followed by a value word (`tokenValue`,
-        // `tokenRef`). Quantity fields — `max_tokens`,
-        // `model_auto_compact_token_limit`, `…_token_weight` — follow
-        // `token(s)` with a count word instead and are routine model tuning,
-        // not credentials.
+        // A credential-style `token` ends the key or is followed by a value word;
+        // quantity fields like `max_tokens` follow it with a count word instead.
         || flattened.ends_with("token")
         || flattened.contains("tokenvalue")
         || flattened.contains("tokenref")

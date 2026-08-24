@@ -1,25 +1,5 @@
-//! Minimal AWS S3 client for Phase 4 workspace data ingestion.
-//!
-//! Implements just the two operations the workspace materializer needs —
-//! `ListObjectsV2` and `GetObject` — with SigV4 signing built on
-//! `reqwest`, `sha2`, `hmac`, and `chrono`. Pulling the full
-//! `aws-sdk-s3` crate would more than double the compile surface for two
-//! call sites; this module stays under 400 lines of focused code.
-//!
-//! Scope limits:
-//!
-//! * Path-style and virtual-hosted bucket URLs only.
-//! * AWS standard regions (us-east-1, us-west-2, eu-…). The endpoint
-//!   pattern is `https://s3.<region>.amazonaws.com/<bucket>`. Other
-//!   providers can be plugged in later via an explicit endpoint override.
-//! * No multipart, no presigning, no streaming uploads, no session-token
-//!   credentials. Only static `(access_key, secret_key)` pairs.
-//! * GET responses are buffered in memory up to a per-object cap. The
-//!   workspace materializer enforces the cumulative cap.
-//!
-//! The SigV4 implementation is the standard "AWS Signature Version 4"
-//! algorithm described in
-//! https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_aws-signing.html.
+//! Minimal SigV4-signing S3 client covering the `ListObjectsV2` and
+//! `GetObject` calls the workspace materializer needs, with static credentials.
 
 use std::io::Read;
 use std::time::Duration;
@@ -43,9 +23,8 @@ const STREAM_CHUNK_BYTES: usize = 32 * 1024;
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Static credentials. We intentionally do not implement the full AWS
-/// credential-provider chain — operators declare the access/secret refs
-/// in config and resolve them through the encrypted secret store.
+/// Static credentials resolved from config secret refs; the AWS
+/// credential-provider chain is deliberately not implemented.
 #[derive(Debug, Clone)]
 pub struct Credentials {
     pub access_key: String,
@@ -57,8 +36,7 @@ pub struct S3Client {
     http: Client,
     region: String,
     credentials: Credentials,
-    /// Optional override for testing against a local mock. None ⇒
-    /// the real AWS endpoint pattern.
+    /// Override for testing against a local mock; `None` uses the AWS endpoint pattern.
     endpoint_base: Option<String>,
 }
 
@@ -80,9 +58,8 @@ impl S3Client {
         })
     }
 
-    /// Override the endpoint base, e.g. `http://127.0.0.1:9000` for a
-    /// localhost MinIO-style mock in tests. The override carries the
-    /// scheme and authority only; we still build the path ourselves.
+    /// Override the endpoint base with a scheme and authority; the path is
+    /// still built here.
     pub fn with_endpoint_base(mut self, base: impl Into<String>) -> Self {
         self.endpoint_base = Some(base.into());
         self
@@ -131,16 +108,11 @@ impl S3Client {
         parse_list_objects_v2(&body)
     }
 
-    /// Fetch `bucket/key`. The full body is buffered into memory because
-    /// the workspace materializer wants a single `bytes` slice it can
-    /// write atomically; callers are responsible for enforcing the
-    /// per-object size before requesting (the response cap below is
-    /// defensive backstop).
+    /// Fetch `bucket/key`, buffering the full body so the materializer can
+    /// write a single slice atomically.
     pub fn get_object(&self, bucket: &str, key: &str, max_bytes: u64) -> Result<Vec<u8>> {
-        // Pass the raw key — `canonical_uri` will percent-encode it
-        // exactly once. Pre-encoding here used to double-encode
-        // (`% → %25`) and break SigV4 for keys with spaces, `+`, or
-        // non-ASCII characters.
+        // Pass the RAW key: `canonical_uri` percent-encodes exactly once, and
+        // pre-encoding here double-encodes and breaks SigV4.
         self.signed_get_with_path(bucket, key, &[], max_bytes)
     }
 
@@ -165,9 +137,6 @@ impl S3Client {
         let date_stamp = now.format("%Y%m%d").to_string();
         let host = host_for(&self.endpoint_base, &self.region);
 
-        // Canonical request inputs. `canonical_uri` percent-encodes the
-        // raw path once; we then build the HTTP URL from the same
-        // encoded form so the request line matches what we signed.
         let canonical_uri = canonical_uri(bucket, path_raw);
         let canonical_query = canonical_query_string(query);
 
@@ -193,12 +162,10 @@ impl S3Client {
         );
         let canonical_request_hash = hex_sha256(canonical_request.as_bytes());
 
-        // String-to-sign.
         let credential_scope = format!("{date_stamp}/{}/{SERVICE}/aws4_request", self.region);
         let string_to_sign =
             format!("{ALGO}\n{amz_date}\n{credential_scope}\n{canonical_request_hash}");
 
-        // Signing key derivation.
         let signing_key = derive_signing_key(
             &self.credentials.secret_key,
             &date_stamp,
@@ -207,15 +174,13 @@ impl S3Client {
         )?;
         let signature = hex_hmac(&signing_key, string_to_sign.as_bytes())?;
 
-        // Authorization header.
         let authorization = format!(
             "{ALGO} Credential={}/{credential_scope}, SignedHeaders={signed_header_names}, Signature={signature}",
             self.credentials.access_key
         );
 
-        // Build and dispatch the request from the encoded canonical_uri
-        // so the on-the-wire path matches the signed canonical request
-        // byte-for-byte.
+        // Dispatch from the encoded canonical_uri so the on-the-wire path
+        // matches the signed canonical request byte-for-byte.
         let host_base = match &self.endpoint_base {
             Some(base) => base.trim_end_matches('/').to_owned(),
             None => format!("https://s3.{}.amazonaws.com", self.region),
@@ -303,7 +268,6 @@ fn read_response_capped(
 
 fn host_for(endpoint_base: &Option<String>, region: &str) -> String {
     if let Some(base) = endpoint_base {
-        // Strip the scheme to extract authority for the `Host` header.
         let authority = base
             .trim_start_matches("http://")
             .trim_start_matches("https://")
@@ -318,8 +282,7 @@ fn canonical_uri(bucket: &str, path: &str) -> String {
     if trimmed_path.is_empty() {
         format!("/{}", uri_encode(bucket, false))
     } else {
-        // bucket is already a single segment; the object key may have
-        // embedded `/` which we preserve unescaped (S3 expects that).
+        // S3 expects embedded `/` in an object key to stay unescaped.
         let mut out = String::with_capacity(2 + bucket.len() + trimmed_path.len());
         out.push('/');
         out.push_str(&uri_encode(bucket, false));
@@ -542,14 +505,11 @@ mod tests {
 
     #[test]
     fn canonical_uri_single_encodes_object_keys() {
-        // Object keys with spaces, `+`, and non-ASCII characters must
-        // appear percent-encoded **exactly once** in the canonical URI;
-        // double-encoding would break SigV4 against real S3.
+        // Double-encoding here would break SigV4 against real S3.
         assert_eq!(
             canonical_uri("example", "data/has spaces+and%signs/héllo"),
             "/example/data/has%20spaces%2Band%25signs/h%C3%A9llo"
         );
-        // Leading slash on the key is trimmed.
         assert_eq!(
             canonical_uri("example", "/leading/slash"),
             "/example/leading/slash"

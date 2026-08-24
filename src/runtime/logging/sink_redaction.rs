@@ -1,13 +1,5 @@
-//! Per-table redaction allowlists for the Supabase logging sink.
-//!
-//! Default closed: callers pass a fully-hydrated row (JSON columns already
-//! parsed into `serde_json::Value`); `redact_row` keeps only the allowlisted
-//! keys inside each JSON column, drops or rewrites high-risk columns, and
-//! returns `StackError::SupabaseSinkUnknownTable` for tables that have not
-//! been explicitly modeled. This is the load-bearing guard for the spec rule
-//! "Ensure external sink payloads never include secret values" — adding a new
-//! source table to the sink requires extending this function so nothing
-//! escapes by accident.
+//! Per-table redaction allowlists for the Supabase logging sink. Default closed: an unmodeled
+//! table errors, so a new source table MUST be added here before it can be mirrored outbound.
 
 use crate::error::{Result, StackError};
 use serde_json::{Map, Value, json};
@@ -58,16 +50,13 @@ const AGENT_LIFECYCLE_PAYLOAD_KEEP: &[&str] = &[
 
 fn redact_events_row(row: &mut Map<String, Value>) -> Result<()> {
     redact_json_column(row, "payload_json", EVENTS_PAYLOAD_KEEP);
-    // events.message can be free-form (e.g. a workspace mutation might log a
-    // path; an installer might emit a stack trace). Replace it wholesale so
-    // short inline secrets do not pass through under a length cap.
+    // Free-form text is replaced wholesale so short inline secrets cannot pass a length cap.
     redact_string_field(row, "message");
     Ok(())
 }
 
 fn redact_sessions_row(row: &mut Map<String, Value>) -> Result<()> {
-    // metadata_json: keep agent_id (a stable identifier); drop everything else
-    // so an upstream regression that stuffs secrets into metadata cannot leak.
+    // Keep only agent_id so an upstream regression stuffing secrets into metadata cannot leak.
     if let Some(metadata) = row.get_mut("metadata_json") {
         let mut redacted = Map::new();
         if let Some(obj) = metadata.as_object()
@@ -78,17 +67,11 @@ fn redact_sessions_row(row: &mut Map<String, Value>) -> Result<()> {
         }
         *metadata = Value::Object(redacted);
     }
-    // The `title` column is user-supplied; replace with null. PostgREST keeps
-    // the column shape stable, and dashboards still see `title IS NOT NULL`
-    // == false here. We deliberately do not synthesize a `title_present`
-    // column because the Postgres schema has no such column — adding it
-    // would require schema drift.
     if row.contains_key("title") {
         row.insert("title".to_owned(), Value::Null);
     }
-    // `cwd` for a session can encode private repo names, user names, or
-    // `/var/secrets/...`-style paths. The Postgres mirror column is NOT NULL,
-    // so redact to its non-secret default shape instead of null.
+    // `cwd` can encode private repo or user names; the Postgres mirror column is NOT NULL, so
+    // it redacts to the empty string rather than null.
     if row.contains_key("cwd") {
         row.insert("cwd".to_owned(), Value::String(String::new()));
     }
@@ -96,23 +79,15 @@ fn redact_sessions_row(row: &mut Map<String, Value>) -> Result<()> {
 }
 
 fn redact_prompt_scalars(row: &mut Map<String, Value>) {
-    // ACP / agent scalars can be free-form depending on adapter behavior.
-    // Replace them wholesale so short inline secrets do not pass through.
+    // Adapter-dependent free-form text; replaced wholesale rather than length-capped.
     redact_string_field(row, "error_message");
     redact_string_field(row, "stop_reason");
 }
 
 fn redact_prompts_row(row: &mut Map<String, Value>) -> Result<()> {
     redact_prompt_scalars(row);
-    // Prompt content is the highest-risk surface: agents can paste anything in
-    // there, including secrets and PII. Drop everything but a length stamp so
-    // dashboards can still see "this session had a 3kB prompt".
-    //
-    // The hydrator stores the original prompt_json TEXT byte count in the
-    // out-of-band `_prompt_json_bytes` hint because the in-memory `Value`
-    // (e.g. an ACP block array) is not a stable proxy for the on-disk size.
-    // Falls back to serializing the in-memory value when the hint is absent
-    // (tests sometimes synthesize a row without the hint).
+    // Prompt content keeps only a length stamp. The byte count comes from the hydrator's
+    // out-of-band hint because the in-memory `Value` is no proxy for the on-disk size.
     let byte_len = row
         .remove("_prompt_json_bytes")
         .and_then(|v| v.as_u64())
@@ -133,8 +108,7 @@ fn redact_prompts_row(row: &mut Map<String, Value>) -> Result<()> {
 }
 
 fn redact_commands_row(row: &mut Map<String, Value>) -> Result<()> {
-    // env vars routinely carry secrets. Replace the whole column with a count
-    // so dashboards keep "env was non-empty" without leaking values.
+    // env vars routinely carry secrets, so the whole column becomes a count.
     let env_var_count = row
         .get("env_json")
         .and_then(|v| match v {
@@ -147,10 +121,8 @@ fn redact_commands_row(row: &mut Map<String, Value>) -> Result<()> {
         "env_json".to_owned(),
         json!({"env_var_count": env_var_count}),
     );
-    // Command lines and cwd routinely carry inline credentials
-    // (`curl -u user:token`, `psql postgres://user:pass@host`,
-    // `/tmp/secrets/...`). The local SQLite store keeps the full value for
-    // local audit; the external mirror gets a length stamp only.
+    // Command lines and cwd routinely carry inline credentials, so the external mirror gets a
+    // length stamp only; the local SQLite store still keeps the full value for audit.
     let command_byte_len = row
         .get("command")
         .and_then(|v| v.as_str())
@@ -172,18 +144,14 @@ fn redact_permission_requests_row(row: &mut Map<String, Value>) -> Result<()> {
 }
 
 fn redact_permission_decisions_row(row: &mut Map<String, Value>) -> Result<()> {
-    // `reason` is the operator's free-form note explaining why they approved
-    // or denied a request. Replace it wholesale so short pasted tokens do not
-    // pass through under a length cap.
+    // The operator's free-form note; replaced wholesale so pasted tokens cannot pass a cap.
     redact_string_field(row, "reason");
     Ok(())
 }
 
 fn redact_auth_failures_row(row: &mut Map<String, Value>) -> Result<()> {
-    // payload_json on auth_failures is freeform and was originally meant for
-    // internal debugging - never ship it outbound. Keep only the structural
-    // auth reason codes emitted by the runtime; redact anything else. `route`
-    // is an unauthenticated request path and can contain path-embedded tokens.
+    // payload_json here is internal-debugging freeform and never ships outbound; `route` is an
+    // unauthenticated request path that can carry path-embedded tokens.
     row.insert("payload_json".to_owned(), Value::Object(Map::new()));
     if let Some(reason) = row.get_mut("reason")
         && let Some(text) = reason.as_str()
@@ -202,11 +170,8 @@ fn redact_agent_lifecycle_row(row: &mut Map<String, Value>) -> Result<()> {
     Ok(())
 }
 
-/// Filter `column` (expected to be a JSON object) so it keeps only `allow`ed
-/// top-level keys with scalar values. Non-object values (including null) are
-/// replaced with an empty object so downstream consumers see a stable shape.
-/// Nested arrays/objects under allowlisted names are dropped because they can
-/// smuggle arbitrary secret-bearing structure through an otherwise-safe key.
+/// Keep only allowlisted top-level keys with SCALAR values; nested arrays and objects are
+/// dropped even under an allowed name, since they can smuggle structure through a safe key.
 fn redact_json_column(row: &mut Map<String, Value>, column: &str, allow: &[&str]) {
     let mut filtered = Map::new();
     if let Some(Value::Object(obj)) = row.get(column) {
@@ -228,8 +193,7 @@ fn safe_json_scalar(value: &Value) -> Option<Value> {
     }
 }
 
-/// Replace a top-level string column with a length stamp. No-op when the field
-/// is null or absent.
+/// Replace a top-level string column with a length stamp; no-op when null or absent.
 fn redact_string_field(row: &mut Map<String, Value>, key: &str) {
     if let Some(v) = row.get_mut(key)
         && let Some(text) = v.as_str()
@@ -366,7 +330,6 @@ mod tests {
         assert_eq!(pj.get("redacted").and_then(|v| v.as_bool()), Some(true));
         let byte_len = pj.get("byte_len").and_then(|v| v.as_u64()).unwrap();
         assert!(byte_len > 0);
-        // Spot-check the secret-bearing text is gone.
         let serialized = serde_json::to_string(&row).expect("serialize");
         assert!(
             !serialized.contains("very long secret-bearing prompt body"),

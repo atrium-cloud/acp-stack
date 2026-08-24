@@ -134,11 +134,8 @@ fn run_apply(args: DepsApplyArgs, output: OutputFormat) -> Result<()> {
     let home = home_dir()?;
     let state_path = default_state_path(&home);
     if !state_path.exists() {
-        // The runner runs operator install scripts and persists per-
-        // action `installer_runs` rows for audit. Silently downgrading
-        // to "audit off" when the state DB is missing would let
-        // side-effectful installs run without a trail; fail fast with
-        // a clear pointer to `acps init` instead.
+        // Fail fast rather than downgrade to "audit off": side-effectful installs must
+        // never run without their `installer_runs` trail.
         return Err(StackError::InvalidParam {
             field: "state",
             reason: format!(
@@ -148,12 +145,8 @@ fn run_apply(args: DepsApplyArgs, output: OutputFormat) -> Result<()> {
         });
     }
     let store = StateStore::open(&state_path)?;
-    // Migrate before any install snippet runs. If the on-disk schema
-    // is older than the binary's, the first `append_installer_run`
-    // would fail mid-apply — by then a side-effectful install would
-    // already have executed without an audit row. Failing fast here
-    // keeps "no audit row recorded" from coexisting with "side
-    // effects committed".
+    // Migrate BEFORE any install snippet runs: an older on-disk schema would fail the
+    // first `append_installer_run` mid-apply, after side effects had committed.
     store.migrate()?;
     let report = if output.is_json() {
         apply_dependencies_tracked(
@@ -232,10 +225,8 @@ fn run_apply(args: DepsApplyArgs, output: OutputFormat) -> Result<()> {
         println!("audit run: {}", report.apply_run_id);
     }
 
-    // Surface any non-success as a non-zero exit so automation can gate
-    // on it — unlike init, `acps deps apply` is an explicit imperative
-    // command, so "could not do what you asked" must fail even when the
-    // cause is an un-escalatable host rather than a broken action.
+    // Unlike init, this is an explicit imperative command, so any non-success exits
+    // non-zero even when the cause is an un-escalatable host.
     let mut failures: Vec<String> = Vec::new();
     let mut skipped_privileged = 0usize;
     let mut skipped_privilege_uid: Option<u32> = None;
@@ -269,10 +260,8 @@ fn run_apply(args: DepsApplyArgs, output: OutputFormat) -> Result<()> {
         }
         failures.push(format!(
             "{skipped_privileged} action(s) need root privilege (uid={uid}, no passwordless sudo)",
-            // The outcome carries the real euid; `escalation.uid()`
-            // reports 0 under `NotNeeded`, which can still reach
-            // PrivilegeRequired when a system dep turned pending
-            // between probe and apply.
+            // The outcome carries the real euid; `escalation.uid()` reports 0 under
+            // `NotNeeded`, which a dep turning pending between probe and apply reaches.
             uid = skipped_privilege_uid.unwrap_or_default(),
         ));
     }

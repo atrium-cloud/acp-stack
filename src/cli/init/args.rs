@@ -29,9 +29,8 @@ pub(super) struct InitMcpHttpServer {
     pub(super) headers: Vec<InitMcpHttpHeader>,
 }
 
-/// Mirrors `HttpHeaderRef`: exactly one of `value_ref` (whole-value secret
-/// ref) or `value` (`${NAME}` template) is set; enforced where the record is
-/// built (wire boundary or flag splitter).
+/// Mirrors `HttpHeaderRef`: exactly one of `value_ref` or `value` is set,
+/// enforced where the record is built (wire boundary or flag splitter).
 #[derive(Debug, Clone)]
 pub(super) struct InitMcpHttpHeader {
     pub(super) name: String,
@@ -424,10 +423,8 @@ pub struct InitArgs {
     pub(super) native_config_upload: Option<InitNativeConfigUpload>,
     #[arg(skip)]
     pub(super) native_config_revision: Option<String>,
-    /// The hosted caller declared it will push a custom provider's credential
-    /// out-of-band (managed-state) after init. Only then is a missing custom
-    /// provider ref soft-passed; a terminal run leaves this false and keeps the
-    /// hard failure. Not a CLI flag: the declaration rides the start request.
+    /// Only when set is a missing custom-provider ref soft-passed; a terminal
+    /// run leaves this false and keeps the hard failure.
     #[arg(skip)]
     pub(super) defer_provider_credentials: bool,
     /// Resume the most recent non-terminal init run. With `--run-id`, resume
@@ -448,10 +445,8 @@ pub struct InitArgs {
     pub(super) rotate_keys: bool,
 }
 
-/// Every flag absent, as if `acps init` were invoked with no arguments at all.
-/// Hand-written rather than derived because three fields are not zero-valued:
-/// `no_skills` starts set (skills are opt-in for a caller that declares
-/// nothing), and the two edge enums carry the same defaults clap applies.
+/// Every flag absent, as if `acps init` were invoked with no arguments. Not
+/// derived: `no_skills` starts set, and the edge enums carry clap's defaults.
 impl Default for InitArgs {
     fn default() -> Self {
         Self {

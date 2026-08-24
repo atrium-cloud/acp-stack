@@ -66,10 +66,7 @@ impl EventHub {
         });
     }
 
-    /// Fan out a workspace mutation to subscribers of the `workspace` topic.
-    /// Topic name matches `docs/specs/api/endpoints.md:1123-1130`. Payload is shaped
-    /// like the session-update envelope so client code can dispatch on
-    /// `payload.kind` uniformly across topics.
+    /// Fan out a workspace mutation on the `workspace` topic.
     pub fn publish_workspace_event(&self, event: &Event, data: Value) {
         self.publish(LiveEvent {
             event_type: "event",
@@ -83,9 +80,8 @@ impl EventHub {
         });
     }
 
-    /// Fan out a per-command event (stdout/stderr chunk or lifecycle
-    /// transition) on the `commands.{id}` topic. The payload shape mirrors
-    /// `publish_workspace_event` so subscribers can dispatch uniformly.
+    /// Fan out a per-command output chunk or lifecycle transition on the
+    /// `commands.{id}` topic.
     pub fn publish_command_event(&self, command_id: &str, event: &Event, data: Value) {
         self.publish(LiveEvent {
             event_type: "event",
@@ -100,8 +96,7 @@ impl EventHub {
     }
 
     /// Fan out an agent-lifecycle row (`agent.*`) on the `agent.lifecycle`
-    /// topic. The persistent record lives in the `agent_lifecycle` table; this
-    /// is the live-stream mirror.
+    /// topic.
     pub fn publish_agent_event(&self, id: &str, created_at: &str, kind: &str, data: Value) {
         self.publish(LiveEvent {
             event_type: "event",
@@ -115,10 +110,8 @@ impl EventHub {
         });
     }
 
-    /// Fan out a runtime-status row (`server.*`) on the `status` topic. Same
-    /// underlying SQLite row as `publish_agent_event` (both come from
-    /// `agent_lifecycle`); the topic distinction lets a UI subscribe to
-    /// runtime health without seeing every agent-spawn transition.
+    /// Fan out a runtime-status row (`server.*`) on the `status` topic, so a
+    /// UI can watch runtime health without every agent-spawn transition.
     pub fn publish_status_event(&self, id: &str, created_at: &str, kind: &str, data: Value) {
         self.publish(LiveEvent {
             event_type: "event",
@@ -132,10 +125,8 @@ impl EventHub {
         });
     }
 
-    /// Fan out a permission-lifecycle row (`permission.*`) on the `permissions`
-    /// topic. The persistent record lives in `permission_requests` /
-    /// `permission_decisions`; this is the live-stream mirror. Payload shape
-    /// matches the other publish_* helpers: `{ kind, data }`.
+    /// Fan out a permission-lifecycle row (`permission.*`) on the
+    /// `permissions` topic.
     pub fn publish_permission_event(&self, id: &str, created_at: &str, kind: &str, data: Value) {
         self.publish(LiveEvent {
             event_type: "event",
@@ -149,14 +140,9 @@ impl EventHub {
         });
     }
 
-    /// Fan out every `events` row on the `logs` topic so `acps logs tail` and
-    /// any other generic log consumer can see the same stream the SQLite
-    /// query routes serve. `payload_json` was validated by
-    /// `validate_json_payload` before write, so a parse failure here means
-    /// downstream corruption — we keep the wire shape stable (Null payload)
-    /// and surface the anomaly via `tracing::warn!` rather than swallowing it.
-    /// `session_id` is included only when the row was scoped via
-    /// `append_session_event_with_source`; absence means a global write.
+    /// Fan out every `events` row on the `logs` topic. `payload_json` was
+    /// validated before write, so a parse failure here means downstream
+    /// corruption: keep the wire shape stable and warn rather than swallow.
     pub fn publish_log_event(&self, event: &Event) {
         let data: Value = match serde_json::from_str(&event.payload_json) {
             Ok(value) => value,

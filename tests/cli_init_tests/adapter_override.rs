@@ -108,8 +108,7 @@ fn init_agent_change_clears_adapter_override() {
 
     let config = written_config(&tempdir);
     assert!(config.agent.adapter_override.is_none());
-    // Under the dev placebo registry every entry's harness command is the
-    // placebo binary path; the point is that the override command is gone.
+    // Under the dev placebo registry every harness command is the placebo path.
     assert_eq!(config.agent.command, env!("CARGO_BIN_EXE_placebo-agent"));
 }
 
@@ -176,10 +175,8 @@ fn init_adapter_override_clear_works_after_agent_leaves_the_registry() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     init_placebo_with_override(&tempdir);
 
-    // Without the dev placebo registry, `placebo` is absent from the embedded
-    // catalog. Clearing the now-stale designation must still be applied and
-    // persisted; the run then stops at agent install because the configured
-    // agent itself is unknown to the registry.
+    // With `placebo` absent from the embedded catalog, clearing the stale
+    // designation must still persist even though the run then fails at install.
     acps_command_without_placebo()
         .env("HOME", tempdir.path())
         .args([

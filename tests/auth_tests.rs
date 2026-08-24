@@ -118,8 +118,7 @@ fn auth_failure_rows_query_newest_first() {
         })
         .expect("query");
     assert_eq!(rows.len(), 4);
-    // Lexicographic id order matches chronological order; reverse-iterating
-    // gives the appended order.
+    // Lexicographic id order matches chronological order.
     assert_eq!(rows[3].reason, "missing");
     assert_eq!(rows[2].reason, "invalid");
     assert_eq!(rows[1].reason, "wrong_kind");

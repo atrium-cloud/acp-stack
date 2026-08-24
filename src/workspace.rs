@@ -1,31 +1,7 @@
-//! Workspace file operations under `workspace.root`.
-//!
-//! Three responsibilities:
-//!   * Resolve incoming request paths to absolute filesystem paths inside the
-//!     workspace root, rejecting traversal, NUL bytes, absolute prefixes, and
-//!     symlink escapes. See `resolve_workspace_path`.
-//!   * Provide synchronous list/read/write/delete primitives that the HTTP
-//!     handlers run inside `tokio::task::spawn_blocking`.
-//!   * Stay agnostic to HTTP framing — the API layer translates `StackError`
-//!     into envelope responses.
-//!
-//! Symlink policy: for reads we canonicalize the full path and check that it
-//! stays inside the canonicalized root, which transparently rejects escapes
-//! while permitting symlinks that happen to point back inside the workspace.
-//! For writes we additionally refuse to overwrite an existing symlink at the
-//! target, because writing through a symlink (even one that points inside the
-//! workspace) is rarely what an API client intends and makes intent hard to
-//! audit from the request line alone. `read_file` also opens the final path
-//! with `O_NOFOLLOW` on Unix so a symlink swap between resolve and open is
-//! refused at the kernel level rather than silently followed.
-//!
-//! Residual TOCTOU: a local actor with write access to `workspace.root` can
-//! swap entries between `resolve_workspace_path` and the subsequent
-//! list/write/delete syscall, defeating intermediate-directory containment.
-//! The runtime accepts this in single-tenant deployments where the agent and
-//! daemon run as the same user inside a VM. Strict mitigation would require
-//! `openat` with `O_NOFOLLOW` at every path segment; that is intentionally
-//! out of scope for 0.0.1.
+//! Workspace file operations under `workspace.root`: path resolution rejecting traversal, NUL
+//! bytes, absolute prefixes, and symlink escapes, plus the sync list/read/write/delete primitives
+//! the HTTP handlers run in `spawn_blocking`. Residual TOCTOU is accepted: a local actor with
+//! write access to the root can swap entries between resolve and the following syscall.
 
 use std::fs::Metadata;
 use std::io::{ErrorKind, Read};
@@ -44,9 +20,8 @@ pub enum PathIntent {
     WriteOrCreate,
 }
 
-/// Resolve a workspace-relative `requested` path to an absolute filesystem
-/// path inside `root`. `root` must already exist (it is canonicalized on every
-/// call so that callers do not need to cache the canonical form).
+/// Resolve a workspace-relative `requested` path to an absolute filesystem path inside `root`,
+/// which must already exist.
 pub fn resolve_workspace_path(root: &Path, requested: &str, intent: PathIntent) -> Result<PathBuf> {
     if requested.contains('\0') {
         return Err(StackError::WorkspacePathInvalid {
@@ -75,15 +50,9 @@ pub fn resolve_workspace_path(root: &Path, requested: &str, intent: PathIntent) 
             Component::Normal(_) => normal_count += 1,
         }
     }
-    // For writes/deletes the request must point at a specific file. Two
-    // edge cases:
-    //   * paths that normalize to "the root itself" (`""`, `.`, `./`, …) —
-    //     Rust's `Path::file_name()` returns the workspace root's basename
-    //     for these, so they'd resolve to a sibling of the root.
-    //   * paths whose final string segment is `.` (e.g. `subdir/.`) — Rust
-    //     collapses the trailing `.` away, so the resolver would silently
-    //     act on `subdir` even though the response echoes `subdir/.`. The
-    //     write would target a different path than the caller named.
+    // Rust's `Path` API silently retargets both of these: a path normalizing to the root itself
+    // resolves to a sibling of the root, and a trailing `.` (`subdir/.`) collapses to `subdir`,
+    // so the write would land somewhere other than the path the caller named.
     if matches!(intent, PathIntent::WriteOrCreate) {
         if normal_count == 0 {
             return Err(StackError::WorkspacePathInvalid {
@@ -137,10 +106,8 @@ pub fn resolve_workspace_path(root: &Path, requested: &str, intent: PathIntent) 
                     requested: requested.to_owned(),
                 });
             }
-            // `canonicalize` happily resolves through a regular file, so the
-            // parent could canonicalize successfully and still not be a
-            // directory. Re-stat explicitly to surface this as a 400 instead
-            // of letting atomic_write_owner_only fail with a 500 ENOTDIR.
+            // `canonicalize` resolves through a regular file, so the parent can canonicalize and
+            // still not be a directory.
             let parent_metadata =
                 std::fs::metadata(&canonical_parent).map_err(|source| StackError::WorkspaceIo {
                     requested: requested.to_owned(),
@@ -160,9 +127,7 @@ pub fn resolve_workspace_path(root: &Path, requested: &str, intent: PathIntent) 
                         requested: requested.to_owned(),
                     })?;
             let resolved = canonical_parent.join(final_name);
-            // Refuse to overwrite an existing symlink. `symlink_metadata` does
-            // not follow the link, so we see the link itself rather than its
-            // target.
+            // Refuse to overwrite an existing symlink; `symlink_metadata` sees the link itself.
             if let Ok(metadata) = std::fs::symlink_metadata(&resolved)
                 && metadata.file_type().is_symlink()
             {
@@ -175,11 +140,8 @@ pub fn resolve_workspace_path(root: &Path, requested: &str, intent: PathIntent) 
     }
 }
 
-/// Resolve an ABSOLUTE path (as ACP `fs/*` methods send) to a verified path
-/// inside `root`. The path must lexically sit under the workspace root; the
-/// remainder is then routed through `resolve_workspace_path`, which supplies
-/// the canonicalization, `..` rejection, and symlink handling — the absolute
-/// entry point must never be weaker than the relative one.
+/// Resolve an ABSOLUTE path (as ACP `fs/*` methods send) to a verified path inside `root`. The
+/// remainder MUST route through `resolve_workspace_path`: this entry point must never be weaker.
 pub fn resolve_workspace_abs_path(
     root: &Path,
     requested: &Path,
@@ -257,15 +219,9 @@ pub struct FileMetadata {
     pub modified: DateTime<Utc>,
 }
 
-/// List the entries of `absolute_path` (which must be inside the workspace
-/// root; the caller resolves first). Entries are sorted directories-first,
-/// then by name ascending. Symlinks are reported as `EntryKind::Symlink` and
-/// are not traversed: their `size` field reflects the link target's metadata
-/// only when the metadata call succeeds; otherwise it is `None`.
+/// List the entries of an already-resolved `absolute_path`, sorted directories-first then by
+/// name. Symlinks are reported as `EntryKind::Symlink` and are not traversed.
 pub fn list_directory(absolute_path: &Path) -> Result<WorkspaceListing> {
-    // Targeting a regular file with the list endpoint is a client error, not
-    // an internal fault: surface a workspace.path_invalid 400 rather than
-    // leaking the platform's NotADirectory I/O text through workspace.io_failed.
     let metadata = std::fs::metadata(absolute_path).map_err(|source| StackError::WorkspaceIo {
         requested: display_relative(absolute_path),
         source,
@@ -319,16 +275,11 @@ pub fn list_directory(absolute_path: &Path) -> Result<WorkspaceListing> {
     Ok(WorkspaceListing { entries })
 }
 
-/// Read at most `max_bytes` of an existing regular file. Returns
-/// `WorkspaceTooLarge` if the file's reported size exceeds `max_bytes` or the
-/// stream produces more bytes than that (which should not happen given the
-/// initial metadata check, but we re-check to defend against a concurrent
-/// writer that grows the file after we opened it).
+/// Read at most `max_bytes` of an existing regular file. The post-read size re-check defends
+/// against a concurrent writer growing the file after the metadata check.
 pub fn read_file(absolute_path: &Path, max_bytes: u64) -> Result<FileRead> {
-    // Stat first, open second. Opening a FIFO/socket for read can block
-    // indefinitely on Unix, which would tie up a tokio blocking thread for
-    // every request to such a path. Stat-then-open keeps the open call
-    // confined to entries we've already verified are regular files.
+    // Stat first, open second: opening a FIFO/socket for read blocks indefinitely on Unix and
+    // would tie up a tokio blocking thread.
     let metadata = std::fs::metadata(absolute_path).map_err(|source| {
         if source.kind() == ErrorKind::NotFound {
             StackError::WorkspaceNotFound {
@@ -351,10 +302,8 @@ pub fn read_file(absolute_path: &Path, max_bytes: u64) -> Result<FileRead> {
         return Err(StackError::WorkspaceTooLarge { limit: max_bytes });
     }
     let mut file = open_no_follow(absolute_path).map_err(|source| {
-        // ELOOP from O_NOFOLLOW means a symlink appeared at the final
-        // component between our metadata check and the open. Surface that as
-        // the same 400 symlink-escape we'd return at resolve time rather
-        // than an opaque 500.
+        // ELOOP from O_NOFOLLOW means a symlink appeared at the final component between the
+        // metadata check and the open.
         if source.raw_os_error() == Some(libc::ELOOP) {
             StackError::WorkspaceSymlinkEscape {
                 requested: display_relative(absolute_path),
@@ -395,10 +344,7 @@ pub fn read_file(absolute_path: &Path, max_bytes: u64) -> Result<FileRead> {
     })
 }
 
-/// Atomically write `content` to `absolute_path` using a temp file alongside
-/// the target. Returns the post-write file size and mtime. Refuses to write
-/// when the target is an existing directory — that's a 400-shaped client
-/// error rather than the 500 that atomic-write would produce on the rename.
+/// Atomically write `content` to `absolute_path`, returning the post-write size and mtime.
 pub fn write_file_atomic(absolute_path: &Path, content: &[u8]) -> Result<FileMetadata> {
     if let Ok(metadata) = std::fs::symlink_metadata(absolute_path)
         && metadata.file_type().is_dir()
@@ -431,9 +377,7 @@ pub fn write_file_atomic(absolute_path: &Path, content: &[u8]) -> Result<FileMet
     })
 }
 
-/// Remove a regular file at `absolute_path`. Refuses directories (the API
-/// surface does not expose recursive directory removal in 0.0.1) and refuses
-/// symlinks (whose delete semantics are ambiguous over the wire).
+/// Remove a regular file at `absolute_path`, refusing directories and symlinks.
 pub fn delete_file(absolute_path: &Path) -> Result<()> {
     let metadata = std::fs::symlink_metadata(absolute_path).map_err(|source| {
         if source.kind() == ErrorKind::NotFound {
@@ -459,9 +403,6 @@ pub fn delete_file(absolute_path: &Path) -> Result<()> {
             requested: display_relative(absolute_path),
         });
     }
-    // Refuse non-regular entries explicitly: the API contract says this
-    // endpoint deletes "a regular file", and silently removing FIFOs, sockets,
-    // or device nodes via remove_file would be a surprise.
     if !file_type.is_file() {
         return Err(StackError::WorkspacePathInvalid {
             reason: "target is not a regular file".to_owned(),
@@ -474,9 +415,7 @@ pub fn delete_file(absolute_path: &Path) -> Result<()> {
     })
 }
 
-/// Canonicalize a path and translate `std::io` errors into the workspace
-/// domain so client-shaped errors (missing path, intermediate non-directory)
-/// surface as 4xx instead of falling through to generic 500 `WorkspaceIo`.
+/// Canonicalize a path, translating client-shaped `std::io` errors into 4xx workspace errors.
 fn canonicalize_or_translate(path: &Path, requested: &str, intent: PathIntent) -> Result<PathBuf> {
     match path.canonicalize() {
         Ok(canonical) => Ok(canonical),
@@ -506,17 +445,9 @@ fn canonicalize_or_translate(path: &Path, requested: &str, intent: PathIntent) -
     }
 }
 
-/// Open a file with `O_NOFOLLOW | O_NONBLOCK` so that two final-component
-/// type swaps that could happen between our resolve-time metadata check and
-/// this open are caught at open time rather than after the syscall has
-/// blocked indefinitely or followed a link:
-///
-///   * a symlink swapped in → kernel returns ELOOP, surfaced as a 400.
-///   * a FIFO/socket swapped in → `O_NONBLOCK` makes the open return
-///     immediately (with ENXIO for a writer-less FIFO, or success); the
-///     post-open `fstat` then rejects the non-regular file before any read.
-///
-/// On non-Unix hosts this falls back to the platform-default open.
+/// Open with `O_NOFOLLOW | O_NONBLOCK` so a final-component swap between the resolve-time metadata
+/// check and this open is caught here: a symlink returns ELOOP, and a FIFO/socket returns
+/// immediately instead of blocking, to be rejected by the post-open `fstat`.
 fn open_no_follow(absolute_path: &Path) -> std::io::Result<std::fs::File> {
     #[cfg(unix)]
     {
@@ -525,9 +456,7 @@ fn open_no_follow(absolute_path: &Path) -> std::io::Result<std::fs::File> {
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(absolute_path)?;
-        // Re-stat through the open handle so the type we read from is the
-        // type we already accepted in `read_file`'s metadata check. Any
-        // race-substituted non-regular file is rejected here.
+        // Re-stat through the open handle so a race-substituted non-regular file is rejected.
         let metadata = file.metadata()?;
         let mode = metadata.mode();
         // libc exposes these constants with target-specific integer types.
@@ -582,9 +511,7 @@ fn display_relative(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-/// `atomic_write_owner_only` returns `FileCreate`/`PermissionSet`/... errors;
-/// translate them into workspace-domain errors so handlers can respond with
-/// `workspace.*` codes consistently.
+/// Translate `atomic_write_owner_only` errors into workspace-domain `workspace.*` errors.
 fn translate_atomic_write_error(error: StackError) -> StackError {
     let requested = "<workspace target>".to_owned();
     match error {
@@ -642,10 +569,6 @@ mod tests {
     fn write_atomic_refuses_directory_target() {
         let root = workspace_root();
         std::fs::create_dir(root.path().join("subdir")).expect("mkdir");
-        // `subdir/.` is normalized to `subdir` by Rust's Path API, so the
-        // resolver accepts the request, but the write primitive must catch
-        // the directory-as-target case and surface a 400-shaped path-invalid
-        // error rather than the 500 that the atomic rename would produce.
         let target = root.path().join("subdir");
         let error = write_file_atomic(&target, b"oops").expect_err("should refuse directory");
         assert!(matches!(

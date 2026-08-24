@@ -36,8 +36,6 @@ pub(crate) fn reject_starter_only_mcp_args_for_existing_config(args: &InitArgs) 
     reject_starter_only_mcp_arg("--mcp-stdio-env", &args.mcp_stdio_env)?;
     reject_starter_only_mcp_arg("--mcp-http", &args.mcp_http)?;
     reject_starter_only_mcp_arg("--mcp-http-header", &args.mcp_http_header)?;
-    // Structured declarations (hosted request or wizard) declare into a fresh
-    // starter config only, same as the flag forms above.
     if !args.prompt_mcp_stdio.is_empty() {
         return starter_only_mcp_error("--mcp-stdio");
     }
@@ -47,12 +45,11 @@ pub(crate) fn reject_starter_only_mcp_args_for_existing_config(args: &InitArgs) 
     Ok(())
 }
 
-/// `--data-from` and structured data-source declarations seed a fresh starter
-/// config only; reject them when a config already exists (the operator edits
-/// `[[workspace.data_sources]]` directly).
+/// Data-source declarations seed a fresh starter config only; reject them when a
+/// config already exists.
 pub(crate) fn reject_data_source_args_for_existing_config(args: &InitArgs) -> Result<()> {
-    // The structured field only arrives from the hosted request (or wizard),
-    // so name the hosted field in that error rather than the CLI flag.
+    // The structured field only arrives from the hosted request, so name the hosted
+    // field in that error rather than the CLI flag.
     let field = if !args.data_from.is_empty() {
         Some("--data-from")
     } else if !args.prompt_data_sources.is_empty() {
@@ -91,11 +88,7 @@ fn parse_sandbox_mode(raw: &str) -> Result<SandboxMode> {
     }
 }
 
-/// Sandbox config for a freshly-created starter config. Only the `mode` is
-/// settable here (the rest of `[workspace.sandbox]` is reserved for hand-edited
-/// or imported configs); an absent flag keeps the `off` default so a plain
-/// `acps init` is unchanged. `custom` needs a wrapper that this flag cannot
-/// supply, so config validation rejects it downstream — fail-fast, by design.
+/// Sandbox config for a freshly-created starter config; only `mode` is settable here.
 fn sandbox_from_args(args: &InitArgs) -> Result<SandboxConfig> {
     let Some(raw) = args.sandbox.as_deref() else {
         return Ok(SandboxConfig::default());
@@ -306,11 +299,8 @@ fn mcp_from_args(args: &InitArgs) -> Result<McpConfig> {
     Ok(McpConfig { servers })
 }
 
-/// Convert prompt-collected MCP rows into config servers. Shared between the
-/// starter-config build (flag lane) and the post-probe `mcp_configure` step
-/// (interactive lane) so validation cannot drift: the lenient config loader
-/// silently drops invalid servers, so a bad URL must be rejected here where
-/// the operator can still see it.
+/// Convert prompt-collected MCP rows into config servers. The lenient config loader
+/// silently drops invalid servers, so a bad URL must be rejected here instead.
 pub(in crate::cli::init) fn mcp_servers_from_prompted(
     stdio: &[InitMcpStdioServer],
     http: &[InitMcpHttpServer],
@@ -343,9 +333,8 @@ pub(in crate::cli::init) fn mcp_servers_from_prompted(
     Ok(servers)
 }
 
-/// Merge interactively-added servers into the config, rejecting names that
-/// collide with an existing or previously-added server. Returns the added
-/// names in order for the step payload.
+/// Merge interactively-added servers into the config, rejecting colliding names and
+/// returning the added names in order.
 pub(in crate::cli::init) fn merge_prompted_mcp_servers(
     existing: &mut Vec<McpServerConfig>,
     new_servers: Vec<McpServerConfig>,
@@ -435,9 +424,8 @@ fn find_mcp_server_mut<'a>(
 
 fn split_mcp_pair(field: &'static str, value: &str) -> Result<(String, String)> {
     let Some((name, target)) = value.split_once('=') else {
-        // Screened before the echo, on the same grounds as
-        // `split_mcp_header_ref`: an entry that never split is the one shape
-        // that can be a bare pasted credential.
+        // Screened before the echo: an entry that never split is the one shape that
+        // can be a bare pasted credential.
         crate::config::screen_ref_name(field, value)?;
         return Err(StackError::InvalidParam {
             field,
@@ -447,9 +435,8 @@ fn split_mcp_pair(field: &'static str, value: &str) -> Result<(String, String)> 
     let name = name.trim();
     let target = target.trim();
     if name.is_empty() || target.is_empty() {
-        // A composite paste splits somewhere the screen does not recognize —
-        // base64 padding leaves an empty target — so, like the arm above, the
-        // complaint states the shape rather than repeating what arrived.
+        // Screened first, and the complaint states the shape rather than repeating
+        // what arrived, so a pasted credential cannot ride the error out.
         crate::config::screen_ref_name(field, value)?;
         return Err(StackError::InvalidParam {
             field,
@@ -459,10 +446,8 @@ fn split_mcp_pair(field: &'static str, value: &str) -> Result<(String, String)> 
     Ok((name.to_owned(), target.to_owned()))
 }
 
-/// Split a `HEADER:SECRET_REF` (whole-value ref) or `HEADER:=TEMPLATE`
-/// (interpolated value) declaration. `:=` is unambiguous because an HTTP
-/// header name can contain neither `:` nor `=`, while templates contain `:`
-/// freely (`Bearer ${X}` does not, but URLs do).
+/// Split a `HEADER:SECRET_REF` or `HEADER:=TEMPLATE` declaration. `:=` is unambiguous
+/// because an HTTP header name can contain neither `:` nor `=`.
 pub(super) fn split_mcp_header_ref(value: &str) -> Result<HttpHeaderRef> {
     let (header_name, header_value, is_template) =
         if let Some((header_name, template)) = value.split_once(HEADER_TEMPLATE_SEPARATOR) {
@@ -470,11 +455,9 @@ pub(super) fn split_mcp_header_ref(value: &str) -> Result<HttpHeaderRef> {
         } else if let Some((header_name, value_ref)) = value.split_once(HEADER_REF_SEPARATOR) {
             (header_name, value_ref, false)
         } else {
-            // A whole entry with no separator is most often the credential
-            // pasted where its ref name belongs, so it is screened before the
-            // shape complaint — and the complaint describes the expected shape
-            // rather than repeating what arrived. Both errors reach the client
-            // as an init failure reason and stay in replayable history.
+            // An entry with no separator is most often a credential pasted where the
+            // ref name belongs, and this error reaches replayable history, so screen
+            // before complaining and never repeat what arrived.
             crate::config::screen_ref_name("mcp-http-header", value)?;
             return Err(StackError::InvalidParam {
                 field: "mcp-http-header",
@@ -489,11 +472,8 @@ pub(super) fn split_mcp_header_ref(value: &str) -> Result<HttpHeaderRef> {
             reason: "MCP HTTP header must include a non-empty header and value".to_owned(),
         });
     }
-    // A paste that happens to contain a colon lands its head in the header
-    // position. Screening catches the shapes it recognizes, and the validity
-    // error describes the constraint rather than quoting the name back, so a
-    // credential the heuristic does not recognize still cannot ride the error
-    // out to the terminal frame and replayable history.
+    // A paste containing a colon lands its head in the header position, so screen it
+    // and keep the validity error free of the name itself.
     crate::config::screen_ref_name("mcp-http-header", header_name)?;
     HeaderName::from_bytes(header_name.as_bytes()).map_err(|_| StackError::InvalidParam {
         field: "mcp-http-header",
@@ -559,17 +539,8 @@ pub(super) fn classify_data_from(value: &str) -> Result<DataSourceConfig> {
     })
 }
 
-/// Reject HTTPS data sources that the materializer cannot satisfy headlessly.
-/// Catches three known failure modes BEFORE init writes any state, so the
-/// operator gets a clear error pointing at the actual URL rather than a vague
-/// download/extract failure halfway through materialization.
-///
-/// Patterns rejected:
-/// - `drive.google.com/file/d/.../view` (private file view link; needs the
-///   `uc?export=download&id=` form to expose a usable HTTPS download)
-/// - `drive.google.com/drive/folders/...` (folder, not an archive; the
-///   materializer downloads single files)
-/// - `dropbox.com/.../?dl=0` or no `dl` param (preview link; needs `?dl=1`)
+/// Reject Drive/Dropbox share links the materializer cannot satisfy headlessly, before
+/// init writes any state.
 fn reject_unsupported_https_data_source(value: &str) -> Result<()> {
     let lower = value.to_ascii_lowercase();
     if lower.contains("drive.google.com/file/d/")

@@ -75,8 +75,7 @@ fn list_installed_skills_follows_symlinked_root() {
     let home = tempfile::tempdir().expect("home");
     let catalog = RegistryCatalog::load_embedded().expect("registry");
     let home_path = canonical_temp_home(&home);
-    // Dotfiles-style setup: the real skills live elsewhere and `~/.agents` is a
-    // symlink to them. Listing must follow it, not report an empty set.
+    // Dotfiles-style setup: `~/.agents` is a symlink and listing must follow it.
     let real_agents = home_path.join("dotfiles/agents");
     write_installed_skill(&real_agents.join("skills"), "repo-map", "# Repo Map\n");
     std::os::unix::fs::symlink(&real_agents, home_path.join(".agents")).expect("symlink");
@@ -101,7 +100,6 @@ fn remove_agent_skill_removes_flat_skill() {
 
     assert_eq!(report.removed.name, "repo-map");
     assert!(!install_root.join("repo-map").exists());
-    // A sibling skill is untouched.
     assert!(
         install_root
             .join("code-review")
@@ -126,7 +124,6 @@ fn remove_agent_skill_cleans_emptied_group_parent() {
     .expect("remove");
 
     assert!(!install_root.join("contact-center/android").exists());
-    // The now-empty group dir is removed, but the install root survives.
     assert!(!install_root.join("contact-center").exists());
     assert!(install_root.is_dir());
 }
@@ -143,7 +140,6 @@ fn remove_agent_skill_keeps_group_dir_with_siblings() {
     remove_agent_skill(&home_path, opencode_entry(&catalog), "zoom/android").expect("remove");
 
     assert!(!install_root.join("zoom/android").exists());
-    // The group dir stays because a sibling skill remains under it.
     assert!(
         install_root
             .join("zoom/desktop")
@@ -167,9 +163,7 @@ fn remove_agent_skill_missing_is_not_installed() {
 
 #[test]
 fn remove_agent_skill_conflicts_on_directory_without_descriptor() {
-    // A path that exists but is not a clean managed skill (no regular
-    // SKILL.md) must surface as the installer's conflict, not the 404 — the
-    // runtime does not delete directories it did not install.
+    // The runtime must never delete a directory it did not install.
     let home = tempfile::tempdir().expect("home");
     let catalog = RegistryCatalog::load_embedded().expect("registry");
     let home_path = canonical_temp_home(&home);
@@ -185,9 +179,8 @@ fn remove_agent_skill_conflicts_on_directory_without_descriptor() {
 
 #[test]
 fn remove_agent_skill_refuses_skill_not_installed_by_acp_stack() {
-    // A folder the user placed in the install root by hand looks exactly like
-    // an installed skill (regular SKILL.md) but carries no managed marker —
-    // removal must refuse it and leave every byte in place.
+    // A hand-placed folder looks like an installed skill but has no managed
+    // marker; removal must refuse it and leave every byte in place.
     let home = tempfile::tempdir().expect("home");
     let catalog = RegistryCatalog::load_embedded().expect("registry");
     let home_path = canonical_temp_home(&home);
@@ -236,6 +229,6 @@ fn remove_agent_skill_rejects_symlinked_target() {
         .expect_err("symlinked target");
 
     assert!(matches!(err, StackError::SkillInstallTargetConflict { .. }));
-    // The symlink target's descriptor is left intact — nothing was deleted.
+    // The symlink target's descriptor must be intact: nothing was deleted.
     assert!(external.path().join(SKILL_DESCRIPTOR).is_file());
 }

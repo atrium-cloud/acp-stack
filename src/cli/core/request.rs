@@ -2,8 +2,7 @@ use super::*;
 
 // CONSTANTS
 
-/// Paths whose label is the path itself. Matched before [`PATTERN_PATH_LABELS`];
-/// no literal here is also covered by a pattern prefix.
+/// Paths whose label is the path itself. Matched before [`PATTERN_PATH_LABELS`].
 const EXACT_PATH_LABELS: &[&str] = &[
     "/v1/status",
     "/v1/status/agent",
@@ -59,9 +58,8 @@ const EXACT_PATH_LABELS: &[&str] = &[
     "/v1/sessions/-/status",
 ];
 
-/// Parameterized routes, matched in order: the first entry whose prefix and tail
-/// both match wins, so the per-collection catch-all must stay last within its
-/// prefix group.
+/// Parameterized routes, matched in order — the per-collection catch-all MUST stay last within
+/// its prefix group.
 const PATTERN_PATH_LABELS: &[(&str, PathTail, &str)] = &[
     (
         "/v1/agent/config/native/import/",
@@ -167,8 +165,7 @@ const PATTERN_PATH_LABELS: &[(&str, PathTail, &str)] = &[
     ("/v1/sessions/", PathTail::Any, "/v1/sessions/{id}"),
 ];
 
-/// Fallback for paths not listed above. The remaining callers in this CLI pass
-/// static literals covered by the tables.
+/// Fallback for paths not listed above.
 const FALLBACK_PATH_LABEL: &str = "/v1/agent";
 
 #[derive(Debug, Clone, Copy)]
@@ -199,9 +196,7 @@ pub(crate) async fn daemon_request(
     body: Option<&serde_json::Value>,
 ) -> Result<serde_json::Value> {
     let url = format!("{}{}", base_url.trim_end_matches('/'), path);
-    // Static `path` is the spec contract for error reporting; keep it pinned
-    // to a small set of known prefixes so `AgentApiRequest::path` stays a
-    // useful diagnostic and we don't accidentally leak path params to logs.
+    // Bucketing to a static label keeps path params out of logged errors.
     let path_label: &'static str = static_path_label(path);
     let client = reqwest::Client::new();
     let request = match method {
@@ -289,15 +284,13 @@ pub(crate) async fn local_daemon_json_response(
 /// Tail condition applied to a path that already matched a prefix.
 #[derive(Debug, Clone, Copy)]
 enum PathTail {
-    /// Any path under the prefix.
     Any,
     Suffix(&'static str),
     Contains(&'static str),
 }
 
 pub(crate) fn static_path_label(path: &str) -> &'static str {
-    // Strip the query string before bucketing so callers passing `?limit=` etc.
-    // still resolve to the canonical path label.
+    // Strip the query string so callers passing `?limit=` still resolve to the canonical label.
     let bare = path.split('?').next().unwrap_or(path);
     if let Some(label) = EXACT_PATH_LABELS.iter().find(|label| **label == bare) {
         return label;
@@ -315,11 +308,8 @@ pub(crate) fn static_path_label(path: &str) -> &'static str {
     FALLBACK_PATH_LABEL
 }
 
-/// Percent-encode a single URL path segment using the "unreserved" RFC 3986
-/// allowlist. ACP session and prompt IDs are opaque strings — an agent that
-/// returned `sess_a/b` (with a slash) would otherwise be routed as a
-/// different resource entirely, which is both a correctness bug and a
-/// path-injection vector for any client that forwards untrusted IDs.
+/// Percent-encode a URL path segment against the RFC 3986 unreserved set. ACP session and prompt
+/// IDs are opaque, so an id containing `/` is a path-injection vector unless it is encoded here.
 pub(crate) fn encode_path_segment(segment: &str) -> String {
     let mut out = String::with_capacity(segment.len());
     for byte in segment.as_bytes() {

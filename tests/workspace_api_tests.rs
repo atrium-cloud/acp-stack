@@ -723,8 +723,7 @@ async fn workspace_websocket_publishes_on_write() {
     let harness = Harness::spawn().await;
     let mut stream = open_ws(&harness.base_url, &["workspace"]).await;
 
-    // Subscribe is async; give the server a moment to record the topic before
-    // the producer side fires. 50ms is plenty for a localhost loopback.
+    // Subscribe is async: let the server record the topic before the producer fires.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     let response = auth(session_client().put(format!("{}/v1/files/content", harness.base_url)))

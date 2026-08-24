@@ -649,8 +649,7 @@ async fn run_sessions_prompt(
     .await
 }
 
-/// Run an agent-advertised slash command by submitting it through the
-/// session commands route, then poll like a normal prompt.
+/// Submit an agent-advertised slash command, then poll it like a prompt.
 async fn run_sessions_command_run(
     config: &Config,
     base_url: &str,
@@ -718,9 +717,8 @@ async fn run_sessions_command_run(
     .await
 }
 
-/// Poll a submitted prompt until it settles (completed/cancelled), errors, or
-/// the client-side deadline passes. Shared by `sessions prompt` and
-/// `sessions commands run`.
+/// Poll a submitted prompt until it settles, errors, or the client-side
+/// deadline passes.
 #[allow(clippy::too_many_arguments)]
 async fn await_prompt_settle(
     config: &Config,
@@ -788,8 +786,7 @@ async fn await_prompt_settle(
             }
             _ => {
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                // Linear back-off capped at 2s so a long-running prompt does
-                // not spam the daemon every 250ms for minutes on end.
+                // Linear back-off capped at 2s.
                 delay_ms = (delay_ms + 250).min(2000);
             }
         }

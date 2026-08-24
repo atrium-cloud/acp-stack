@@ -1,11 +1,10 @@
-//! Shared fixtures for the `state_*_tests` binaries: tempdir-backed stores,
-//! row seeders, and in-memory `Event` builders for `LogFilter::matches`.
+//! Shared fixtures for the `state_*_tests` binaries: tempdir-backed stores, row seeders, and
+//! in-memory `Event` builders.
 
 use acp_stack::state::{Event, NewPromptRecord, NewSessionRecord, PromptStatus, StateStore};
 use rusqlite::Connection;
 use rusqlite::params;
 
-// CONSTANTS for the mark_stalled_prompts tests.
 pub const STALE_THRESHOLD_SECS: u64 = 60;
 pub const STALE_REASON: &str = "test stall reason";
 
@@ -29,9 +28,7 @@ pub fn insert_state_test_session(store: &StateStore, session_id: &str) {
         .expect("session inserted");
 }
 
-/// Helper: insert a session + one prompt, flip the prompt to running,
-/// then overwrite its `updated_at` directly so the test controls the
-/// "how old is this row" axis without sleeping for minutes.
+/// Seed a running prompt with a caller-chosen `updated_at`, so age tests need no wall-clock wait.
 pub fn seed_running_prompt_at(
     store: &StateStore,
     session_id: &str,
@@ -65,8 +62,6 @@ pub fn seed_running_prompt_at(
             None,
         )
         .expect("prompt flipped to running");
-    // Force `updated_at` so the test does not have to wait for the
-    // threshold to actually elapse on wall-clock time.
     let connection =
         Connection::open(store.path()).expect("open sqlite directly for updated_at override");
     connection

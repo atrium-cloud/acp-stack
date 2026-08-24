@@ -28,12 +28,10 @@ use crate::cli::core::{OutputFormat, print_json};
 
 // CONSTANTS
 
-/// Version of the `agent test --format json` document. Machine readers pin it;
-/// removing a field or changing an existing field's meaning bumps it.
+/// Version of the `agent test --format json` document; any field change bumps it.
 const AGENT_TEST_SCHEMA_VERSION: i64 = 1;
 
-/// Phases, in run order. Derived from the outcome code so text and JSON never
-/// disagree about where a run stopped.
+/// Phases, in run order; derived from the outcome code so text and JSON agree.
 const PHASE_SPAWN: &str = "spawn";
 const PHASE_INITIALIZE: &str = "initialize";
 const PHASE_SESSION_NEW: &str = "session_new";
@@ -43,8 +41,7 @@ const PHASE_FS_CHECK: &str = "fs_check";
 const PHASE_CLEANUP: &str = "cleanup";
 const PHASE_DONE: &str = "done";
 
-/// Outcome codes. These are the machine channel: an orchestrator classifies a
-/// failed testflight from `code`, never from the human `reason`.
+/// Outcome codes: orchestrators classify a failed testflight from `code`, never `reason`.
 const CODE_OK: &str = "ok";
 const CODE_AGENT_SPAWN_FAILED: &str = "agent_spawn_failed";
 const CODE_AGENT_INITIALIZE_FAILED: &str = "agent_initialize_failed";
@@ -63,8 +60,7 @@ const CODE_CLEANUP_FAILED: &str = "cleanup_failed";
 const CODE_CONFIG_INVALID: &str = "config_invalid";
 const CODE_AGENT_UNSUPPORTED: &str = "agent_unsupported";
 
-/// `fs_check.status` values. `skipped` covers both "the registry entry declares
-/// no artifact" and "the run failed before the check could run".
+/// `fs_check.status` values; `skipped` covers "no declared artifact" and "never reached".
 const FS_CHECK_OK: &str = "ok";
 const FS_CHECK_SKIPPED: &str = "skipped";
 const FS_CHECK_FAILED: &str = "failed";
@@ -75,47 +71,33 @@ const SESSION_DELETE_CLEANUP_FAILED: &str = "cleanup_failed";
 const SESSION_DELETE_UNSUPPORTED: &str = "unsupported";
 const SESSION_DELETE_SKIPPED: &str = "skipped";
 
-/// `cleanup.process` values. `terminated` means no agent child remains, which
-/// includes a spawn that failed before a child existed.
+/// `cleanup.process` values; `terminated` means no agent child remains.
 const PROCESS_TERMINATED: &str = "terminated";
 const PROCESS_TERMINATE_FAILED: &str = "terminate_failed";
 
 const STAGE_FS_CHECK: &str = "fs_check";
 
-/// How long the disposable-session delete may take before the run gives up and
-/// falls through to process termination. Generous relative to a healthy
-/// round-trip, short relative to the run's own prompt budget.
+/// How long the disposable-session delete may take before falling through to termination.
 const SESSION_DELETE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Bound on the retained assistant-message tail. Enough to hold a model's
-/// closing summary for failure classification without letting a chatty run
-/// bloat the report.
+/// Bound on the retained assistant-message tail.
 const EVIDENCE_TEXT_TAIL_BYTES: usize = 2048;
 
-/// Placeholder written over a resolved secret value that surfaced in the
-/// assistant-text evidence before it is emitted as JSON.
+/// Placeholder written over a resolved secret value in the assistant-text evidence.
 const SECRET_REDACTION_PLACEHOLDER: &str = "[redacted]";
 
-/// Shortest resolved env value treated as a secret when redacting the evidence
-/// tail. Short, low-entropy settings (`on`, a port, a one-word mode) are left
-/// alone so redaction does not garble the closing summary.
+/// Shortest resolved env value treated as a secret; low-entropy settings are left alone.
 const MIN_REDACTED_SECRET_LEN: usize = 6;
 
-/// Shortest leading fragment of a secret redacted at the tail's head. The tail
-/// is truncated from the front, so a value straddling the cut leaves a suffix
-/// fragment there; only a fragment this long is treated as a leak rather than a
-/// coincidental prefix.
+/// Shortest leading fragment of a secret redacted at the front-truncated tail's head.
 const MIN_REDACTED_SECRET_FRAGMENT_LEN: usize = 8;
 
-/// Some adapters answer the prompt request before their final file writes are
-/// visible to a stat from this process; re-poll briefly before declaring the
-/// artifact missing so a settle race is not misread as model non-compliance.
+/// Some adapters answer the prompt before their final file writes are visible to a
+/// stat from this process; re-poll briefly before declaring the artifact missing.
 const FS_CHECK_SETTLE_TIMEOUT: Duration = Duration::from_secs(2);
 const FS_CHECK_SETTLE_INTERVAL: Duration = Duration::from_millis(100);
 
-/// A typed `agent test` failure. Every fallible step inside the run converts
-/// into this before it leaves, so the reported `code` is always present and is
-/// never recovered by string-matching a stage label.
+/// A typed `agent test` failure carrying the machine-readable outcome `code`.
 #[derive(Debug)]
 pub(super) struct AgentTestFailure {
     stage: &'static str,
@@ -176,21 +158,16 @@ fn phase_for_code(code: &str) -> &'static str {
         | CODE_FS_CHECK_FAILED => PHASE_FS_CHECK,
         CODE_CLEANUP_FAILED => PHASE_CLEANUP,
         CODE_OK => PHASE_DONE,
-        // `agent_spawn_failed`, `config_invalid` and `agent_unsupported` all
-        // stop the run before a child is up.
         _ => PHASE_SPAWN,
     }
 }
 
-/// What the run's session updates said, kept so a failure report can separate
-/// "the model never acted" from "the harness lost the artifact". Totalled on
-/// every exit path, not just success.
+/// What the run's session updates said, totalled on every exit path.
 #[derive(Default, Clone)]
 struct AgentTestEvidence {
-    /// Tail of the concatenated `agent_message_chunk` text — the turn's final
-    /// assistant words, bounded by [`EVIDENCE_TEXT_TAIL_BYTES`].
+    /// Tail of the concatenated `agent_message_chunk` text, bounded by
+    /// [`EVIDENCE_TEXT_TAIL_BYTES`].
     final_assistant_text: String,
-    /// True when older chunk text was dropped to keep the tail bounded.
     text_truncated: bool,
     message_chunks: usize,
     thought_chunks: usize,
@@ -229,14 +206,9 @@ impl AgentTestEvidence {
     }
 }
 
-/// Redact any resolved secret value that surfaced in the assistant-text tail
-/// before the evidence is emitted as JSON. The test agent runs with the config's
-/// resolved credentials in its env and auto-approves tools, so a misbehaving or
-/// injected run could copy a key into its closing words; the diagnostic tail
-/// must not become an exfiltration channel. `secret_values` are the resolved
-/// env values — the only strings the agent could echo that this process placed
-/// in its environment. `text_truncated` gates the head-fragment pass to the one
-/// case it applies to: a value straddling the front-truncation cut.
+/// Redact resolved secret values from the assistant-text tail before it is emitted as
+/// JSON: the test agent runs with credentials in its env and auto-approves tools, so
+/// the diagnostic tail must not become an exfiltration channel.
 fn redact_secret_values(text: &mut String, secret_values: &[String], text_truncated: bool) {
     for value in secret_values {
         if value.len() < MIN_REDACTED_SECRET_LEN {
@@ -251,9 +223,8 @@ fn redact_secret_values(text: &mut String, secret_values: &[String], text_trunca
     }
 }
 
-/// Redact the longest suffix of `value` that `text` begins with. The tail is
-/// truncated from the front, so a secret straddling the cut leaves a suffix
-/// fragment at the tail's head that the whole-value match above cannot catch.
+/// Redact the longest suffix of `value` that `text` begins with — the tail is
+/// truncated from the front, so a straddling secret leaves only a suffix fragment.
 fn redact_leading_secret_fragment(text: &mut String, value: &str) {
     let max = value.len().min(text.len());
     for len in (MIN_REDACTED_SECRET_FRAGMENT_LEN..=max).rev() {
@@ -351,20 +322,14 @@ impl CleanupOutcome {
     }
 }
 
-/// What one `agent test` run observed. Carries no reason strings, prompt
-/// text, paths, credentials, or raw provider errors — reasons embed workspace
-/// paths and spawn argv, so the harness side of the JSON document reports
-/// codes only. The one deliberate exception is `evidence`: agent-produced
-/// output (final assistant text, update-kind counts), included so a failure
-/// can be classified as model non-compliance versus a harness defect. The text
-/// is scrubbed of the secret values this process injected into the agent's env
-/// before emission (see [`redact_secret_values`]) so an auto-approving,
-/// credentialed run cannot echo one of them back through it. That scrub is the
-/// bound of the guarantee: credentials an agent reads from its own on-disk
-/// config, and any prompt or workspace-file content the model chose to echo,
-/// are agent-authored, unknowable here, and retained deliberately — the field
-/// exists to show what the model said. `session_id` is kept for the human text
-/// summary and is deliberately absent from JSON.
+/// What one `agent test` run observed. The harness fields report codes only: no reason
+/// strings, prompt text, or paths. `evidence` is the deliberate exception, carrying
+/// arbitrary agent output (final assistant text, update-kind counts) scrubbed only of the
+/// secret values this process injected into the agent's env (see [`redact_secret_values`]),
+/// so a credentialed auto-approving run cannot echo those back. That scrub is the bound of
+/// the guarantee: credentials the agent reads from its own on-disk config, or prompt and
+/// workspace-file content it echoes, are agent-authored, unknowable here, and retained
+/// deliberately.
 struct AgentTestOutcome {
     ok: bool,
     code: &'static str,
@@ -388,9 +353,6 @@ impl AgentTestOutcome {
             code: CODE_OK,
             elapsed_ms: 0,
             agent,
-            // Without the registry entry the run cannot tell a registry prompt
-            // from the built-in default, so an explicit `--prompt` is the only
-            // source knowable this early.
             prompt_source: if prompt_provided {
                 AgentTestPromptSource::CliFlag
             } else {
@@ -443,12 +405,7 @@ struct AgentTestRun {
     error: Option<StackError>,
 }
 
-/// Run a real-prompt testflight at the tail of `acps init`. Uses the registry
-/// entry's `testflight_prompt` if present (else the default) and verifies the
-/// declared `testflight_expect_fs` artifact post-prompt. Surfaces the same
-/// "ok / session_id / stop_reason / updates / fs_check" lines as
-/// `acps agent test` so the operator sees consistent output regardless of
-/// which entry point they used.
+/// Run a real-prompt testflight at the tail of `acps init`.
 pub(in crate::cli) fn run_init_testflight(
     home: &Path,
     config: &Config,
@@ -476,9 +433,6 @@ pub(super) fn run_agent_test(args: AgentTestArgs, format: OutputFormat) -> Resul
     let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
     let run = run_agent_test_with(&home, &config, &registry, args);
     if format.is_json() {
-        // Both outcomes render the same document on stdout; on failure the
-        // error itself still goes to stderr with exit status 1 from `main`, so
-        // machine readers parse stdout and humans read stderr.
         print_json(&run.outcome.to_json())?;
     } else if run.error.is_none() {
         print_agent_test_summary(&run.outcome);
@@ -515,9 +469,7 @@ fn run_agent_test_with(
     registry: &RegistryCatalog,
     args: AgentTestArgs,
 ) -> AgentTestRun {
-    // Wall clock, not `Instant`: this can run inside a VM whose monotonic
-    // clock stalls across a host suspend, which would under-report the
-    // duration an orchestrator budgets against.
+    // Wall clock, not `Instant`: a VM's monotonic clock stalls across a host suspend.
     let started = SystemTime::now();
     let mut outcome = AgentTestOutcome::starting(config.agent.id.clone(), args.prompt.is_some());
     let failure = execute_agent_test(home, config, registry, args, &mut outcome).err();
@@ -592,9 +544,8 @@ fn execute_agent_test(
             format!("resolve agent launch environment failed: {error}"),
         )
     })?;
-    // Snapshot the resolved secret values before `env` moves into the run: the
-    // evidence tail is scrubbed of them below so a run that echoes a credential
-    // cannot leak it into the JSON document.
+    // Snapshot the resolved secrets before `env` moves: the evidence tail is scrubbed
+    // of them below so a run that echoes a credential cannot leak it into the JSON.
     let secret_values: Vec<String> = env.values().cloned().collect();
     let cwd = config
         .agent
@@ -604,10 +555,8 @@ fn execute_agent_test(
         .unwrap_or_else(|| PathBuf::from(&config.workspace.root));
     let agent = config.agent.clone();
 
-    // The prompt asks for a file in the agent's current workspace, and the
-    // agent resolves relative paths against its session cwd — so the artifact
-    // is prepared and verified against that same cwd, not the workspace root.
-    // The workspace root stays the containment boundary in both helpers.
+    // The agent resolves relative paths against its session cwd, so the artifact is
+    // prepared and verified there; the workspace root stays the containment boundary.
     let artifact_base = cwd.clone();
     if let Some(rel) = expect_fs.as_deref() {
         prepare_testflight_expect_fs(&artifact_base, &workspace_root, rel)?;
@@ -639,8 +588,7 @@ fn execute_agent_test(
         .await
     });
 
-    // Cleanup is observed on every exit path, so it is recorded before the
-    // run's own failure is propagated.
+    // Cleanup is observed on every exit path, so record it before propagating failure.
     outcome.cleanup = report.cleanup;
     outcome.session_id = report.session_id;
     outcome.stop_reason = report.stop_reason;
@@ -671,10 +619,7 @@ fn execute_agent_test(
     Ok(())
 }
 
-/// [`verify_testflight_expect_fs`] behind the settle window: a missing or
-/// still-empty artifact is re-polled for [`FS_CHECK_SETTLE_TIMEOUT`] before the
-/// failure stands, so an adapter that answers the prompt just ahead of its
-/// final flush is not misread as non-compliant.
+/// [`verify_testflight_expect_fs`] behind the [`FS_CHECK_SETTLE_TIMEOUT`] re-poll window.
 fn verify_testflight_expect_fs_settled(
     artifact_base: &Path,
     workspace_root: &Path,
@@ -718,13 +663,9 @@ pub(super) struct TestflightFsOutcome {
     pub(super) bytes: u64,
 }
 
-/// Verify the registry-declared testflight artifact lives under the workspace
-/// after the prompt completes. The artifact path resolves against
-/// `artifact_base` — the session cwd the agent resolves relative paths with —
-/// while `workspace_root` stays the containment boundary. Treats absence and
-/// zero-length files as failures so the operator can distinguish "agent did
-/// not run the tool" from "agent ran the tool successfully". Uses canonical
-/// paths to reject an agent that resolved a symlink out of the workspace.
+/// Clear any stale testflight artifact before the prompt runs. Paths resolve against
+/// `artifact_base` (the agent's session cwd) while `workspace_root` stays the
+/// containment boundary.
 pub(super) fn prepare_testflight_expect_fs(
     artifact_base: &Path,
     workspace_root: &Path,
@@ -919,9 +860,7 @@ fn parse_agent_test_duration(field: &'static str, value: &str) -> TestResult<Dur
     })
 }
 
-/// What the ACP side of the run produced. Unlike the fallible steps around it
-/// this is total: cleanup is observed whether the run succeeded or failed, so
-/// the failure travels as a field rather than as `Err`.
+/// What the ACP side of the run produced; total, so the failure travels as a field.
 struct AgentTestInnerReport {
     session_id: Option<String>,
     stop_reason: Option<StopReason>,
@@ -957,8 +896,7 @@ async fn run_agent_test_inner(
     {
         Ok(bridge) => bridge,
         Err(error) => {
-            // `AcpBridge::spawn` kills its own child on every failure path, so
-            // nothing is left running to clean up here.
+            // `AcpBridge::spawn` kills its own child on every failure path.
             return AgentTestInnerReport {
                 session_id: None,
                 stop_reason: None,
@@ -1013,20 +951,16 @@ async fn run_agent_test_inner(
         .await
     };
 
-    // The disposable session is deleted before the process goes down: once the
-    // bridge is shut down the agent can no longer be asked to forget it, and a
-    // testflight must not leave state behind in the agent's own store.
+    // Delete the disposable session before shutdown: once the bridge is down the agent
+    // can no longer be asked to forget it.
     let session_id = created_session
         .as_ref()
         .map(|session_id| session_id.to_string());
     let session_delete = match created_session {
         None => SESSION_DELETE_SKIPPED,
         Some(_) if !bridge.capabilities().supports_delete_session() => SESSION_DELETE_UNSUPPORTED,
-        // Bounded, because the run reaching cleanup is no evidence the agent is
-        // healthy: a run that failed on a progress timeout leaves the agent
-        // wedged mid-prompt on its single event loop, where a `session/delete`
-        // request is never answered. `shutdown()` below still reclaims the
-        // process, so a cleanup that cannot complete is reported, not awaited.
+        // Bounded: an agent wedged mid-prompt never answers `session/delete`, and
+        // `shutdown()` below still reclaims the process.
         Some(session_id) => {
             match tokio::time::timeout(SESSION_DELETE_TIMEOUT, bridge.delete_session(session_id))
                 .await
@@ -1061,9 +995,7 @@ async fn run_agent_test_inner(
         process,
     };
 
-    // A failed session delete does not flip the verdict: the test measures
-    // prompt completion and the fs check, and a working agent with a flaky
-    // delete must not read as a failed run. A leaked agent child does flip it.
+    // A failed session delete does not flip the verdict; a leaked agent child does.
     let failure = match (result, process) {
         (Err(failure), _) => Some(failure),
         (Ok(()), PROCESS_TERMINATE_FAILED) => Some(AgentTestFailure::new(
@@ -1157,9 +1089,8 @@ async fn apply_agent_test_session_config(
             .and_then(|provider| provider.model.as_deref())
     }) {
         if model_value_is_explicit_without_discovery(agent) {
-            // Same skip as the supervisor: the harness reads this pin from
-            // its on-disk config, so the advertised-list match can only fail
-            // spuriously.
+            // Same skip as the supervisor: the harness reads this pin from its
+            // on-disk config, so the advertised-list match can only fail spuriously.
             tracing::debug!(
                 model,
                 "model provisioned on disk; skipping session/set_config_option"
@@ -1257,8 +1188,6 @@ mod evidence_tests {
     #[test]
     fn evidence_text_keeps_a_bounded_tail_on_char_boundaries() {
         let mut evidence = AgentTestEvidence::default();
-        // Multibyte content larger than the cap: the retained tail must end
-        // exactly with the latest text and start on a char boundary.
         let filler = "é".repeat(EVIDENCE_TEXT_TAIL_BYTES);
         evidence.record(&message_chunk(&filler));
         evidence.record(&message_chunk("final words"));
@@ -1277,32 +1206,25 @@ mod evidence_tests {
             "https://api.example.test/v1".to_owned(),
         ];
 
-        // A full occurrence anywhere in the tail is replaced.
         let mut text = "I wrote the key sk-supersecretkey-ABCDEF to the file.".to_owned();
         redact_secret_values(&mut text, &secrets, false);
         assert!(!text.contains("sk-supersecretkey-ABCDEF"));
         assert!(text.contains(SECRET_REDACTION_PLACEHOLDER));
 
-        // A short, low-entropy value is left alone so the summary is not garbled.
         let mut short = "mode is on now".to_owned();
         redact_secret_values(&mut short, &secrets, true);
         assert_eq!(short, "mode is on now");
 
-        // A secret straddling the truncation cut leaves a suffix fragment at the
-        // head; the fragment is redacted even though the whole value is absent.
         let mut straddled = "retkey-ABCDEF was the tail".to_owned();
         redact_secret_values(&mut straddled, &secrets, true);
         assert!(straddled.starts_with(SECRET_REDACTION_PLACEHOLDER));
         assert!(straddled.ends_with(" was the tail"));
         assert!(!straddled.contains("retkey-ABCDEF"));
 
-        // The same head fragment on a non-truncated tail is a coincidence, not a
-        // straddle, so it is left alone.
         let mut untruncated = "retkey-ABCDEF was the tail".to_owned();
         redact_secret_values(&mut untruncated, &secrets, false);
         assert_eq!(untruncated, "retkey-ABCDEF was the tail");
 
-        // Text with no secret material is untouched.
         let mut clean = "created report.txt with the requested summary".to_owned();
         redact_secret_values(&mut clean, &secrets, true);
         assert_eq!(clean, "created report.txt with the requested summary");

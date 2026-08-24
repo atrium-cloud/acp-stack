@@ -15,10 +15,7 @@ use crate::common::agent::{
 
 #[tokio::test]
 async fn providers_lists_supported_providers_for_configured_agent() {
-    // Test config uses agent id `opencode`. The embedded provider
-    // mapping lists openai, anthropic, openrouter, etc. as supported
-    // for opencode. The endpoint should return those without spawning
-    // the agent — it's pure embedded-mapping lookup.
+    // Pure embedded-mapping lookup: the endpoint answers without spawning.
     let harness = AgentHarness::spawn().await;
     let client = http().await;
 
@@ -39,7 +36,6 @@ async fn providers_lists_supported_providers_for_configured_agent() {
         !providers.is_empty(),
         "embedded mapping lists providers for opencode",
     );
-    // Each provider entry has at least an id and a name.
     for provider in providers {
         assert!(
             provider["id"].as_str().is_some(),
@@ -103,15 +99,9 @@ async fn providers_requires_session_key() {
 
 #[tokio::test]
 async fn models_returns_fixture_advertised_values() {
-    // Drive the model-discovery path entirely from a fixture file so
-    // the test doesn't spawn the real agent binary. The
-    // ACP_STACK_AGENT_CONFIG_OPTIONS_PATH env var is the same seam
-    // the CLI uses — see runtime::model_discovery for details.
+    // The fixture file drives model discovery so no real agent binary spawns.
     let tempdir = TempDir::new().expect("tempdir");
     let fixture_path = tempdir.path().join("config-options.json");
-    // Mirrors `tests/common/cli.rs::write_acp_config_options` shape so
-    // the fixture round-trips through the same SessionConfigOption
-    // deserializer the CLI tests rely on.
     let fixture_body = serde_json::json!([
         {
             "id": "model",
@@ -154,7 +144,6 @@ async fn models_returns_fixture_advertised_values() {
 
     let harness = AgentHarness::spawn().await;
     let client = http().await;
-    // /v1/models is a session-tier discovery route.
     let response = client
         .get(format!("{}/v1/models", harness.base_url))
         .header("Authorization", session_bearer())
@@ -190,8 +179,6 @@ async fn models_returns_fixture_advertised_values() {
 
 #[tokio::test]
 async fn agent_config_options_returns_the_full_advertised_set() {
-    // The generic endpoint carries everything the typed `/v1/models` lanes
-    // do not: `model_config`, boolean kinds, and category-less options.
     let tempdir = TempDir::new().expect("tempdir");
     let fixture_path = tempdir.path().join("config-options.json");
     let fixture_body = serde_json::json!([
@@ -261,9 +248,8 @@ async fn agent_config_options_returns_the_full_advertised_set() {
     );
 }
 
-/// Seed a structured provider credential (plus the flat secret) under `home`,
-/// mirroring `common::cli::seed_provider_credential` — that module is gated
-/// behind `dev-tools`, which this binary does not build with.
+/// Seed a structured provider credential under `home`; duplicated from
+/// `common::cli` because that module is gated behind `dev-tools`.
 fn seed_provider_credential(home: &std::path::Path, provider_id: &str, env_names: &[&str]) {
     let mut store = SecretStore::open_or_create(home).expect("secret store should open");
     let values = env_names
@@ -288,9 +274,8 @@ fn seed_provider_credential(home: &std::path::Path, provider_id: &str, env_names
 }
 
 /// Config for the provider-catalog `/v1/models` path: codex takes the model
-/// verbatim for OpenRouter (`model_value_is_explicit_without_discovery`), and
-/// OpenRouter declares a `models_url`, so the handler serves the provider
-/// catalog instead of the ACP-advertised list.
+/// verbatim for OpenRouter and OpenRouter declares a `models_url`, so the
+/// handler serves the catalog instead of the ACP-advertised list.
 fn codex_openrouter_config() -> Config {
     let mut config = test_config();
     config.agent.id = "codex".to_owned();
@@ -314,9 +299,7 @@ fn hermes_openrouter_config() -> Config {
     config
 }
 
-/// Config-options fixture with `model`, `mode`, and `thought_level`
-/// categories: the catalog path reads only the modes and efforts, the ACP
-/// fallback reads all three.
+/// Config-options fixture with `model`, `mode`, and `thought_level` categories.
 fn write_models_mode_fixture(root: &std::path::Path) -> std::path::PathBuf {
     let fixture_path = root.join("config-options.json");
     let fixture_body = serde_json::json!([
@@ -359,12 +342,8 @@ fn write_models_mode_fixture(root: &std::path::Path) -> std::path::PathBuf {
     fixture_path
 }
 
-/// Shared env for the catalog-path tests: HOME via `HomeEnvGuard` (the
-/// handler resolves the cache and secret store through `home_dir()`), the
-/// remaining fixture vars through one `EnvVarGuard::set_many` so the
-/// discovery-fixture mutex is taken exactly once. The handler reads the
-/// provider key from the seeded secret store; the `OPENROUTER_API_KEY`
-/// process env mirrors a real deployment where the key is also present.
+/// Shared env for the catalog-path tests. The fixture vars go through one
+/// `EnvVarGuard::set_many` so the discovery-fixture mutex is taken exactly once.
 fn catalog_fixture_env(
     home: &std::path::Path,
     models_base: &str,
@@ -389,8 +368,6 @@ fn catalog_fixture_env(
 async fn models_serves_provider_catalog_for_codex_openrouter() {
     let tempdir = TempDir::new().expect("tempdir");
     let home = tempdir.path().join("home");
-    // The seeded credential stands in for `acps agent provider credential
-    // add`: key resolution reads the secret store under HOME.
     seed_provider_credential(&home, "openrouter", &["OPENROUTER_API_KEY"]);
     let fixture_path = write_models_mode_fixture(tempdir.path());
     let base = spawn_provider_models_server(json!({
@@ -451,8 +428,7 @@ async fn models_falls_back_to_acp_with_catalog_error() {
     let home = tempdir.path().join("home");
     seed_provider_credential(&home, "openrouter", &["OPENROUTER_API_KEY"]);
     let fixture_path = write_models_mode_fixture(tempdir.path());
-    // Dead port: the catalog fetch must degrade to `catalog_error` while ACP
-    // discovery still serves the response.
+    // Dead port forces the catalog fetch to fail.
     let _guards = catalog_fixture_env(&home, "http://127.0.0.1:1", fixture_path);
 
     let harness = AgentHarness::spawn_with_config(codex_openrouter_config()).await;
@@ -484,9 +460,7 @@ async fn models_falls_back_to_acp_with_catalog_error() {
         "fixture model values missing: {models:?}",
     );
 
-    // Second poll within the failure-backoff window: the handler must serve
-    // the stored reason from the marker without a new fetch, and the stored
-    // reason must not acquire a second "model catalog fetch failed" prefix.
+    // Second poll lands inside the failure-backoff window.
     let response = http()
         .await
         .get(format!("{}/v1/models", harness.base_url))
@@ -534,8 +508,6 @@ async fn models_degrades_to_empty_for_hermes_on_catalog_outage() {
         .to_string(),
     )
     .expect("write fixture");
-    // Dead port: with no cache and no ACP model advertisement, the handler
-    // must degrade to an empty model list instead of failing the request.
     let _guards = catalog_fixture_env(&home, "http://127.0.0.1:1", fixture_path);
 
     let harness = AgentHarness::spawn_with_config(hermes_openrouter_config()).await;
@@ -581,8 +553,8 @@ async fn models_serves_stale_cache_without_catalog_error() {
     let tempdir = TempDir::new().expect("tempdir");
     let home = tempdir.path().join("home");
     seed_provider_credential(&home, "openrouter", &["OPENROUTER_API_KEY"]);
-    // Pre-seed a stale catalog: the ancient `fetched_at` forces a refresh,
-    // which fails against the dead port and leaves this entry to serve.
+    // The ancient `fetched_at` forces a refresh, which fails against the dead
+    // port and leaves this entry to serve.
     let cache_dir = home.join(".config").join("acp-stack");
     std::fs::create_dir_all(&cache_dir).expect("cache dir");
     std::fs::write(
@@ -634,8 +606,7 @@ async fn models_serves_stale_cache_without_catalog_error() {
 
 #[tokio::test]
 async fn models_rejects_admin_key() {
-    // Strict tiering has no admin-key superset behavior; session-tier
-    // routes reject valid admin keys with auth.wrong_kind.
+    // Strict tiering: an admin key is not a session-key superset.
     let harness = AgentHarness::spawn().await;
     let client = http().await;
     let response = client

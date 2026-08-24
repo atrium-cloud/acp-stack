@@ -60,9 +60,8 @@ fn settlement_signals_for(agent_id: &str) -> Vec<InitStateSignal> {
     agent_settlement_signals(&config_for_agent(agent_id), &registry, &args, false)
 }
 
-// No embedded agent is mode-only anymore (every set_mode agent also sets
-// set_model), so tests exercising set_model=false paths run against this
-// synthetic entry.
+// No embedded agent is mode-only anymore, so set_model=false paths run against
+// this synthetic entry.
 fn mode_only_registry() -> RegistryCatalog {
     RegistryCatalog::from_toml(
         r#"
@@ -85,8 +84,6 @@ creates = "true"
     .expect("registry")
 }
 
-// A registry set_model=false verdict outranks a model value already present
-// in config: the lane must settle as not applicable, not as the stale value.
 #[test]
 fn registry_verdict_outranks_a_configured_root_model() {
     let registry = mode_only_registry();
@@ -97,9 +94,6 @@ fn registry_verdict_outranks_a_configured_root_model() {
     assert_eq!(applicability_of(&signals, InitCategory::Model), Some(false));
 }
 
-// amp declares set_provider=false in the registry, so a client must not show
-// the provider lane as pending input that will never come; the model lane
-// stays live for the `amp-mode` execution tiers.
 #[test]
 fn registry_derivation_marks_amp_provider_inapplicable_but_keeps_model() {
     let signals = settlement_signals_for("amp");
@@ -198,9 +192,8 @@ fn registry_derivation_honors_no_skills() {
 }
 
 fn skills_applicability_under_restore(recorded: &RecordedInitArgs) -> (InitArgs, Option<bool>) {
-    // The hosted resume shape: the request redeclares nothing about skills,
-    // so `no_skills` is false when the settlement signals go out and only
-    // the recorded run can put it back.
+    // The hosted resume shape: the request redeclares nothing about skills, so only
+    // the recorded run can put `no_skills` back.
     let mut args = parse_init_args(&["--resume"]);
     let driver = Arc::new(RecordingDriver::default());
     prompt::with_hosted_driver(driver.clone(), || {
@@ -210,11 +203,8 @@ fn skills_applicability_under_restore(recorded: &RecordedInitArgs) -> (InitArgs,
     (args, applicability)
 }
 
-// The settlement signals fire before the recorded args are restored, so a
-// resume of a `--no-skills` run has already reported the lane as applicable
-// by the time the restore turns the skills step off. Without the correction
-// the terminal sweep would settle Skills with no value, telling the client
-// the lane ran.
+// Settlement signals fire before the recorded args are restored, so a resume of a
+// `--no-skills` run has already reported the lane as applicable and must retract it.
 #[test]
 fn a_resume_that_inherits_no_skills_withdraws_the_skills_lane() {
     let (args, applicability) = skills_applicability_under_restore(&RecordedInitArgs {
@@ -276,9 +266,8 @@ fn registry_derivation_reports_pending_dependencies_as_applicable() {
 
 #[test]
 fn probe_rules_on_mcp_applicability() {
-    // Spelled out rather than routed back through `applicability`: the rule
-    // under test is that an applicable verdict carries no reason, and
-    // reusing the helper the implementation uses would assert nothing.
+    // Spelled out rather than routed through `applicability`: reusing the helper the
+    // implementation uses would assert nothing.
     let advertised = capabilities_fixture(serde_json::json!({ "http": true }));
     assert_eq!(
         mcp_applicability_from_probe(&CapabilityProbeOutcome::Probed(advertised)),
@@ -353,8 +342,8 @@ fn settled_mcp(value: &str) -> Option<InitStateSignal> {
     })
 }
 
-// The lane reports what the agent will actually be handed, which is why the
-// settlement reads the probe's own partition rather than the config list.
+// The lane reports what the agent is actually handed, so the settlement reads the
+// probe's partition rather than the config list.
 #[test]
 fn probe_settles_mcp_with_the_servers_the_agent_will_be_given() {
     let config = config_with_mcp_servers(&["linear", "files"]);
@@ -379,9 +368,6 @@ fn probe_settles_mcp_with_the_servers_the_agent_will_be_given() {
     );
 }
 
-// Both ways the settlement declines: the agent takes no servers at all, and
-// the run declared none. The first is the case the probe-first ordering
-// exists for — the applicability verdict has to be the last word.
 #[test]
 fn probe_settles_no_mcp_without_support_or_declarations() {
     assert_eq!(
@@ -415,9 +401,6 @@ fn declared_stdio_servers() -> Vec<crate::config::McpServerConfig> {
     .expect("declared servers")
 }
 
-// The hosted lift's boundary: a session that declared nothing gets the
-// streamed picker, and one that declared its servers up front is left
-// alone — the wizard is skipped, not answered on the client's behalf.
 #[test]
 fn declared_mcp_servers_keep_a_hosted_run_out_of_the_wizard() {
     let args = parse_init_args(&[]);
@@ -435,8 +418,6 @@ fn declared_mcp_servers_keep_a_hosted_run_out_of_the_wizard() {
     });
 }
 
-// The lift only widened the hosted path: every other run reaches the
-// wizard exactly as before.
 #[test]
 fn mcp_prompting_stays_off_for_non_hosted_and_flag_driven_runs() {
     let config = config_without_mcp_servers();
@@ -472,8 +453,7 @@ fn capabilities_fixture(
     .expect("capabilities fixture")
 }
 
-/// The step kinds in the order `run_init_with_output` drives them. Call
-/// order is the authority on sequence, so this list is maintained against
+/// Step kinds in the order `run_init_with_output` drives them; maintained against
 /// the call sites, never against the ordinals.
 const STEP_CALL_ORDER: [&str; 13] = [
     step_kind::SECRETS_INIT,
@@ -499,8 +479,7 @@ fn test_store() -> (tempfile::TempDir, StateStore, crate::state::InitRunRecord) 
     (dir, store, run)
 }
 
-/// Drives every step through its wrapper, including the pre-created
-/// log-dir variant workspace materialization uses.
+/// Drives every step through its wrapper, including the pre-created log-dir variant.
 fn drive_all_steps(store: &StateStore, run: &crate::state::InitRunRecord) {
     for (index, kind) in STEP_CALL_ORDER.iter().enumerate() {
         let ordinal = index as i64 + 1;
@@ -551,8 +530,8 @@ fn step_wrappers_signal_started_and_finished_in_call_order() {
     assert_eq!(driver.recorded(), expected);
 }
 
-// A terminal run must not merely discard signals, it must never build
-// them: the derivations behind them walk the registry and the filesystem.
+// A terminal run must never build signals, not merely discard them: the derivations
+// behind them walk the registry and the filesystem.
 #[test]
 fn signals_are_never_built_without_a_hosted_driver() {
     let built = std::cell::Cell::new(false);
@@ -648,11 +627,8 @@ fn installed_skill_names_omits_an_empty_list() {
     assert_eq!(installed_skill_names(&[]), None);
 }
 
-// The highest-blast-radius part of the mode lane: mode-only agents
-// (set_model=false) never spawned during init before it existed, so a
-// harness that cannot complete a provisional session must degrade to a
-// skipped lane rather than fail the run. The stub resolves and spawns, then
-// exits without speaking ACP — exactly the shape of that failure.
+// A harness that cannot complete a provisional session must degrade to a skipped
+// lane rather than fail the run. The stub spawns, then exits without speaking ACP.
 #[cfg(unix)]
 #[test]
 fn a_mode_only_discovery_failure_skips_the_lane_instead_of_failing_init() {
@@ -694,9 +670,8 @@ fn a_mode_only_discovery_failure_skips_the_lane_instead_of_failing_init() {
             InitStateSignal::CategoryApplicability {
                 category: InitCategory::Mode,
                 applicable: false,
-                // Not `Discovery`: the session never opened, so this reports
-                // that the check could not be made, which is not grounds for
-                // withdrawing a mode the config already holds.
+                // Not `Discovery`: the session never opened, so the check could not
+                // be made — no grounds to withdraw a mode the config already holds.
                 source: ApplicabilitySource::DiscoveryUnavailable,
                 ..
             }
@@ -706,10 +681,8 @@ fn a_mode_only_discovery_failure_skips_the_lane_instead_of_failing_init() {
     );
 }
 
-/// A hosted init writes a custom provider whose api-key ref arrives later
-/// through a managed credential push. Until it lands the agent cannot
-/// resolve its environment, so the lanes that would spawn it must gate on
-/// the credential rather than on the spawn failing.
+/// A custom provider whose api-key ref arrives later through a managed credential
+/// push: lanes that would spawn the agent must gate on the credential, not the spawn.
 #[cfg(unix)]
 fn pending_credential_fixture() -> (tempfile::TempDir, Config, RegistryCatalog, SecretStore) {
     use std::os::unix::fs::PermissionsExt;
@@ -721,8 +694,7 @@ fn pending_credential_fixture() -> (tempfile::TempDir, Config, RegistryCatalog, 
         .expect("stub is executable");
     let registry = RegistryCatalog::load_embedded().expect("registry");
     let mut config = config_for_agent("opencode");
-    // Binary and cwd both resolve, so nothing but the pending credential
-    // can be what stops the lane.
+    // Binary and cwd both resolve, so only the pending credential can stop the lane.
     config.agent.command = stub.display().to_string();
     config.agent.args = Vec::new();
     config.agent.env = vec!["PENDING_CUSTOM_KEY".to_owned()];
@@ -813,8 +785,7 @@ fn testflight_skips_or_errors_on_a_pending_provider_credential() {
     assert!(error.to_string().contains("PENDING_CUSTOM_KEY"));
 }
 
-/// Answers every prompt with one scripted confirm answer, so the testflight
-/// resolver sees a hosted client and the deferral flag under test.
+/// Answers every prompt with one scripted confirm answer.
 struct ScriptedConfirmDriver(prompt::ConfirmAnswer);
 
 impl prompt::HostedPromptDriver for ScriptedConfirmDriver {
@@ -887,8 +858,7 @@ fn a_deferred_testflight_answer_is_not_a_decline() {
         }),
         Some(TestflightDecision::SkipDeferred)
     );
-    // An accepted answer is a run whatever the flag says: the backend defers by
-    // declining, so a `true` that also claims deferral would run it twice.
+    // The backend defers by declining, so a `true` that also claims deferral is a run.
     assert_eq!(
         resolve(prompt::ConfirmAnswer {
             value: true,
@@ -934,8 +904,6 @@ fn store_with_live_background_apply(init_run_id: &str) -> (tempfile::TempDir, St
 
 #[test]
 fn background_deps_launch_adopts_only_this_runs_live_apply() {
-    // Resume case: the live background row belongs to this init run, so the
-    // launch adopts it instead of spawning a second worker.
     let (_dir, store) = store_with_live_background_apply("irun_owner");
     let config = config_for_agent("placebo");
     let (outcome, apply_run_id) = launch_background_deps_apply(
@@ -949,7 +917,6 @@ fn background_deps_launch_adopts_only_this_runs_live_apply() {
     assert_eq!(apply_run_id, "dap_live_bg");
     assert!(outcome.background);
     assert!(outcome.payload_json.contains("\"adopted\":true"));
-    // Still exactly one run row: nothing was claimed.
     assert_eq!(
         store.query_deps_apply_runs(10).expect("query").len(),
         1,
@@ -959,9 +926,8 @@ fn background_deps_launch_adopts_only_this_runs_live_apply() {
 
 #[test]
 fn background_deps_launch_rejects_a_foreign_live_apply() {
-    // A live background apply owned by a DIFFERENT init run must not be
-    // adopted — recording this run's deps step against foreign work would
-    // silently skip its own declared deps. Fail fast, retryable.
+    // Adopting a DIFFERENT run's apply would record this run's deps step against
+    // foreign work and silently skip its own declared deps.
     let (_dir, store) = store_with_live_background_apply("irun_other");
     let config = config_for_agent("placebo");
     let error = launch_background_deps_apply(

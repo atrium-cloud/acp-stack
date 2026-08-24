@@ -146,9 +146,8 @@ fn missing_flag(flag: &str) -> StackError {
     }
 }
 
-/// The `--sync-fd` value only exists at supervisor runtime, so the wrapper
-/// argv carries the `__sandbox-exec` invocation without it and the fd is
-/// injected here, right after the subcommand token.
+/// Inject `--sync-fd` right after the subcommand token; the value only exists
+/// at supervisor runtime, so the stored wrapper argv omits it.
 pub(super) fn inject_sync_fd(child_command: &mut Vec<String>, sync_fd: i32) -> Result<()> {
     let position = child_command
         .iter()

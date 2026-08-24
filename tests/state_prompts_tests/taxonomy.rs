@@ -156,11 +156,8 @@ fn prompt_update_preserves_taxonomy_when_called_with_none() {
         })
         .expect("prompt inserted");
 
-    // First write (non-terminal) sets the taxonomy; second write transitions
-    // to a terminal status with None on both taxonomy params and must NOT
-    // clobber the existing failure_class / failure_detail_json. The terminal
-    // write is the only one that lands on already-set rows in production —
-    // the supervisor sets a running-state taxonomy and then settles once.
+    // A terminal write passing None on both taxonomy params must NOT clobber
+    // the existing failure_class / failure_detail_json.
     store
         .update_prompt_status(
             "prm_preserve",
@@ -224,8 +221,7 @@ fn prompt_update_clears_taxonomy_with_empty_string_sentinel() {
         })
         .expect("prompt inserted");
 
-    // First write (non-terminal) sets the taxonomy; second write transitions
-    // to terminal with Some("") for both taxonomy params and must clear them.
+    // Some("") on both taxonomy params clears them, unlike None.
     store
         .update_prompt_status(
             "prm_clear",

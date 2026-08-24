@@ -165,11 +165,8 @@ impl StateStore {
         Ok(())
     }
 
-    /// Rotate both keys atomically. Two sequential [`Self::upsert_auth_key`]
-    /// calls would leave a mismatched session/admin pair if the process died
-    /// between them — a state `ensure_auth_verifier_pair` treats as
-    /// unrecoverable — so the pair replacement must be a single transaction.
-    /// `created_at` is preserved on rows that already exist.
+    /// Rotate both keys in ONE transaction: two sequential upserts would leave a mismatched
+    /// session/admin pair on a mid-way crash, which `ensure_auth_verifier_pair` cannot recover.
     pub fn replace_auth_key_pair(&self, verifiers: &crate::auth::AuthVerifierSet) -> Result<()> {
         let transaction =
             Transaction::new_unchecked(self.connection(), TransactionBehavior::Immediate)?;

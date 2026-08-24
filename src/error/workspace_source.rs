@@ -1,9 +1,4 @@
-//! Workspace-source materialization error helpers.
-//!
-//! Covers the `workspace.code_sources` / `workspace.data_sources` config-time
-//! validators and the materialization pipeline that runs during `acps init`.
-//! Variants here predominantly use `workspace.*` error codes plus the catch-all
-//! `config.invalid` for the code/data-source validators.
+//! Error helpers for the workspace code/data-source validators and materialization pipeline.
 
 use http::StatusCode;
 

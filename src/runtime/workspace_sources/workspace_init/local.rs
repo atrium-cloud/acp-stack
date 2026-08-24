@@ -28,11 +28,9 @@ pub(super) fn materialize_local(
             reason: "path is required".to_owned(),
         })?;
     let src = Path::new(path);
-    // Reject a top-level symlink **before** canonicalize follows it.
-    // `copy_tree` checks symlinks during the walk, but that runs only
-    // after canonicalization has already resolved the configured root; a
-    // configured `/data/link -> /etc` would otherwise be copied as if
-    // `/etc` were the declared source.
+    // MUST reject a top-level symlink BEFORE canonicalize follows it:
+    // `copy_tree`'s walk runs after canonicalization, so a configured
+    // `/data/link -> /etc` would otherwise be copied as the declared source.
     let src_metadata = std::fs::symlink_metadata(src).map_err(|source_err| {
         StackError::WorkspaceDataSourceInvalid {
             index,
@@ -52,11 +50,8 @@ pub(super) fn materialize_local(
                 reason: format!("local path `{path}` is not readable: {source_err}"),
             })?;
 
-    // Refuse if the destination would end up inside the source tree —
-    // copying into a subdirectory of `path` would either loop forever or
-    // produce a recursive snapshot of itself. The canonical form of `dest`
-    // may not exist yet, so we check against its parent (which we just
-    // created or are about to create).
+    // A destination inside the source tree would loop or snapshot itself. `dest`
+    // may not exist yet, so the check runs against its parent.
     ensure_destination_not_symlink(dest)?;
     let dest_parent_canonical = dest
         .parent()

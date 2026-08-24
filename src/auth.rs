@@ -1,16 +1,6 @@
-//! API key generation, verifier hashing, constant-time comparison, and
-//! structured auth-failure logging.
-//!
-//! Keys are 32 random bytes from the system CSPRNG, base64url-encoded without
-//! padding, prefixed with `acps_`. The prefix makes leaked keys identifiable
-//! in logs and grep without leaking the secret bytes themselves; the format
-//! matches widely-used patterns (GitHub, Stripe).
-//!
-//! `record_auth_failure` is the single entry point for writing rows into the
-//! `auth_failures` table. The HTTP layer (next batch) calls this whenever it
-//! rejects a key; never store the attempted key value itself, only the kind
-//! that was expected and the reason it failed (per
-//! `docs/specs/security.md:70`).
+//! API key generation, verifier hashing, constant-time comparison, and structured auth-failure
+//! logging. An `auth_failures` row records only the expected kind and the reason, never the
+//! attempted key value.
 
 use base64::Engine;
 use rand::RngExt;
@@ -35,10 +25,8 @@ pub const AUTH_VERIFIER_DIGEST_BYTES: usize = 32;
 pub enum KeyKind {
     Session,
     Admin,
-    /// Stamped by the internal Unix-domain-socket listener. It is not
-    /// derivable from any bearer; route handlers reuse the same code path as
-    /// session/admin requests but `enforce_tier` will never accept Local on the
-    /// TCP router, so a Local tag leaking into the public API is a 401.
+    /// Stamped by the internal Unix-domain-socket listener and not derivable from any bearer;
+    /// `enforce_tier` never accepts Local on the TCP router, so a leaked Local tag is a 401.
     Local,
     Unknown,
 }
@@ -74,9 +62,7 @@ impl AuthFailureReason {
     }
 }
 
-/// Generate a fresh API key. The bytes come from `rand::rng()`, which is the
-/// thread-local CSPRNG and is reseeded periodically from the system entropy
-/// source.
+/// Generate a fresh `acps_`-prefixed API key from the thread-local CSPRNG.
 pub fn generate_api_key() -> String {
     let mut bytes = [0u8; API_KEY_ENTROPY_BYTES];
     rand::rng().fill(&mut bytes);
@@ -84,11 +70,8 @@ pub fn generate_api_key() -> String {
     format!("{API_KEY_PREFIX}{encoded}")
 }
 
-/// Constant-time equality on byte slices of equal length. Returns false when
-/// the lengths differ; this length check is NOT itself constant-time, but the
-/// API key length is fixed and public, so a length mismatch reveals nothing a
-/// caller cannot observe by inspecting the key format. For two same-length
-/// slices, the byte-by-byte comparison is constant-time via `subtle`.
+/// Constant-time equality for equal-length slices. The length check itself is NOT constant-time,
+/// which is safe only because the API key length is fixed and public.
 pub fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;
@@ -252,9 +235,7 @@ fn decode_verifier_part(
     Ok(decoded)
 }
 
-/// Persist an auth-failure record. The payload is a small JSON object so
-/// future fields (rate-limit context, header parse details, etc.) can be
-/// added without a migration. Never write the attempted key value here.
+/// Persist an auth-failure record. The attempted key value must never be written here.
 pub fn record_auth_failure(
     state: &StateStore,
     kind: KeyKind,
@@ -300,7 +281,6 @@ mod tests {
         let key = generate_api_key();
         assert!(key.starts_with(API_KEY_PREFIX));
         let body = &key[API_KEY_PREFIX.len()..];
-        // 32 bytes -> ceil(32 * 4 / 3) = 43 base64url chars, no padding.
         assert_eq!(body.len(), 43);
         for c in body.chars() {
             assert!(

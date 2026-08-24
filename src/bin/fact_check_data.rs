@@ -1,10 +1,4 @@
 //! Dev tool: fact-check shipped data files against external metadata sources.
-//!
-//! Usage:
-//!
-//! ```sh
-//! cargo run --features dev-tools --bin fact-check-data
-//! ```
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;

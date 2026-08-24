@@ -85,7 +85,6 @@ fn teardown_runs_after_normal_exit_and_status_is_mirrored() {
     let markdir = tmp.path();
     let provider = write_provider_script(markdir, "touch \"$markdir/$phase-ran\"\nexit 0");
 
-    // Success path: workload exit 0 is preserved.
     let status = supervise_command(
         &[provider.to_str().unwrap(), markdir.to_str().unwrap()],
         "10s",
@@ -98,7 +97,6 @@ fn teardown_runs_after_normal_exit_and_status_is_mirrored() {
     assert!(markdir.join("setup-ran").exists());
     assert!(markdir.join("teardown-ran").exists());
 
-    // Failure path: a nonzero workload exit code is preserved verbatim.
     let status = supervise_command(
         &[provider.to_str().unwrap(), markdir.to_str().unwrap()],
         "10s",

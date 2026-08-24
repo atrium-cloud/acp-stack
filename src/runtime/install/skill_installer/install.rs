@@ -1,5 +1,5 @@
-//! The install flow: selector parsing, archive fetch, and the copy of
-//! resolved skill directories into an agent's shared install root.
+//! The install flow: selector parsing, archive fetch, and the copy into an
+//! agent's shared install root.
 
 use super::*;
 
@@ -36,11 +36,10 @@ pub fn install_from_github(
     install_from_extracted_root(source, &archive_root, destination_root, skill_names)
 }
 
-/// Download and extract a source's GitHub archive into a fresh temporary
-/// directory, returning the tempdir guard (keep it alive) and the archive's
-/// single top-level directory. Shared by install and inspection. Exposed so the
-/// add route can fetch off the async runtime and *before* taking the agent
-/// config-mutation lock, keeping a slow download from blocking `agent switch`.
+/// Download and extract a source's GitHub archive into a temporary directory,
+/// returning the tempdir guard and the archive's top-level directory. Fetch
+/// before taking the agent config-mutation lock so a slow download cannot block
+/// `agent switch`.
 pub fn fetch_and_extract_source(
     source: &ResolvedSkillSource,
 ) -> Result<(tempfile::TempDir, PathBuf)> {

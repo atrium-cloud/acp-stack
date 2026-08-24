@@ -11,9 +11,6 @@ fn mark_stalled_prompts_flips_only_aged_rows() {
     let store = StateStore::open(&path).expect("state should open");
     store.migrate().expect("migration should pass");
 
-    // Old row: well past the threshold. Fresh row: minted right before
-    // the sweep; its `updated_at` will be roughly "now" so the comparison
-    // against `now - 60s` keeps it as running.
     let aged = "2020-01-01T00:00:00.000000000Z";
     seed_running_prompt_at(&store, "sess_aged", "prm_aged", aged);
 
@@ -110,10 +107,7 @@ fn mark_stalled_prompts_leaves_terminal_rows_alone() {
     let store = StateStore::open(&path).expect("state should open");
     store.migrate().expect("migration should pass");
 
-    // Seed three terminal rows aged past the threshold. The sweep must
-    // not touch any of them — once a prompt is settled, the durable
-    // status (`completed`, `errored`, `cancelled`) is the source of
-    // truth.
+    // Terminal rows aged past the threshold: once settled, the durable status is the truth.
     let aged = "2020-01-01T00:00:00.000000000Z";
     for (session_id, prompt_id, terminal) in [
         ("sess_done", "prm_done", PromptStatus::Completed),
@@ -171,13 +165,8 @@ fn mark_stalled_prompts_leaves_terminal_rows_alone() {
 
 #[test]
 fn update_prompt_status_is_noop_on_terminal_rows() {
-    // Regression test for the sweeper/supervisor race: once a prompt is in any
-    // terminal status (`completed | errored | cancelled | stalled`), a later
-    // `update_prompt_status` call from the supervisor settle path must NOT
-    // overwrite it. The WHERE guard inside `update_prompt_status` enforces
-    // this; without it a slow ACP `prompt_session` future returning after the
-    // sweeper had already flipped the row to `stalled` would race-erase the
-    // stalled marker with `completed`/`errored`/`cancelled`.
+    // Sweeper/supervisor race: a late supervisor settle must NOT overwrite an already-terminal
+    // status, or a slow `prompt_session` future would race-erase a `stalled` marker.
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let path = tempdir.path().join("state.sqlite");
     let store = StateStore::open(&path).expect("state should open");
@@ -236,8 +225,7 @@ fn update_prompt_status_is_noop_on_terminal_rows() {
             )
             .expect("first terminal write");
         assert!(first_applied, "first terminal write should apply");
-        // Second write is the supervisor late-settle. It should not return an
-        // error (the row exists), but it must be a no-op on the data.
+        // The supervisor late-settle: no error, but a no-op on the data.
         let second_applied = store
             .update_prompt_status(
                 prompt_id,
@@ -270,8 +258,7 @@ fn update_prompt_status_is_noop_on_terminal_rows() {
         );
     }
 
-    // PromptNotFound is still surfaced when the row truly does not exist —
-    // the no-op handling must not mask the missing-row case.
+    // The no-op handling must not mask a genuinely missing row.
     let missing = store.update_prompt_status(
         "prm_does_not_exist",
         PromptStatus::Completed,
@@ -296,7 +283,6 @@ fn count_stuck_prompts_returns_count_and_oldest_updated_at() {
     let store = StateStore::open(&path).expect("state should open");
     store.migrate().expect("migration should pass");
 
-    // No stuck rows yet.
     let (count, oldest) = store
         .count_stuck_prompts(std::time::Duration::from_secs(STALE_THRESHOLD_SECS))
         .expect("count_stuck_prompts should run");

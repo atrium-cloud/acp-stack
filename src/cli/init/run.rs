@@ -58,21 +58,17 @@ pub(in crate::cli) fn run_init_command(command: InitCommand, mode: InitMode) -> 
     }
 }
 
-/// The init flow, in order. Everything above `InitFlow::begin` is untracked
-/// preflight; everything below it is a recorded step whose call order — never
-/// the durable ordinals, which are matching keys for `--resume` — is the
-/// authority on step sequence.
+/// The init flow, in order. Call order below `InitFlow::begin` is the
+/// authority on step sequence, never the durable ordinals, which are only
+/// matching keys for `--resume`.
 fn run_init_with_output(
     mut args: InitArgs,
     mode: InitMode,
     output_mode: InitOutputMode,
 ) -> Result<()> {
-    // Hosted init always rotates: the plaintext keys only ever travel in the
-    // result frame, so a preserved run would leave the backend permanently
-    // unable to obtain credentials for an instance with pre-existing state.
-    // Folded into the flag BEFORE the run record is written so a later CLI
-    // `acps init --resume` of a crashed hosted run replays the rotation and
-    // reprints fresh keys instead of "preserving" already-invalidated ones.
+    // Hosted init always rotates, since plaintext keys travel only in the
+    // result frame. Folded in BEFORE the run record is written so a later
+    // `--resume` replays the rotation instead of preserving invalidated keys.
     args.rotate_keys = args.rotate_keys || matches!(output_mode, InitOutputMode::Hosted);
 
     let base = prepare_init_base(&mut args, mode, output_mode)?;

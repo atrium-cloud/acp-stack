@@ -1,9 +1,5 @@
-//! Derived metrics: counts, durations, percentiles aggregated over a window.
-//!
-//! The wire-facing JSON shape for `/v1/metrics/summary` lives in `api`; this
-//! module is the boundary between raw SQLite aggregation and downstream
-//! consumers (HTTP handler, CLI pretty-printer, future Supabase mirror).
-//! Percentiles are computed in Rust because SQLite has no `percentile_cont`.
+//! Derived metrics: counts, durations, and percentiles aggregated over a
+//! window. Percentiles are computed in Rust; SQLite has no `percentile_cont`.
 
 use crate::error::Result;
 use rusqlite::{OptionalExtension, params};
@@ -25,18 +21,15 @@ pub struct StateCounts {
     pub permission_decisions: i64,
 }
 
-/// Time window for `metrics_summary`. Both bounds are inclusive on `since`,
-/// exclusive on `until`, RFC3339 with 9-digit subseconds (matches the
-/// `current_timestamp` format used throughout the schema).
+/// Time window for `metrics_summary`: `[since, until)`, RFC3339 with 9-digit
+/// subseconds to match the schema's `current_timestamp` format.
 #[derive(Debug, Clone)]
 pub struct MetricsWindow {
     pub since: String,
     pub until: String,
 }
 
-/// Derived per-window metrics. All counts/aggregates are scoped to the same
-/// `MetricsWindow`; percentiles are `None` when the underlying sample is
-/// empty.
+/// Derived per-window metrics; percentiles are `None` on an empty sample.
 #[derive(Debug, Clone)]
 pub struct MetricsSummary {
     pub window: MetricsWindow,
@@ -112,9 +105,8 @@ pub struct SecurityMetrics {
 
 #[derive(Debug, Clone, Default)]
 pub struct ApiConnectionMetrics {
-    /// Count of `api.request` events in the window. The running binary always
-    /// carries this instrument, so a quiet window is `0` — never an absent
-    /// measurement.
+    /// Count of `api.request` events in the window; a quiet window is `0`,
+    /// never an absent measurement.
     pub request_count: i64,
     pub by_status: std::collections::BTreeMap<String, i64>,
     pub by_method: std::collections::BTreeMap<String, i64>,
@@ -142,19 +134,16 @@ pub struct UsageMetrics {
     pub context_window_max: Option<i64>,
 }
 
-/// Convert an RFC3339 timestamp to an `Option<DateTime<Utc>>`. Returns None
-/// on parse failure rather than propagating an error: metrics aggregations
-/// tolerate (and skip) malformed rows so a single bad input cannot blank out
-/// an entire summary.
+/// Parse an RFC3339 timestamp, returning `None` on failure so a single
+/// malformed row cannot blank out an entire summary.
 fn parse_rfc3339(input: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     chrono::DateTime::parse_from_rfc3339(input)
         .ok()
         .map(|dt| dt.with_timezone(&chrono::Utc))
 }
 
-/// Return the wall-clock duration between two RFC3339 timestamps in
-/// milliseconds (b - a). Returns None when either side fails to parse OR the
-/// computed duration is negative (clock skew across rows).
+/// Milliseconds between two RFC3339 timestamps; `None` on a parse failure or a
+/// negative result (clock skew across rows).
 fn duration_ms_between(start: &str, end: &str) -> Option<i64> {
     let start = parse_rfc3339(start)?;
     let end = parse_rfc3339(end)?;
@@ -170,8 +159,7 @@ fn average_i64(values: &[i64]) -> Option<i64> {
     Some((sum / values.len() as i128) as i64)
 }
 
-/// Linear-interpolated percentile (matches numpy default). For a near-empty
-/// or single-value sample this collapses to that value.
+/// Linear-interpolated percentile, matching the numpy default.
 fn percentile_i64(values: &[i64], q: f64) -> Option<i64> {
     if values.is_empty() {
         return None;
@@ -208,9 +196,7 @@ impl StateStore {
         })
     }
 
-    /// Counts scoped to a `[since, until)` window keyed on the supplied
-    /// timestamp column. SQLite optimizes the range scan via the
-    /// `created_at` indexes added in migration 007.
+    /// Counts scoped to a `[since, until)` window on the given timestamp column.
     fn count_table_in_window(
         &self,
         table: &'static str,
@@ -225,12 +211,7 @@ impl StateStore {
             .query_row(&sql, params![window.since, window.until], |row| row.get(0))?)
     }
 
-    /// Compute the full metrics summary for a `[since, until)` window. The
-    /// caller (HTTP handler / CLI) decides the window; pure-SQLite aggregation
-    /// keeps this function side-effect-free and re-runnable. Percentiles are
-    /// computed in Rust because SQLite has no `percentile_cont`; the row
-    /// counts in a reasonable window (hours-to-days × thousands) are small
-    /// enough that loading them into memory once per query is fine.
+    /// Compute the full metrics summary for a `[since, until)` window.
     pub fn metrics_summary(&self, window: MetricsWindow) -> Result<MetricsSummary> {
         let counts = StateCounts {
             events: self.count_table_in_window("events", "created_at", &window)?,
@@ -468,9 +449,7 @@ impl StateStore {
             let (status, count) = entry?;
             by_outcome.insert(status, count);
         }
-        // Response time = time between request created_at and decision
-        // created_at. Joining on the decision row covers approve/deny/cancel/
-        // expired terminal outcomes; pending rows are excluded (no decision).
+        // The join excludes pending rows, which have no decision to measure to.
         let mut response_statement = self.connection().prepare(
             "SELECT r.created_at, d.created_at FROM permission_requests r \
              JOIN permission_decisions d ON d.request_id = r.id \
@@ -654,9 +633,8 @@ impl StateStore {
     }
 
     fn usage_metrics(&self, window: &MetricsWindow) -> Result<UsageMetrics> {
-        // Sum token counters across all `usage.reported` events. Agents that
-        // don't emit these leave every field None. Context fields use MAX
-        // because standard ACP usage updates report snapshots, not deltas.
+        // Context fields use MAX because ACP usage updates report snapshots,
+        // not deltas.
         let row = self
             .connection()
             .query_row(

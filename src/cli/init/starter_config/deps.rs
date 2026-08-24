@@ -14,9 +14,8 @@ pub(super) const BROWSER_USE_SHARE_DIR: &str = "/usr/local/share/acp-stack";
 pub(super) const BROWSER_USE_WRAPPER_PATH: &str = "/usr/local/share/acp-stack/browser-use-mcp.py";
 pub(super) const BROWSER_USE_LAUNCHER_PATH: &str = "/usr/local/bin/acp-stack-browser-use-mcp";
 
-// Centralized package manifest for init's Standard Setup path. This mirrors the
-// VM base profile: broad agent-work tools, no build toolchains or language
-// headers, and no inferred package-manager behavior.
+// Package manifest for init's Standard Setup path, mirroring the VM base
+// profile: agent-work tools, no build toolchains or language headers.
 pub(super) const STANDARD_AGENT_WORK_APT_PACKAGES: &[&str] = &[
     "ca-certificates",
     "bash",
@@ -77,10 +76,8 @@ pub(super) const BROWSER_USE_APT_PACKAGES: &[&str] = &[
 pub(super) const BUILD_HEAVY_APT_PACKAGES: &[&str] =
     &["build-essential", "pkg-config", "python3-dev"];
 
-/// Operator-supplied agent environment variable references collected during
-/// init. `flag_refs` (from `--agent-env-ref`) must already exist in the secret
-/// store; `fresh` holds interactively-entered name+value pairs to write.
-/// Values are `Zeroizing` and never echoed or recorded in the init run args.
+/// Agent env refs collected during init: `flag_refs` must already exist in the
+/// secret store, `fresh` holds interactively-entered pairs still to be written.
 #[derive(Default)]
 pub(crate) struct AgentEnvCollection {
     pub(super) flag_refs: Vec<String>,
@@ -98,8 +95,7 @@ impl AgentEnvCollection {
     }
 }
 
-/// Reject `--agent-env-ref` when a config already exists; like the other
-/// starter-only flags it only applies to a fresh config.
+/// Reject `--agent-env-ref` when a config already exists.
 pub(crate) fn reject_agent_env_refs_for_existing_config(args: &InitArgs) -> Result<()> {
     if !args.agent_env_ref.is_empty() {
         return Err(StackError::InvalidParam {
@@ -110,10 +106,8 @@ pub(crate) fn reject_agent_env_refs_for_existing_config(args: &InitArgs) -> Resu
     Ok(())
 }
 
-/// Collect operator agent environment variable refs from `--agent-env-ref` and,
-/// in interactive runs, name/value entries. Flag refs reference secrets that
-/// must already exist; interactive entries carry their value for the store write
-/// after the secret store opens.
+/// Collect agent env refs from `--agent-env-ref` and, in interactive runs,
+/// name/value entries.
 pub(crate) fn collect_agent_env_refs_for_init(
     args: &InitArgs,
     interactive: bool,
@@ -128,10 +122,8 @@ pub(crate) fn collect_agent_env_refs_for_init(
             });
         }
         if !is_valid_secret_ref_name(&name) {
-            // A value pasted where its ref name belongs is screened first, and
-            // the shape complaint names the constraint rather than the entry:
-            // the heuristic only recognizes the credential prefixes it knows,
-            // so a token it does not recognize must not ride the error out.
+            // Screen for a pasted credential first, then complain about shape
+            // without echoing the entry — an unrecognized token may be a secret.
             crate::config::screen_ref_name("agent-env-ref", &name)?;
             return Err(StackError::InvalidParam {
                 field: "agent-env-ref",
@@ -174,7 +166,6 @@ pub(crate) fn collect_agent_env_refs_for_init(
                 break;
             };
             if value.is_empty() {
-                // Don't store an empty secret for the ref; skip it.
                 continue;
             }
             fresh.push((name, zeroize::Zeroizing::new(value)));
@@ -183,10 +174,8 @@ pub(crate) fn collect_agent_env_refs_for_init(
     Ok(AgentEnvCollection { flag_refs, fresh })
 }
 
-/// Append the collected ref names to `config.agent.env`, de-duplicating against
-/// refs already present (e.g. the provider key ref). Returns whether anything
-/// was added. Called only after the refs are verified/stored so a run that fails
-/// verification never persists an unresolved `agent.env` ref.
+/// Append the collected ref names to `config.agent.env`. Call only after the
+/// refs are verified/stored, so no unresolved `agent.env` ref is persisted.
 pub(crate) fn append_agent_env_refs(config: &mut Config, collection: &AgentEnvCollection) -> bool {
     let mut changed = false;
     for name in collection.ref_names() {
@@ -198,9 +187,8 @@ pub(crate) fn append_agent_env_refs(config: &mut Config, collection: &AgentEnvCo
     changed
 }
 
-/// Write interactively-collected env values to the store and verify that every
-/// flag-provided ref already resolves. Runs after the secret store is open and
-/// before the agent is installed/launched, so `resolve_agent_env` finds them.
+/// Write collected env values to the store and verify every flag-provided ref
+/// resolves; must run before the agent is installed or launched.
 pub(crate) fn apply_agent_env_collection(
     secret_store: &mut SecretStore,
     collection: &AgentEnvCollection,
@@ -216,19 +204,16 @@ pub(crate) fn apply_agent_env_collection(
             });
         }
         if secret_store.contains(name) {
-            // A valid ref name can still be credential-shaped — 40-plus hex
-            // characters starting with a letter passes both checks — so this
-            // arm names the condition rather than the entry, like the one
-            // above. The operator typed the name and knows which it is.
+            // A valid ref name can still be credential-shaped, so name the
+            // condition rather than echoing the entry.
             return Err(StackError::InvalidParam {
                 field: "agent-env-ref",
                 reason: "an agent env ref with this name already exists in the secret store; refusing to overwrite it. Choose a new ref name, or update the value with `acps secrets set`.".to_owned(),
             });
         }
     }
-    // Only write when there is something to store: `set_many` re-encrypts the
-    // whole store (age ciphertext is non-deterministic), so an empty write on a
-    // no-change re-run would needlessly rewrite the secret file.
+    // `set_many` re-encrypts the whole store (age ciphertext is
+    // non-deterministic), so skip the write when there is nothing to store.
     if !collection.fresh.is_empty() {
         secret_store.set_many(
             collection
@@ -277,8 +262,8 @@ fn parse_dep_entry(
     })
 }
 
-/// Build dependency entries from `--dep` (user scope) and `--dep-system`
-/// (system scope) flags. Each is `NAME=SHELL` with an install action.
+/// Build dependency entries from the `NAME=SHELL` `--dep` and `--dep-system`
+/// flags.
 pub(super) fn deps_from_args(args: &InitArgs) -> Result<Vec<DependencyEntry>> {
     let mut entries = Vec::new();
     for raw in &args.dep {
@@ -476,8 +461,7 @@ fn assert_standard_agent_work_excludes_build_packages() -> Result<()> {
     Ok(())
 }
 
-/// Append flag-declared dependencies to `config.dependencies.commands`,
-/// rejecting a name that is already declared (e.g. an auto-added `cloudflared`).
+/// Append flag-declared dependencies, rejecting an already-declared name.
 pub(crate) fn push_args_deps_to_config(config: &mut Config, args: &InitArgs) -> Result<()> {
     if args.standard_agent_work_deps {
         push_standard_agent_work_deps_to_config(config)?;
@@ -502,8 +486,7 @@ pub(crate) fn push_args_deps_to_config(config: &mut Config, args: &InitArgs) -> 
     Ok(())
 }
 
-/// `--dep`/`--dep-system` declare into a fresh starter config only; reject them
-/// when a config already exists (the operator edits config or uses `acps deps`).
+/// Reject `--dep`/`--dep-system` when a config already exists.
 pub(crate) fn reject_deps_args_for_existing_config(args: &InitArgs) -> Result<()> {
     for (flag, values) in [("--dep", &args.dep), ("--dep-system", &args.dep_system)] {
         if !values.is_empty() {
@@ -530,24 +513,17 @@ pub(crate) fn reject_deps_args_for_existing_config(args: &InitArgs) -> Result<()
     Ok(())
 }
 
-/// Decide whether to run the dependency-apply init step. Non-interactive runs
-/// require `--deps-apply --deps-apply-yes`; interactive runs summarize the
-/// pending actions and confirm (default no). Returns false when there is
-/// nothing actionable.
-///
-/// The prompt stays offered even when escalation is unavailable: the apply
-/// still runs every user-scope action and records `privilege_required` audit
-/// rows for the skipped system-scope ones, which health and `acps installer
-/// history` need. Declining silently on the operator's behalf would lose both.
+/// Decide whether to run the dependency-apply init step. The prompt stays
+/// offered even when escalation is unavailable, so user-scope actions still run
+/// and skipped system-scope ones still record `privilege_required` audit rows.
 pub(crate) fn should_apply_deps_for_init(
     args: &InitArgs,
     candidates: &[DepApplyCandidate],
     interactive: bool,
     escalation: &PrivilegeEscalation,
     shell_program: &str,
-    // Output-mode-aware line sink (init_println! at the call site).
-    // Printing directly here would corrupt `--handoff-json`, whose stdout
-    // must stay a single JSON object.
+    // Printing directly here would corrupt `--handoff-json`, whose stdout must
+    // stay a single JSON object.
     emit_notice: &mut dyn FnMut(&str),
 ) -> Result<bool> {
     if candidates.is_empty() {

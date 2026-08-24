@@ -341,10 +341,9 @@ fn add_data_source_to_config(config: &mut Config, source: DataSourceConfig) -> R
 
 fn apply_sandbox_set(config: &mut Config, args: &SandboxSetArgs) -> Result<()> {
     validate_sandbox_args(args)?;
-    // The extensions table has no CLI surface, so a mode change can never fix
-    // an incompatible combination in the same invocation — fail before any
-    // write with a pointer at the extension instead of a generic validation
-    // error.
+    // The extensions table has no CLI surface, so a mode change cannot fix an
+    // incompatible combination in the same invocation; fail before any write
+    // with a pointer at the extension.
     let network_provider = crate::extensions::resolve_network_provider(config);
     if let Some(network) = &network_provider
         && args.mode != SandboxModeArg::Unshare

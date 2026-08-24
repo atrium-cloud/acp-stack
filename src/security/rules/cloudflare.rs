@@ -1,8 +1,5 @@
-//! Cloudflare Tunnel posture checks. When `[edge.cloudflare]` declares
-//! `exposure = "tunnel"`, the daemon expects to live behind a local
-//! cloudflared and accept traffic only via loopback with localhost trusted
-//! proxies. This module emits findings for each posture mismatch and for
-//! recent traffic that bypassed the expected path.
+//! Cloudflare Tunnel posture checks: findings for each mismatch against the
+//! expected loopback-behind-cloudflared shape, plus traffic that bypassed it.
 
 use crate::security::SecurityCheckInputs;
 use crate::security::findings::{SecurityFinding, bind_is_public};

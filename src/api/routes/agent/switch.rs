@@ -1,8 +1,6 @@
 //! Agent switch: repoint the default target to a different harness.
 
 use super::*;
-// Same shape the `/v1/models` route serves; reused verbatim so a client can
-// render either response with one model renderer.
 use crate::api::routes::providers::ModelJson;
 use crate::runtime::agent::switch_journal::{
     SwitchJournal, SwitchJournalPhase, candidate_fingerprint, load_switch_journal,
@@ -105,9 +103,8 @@ pub(crate) async fn agent_switch_handler(
     let registry = RegistryCatalog::load_with_override(
         &home.join(".config").join("acp-stack").join("agents.toml"),
     )?;
-    // The journal gates dispatch: a same-target retry of an interrupted or
-    // completed switch must be recognized before the fresh-path validation
-    // below rejects it as "already configured".
+    // The journal must gate dispatch first, or the fresh-path validation below rejects a
+    // same-target retry of an interrupted switch as "already configured".
     let resume_journal = match load_switch_journal(&state.runtime_paths.config_path)? {
         Some(journal) => match classify_switch_journal(&journal, &body.agent_id, &fresh_config)? {
             SwitchJournalAction::NoOp => {
@@ -131,11 +128,8 @@ pub(crate) async fn agent_switch_handler(
         },
         None => None,
     };
-    // A client that re-delivers the stored harness on every agent-config PATCH
-    // names the current target, so a bare switch to the target that is already
-    // the default must converge as a side-effect-free success — the
-    // never-switched twin of the completed-journal retry above. Flagged bodies
-    // keep their explicit-intent rejections in the existing-target path below.
+    // A bare switch naming the target that is already the default must converge as a
+    // side-effect-free success; flagged bodies keep their rejections in the existing-target path below.
     if resume_journal.is_none()
         && fresh_config.array.primary_target == body.agent_id
         && !body.drop_configs
@@ -206,8 +200,7 @@ pub(crate) async fn agent_switch_handler(
         .await?;
         advertised_values_for_category(&response, AgentSessionConfigCategory::Model)?
             .into_iter()
-            // ACP advertises bare values with no separate label, so there is
-            // no display name to carry here.
+            // ACP advertises bare values with no separate label, so there is no display name to carry.
             .map(|value| ModelJson {
                 value,
                 display_name: None,
@@ -336,8 +329,7 @@ async fn switch_to_existing_array_target(
     let canonical = candidate_config.to_canonical_toml()?;
     let mut candidate_config = crate::config::load_config_from_str(&canonical)?;
     candidate_config.agent.adapter = adapter_from_registry_entry(target_entry);
-    // Selecting an existing target repoints the native config the override
-    // lives in, so it faces the same survival check as a planned switch.
+    // Selecting an existing target repoints the native config the override lives in, so it faces the same survival check as a planned switch.
     crate::runtime::agent::switch::ensure_endpoint_override_survives_target(
         &target_entry.id,
         target_entry.set_provider_base_url,
@@ -453,9 +445,7 @@ fn classify_switch_journal(
     fresh_config: &Config,
 ) -> Result<SwitchJournalAction> {
     let same_target = journal.requested_target_matches(requested);
-    // Post-commit the on-disk primary target id is rewritten to the target
-    // agent id (config canonicalization invariant), so the committed marker
-    // is the agent id, not the requested target id.
+    // Config canonicalization rewrites the on-disk primary target id to the agent id, so the committed marker is the agent id.
     let committed_on_disk = fresh_config.agent.id == journal.target_agent_id;
     if journal.phase == SwitchJournalPhase::Completed {
         if same_target && committed_on_disk {
@@ -473,11 +463,8 @@ fn classify_switch_journal(
         });
     }
     if committed_on_disk {
-        // The config write is the commit marker (the session rename strictly
-        // precedes it), so disk showing the new primary means the switch
-        // committed. Verify the bytes match the journaled candidate before
-        // trusting them: an operator edit between attempts must not be
-        // silently adopted as the in-flight switch's outcome.
+        // The config write is the commit marker, so verify the bytes match the journaled candidate:
+        // an operator edit between attempts must not be adopted as the in-flight switch's outcome.
         let on_disk = fresh_config.to_canonical_toml()?;
         if candidate_fingerprint(&on_disk) != journal.candidate_fingerprint {
             return Err(StackError::AgentSwitchConflict {
@@ -515,10 +502,8 @@ async fn commit_switch_and_apply_runtime(
     journal: &mut SwitchJournal,
 ) -> Result<bool> {
     let state = commit.state;
-    // A same-target resume must reproduce the journaled candidate byte for
-    // byte; a divergence means the operator edited config between attempts
-    // and this retry would converge on a different switch than the one that
-    // was interrupted.
+    // A same-target resume must reproduce the journaled candidate byte for byte, or this retry
+    // converges on a different switch than the one that was interrupted.
     if let Some(prior) = commit.resume_journal
         && prior.candidate_fingerprint != journal.candidate_fingerprint
     {
@@ -531,12 +516,8 @@ async fn commit_switch_and_apply_runtime(
     }
     persist_switch_journal(&state.runtime_paths.config_path, journal)?;
     if commit.rename_sessions {
-        // Rename sessions to the new primary target BEFORE writing the new
-        // config. The rename can fail (e.g. a UNIQUE(target_id,
-        // agent_session_id) collision is detected up front), and if it does
-        // the on-disk config must stay untouched so config and DB never
-        // diverge. Re-running after a crash between rename and write is a
-        // no-op: zero rows still carry the old target id.
+        // The session rename MUST precede the config write: it can fail on a UNIQUE collision, and
+        // if it does the on-disk config must stay untouched so config and DB never diverge.
         let rename_result = {
             let store = state.state.lock().await;
             store.rename_session_target_id(
@@ -545,11 +526,8 @@ async fn commit_switch_and_apply_runtime(
             )
         };
         if let Err(rename_error) = rename_result {
-            // The collision check rejects before any row moves and the config
-            // write below has not run, so nothing durable changed: drop the
-            // Planned journal persisted above rather than strand an
-            // in-progress record that would 409 every later switch while a
-            // same-target retry just reproduces the collision.
+            // Nothing durable changed, so drop the Planned journal rather than strand a record that
+            // would 409 every later switch.
             if matches!(rename_error, StackError::SessionTargetRenameConflict { .. }) {
                 remove_switch_journal(&state.runtime_paths.config_path)?;
             }
@@ -607,10 +585,8 @@ async fn resume_committed_switch(
     journal.phase = SwitchJournalPhase::RuntimeApplied;
     persist_switch_journal(&state.runtime_paths.config_path, &journal)?;
 
-    // `--drop` cleanup cannot be reconstructed on a post-commit resume: the
-    // source agent's identity was renamed away with its target, so there is
-    // no trustworthy config left to clean against. Surface the skip rather
-    // than silently dropping the flag.
+    // `--drop` cleanup cannot be reconstructed here: the source agent's identity was renamed away
+    // with its target, so there is no trustworthy config left to clean against.
     let cleanup_errors = if drop_requested {
         let message = format!(
             "source agent config cleanup was skipped because the switch to `{}` was already committed before this retry; remove the old agent's config manually",

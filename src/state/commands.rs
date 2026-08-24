@@ -32,8 +32,7 @@ pub struct CommandRecord {
     pub last_output_seq: Option<i64>,
     pub output_bytes: i64,
     pub last_progress_at: Option<String>,
-    /// Who initiated the command: `operator` (API/CLI gateway submit) or
-    /// `acp` (agent-requested client terminal).
+    /// Who initiated the command: `operator` or `acp`.
     pub origin: String,
     /// Local session the command belongs to; set only for `acp`-origin rows.
     pub session_id: Option<String>,
@@ -64,9 +63,7 @@ impl CommandOrigin {
     }
 }
 
-/// Lifecycle status of a `commands` row. The string form goes to SQLite and
-/// out over the API; `CommandStatus::as_str` is the single source of truth so
-/// the gateway and tests do not drift apart.
+/// Lifecycle status of a `commands` row; `as_str` is the sole source of the wire form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandStatus {
     Pending,
@@ -175,10 +172,8 @@ impl StateStore {
             .optional()?)
     }
 
-    /// Insert a `commands` row in the `pending` state. The gateway transitions
-    /// it to `running` via `start_command` once the subprocess has been
-    /// spawned, so an inserted row that never starts (e.g. a crash between
-    /// INSERT and spawn) is recoverable from history.
+    /// Insert a `commands` row in the `pending` state, so a crash between INSERT and
+    /// spawn stays recoverable from history.
     pub fn append_command(&self, input: NewCommandRecord<'_>) -> Result<CommandRecord> {
         if let Some(payload) = input.env_json {
             validate_json_payload(self.connection(), payload)?;
@@ -235,9 +230,8 @@ impl StateStore {
         Ok(record)
     }
 
-    /// Move a command from `pending` to `running` and stamp `started_at`. The
-    /// caller is responsible for ensuring the subprocess has actually been
-    /// spawned; this only records the transition.
+    /// Move a command from `pending` to `running` and stamp `started_at`; callers must
+    /// have spawned the subprocess already.
     pub fn start_command(&self, id: &str) -> Result<()> {
         let now = current_timestamp();
         self.persist_with_outbox("commands", id, &now, |conn| {
@@ -256,9 +250,8 @@ impl StateStore {
         })
     }
 
-    /// Record the terminal state of a command run. `status` should be one of
-    /// the non-pending/non-running variants of `CommandStatus`; the caller
-    /// supplies the resolved exit status (or `None` if killed by signal).
+    /// Record the terminal state of a command run; `exit_status` is `None` when the
+    /// process was killed by a signal.
     pub fn finish_command(
         &self,
         id: &str,
@@ -287,8 +280,7 @@ impl StateStore {
         })
     }
 
-    /// Flip the `truncated` flag on a command row. Idempotent; called when the
-    /// gateway hits its per-command output cap.
+    /// Flip the `truncated` flag on a command row. Idempotent.
     pub fn mark_command_truncated(&self, id: &str) -> Result<()> {
         let now = current_timestamp();
         self.persist_with_outbox("commands", id, &now, |conn| {
@@ -303,10 +295,8 @@ impl StateStore {
         })
     }
 
-    /// Append a single stdout/stderr chunk as a durable event. The `events`
-    /// row carries the bytes; `commands.{id}` WebSocket subscribers receive
-    /// the same payload via `EventHub::publish_command_event`. `seq` lets
-    /// consumers reassemble interleaved streams in original write order.
+    /// Append a single stdout/stderr chunk as a durable event; `seq` lets consumers
+    /// reassemble interleaved streams in original write order.
     pub fn append_command_output(
         &self,
         command_id: &str,
@@ -435,21 +425,10 @@ impl StateStore {
         })
     }
 
-    /// Same idea for `commands` as `reconcile_orphaned_prompts`: a daemon
-    /// restart kills any subprocesses (`kill_on_drop` plus tokio runtime
-    /// teardown), but the SQLite rows are not finalized in that path. Without
-    /// this sweep, every `running` / `pending` row from the previous run is
-    /// permanently stuck and a CLI/HTTP poll would never see them settle.
-    /// Unlike prompts, `commands` has no error-message column, so no reason
-    /// text is recorded; the caller logs it instead.
-    ///
-    /// Any pending command-source permission tied to a reconciled command is
-    /// canceled inside the same transaction (decision reason
-    /// `command-reconciled`), so a failed command can never leave its
-    /// permission request approvable — even if the separate permission sweep
-    /// never runs.
-    /// Returns the ids of the commands transitioned to `failed` and the
-    /// number of dependent permissions canceled alongside them.
+    /// Settle `pending`/`running` rows a daemon restart stranded, returning their ids
+    /// and the count of dependent permissions cancelled. Pending command-source
+    /// permissions are cancelled in the SAME transaction, so a failed command can never
+    /// leave its permission request approvable.
     pub fn reconcile_orphaned_commands(&self) -> Result<(Vec<String>, usize)> {
         let now = current_timestamp();
         let external = self.external_logging_enabled();

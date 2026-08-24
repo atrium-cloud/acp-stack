@@ -29,10 +29,7 @@ async fn security_check_calls_running_daemon_without_auth_key() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn security_check_renders_hint_line_for_each_finding() {
-    // Drive a finding by reporting an unspecified-address effective_bind; the
-    // self-check turns that into `api.public_bind` (warning). The CLI must
-    // render the diagnostic line AND an indented `hint:` line with the
-    // remediation prose.
+    // An unspecified-address effective_bind drives an `api.public_bind` warning.
     let harness = AgentCliHarness::spawn_with_effective_bind("0.0.0.0:7700").await;
     let home = tempfile::tempdir().expect("tempdir should be created");
     write_cli_home_with_socket(

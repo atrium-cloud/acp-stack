@@ -11,23 +11,18 @@ pub(super) const KIMI_MODEL_PROVIDER_TYPE_ENV: &str = "KIMI_MODEL_PROVIDER_TYPE"
 pub(super) const KIMI_MODEL_MAX_CONTEXT_SIZE_ENV: &str = "KIMI_MODEL_MAX_CONTEXT_SIZE";
 pub(super) const KIMI_MODEL_MAX_OUTPUT_SIZE_ENV: &str = "KIMI_MODEL_MAX_OUTPUT_SIZE";
 pub(super) const KIMI_MODEL_DISPLAY_NAME_ENV: &str = "KIMI_MODEL_DISPLAY_NAME";
-// Kimi Code requires a model before its ACP process can initialize. Init pins
-// this default into config when `--model` is not passed, and the launch env
-// falls back to it when a hand-edited config omits the model. It is the
-// one id available on every subscription tier, whereas `k3` is gated to
-// Moderato and above.
+// Kimi Code requires a model before its ACP process can initialize. This id is
+// available on every subscription tier, whereas `k3` is gated to Moderato up.
 pub(crate) const KIMI_CODE_DEFAULT_MODEL: &str = "kimi-for-coding";
-// The Moonshot platform bills per token and has its own model catalog, so the
-// subscription-tier default does not exist there.
+// The Moonshot platform has its own catalog; the subscription-tier default does
+// not exist there.
 pub(crate) const KIMI_MOONSHOT_DEFAULT_MODEL: &str = "kimi-k3";
 pub(super) const KIMI_CODE_BASE_URL: &str = "https://api.kimi.com/coding/v1";
 pub(super) const KIMI_CODE_GLOBAL_BASE_URL: &str = "https://api.kimi.ai/coding/v1";
 pub(super) const KIMI_MOONSHOT_BASE_URL: &str = "https://api.moonshot.ai/v1";
 pub(super) const KIMI_MOONSHOT_CN_BASE_URL: &str = "https://api.moonshot.cn/v1";
-// Alias ids of the "Kimi For Coding" providers.toml row. `[agent.provider]`
-// stores whichever alias the operator selected, so the launch-env branch must
-// recognize all of them; a test cross-checks this list against the embedded
-// provider mapping.
+// Alias ids of the "Kimi For Coding" providers.toml row; `[agent.provider]`
+// stores whichever one the operator selected.
 pub(super) const KIMI_SUBSCRIPTION_PROVIDER_IDS: [&str; 5] = [
     "kimi-coding",
     "kimi-for-coding",
@@ -40,9 +35,7 @@ pub(super) const KIMI_MOONSHOT_PROVIDER_ID: &str = "moonshotai";
 pub(super) const KIMI_MOONSHOT_CN_PROVIDER_ID: &str = "moonshotai-cn";
 
 /// The (base URL, default api-key env ref, default model) triple the Kimi
-/// launch env derives from the configured provider. `None` (no
-/// `[agent.provider]`) keeps the historical implicit default: the
-/// first-party subscription endpoint.
+/// launch env derives from the configured provider.
 pub(crate) fn kimi_provider_profile(
     provider_id: Option<&str>,
 ) -> Option<(&'static str, &'static str, &'static str)> {
@@ -77,17 +70,15 @@ pub(crate) fn kimi_provider_profile(
 }
 
 pub(crate) fn kimi_default_model_for_provider(provider_id: Option<&str>) -> &'static str {
-    // The unmapped-provider fallback is only reachable for custom providers,
-    // and every custom-provider write path requires an explicit model, so the
-    // fallback value is never launched.
+    // The fallback is only reachable for custom providers, which always require
+    // an explicit model, so this value is never launched.
     kimi_provider_profile(provider_id)
         .map(|(_, _, model)| model)
         .unwrap_or(KIMI_CODE_DEFAULT_MODEL)
 }
 
-// acps owns MCP composition: this opt-out keeps Hermes' own config.yaml MCP
-// servers from launching into acps-managed sessions. The value must be
-// exactly "1"; Hermes ignores anything else.
+// Keeps Hermes' own config.yaml MCP servers out of acps-managed sessions. The
+// value must be exactly "1"; Hermes ignores anything else.
 pub(super) const HERMES_SKIP_CONFIGURED_MCP_ENV: &str = "HERMES_ACP_SKIP_CONFIGURED_MCP";
 
 pub(super) fn build_agent_process_env(
@@ -102,9 +93,8 @@ pub(super) fn build_agent_process_env(
                 ),
             });
         }
-        // Keep the degradation visible: combined with Hermes not advertising
-        // `mcpCapabilities`, this means Hermes sessions currently run with no
-        // MCP servers from either side.
+        // Hermes does not advertise `mcpCapabilities` either, so its sessions
+        // run with no MCP servers from either side; keep that visible.
         tracing::info!(
             "disabling Hermes global MCP startup ({HERMES_SKIP_CONFIGURED_MCP_ENV}=1); acps owns MCP composition"
         );
@@ -119,7 +109,7 @@ pub(super) fn build_agent_process_env(
     let provider = agent.provider.as_ref();
     let custom = provider.and_then(|provider| provider.custom.as_ref());
     // Resolve the lane before the runtime-managed guard so every error names
-    // the credential ref the active lane actually reads.
+    // the credential ref the active lane reads.
     let (base_url, api_key_ref, default_model) = if let Some(custom) = custom {
         let Some(api_key_ref) = provider.and_then(|provider| provider.api_key_ref.as_deref())
         else {
@@ -172,9 +162,7 @@ pub(super) fn build_agent_process_env(
             reason: format!("Kimi Code secret `{api_key_ref}` must not be empty"),
         });
     }
-    // Root-first, matching the supervisor's model-selection precedence; the
-    // CLI write paths clear the losing slot so only hand-edited configs can
-    // populate both.
+    // Root-first, matching the supervisor's model-selection precedence.
     let Some(model) = agent
         .model
         .as_deref()

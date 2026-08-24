@@ -1,19 +1,6 @@
-//! Client-terminal substrate for the ACP bridge (`terminal/*` methods).
-//!
-//! Concurrency model: each terminal is driven by a single owning task that
-//! holds the `tokio::process::Child` and `select!`s over natural exit and a
-//! kill channel. The registry never holds the `Child` — only a
-//! `TerminalHandle` of cheap shared endpoints (output buffer, exit watch,
-//! kill sender) — so `terminal/output`, `terminal/wait_for_exit`, and
-//! `terminal/kill` never contend for the process under a mutex, and a pending
-//! `wait()` is interrupted only by the kill signal the owner itself selects
-//! on.
-//!
-//! Memory: the in-memory replay buffer is trimmed to the byte limit as chunks
-//! arrive (keeping the newest bytes, per the ACP spec's truncation direction),
-//! so a chatty child the agent never polls cannot grow daemon memory. The
-//! untrimmed stream still flows to the durable command log when a command row
-//! is attached.
+//! Client-terminal substrate for the ACP bridge (`terminal/*` methods): one
+//! owning task per terminal holds the `Child`; the registry holds only cheap
+//! shared endpoints (buffer, exit watch, kill sender).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -51,30 +38,22 @@ type AcpError = agent_client_protocol::Error;
 
 // CONSTANTS
 
-/// In-memory replay cap applied when the agent omits `outputByteLimit` on
-/// `terminal/create`, so a long-running command can never buffer unbounded
-/// output in daemon memory.
+/// In-memory replay cap applied when the agent omits `outputByteLimit`.
 pub(crate) const DEFAULT_TERMINAL_OUTPUT_BYTE_LIMIT: u64 = 1024 * 1024;
 
-/// Hard ceiling on the in-memory replay buffer regardless of the
-/// `outputByteLimit` the agent requests. Without a clamp an agent asking for
-/// a huge limit re-opens the unbounded buffering the default exists to
-/// prevent. The durable command log is capped separately by state config.
+/// Hard ceiling on the in-memory replay buffer regardless of the requested
+/// `outputByteLimit`; the durable command log is capped separately.
 pub(crate) const MAX_TERMINAL_OUTPUT_BYTE_LIMIT: u64 = 10 * 1024 * 1024;
 
-/// SIGTERM -> SIGKILL escalation window for `terminal/kill`, release-of-a-
-/// running-terminal, and bridge shutdown.
+/// SIGTERM -> SIGKILL escalation window for kill, release, and shutdown.
 pub(crate) const TERMINAL_KILL_GRACE: Duration = Duration::from_secs(2);
 
-/// Capacity of the per-terminal output mpsc between the pipe readers and the
-/// buffer pump. Mirrors the command gateway's bound: backpressure, not growth.
 const OUTPUT_CHANNEL_CAPACITY: usize = 64;
 
-/// Prefix for terminal ids minted by this client.
 const TERMINAL_ID_PREFIX: &str = "term_";
 
-/// Rolling output buffer for one terminal. `truncated` latches once any byte
-/// has been dropped to honor the limit.
+/// Rolling output buffer for one terminal; `truncated` latches once any byte
+/// has been dropped.
 #[derive(Debug, Default)]
 pub(crate) struct TerminalBuffer {
     pub(crate) data: String,
@@ -83,7 +62,7 @@ pub(crate) struct TerminalBuffer {
 
 impl TerminalBuffer {
     /// Append a chunk, then trim in place to `limit` retaining the NEWEST
-    /// bytes at a char boundary. Trimming here (not at read time) is what
+    /// bytes at a char boundary. Trimming here, not at read time, is what
     /// bounds memory for output the agent never polls.
     fn append_capped(&mut self, chunk: &str, limit: u64) {
         self.data.push_str(chunk);
@@ -95,8 +74,7 @@ impl TerminalBuffer {
     }
 }
 
-/// Shared endpoints for one live (or exited-but-unreleased) terminal. The
-/// durable command row id stays with the owning task, which finalizes it.
+/// Shared endpoints for one live (or exited-but-unreleased) terminal.
 pub(crate) struct TerminalHandle {
     pub(crate) buffer: Arc<TokioMutex<TerminalBuffer>>,
     pub(crate) exit_rx: watch::Receiver<Option<TerminalExitStatus>>,
@@ -106,11 +84,7 @@ pub(crate) struct TerminalHandle {
 
 impl TerminalHandle {
     /// Ask the owning task to terminate the child (SIGTERM, `grace`, then
-    /// SIGKILL). Idempotent: once the owner has returned the channel is
-    /// closed and the send fails harmlessly — the exit watch is already set.
-    /// During the owner's post-exit drain the send instead parks in the
-    /// buffer unread (bounded by the drain budget); the child is already
-    /// dead by then.
+    /// SIGKILL). Idempotent: a failed send means the owner already reaped.
     pub(crate) async fn request_kill(&self, grace: Duration) {
         if self.kill_tx.send(grace).await.is_err() {
             tracing::debug!("terminal kill requested after owner exit; already reaped");
@@ -123,8 +97,7 @@ impl TerminalHandle {
         match exit_rx.wait_for(|status| status.is_some()).await {
             Ok(status) => status.clone().unwrap_or_default(),
             Err(_) => {
-                // The owner dropped its sender without publishing — only
-                // possible if the owning task panicked. Surface a bare status
+                // Owner panicked before publishing; surface a bare status
                 // rather than hanging the agent's RPC forever.
                 tracing::warn!("terminal owner task dropped exit channel without publishing");
                 TerminalExitStatus::new()
@@ -138,9 +111,6 @@ impl TerminalHandle {
 }
 
 /// Live terminals for one bridge, keyed by (agent session id, terminal id).
-/// Everything is dropped together on bridge shutdown via `drain_all`, which
-/// also latches `closed` so a `terminal/create` racing shutdown cannot
-/// register a child the drain snapshot never saw.
 #[derive(Default)]
 pub(crate) struct TerminalRegistry {
     entries: TokioMutex<RegistryEntries>,
@@ -153,33 +123,27 @@ struct RegistryEntries {
     closed: bool,
 }
 
-/// Durable command-log target for client terminals: the SQLite store the
-/// command rows land in, plus the live-event hub the `commands.{id}` topic
-/// fans out through. Public because it is a parameter of `AcpBridge::spawn`;
-/// re-exported through `acp_bridge`.
+/// Durable command-log target for client terminals: the store command rows
+/// land in, plus the hub the `commands.{id}` topic fans out through.
 #[derive(Clone)]
 pub struct TerminalCommandLog {
     pub state: Arc<TokioMutex<StateStore>>,
     pub event_hub: EventHub,
 }
 
-/// Durable command-log attachment for one terminal: the owner mirrors chunks
-/// into `append_command_output` and finalizes the row on exit, publishing
-/// each step on the `commands.{id}` live topic.
+/// Durable command-log attachment for one terminal.
 pub(crate) struct TerminalPersistence {
     pub(crate) command_log: TerminalCommandLog,
     pub(crate) command_id: String,
 }
 
 impl TerminalRegistry {
-    /// Take ownership of a freshly spawned child: wire the pipe readers and
-    /// the owning task, insert the handle, and return the minted terminal id.
-    /// Returns `None` — after killing the child — when the registry has been
-    /// closed by `drain_all`, so a create racing bridge shutdown cannot leave
-    /// an orphan process behind. The entries lock is held from the closed
-    /// check through the insert (everything between is synchronous), so a
-    /// concurrent `drain_all` either sees the new terminal or the register
-    /// sees `closed`.
+    /// Take ownership of a freshly spawned child and return the minted
+    /// terminal id, or `None` (after killing the child) once `drain_all` has
+    /// closed the registry. The entries lock MUST stay held from the closed
+    /// check through the insert, so a concurrent `drain_all` either sees the
+    /// new terminal or the register sees `closed` — otherwise shutdown leaks
+    /// an orphan process.
     pub(crate) async fn register(
         self: &Arc<Self>,
         session_id: &str,
@@ -250,8 +214,7 @@ impl TerminalRegistry {
             .map(Arc::clone)
     }
 
-    /// Remove and return the handle (`terminal/release`). Subsequent lookups
-    /// on the id fail, which callers surface as resource-not-found.
+    /// Remove and return the handle (`terminal/release`).
     pub(crate) async fn remove(
         &self,
         session_id: &str,
@@ -264,10 +227,9 @@ impl TerminalRegistry {
             .remove(&(session_id.to_owned(), terminal_id.to_owned()))
     }
 
-    /// Kill-and-release every live terminal and refuse all future
-    /// registrations. Called on bridge shutdown and crash teardown: terminal
-    /// children live in their own process groups, so the agent-process-group
-    /// kill never reaches them.
+    /// Kill-and-release every live terminal and refuse future registrations.
+    /// Needed on shutdown because terminal children live in their own process
+    /// groups, so the agent-process-group kill never reaches them.
     pub(crate) async fn drain_all(&self) {
         let handles: Vec<Arc<TerminalHandle>> = {
             let mut entries = self.entries.lock().await;
@@ -283,12 +245,9 @@ impl TerminalRegistry {
     }
 }
 
-/// Single owner of the `Child`: pumps output chunks while waiting for natural
-/// exit or a kill request, reaps stray descendants by process group, drains
-/// the remaining pipe output (bounded), finalizes the durable command row when
-/// one is attached, and only then publishes the exit status — so a
-/// `terminal/wait_for_exit` response guarantees the output visible through
-/// `terminal/output` and the command log is complete.
+/// Single owner of the `Child`. Publishes the exit status LAST, after the
+/// post-exit drain and command-row finalize, so a `terminal/wait_for_exit`
+/// response guarantees the output and command log are already complete.
 #[allow(clippy::too_many_arguments)]
 async fn own_terminal(
     mut child: Child,
@@ -306,11 +265,8 @@ async fn own_terminal(
     let started = Instant::now();
     let mut seq: u64 = 0;
 
-    // Kill-intent latch: distinguishes exits the owner caused (terminal/kill,
-    // release of a running terminal, shutdown drain) from natural signal
-    // deaths (OOM kill, segfault), so the command row can record `cancelled`
-    // for the former — matching the gateway's operator-cancel mapping —
-    // while genuine failures stay `failed`.
+    // Distinguishes owner-caused exits (recorded `cancelled`) from natural
+    // signal deaths like OOM kill or segfault (recorded `failed`).
     let mut canceled = false;
     let status = loop {
         tokio::select! {
@@ -328,8 +284,7 @@ async fn own_terminal(
                         exit_status_of(status)
                     }
                     // A wait error after SIGTERM is an anomaly, not a clean
-                    // cancellation — the gateway maps the same outcome to
-                    // Failed too.
+                    // cancellation.
                     GraceKillOutcome::ExitedWithinGrace(Err(error)) => {
                         tracing::warn!(error = %error, "terminal child wait failed after SIGTERM");
                         TerminalExitStatus::new().signal("SIGTERM".to_owned())
@@ -350,17 +305,15 @@ async fn own_terminal(
         }
     };
 
-    // Reap descendants that inherited the pipes (same rationale as the
-    // command supervisor's post-wait group kill).
+    // Reap descendants that inherited the pipes.
     if let Some(pid) = pid {
         kill_process_group_pid(pid);
     }
 
     // Drain the remaining chunks BEFORE finalizing, so the exit status is
-    // never observable while output is still in flight. Bounded like the
-    // gateway's post-wait drain: a `setsid`/`nohup` descendant that escaped
-    // the group kill holds the pipes open forever, and only aborting the
-    // readers lets the owner move on.
+    // never observable while output is still in flight. Bounded because a
+    // `setsid`/`nohup` descendant that escaped the group kill holds the pipes
+    // open forever.
     let drain_deadline = Instant::now() + POST_WAIT_DRAIN_BUDGET;
     let mut drained_within_budget = true;
     loop {
@@ -404,8 +357,6 @@ async fn own_terminal(
 
     if let Some(persistence) = &persistence {
         let duration_ms = i64::try_from(started.elapsed().as_millis()).ok();
-        // Mirrors the gateway's finalize mapping, including canceled rows
-        // carrying no exit status.
         let (command_status, event_kind) = if canceled {
             (CommandStatus::Canceled, "command.cancelled")
         } else {
@@ -453,15 +404,12 @@ async fn own_terminal(
     }
 
     if exit_tx.send(Some(status)).is_err() {
-        // All receivers dropped: the terminal was released before exit. The
-        // process is reaped either way; nothing is waiting on the status.
         tracing::debug!("terminal exit published after release; no listeners");
     }
 }
 
-/// Append one chunk to the capped in-memory buffer, mirror the untrimmed
-/// stream into the durable command log when attached, and fan it out on the
-/// `commands.{id}` live topic — the same shape the command gateway publishes.
+/// Append one chunk to the capped in-memory buffer and mirror the untrimmed
+/// stream into the durable command log and `commands.{id}` topic.
 async fn append_chunk(
     buffer: &Arc<TokioMutex<TerminalBuffer>>,
     output_byte_limit: u64,
@@ -505,9 +453,7 @@ async fn append_chunk(
     }
 }
 
-/// Persist and publish a terminal lifecycle transition on `commands.{id}`,
-/// mirroring the gateway's status events so live subscribers see mediated
-/// gateway commands and ACP terminal commands uniformly.
+/// Persist and publish a terminal lifecycle transition on `commands.{id}`.
 async fn publish_lifecycle_event(
     persistence: &TerminalPersistence,
     kind: &'static str,
@@ -536,26 +482,22 @@ async fn publish_lifecycle_event(
     }
 }
 
-/// Everything the `terminal/*` handlers need, cloned into each handler
-/// closure before the bridge's connection task is spawned.
+/// Everything the `terminal/*` handlers need.
 pub(crate) struct TerminalHandlerContext {
     pub(crate) registry: Arc<TerminalRegistry>,
     pub(crate) workspace_root: PathBuf,
     pub(crate) sandbox: crate::config::SandboxConfig,
     pub(crate) network_provider: Option<crate::extensions::NetworkProviderExtension>,
-    /// Durable command-log target. `None` (e.g. discovery probes) means
-    /// terminals still work but leave no `commands` rows behind and publish
-    /// no live command events.
+    /// `None` (e.g. discovery probes) means terminals work but leave no
+    /// `commands` rows behind.
     pub(crate) command_log: Option<TerminalCommandLog>,
     pub(crate) sink: Arc<dyn SessionEventSink>,
 }
 
 /// `terminal/create`: spawn the requested program in a clean session env
-/// under the agent's sandbox profile, record it in the durable command log
-/// with an `acp` origin, and hand the child to an owning terminal task.
-/// Executes directly by design — the VM is the security boundary; agents
-/// send `session/request_permission` separately when their policy requires
-/// review.
+/// under the agent's sandbox profile and hand the child to an owning task.
+/// Executes directly by design: the VM is the security boundary, and agents
+/// send `session/request_permission` separately when their policy needs it.
 pub(crate) async fn handle_create_terminal(
     context: &TerminalHandlerContext,
     request: CreateTerminalRequest,
@@ -571,9 +513,6 @@ pub(crate) async fn handle_create_terminal(
             }))
         })?;
 
-    // Default omitted cwd to the session's own cwd (which may be a
-    // subdirectory of the workspace root); sinks without session state fall
-    // back to the workspace root.
     let requested_cwd = match &request.cwd {
         Some(path) => path.to_string_lossy().into_owned(),
         None => match context.sink.session_cwd(&agent_session_id).await {
@@ -598,8 +537,8 @@ pub(crate) async fn handle_create_terminal(
     )
     .map_err(AcpError::into_internal_error)?;
 
-    // Insert the durable row before spawning (mirrors the gateway) so even a
-    // failed spawn leaves an audit trail.
+    // Insert the durable row before spawning so even a failed spawn leaves an
+    // audit trail.
     let command_id = match &context.command_log {
         Some(command_log) => {
             let rendered = render_command_line(&request.command, &request.args);
@@ -658,8 +597,7 @@ pub(crate) async fn handle_create_terminal(
             };
             if let Err(error) = start_result {
                 // Finalize the pending row before surfacing the error, or it
-                // stays `pending` forever; the child is reaped by
-                // kill_on_drop when this early return drops it.
+                // stays `pending` forever.
                 mark_failed("start failure").await;
                 return Err(AcpError::into_internal_error(error));
             }
@@ -679,8 +617,6 @@ pub(crate) async fn handle_create_terminal(
     {
         Some(terminal_id) => terminal_id,
         None => {
-            // drain_all closed the registry between spawn and register: the
-            // child was killed there; surface the shutdown to the agent.
             mark_failed("create during bridge shutdown").await;
             return Err(AcpError::internal_error().data(serde_json::json!({
                 "reason": "agent bridge is shutting down; terminal registry closed",
@@ -690,24 +626,23 @@ pub(crate) async fn handle_create_terminal(
     Ok(CreateTerminalResponse::new(TerminalId::new(terminal_id)))
 }
 
-/// `terminal/output`: current buffered output (already bounded during
-/// accumulation), the truncation flag, and the exit status once exited.
+/// `terminal/output`: current buffered output, the truncation flag, and the
+/// exit status once exited.
 pub(crate) async fn handle_terminal_output(
     registry: &TerminalRegistry,
     request: TerminalOutputRequest,
 ) -> std::result::Result<TerminalOutputResponse, AcpError> {
     let handle = lookup(registry, &request.session_id.0, &request.terminal_id.0).await?;
     let buffer = handle.buffer.lock().await;
-    // The pump already trims during accumulation; this re-applies the same
-    // invariant at the read boundary so the response can never exceed the
-    // limit even mid-append.
+    // Re-applied at the read boundary so the response cannot exceed the limit
+    // even mid-append.
     let (output, cut_now) = keep_newest(&buffer.data, handle.output_byte_limit);
     let truncated = buffer.truncated || cut_now;
     Ok(TerminalOutputResponse::new(output.to_owned(), truncated).exit_status(handle.exit_status()))
 }
 
 /// `terminal/wait_for_exit`: park until the owning task publishes the exit
-/// status. Multiple concurrent waiters all resolve from the same watch.
+/// status.
 pub(crate) async fn handle_wait_for_terminal_exit(
     registry: &TerminalRegistry,
     request: WaitForTerminalExitRequest,
@@ -734,7 +669,6 @@ pub(crate) async fn handle_kill_terminal(
 }
 
 /// `terminal/release`: kill if still running and drop all terminal state.
-/// Subsequent calls on the id are resource-not-found errors.
 pub(crate) async fn handle_release_terminal(
     registry: &TerminalRegistry,
     request: ReleaseTerminalRequest,
@@ -761,7 +695,6 @@ async fn lookup(
         .ok_or_else(|| AcpError::resource_not_found(None))
 }
 
-/// Human-readable command line for the durable command log.
 fn render_command_line(command: &str, args: &[String]) -> String {
     if args.is_empty() {
         return command.to_owned();
@@ -769,8 +702,8 @@ fn render_command_line(command: &str, args: &[String]) -> String {
     format!("{command} {}", args.join(" "))
 }
 
-/// Env *names* only, sorted, mirroring the gateway: values commonly carry
-/// credentials and must not expand the secret-at-rest surface.
+/// Env names only: values commonly carry credentials and must never be
+/// written to the command log.
 fn env_names_json(env: &[EnvVariable]) -> Option<String> {
     if env.is_empty() {
         return None;
@@ -780,11 +713,10 @@ fn env_names_json(env: &[EnvVariable]) -> Option<String> {
     serde_json::to_string(&names).ok()
 }
 
-/// Clean session environment for a terminal child: managed PATH (so
-/// registry-installed harness tooling resolves) and HOME, plus the vars the
-/// agent supplied on `terminal/create`. Never the `[agent].env` secrets that
-/// are injected into the agent process itself — a client terminal must not
-/// expose provider API keys to arbitrary shell commands.
+/// Clean session environment for a terminal child: managed PATH, HOME, and
+/// the vars the agent supplied. Never the `[agent].env` secrets injected into
+/// the agent process itself — a client terminal must not expose provider API
+/// keys to arbitrary shell commands.
 pub(crate) fn terminal_environment(agent_env: &[EnvVariable]) -> HashMap<String, String> {
     let mut env = HashMap::new();
     if let Some(path) = agent_process_path() {
@@ -800,28 +732,24 @@ pub(crate) fn terminal_environment(agent_env: &[EnvVariable]) -> HashMap<String,
     if let Ok(home) = std::env::var("HOME") {
         env.insert("HOME".to_owned(), home);
     }
-    // Agent-provided vars win over the managed defaults: the command belongs
-    // to the agent, and the spec gives it control of the child env.
+    // Agent-provided vars win over the managed defaults; the spec gives the
+    // agent control of the child env.
     for variable in agent_env {
         env.insert(variable.name.clone(), variable.value.clone());
     }
     env
 }
 
-/// Replay-buffer byte limit for one terminal: the agent's requested
-/// `outputByteLimit` (default when omitted), clamped to the hard ceiling.
+/// Requested `outputByteLimit` (default when omitted), clamped to the ceiling.
 pub(crate) fn effective_output_byte_limit(requested: Option<u64>) -> u64 {
     requested
         .unwrap_or(DEFAULT_TERMINAL_OUTPUT_BYTE_LIMIT)
         .min(MAX_TERMINAL_OUTPUT_BYTE_LIMIT)
 }
 
-/// Return the tail of `buffer` that fits in `limit` bytes, starting on a
-/// UTF-8 char boundary, plus whether anything was dropped. The cutoff rounds
-/// UP to the next boundary so the result never exceeds `limit` and never
-/// splits a codepoint — the mirror of the gateway's `floor_char_boundary`,
-/// because ACP truncation keeps the NEWEST bytes (Zed keeps the head; the
-/// spec says drop it).
+/// Return the tail of `buffer` that fits in `limit` bytes plus whether
+/// anything was dropped. ACP truncation keeps the NEWEST bytes; Zed keeps the
+/// head, which the spec says to drop.
 pub(crate) fn keep_newest(buffer: &str, limit: u64) -> (&str, bool) {
     let cutoff = newest_cutoff(buffer, limit);
     (&buffer[cutoff..], cutoff > 0)
@@ -838,8 +766,7 @@ fn newest_cutoff(buffer: &str, limit: u64) -> usize {
     cutoff
 }
 
-/// Map a reaped process status to the ACP exit shape: `exit_code` for a
-/// normal exit, `signal` name when the kernel terminated it.
+/// Map a reaped process status to the ACP exit shape.
 fn exit_status_of(status: std::process::ExitStatus) -> TerminalExitStatus {
     let mut result = TerminalExitStatus::new();
     if let Some(code) = status.code() {

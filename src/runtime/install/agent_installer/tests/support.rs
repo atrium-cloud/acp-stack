@@ -182,9 +182,8 @@ pub(crate) fn adapter_entry(
     }
 }
 
-// Fixture binaries carry a shebang so they pass the installer's spawn gate;
-// `content` lands after it as a `#`-prefixed comment to keep files distinct
-// without the probe executing it.
+// Fixture binaries carry a shebang so they pass the installer's spawn gate, with `content` after it
+// as a `#`-prefixed comment so files stay distinct without the probe executing it.
 pub(crate) fn shell_string_for_write(path: &Path, content: &str) -> String {
     format!(
         "mkdir -p {bin} && printf '#!/bin/sh\\n# %s' {content} > {binary} && chmod 755 {binary}",
@@ -205,8 +204,8 @@ pub(crate) fn write_fake_npm(dest_dir: &Path, body: &str) {
     std::fs::set_permissions(&npm_path, permissions).expect("chmod fake npm");
 }
 
-// Mirrors the blocked-postinstall stub npm 12 leaves behind: executable file,
-// no shebang, so exec fails with ENOEXEC despite `creates` resolving.
+// Mirrors the blocked-postinstall stub npm 12 leaves behind: executable, no shebang, so exec fails
+// with ENOEXEC despite `creates` resolving.
 pub(crate) fn shell_string_for_stub_write(path: &Path) -> String {
     format!(
         "mkdir -p {bin} && printf 'not a real binary' > {binary} && chmod 755 {binary}",

@@ -1,9 +1,5 @@
-//! Binary swap for the self-updater.
-//!
-//! Extracts the verified release archive into a staging directory inside the
-//! install directory (same filesystem, so the swap is a rename), then moves the
-//! live binaries aside and the staged ones into place. Any failure past the
-//! first rename rolls the previous binaries back before returning.
+//! Binary swap for the self-updater: stage inside the install directory so the swap
+//! is a rename, then roll the previous binaries back on any failure past the first.
 
 use super::*;
 
@@ -114,9 +110,9 @@ fn replace_binaries(stage: &Path, binary_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Undo whatever the swap managed to do, then describe the original failure.
-/// Every abort path in `replace_binaries` goes through here so a partially
-/// swapped install directory can never outlive the error.
+/// Undo whatever the swap managed to do, then describe the original failure. Every
+/// abort path in `replace_binaries` MUST go through here, or a partially swapped
+/// install directory outlives the error.
 fn rollback_and_report(
     path: PathBuf,
     source: std::io::Error,
@@ -155,10 +151,8 @@ fn rollback_binary_swap(installed: &[PathBuf], backed_up: &[(PathBuf, PathBuf)])
 }
 
 pub(super) fn install_binary_dir() -> Result<PathBuf> {
-    // Test seam: redirect the install destination to a fixture directory so the
-    // end-to-end updater test can swap binaries without touching the real
-    // installed path. `fixture_path` returns `None` unless the crate is built
-    // with the `test-fixtures` feature, so production always uses `current_exe`.
+    // Test seam: `fixture_path` returns `None` unless built with `test-fixtures`,
+    // so production always falls through to `current_exe`.
     if let Some(dir) = fixture_path(INSTALL_BINARY_DIR_ENV) {
         return Ok(dir);
     }

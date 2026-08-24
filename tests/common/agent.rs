@@ -1,12 +1,6 @@
-//! Shared fixtures for the `agent_*_tests` binaries: an in-process server
-//! harness whose `[agent].command` points at the standalone placebo ACP
-//! fixture, plus the registry-override, skill, and model-discovery fixture
-//! writers its tests drive.
-//!
-//! `tests/common/api.rs` and `tests/common/sessions.rs` define same-named
-//! items (`SESSION_KEY`, `ADMIN_KEY`, `test_config`, ...) with different key
-//! values and different signatures. The sets are deliberately separate — do
-//! not merge or cross-import them.
+//! Shared fixtures for the `agent_*_tests` binaries. `tests/common/api.rs` and
+//! `tests/common/sessions.rs` define same-named items with different key values and signatures;
+//! the sets are deliberately separate, so do not merge or cross-import them.
 
 use std::sync::Arc;
 
@@ -28,8 +22,7 @@ pub const ADMIN_KEY: &str = "acps_admin_dddddddddddddddddddddddddddddddddddddddd
 pub struct AgentHarness {
     pub base_url: String,
     pub config_path: std::path::PathBuf,
-    // Option so `respawn` can hand the dir to the replacement harness; a
-    // plain `TempDir` could never move out of a `Drop` type.
+    // Option so `respawn` can move the dir out of this `Drop` type.
     tempdir: Option<TempDir>,
     pub state: Arc<TokioMutex<StateStore>>,
     pub join: JoinHandle<acp_stack::error::Result<()>>,
@@ -50,10 +43,8 @@ impl AgentHarness {
         Self::spawn_in_tempdir(tempdir, config, true).await
     }
 
-    /// Abort this server and boot a fresh one on the same tempdir, loading
-    /// the config from disk exactly as a restarted `acps` process would. Used
-    /// by the switch-journal tests to prove resume works across a process
-    /// restart, not just within one server lifetime.
+    /// Boot a fresh server on the same tempdir, reloading config from disk as a restarted `acps`
+    /// process would.
     pub async fn respawn(mut self) -> Self {
         self.join.abort();
         let tempdir = self.tempdir.take().expect("harness tempdir");
@@ -116,8 +107,7 @@ impl EnvVarGuard<'_> {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let previous = std::env::var_os(key);
-        // SAFETY: lock held; no concurrent test in this binary can
-        // observe a partial fixture-env mutation through this guard.
+        // SAFETY: the lock is held, so no concurrent test observes a partial mutation.
         unsafe {
             std::env::remove_var(key);
         }
@@ -127,10 +117,8 @@ impl EnvVarGuard<'_> {
         }
     }
 
-    /// Sets several fixture env vars while holding the lock once. Stacking
-    /// single-key guards would deadlock: the first guard keeps the
-    /// non-reentrant mutex until drop. Keys must be unique — a duplicated key
-    /// would restore to its intermediate value instead of the original.
+    /// Sets several fixture env vars under one lock acquisition: stacking single-key guards would
+    /// deadlock on the non-reentrant mutex. Keys must be unique or the restore is wrong.
     pub fn set_many(pairs: Vec<(&'static str, std::ffi::OsString)>) -> Self {
         let lock = DISCOVERY_FIXTURE_LOCK
             .lock()
@@ -145,9 +133,7 @@ impl EnvVarGuard<'_> {
             "set_many keys must be unique",
         );
         let mut previous = Vec::with_capacity(pairs.len());
-        // SAFETY: DISCOVERY_FIXTURE_LOCK serializes tests in this
-        // binary that mutate or depend on these process-wide fixture
-        // env vars, and it is acquired exactly once for the whole batch.
+        // SAFETY: DISCOVERY_FIXTURE_LOCK serializes every test touching these vars.
         unsafe {
             for (key, value) in pairs {
                 previous.push((key, std::env::var_os(key)));
@@ -163,8 +149,7 @@ impl EnvVarGuard<'_> {
 
 impl Drop for EnvVarGuard<'_> {
     fn drop(&mut self) {
-        // SAFETY: lock still held; restore the prior fixture settings
-        // before releasing it.
+        // SAFETY: the lock is still held during the restore.
         unsafe {
             for (key, previous) in std::mem::take(&mut self.previous) {
                 match previous {
@@ -182,9 +167,8 @@ impl Drop for AgentHarness {
     }
 }
 
-/// Build a test config that points `[agent].command` at the placebo ACP
-/// fixture. Empty `[agent].env` so the handlers don't try to open a secret
-/// store that doesn't exist in the test tempdir.
+/// A test config pointing `[agent].command` at the placebo ACP fixture. `[agent].env` stays empty
+/// so handlers never open a secret store that does not exist in the tempdir.
 pub fn test_config() -> Config {
     let toml_text = include_str!("../fixtures/valid-opencode-stack.toml");
     let mut config = load_config_from_str(toml_text).expect("config parses");
@@ -199,7 +183,6 @@ pub fn test_config() -> Config {
         upstream_agent: "codex-cli".to_owned(),
         source_url: Some("https://github.com/agentclientprotocol/codex-acp".to_owned()),
     });
-    // Replace the install recipe with something that completes in milliseconds.
     config.agent.install = Some(acp_stack::config::AgentInstallConfig {
         install_type: "shell".into(),
         creates: "true".into(),
@@ -312,8 +295,7 @@ pub fn write_installed_skill(root: &std::path::Path, name: &str, descriptor: &st
     std::fs::create_dir_all(&skill_dir).expect("skill dir");
     std::fs::write(skill_dir.join("SKILL.md"), descriptor).expect("descriptor");
     std::fs::write(skill_dir.join("script.sh"), "true\n").expect("script");
-    // Mirrors the marker acp-stack writes at install time; removal refuses
-    // directories without it.
+    // Removal refuses directories without this install-time marker.
     std::fs::write(skill_dir.join(".acp-stack-managed"), "test-source\n").expect("marker");
 }
 
@@ -321,9 +303,8 @@ pub fn write_kimi_registry_override(config_dir: &std::path::Path) {
     write_kimi_registry_override_with_command(config_dir, "true");
 }
 
-/// Same as `write_kimi_registry_override` but with a caller-chosen harness
-/// command, so a test can point the switch target's runtime at a binary that
-/// does not exist yet and create it between attempts.
+/// `write_kimi_registry_override` with a caller-chosen harness command, so a test can point at a
+/// binary that does not exist yet and create it between attempts.
 pub fn write_kimi_registry_override_with_command(config_dir: &std::path::Path, command: &str) {
     let body = format!(
         r#"
@@ -349,9 +330,8 @@ creates = "true"
     std::fs::write(config_dir.join("agents.toml"), body).expect("registry override");
 }
 
-/// Deliberately model-less synthetic amp entry: the embedded registry has no
-/// set_model=false agent left, so capability-gate tests point at this
-/// override instead of the real catalog flags.
+/// Deliberately model-less synthetic amp entry: the embedded registry has no `set_model = false`
+/// agent left, so capability-gate tests point here instead of the real catalog flags.
 pub fn write_amp_registry_override(config_dir: &std::path::Path) {
     let body = r#"
 [[agents]]
@@ -447,11 +427,8 @@ creates = "true"
     std::fs::write(config_dir.join("agents.toml"), body).expect("registry override");
 }
 
-/// Write an executable shim that execs the placebo ACP binary. Combined with
-/// a registry override (or array target) whose command is the shim's path, a
-/// test can make a switch target's start fail while the path does not exist
-/// and converge once the shim is created — without touching the committed
-/// config, which would change the switch journal's candidate fingerprint.
+/// An executable shim that execs the placebo ACP binary, so a test can flip a start from failing to
+/// succeeding without editing the config (which would change the switch journal's fingerprint).
 pub fn write_placebo_shim(path: &std::path::Path) {
     let body = format!(
         "#!/bin/sh\nexec '{}' acp\n",
@@ -466,10 +443,8 @@ pub fn write_placebo_shim(path: &std::path::Path) {
     }
 }
 
-/// Variant of `write_placebo_shim` that exits 1 until `marker` exists. The
-/// shim file itself is present from the start so the installer's
-/// resolve-and-spawn gate passes; only the agent launch fails. Creating the
-/// marker "fixes" the launch without touching the committed config.
+/// `write_placebo_shim` that exits 1 until `marker` exists. The shim file is present from the
+/// start so the installer's resolve-and-spawn gate passes and only the agent launch fails.
 pub fn write_gated_placebo_shim(path: &std::path::Path, marker: &std::path::Path) {
     let body = format!(
         "#!/bin/sh\nif [ ! -f '{}' ]; then\n  echo 'gated placebo shim: marker missing' >&2\n  exit 1\nfi\nexec '{}' acp\n",
@@ -522,10 +497,8 @@ pub fn switch_mcp_config() -> McpConfig {
     }
 }
 
-/// Serve a fixed OpenAI-shaped `GET /models` payload over a throwaway local
-/// port. Point `ACP_STACK_PROVIDER_MODELS_BASE` at the returned base URL so
-/// provider-catalog fetches never leave the test host. Raw sockets instead of
-/// an async server: callers are a mix of sync CLI tests and tokio tests.
+/// Serve a fixed OpenAI-shaped `GET /models` payload locally; point
+/// `ACP_STACK_PROVIDER_MODELS_BASE` at the returned base URL so fetches never leave the test host.
 pub fn spawn_provider_models_server(payload: serde_json::Value) -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind models fixture");
     let base = format!(

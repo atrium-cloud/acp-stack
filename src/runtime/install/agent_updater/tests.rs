@@ -17,9 +17,8 @@ use crate::state::{
 #[test]
 fn command_step_runs_with_null_stdin() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    // `cat` with inherited stdin would block until the daemon's stdin
-    // closes (the pre-fix behavior for `pi update`); with a null stdin it
-    // sees immediate EOF and exits 0 within the timeout.
+    // `cat` with inherited stdin would block until the daemon's stdin closes;
+    // with a null stdin it sees immediate EOF and exits 0 within the timeout.
     let row = super::run_command_step_with_started_at(
         "harness",
         "native",
@@ -78,8 +77,7 @@ fn update_plan_reruns_shell_install_when_the_entry_declares_it() {
     assert!(matches!(plan.kind, UpdatePlanKind::InstallSet));
     let shell = plan.install.shell.as_ref().expect("shell install");
     assert_eq!(shell.creates, "shell-agent");
-    // The rerun plan must not fall back to other declared paths: the recipe
-    // is the update contract, not one option among peers.
+    // The rerun plan must not fall back to other declared paths.
     assert!(plan.install.npm.is_none());
     assert!(plan.install.github.is_none());
     assert!(plan.latest.is_none());
@@ -115,8 +113,6 @@ shell_rerun = true
 
     let plan = choose_update_plan(entry, &component, Some(&installed)).expect("plan");
 
-    // With no recorded method and shell as the only declared path, the rerun
-    // plan replaces the terminal native probe.
     assert_eq!(plan.method, INSTALLER_METHOD_SHELL);
     assert!(matches!(plan.kind, UpdatePlanKind::InstallSet));
 }
@@ -223,8 +219,8 @@ fn native_update_publishes_running_row_while_executing() {
     let dest = tempdir.path().join("bin");
     fs::create_dir_all(&workspace).expect("workspace");
     fs::create_dir_all(&dest).expect("dest");
-    // The `update` subcommand blocks until the test releases it, so the
-    // `running` row can be observed while the update is genuinely in flight.
+    // The `update` subcommand blocks until released, so the `running` row can
+    // be observed while the update is genuinely in flight.
     let proceed = tempdir.path().join("proceed");
     write_executable(
         &dest.join("fake-agent"),
@@ -258,8 +254,8 @@ fn apt_update_publishes_running_row_while_executing() {
     let dest = tempdir.path().join("bin");
     fs::create_dir_all(&workspace).expect("workspace");
     fs::create_dir_all(&dest).expect("dest");
-    // A fake `apt-get` shadows the real one (the step prepends the managed
-    // bin dir to PATH) and blocks until the test releases it.
+    // A fake `apt-get` shadows the real one, since the step prepends the
+    // managed bin dir to PATH.
     let proceed = tempdir.path().join("proceed");
     write_executable(
         &dest.join("apt-get"),
@@ -334,8 +330,7 @@ fn update_plan_honors_harness_version_pin() {
     let entry = registry.lookup_required("fake").expect("entry");
     let agent = agent_config("fake", Some("v1.2.3"));
     let component = harness_update_component(entry, &agent);
-    // Recorded npm install would normally pick the npm plan; the pin must
-    // win. A network fetch here would fail the test (no mock server).
+    // A recorded npm install would normally pick the npm plan; the pin must win.
     let installed = installer_run_with_method(Some(INSTALLER_METHOD_NPM));
 
     let plan = choose_update_plan(entry, &component, Some(&installed)).expect("plan");
@@ -494,8 +489,7 @@ fn adapter_override_shell_only_step_is_skipped_by_update() {
     let dest = tempdir.path().join("bin");
     fs::create_dir_all(&workspace).expect("workspace");
     fs::create_dir_all(&dest).expect("dest");
-    // Satisfy the harness shell-rerun postcheck so the harness step succeeds
-    // and the adapter verdict is isolated.
+    // Satisfy the harness shell-rerun postcheck so the adapter verdict is isolated.
     write_executable(&dest.join("shell-agent"), "#!/bin/sh\nexit 0\n");
 
     let mut config = fake_config(&workspace);
@@ -515,8 +509,8 @@ fn adapter_override_shell_only_step_is_skipped_by_update() {
         },
         update: Default::default(),
     });
-    // Shell-only harness with shell_rerun so the harness step re-runs its
-    // recipe offline; the npm-carrying fixtures would hit the live registry.
+    // Shell-only harness with shell_rerun keeps this offline; the npm-carrying
+    // fixtures would hit the live registry.
     let registry = RegistryCatalog::from_toml(
         r#"
 [[agents]]
@@ -730,9 +724,8 @@ restart = "never"
     crate::config::load_config_from_str(&config_text).expect("config")
 }
 
-// The updater holds its store handle on the worker thread (a rusqlite
-// connection is `!Sync`), so the observing test keeps its own connection —
-// the same pattern as the installer's `running_row_is_visible` test.
+// A rusqlite connection is `!Sync`, so the observing test needs its own
+// connection separate from the worker thread's.
 fn spawn_update_worker(
     state: &StateStore,
     config: crate::config::Config,

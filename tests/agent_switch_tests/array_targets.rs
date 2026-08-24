@@ -11,9 +11,8 @@ use crate::common::agent::{
     admin_bearer, http, session_bearer, test_config,
 };
 
-/// Stage an externally-owned credential carrying an endpoint override, the way
-/// a managed-state apply would leave it, so the switch guard has a live
-/// routing decision to protect.
+/// Stage an externally-owned credential carrying an endpoint override, so the
+/// switch guard has a live routing decision to protect.
 fn stage_endpoint_override(home: &std::path::Path, provider_id: &str) {
     let mut store = SecretStore::open_or_create(home).expect("secret store");
     store
@@ -314,9 +313,8 @@ async fn agent_switch_to_existing_running_target_keeps_it_running() {
     );
 }
 
-/// Selecting an existing Array target whose agent has no endpoint field would
-/// strand a stored override, so the selection is rejected before anything is
-/// journaled or written.
+/// Selecting a target whose agent has no endpoint field would strand a stored
+/// override, so it is rejected before anything is journaled or written.
 #[tokio::test]
 async fn agent_switch_to_array_target_without_endpoint_field_is_rejected_with_override() {
     let tempdir = TempDir::new().expect("tempdir");

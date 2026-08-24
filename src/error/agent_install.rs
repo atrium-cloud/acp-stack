@@ -1,8 +1,5 @@
-//! Agent install/registry/release-asset error helpers.
-//!
-//! Covers the install-time half of the `agent.*` namespace plus `init.*` (the
-//! init-run state which exists to coordinate installation), `deps.*` for
-//! the dependency-apply init step, and `stack.*` for the self-updater.
+//! Agent install/registry/release-asset error helpers, covering the
+//! install-time half of `agent.*` plus `init.*`, `deps.*`, and `stack.*`.
 
 use http::StatusCode;
 
@@ -103,9 +100,8 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
             "config has legacy placeholder agent; select a real supported agent before starting the runtime".to_owned()
         }
         InitRunCorrupted { reason } => format!("init run state is corrupted: {reason}"),
-        // The raw panic message can carry local diagnostics; the public surface
-        // names only the step. The full message rides `Display` into the CLI log
-        // and the durable `init_steps.error_detail`.
+        // The raw panic message can carry local diagnostics, so the public
+        // surface names only the step.
         InitStepPanicked { kind, .. } => format!("init step `{kind}` failed unexpectedly"),
         // Deliberately omits `summary`: it can carry operator shell text and
         // exit detail that should not leave the host over the API.

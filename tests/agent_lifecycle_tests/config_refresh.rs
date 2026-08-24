@@ -5,9 +5,7 @@ use crate::common::agent::{AgentHarness, admin_bearer, http};
 
 #[tokio::test]
 async fn agent_restart_starts_when_not_running() {
-    // POST /v1/agent/restart on a stopped supervisor degenerates into
-    // a plain start. Confirms the endpoint exists, is admin-tier, and
-    // returns the same capability payload as `agent/start`.
+    // Restart on a stopped supervisor degenerates into a plain start.
     let harness = AgentHarness::spawn().await;
     let client = http().await;
     let response = client
@@ -30,25 +28,17 @@ async fn agent_restart_starts_when_not_running() {
 
 #[tokio::test]
 async fn agent_restart_picks_up_config_written_after_daemon_start() {
-    // Regression: the restart handler must re-read the config from
-    // disk so a `acps agent set` that wrote new provider/model values
-    // is honored on the next supervised process spawn — the in-memory
-    // `state.config` cache would otherwise hand the stale config back
-    // to the supervisor.
+    // Regression: the restart handler must re-read config from disk, or the
+    // in-memory `state.config` cache hands the supervisor a stale config.
     use serde_json::Value as JsonValue;
 
     let harness = AgentHarness::spawn().await;
     let client = http().await;
     let initial = std::fs::read_to_string(&harness.config_path).expect("read initial config");
 
-    // Simulate `acps agent set` mutating the config on disk AFTER
-    // the daemon has cached its own copy. Point `command` at a path
-    // that absolutely cannot resolve to a binary; the supervisor's
-    // spawn step reads this field directly. If the handler reads
-    // from disk on each restart (the intended behavior), the spawn
-    // fails with `agent.spawn_failed`. If it regressed to using the
-    // cached `state.config`, restart would succeed with the original
-    // valid binary path and this assertion would fail.
+    // Mutate the on-disk config AFTER the daemon cached its copy, pointing
+    // `command` at an unresolvable path: reading from disk fails the spawn,
+    // while a regression to the cached config would succeed.
     let mutated = initial.replace(
         &format!("command = \"{}\"", env!("CARGO_BIN_EXE_placebo-agent")),
         "command = \"/nonexistent/absolutely-not-a-binary\"",
@@ -69,10 +59,8 @@ async fn agent_restart_picks_up_config_written_after_daemon_start() {
     );
     let body: JsonValue = serde_json::from_str(&body_text).expect("restart err json");
     let code = body["error"]["code"].as_str().expect("error code present");
-    // Spawn failures and downstream initialize failures both prove
-    // the on-disk command was honored. A regression that fell back
-    // to the cached config would route through the original valid
-    // binary and return 200 instead.
+    // Either failure proves the on-disk command was honored; a fallback to
+    // the cached config would return 200 instead.
     assert!(
         matches!(code, "agent.spawn_failed" | "agent.initialize_failed"),
         "unexpected error code `{code}`; expected agent.spawn_failed or agent.initialize_failed",

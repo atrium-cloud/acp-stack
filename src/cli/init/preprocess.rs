@@ -87,9 +87,8 @@ pub(super) fn configure_subagent_inherit_for_init(
         return Ok(false);
     }
     let alias = entry.subagent_alias.as_deref().unwrap_or("subagent");
-    // Default-yes: declining (or a non-interactive run) inherits the main
-    // provider/model by leaving `subagent` unset under the "absent = inherit"
-    // semantic; only an explicit "no" disables it.
+    // Default-yes: declining leaves `subagent` unset, which means inherit; only an
+    // explicit "no" disables it.
     if prompt::confirm(
         prompt::HostedPromptKind::SubagentInheritConfirm,
         interactive,

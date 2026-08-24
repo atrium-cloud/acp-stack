@@ -1,6 +1,5 @@
-//! Command policy coverage: deny/review pattern matching against shell-obfuscated
-//! command words and composed segments, plus the supervised/locked
-//! approve/deny quadrants and the permission events they emit.
+//! Command policy coverage: deny/review matching against shell-obfuscated command words and
+//! composed segments, plus the supervised/locked approve/deny quadrants.
 
 mod common;
 
@@ -316,7 +315,6 @@ async fn review_pattern_enqueues_permission_in_supervised_mode() {
     })
     .await;
     let response = submit(&harness, serde_json::json!({"command": "sudo apt update"})).await;
-    // Row is created in pending state; permission decision lands out-of-band.
     assert_eq!(response.status(), StatusCode::OK);
     let body: Value = response.json().await.expect("json");
     assert_eq!(body["data"]["status"], "pending");
@@ -385,7 +383,7 @@ async fn canceling_command_awaiting_permission_settles_both_rows() {
     let final_body = wait_for_terminal(&harness, &command_id).await;
     assert_eq!(final_body["data"]["status"], "cancelled");
 
-    // No orphan: the permission row settles with the command...
+    // No orphan: the permission row settles with the command.
     let permission_response = auth(session_client().get(format!(
         "{}/v1/permissions/{}",
         harness.base_url, permission_id
@@ -397,7 +395,7 @@ async fn canceling_command_awaiting_permission_settles_both_rows() {
     let permission_body: Value = permission_response.json().await.expect("json");
     assert_eq!(permission_body["data"]["status"], "cancelled");
 
-    // ...and approving it afterwards is a state conflict, not a bad request.
+    // Approving it afterwards is a state conflict, not a bad request.
     let approve_response = auth(session_client().post(format!(
         "{}/v1/permissions/{}/approve",
         harness.base_url, permission_id
@@ -413,8 +411,6 @@ async fn canceling_command_awaiting_permission_settles_both_rows() {
         "permission.invalid_transition"
     );
 
-    // The cancellation is visible in the command's own event stream, with a
-    // reason naming the cause.
     let events_response = auth(session_client().get(format!(
         "{}/v1/logs/events?command_id={}&limit=50",
         harness.base_url, command_id
@@ -553,10 +549,6 @@ async fn locked_mode_enqueues_permission_and_approval_runs() {
     assert_eq!(final_body["data"]["status"], "exited");
     assert_eq!(final_body["data"]["exit_status"], 0);
 
-    // GET /v1/logs/permissions must surface the durable permission.* events
-    // generated for this command's lifecycle (created + approved). Without
-    // this assertion, a regression in PermissionService event persistence
-    // would silently leave the log route returning an empty array.
     let logs = auth(session_client().get(format!("{}/v1/logs/permissions", harness.base_url)))
         .send()
         .await
@@ -581,10 +573,6 @@ async fn locked_mode_enqueues_permission_and_approval_runs() {
 
 #[tokio::test]
 async fn review_supervised_mode_approve_runs_command() {
-    // Quadrant: supervised + review-match + APPROVE → command transitions
-    // to running and exits cleanly. Complements the existing supervised-deny
-    // and locked-approve tests so all four review/locked outcomes are
-    // covered end-to-end.
     let permissions = PermissionsConfig {
         mode: "supervised".to_owned(),
         review: vec!["echo *".to_owned()],
@@ -635,8 +623,6 @@ async fn review_supervised_mode_approve_runs_command() {
 
 #[tokio::test]
 async fn locked_mode_deny_marks_command_failed() {
-    // Quadrant: locked + DENY → command transitions to failed without ever
-    // spawning a child. Completes the four-quadrant policy matrix.
     let permissions = PermissionsConfig {
         mode: "locked".to_owned(),
         review: vec![],
@@ -684,7 +670,6 @@ async fn locked_mode_deny_marks_command_failed() {
     // exit_status is null because the child never ran.
     assert_eq!(final_body["data"]["exit_status"], Value::Null);
 
-    // GET /v1/logs/permissions must surface permission.denied for this row.
     let logs = auth(session_client().get(format!("{}/v1/logs/permissions", harness.base_url)))
         .send()
         .await

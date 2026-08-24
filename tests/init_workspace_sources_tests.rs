@@ -1,16 +1,5 @@
-//! End-to-end coverage for the Phase 4 workspace init materializer.
-//!
-//! Boundaries we exercise:
-//!   * `acps init --code-from <local-bare-repo>` clones into
-//!     `<root>/usr/code/<name>/` and writes the `.acp-stack-source.json`
-//!     sentinel.
-//!   * `acps init --data-from <local-path>` mirrors a local dataset into
-//!     `<root>/usr/data/<name>/`.
-//!   * Re-running `acps init` is idempotent when sentinels match.
-//!   * `acps init --data-from https://...` downloads and extracts an
-//!     archive without relying on an external network fixture.
-//!   * `--data-from http://...` is rejected by the CLI parser before any
-//!     network IO.
+//! End-to-end coverage for the workspace init materializer: git, local, and https
+//! sources, sentinel-based idempotence, and the http rejection.
 
 #[cfg(feature = "test-fixtures")]
 use acp_stack::runtime::init_runner::step_kind;
@@ -101,10 +90,8 @@ fn git_available() -> bool {
         .unwrap_or(false)
 }
 
-// Mirrors run_fixture_git in src/runtime/workspace_sources/workspace_init/tests.rs:
-// scrub git's hook-exported repo-scoping env (GIT_DIR, GIT_INDEX_FILE, ...)
-// so fixtures built under a pre-commit hook stay in their tempdir, and carry
-// both streams into the panic message since libtest cannot capture child stdio.
+// Scrub git's hook-exported repo-scoping env (GIT_DIR, GIT_INDEX_FILE, ...) so
+// fixtures built under a pre-commit hook stay in their tempdir.
 fn run_git(repo: &Path, args: &[&str]) {
     let mut command = StdCommand::new("git");
     command.args(args).current_dir(repo);
@@ -471,9 +458,8 @@ fn init_rerun_is_idempotent_for_local_sources() {
     acps_init(home.path(), &workspace_path, &["--data-from", &source_path])
         .assert()
         .success();
-    // Second invocation must mark the source as Verified (sentinel match).
-    // Accepting "Created" would let a regression slip through where the
-    // sentinel path no-ops and a fresh materialization runs on every init.
+    // Accepting "Created" here would hide a regression where the sentinel path
+    // no-ops and a fresh materialization runs on every init.
     let second = acps_init(home.path(), &workspace_path, &[])
         .assert()
         .success();

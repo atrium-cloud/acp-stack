@@ -9,9 +9,7 @@ use crate::state::{StateStore, default_state_path};
 use super::install::operator_registry_override;
 use crate::cli::core::{OutputFormat, print_json};
 
-// The comparison machinery lives in the runtime layer so the API's
-// `GET /v1/agent/update/status` route shares it; re-export under the CLI's
-// historical names so `cli::agent` call sites and tests are unchanged.
+// Shared with the API's `GET /v1/agent/update/status` route; re-exported under the CLI's names.
 pub(super) use crate::runtime::install::agent_version_check::{
     AgentVersionStatus as AgentCheckStatus, LiveLatestVersionResolver, agent_check_has_failure,
     build_agent_check_report,
@@ -21,9 +19,7 @@ pub(super) fn run_agent_check(output: OutputFormat) -> Result<()> {
     let home = home_dir()?;
     let config = Config::load_from_default_path()?;
     let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
-    // A custom (non-registry) agent has no managed steps to check; report a clean
-    // skip and exit 0, mirroring `acps agent status`/`agent update`. A placeholder
-    // id keeps its own error so its "select a real agent" signal is not masked.
+    // A custom (non-registry) agent has no managed steps; skip cleanly and exit 0.
     let entry = match registry.lookup_required(&config.agent.id) {
         Ok(entry) => entry,
         Err(StackError::AgentRegistryMissing { .. }) => {

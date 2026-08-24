@@ -345,9 +345,8 @@ fn release_workflow_runs_acceptance_gate() {
         workflow.contains("cargo run --features dev-tools --bin sync-skills-catalog -- --check"),
         "release workflow must check the skills catalog snapshot"
     );
-    // Browser Use script changes are gated by the unfiltered trigger: the
-    // full test suite step runs release_gate_tests, whose wrapper self-test
-    // covers the embedded scripts on every push and PR.
+    // Browser Use script changes are gated by the unfiltered trigger, which runs this
+    // suite's wrapper self-test on every push and PR.
 }
 
 #[test]

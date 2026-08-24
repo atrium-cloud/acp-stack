@@ -114,8 +114,7 @@ pub(crate) async fn sessions_snapshot_handler(
                 .collect()
         })
         .unwrap_or_default();
-    // `latest_session_events` returns newest-first; the cursor for the next
-    // refresh is the id at the head of the slice (or null when empty).
+    // `latest_session_events` returns newest-first, so the next cursor is at the head of the slice.
     let last_event_id = recent.first().map(|event| event.id.clone());
     let recent_events = recent.into_iter().map(LogEventJson::from).collect();
     let in_flight_prompts = in_flight

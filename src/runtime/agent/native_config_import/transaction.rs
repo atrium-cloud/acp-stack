@@ -47,10 +47,9 @@ pub fn validate_native_config_secret_refs(
     validate_native_config_secret_refs_with_store(prepared, &secrets)
 }
 
-/// MCP-only slice of [`validate_native_config_secret_refs`], for a hosted init
-/// that soft-passed a custom provider ref pending a managed credential push:
-/// resolving the full agent environment would hard-fail on that same ref, but
-/// the MCP refs are unrelated to the deferral and must still hold.
+/// MCP-only slice of [`validate_native_config_secret_refs`]: a hosted init
+/// deferring a provider credential would hard-fail the full environment check,
+/// but its MCP refs are unrelated to the deferral and must still hold.
 pub fn validate_native_config_mcp_secret_refs(
     prepared: &PreparedNativeConfigImport,
     home: &Path,

@@ -1,21 +1,7 @@
-//! Safe archive extractor for untrusted tarballs/zips.
-//!
-//! Built for Phase 4 workspace data ingestion: take an archive downloaded
-//! from an untrusted source and unpack it into a destination directory,
-//! rejecting every entry that could escape the destination, mask kernel
-//! features (devices, FIFOs), or run away on size.
-//!
-//! Supported formats: tar, tar.gz, zip. Format is detected by magic bytes,
-//! not by file extension, so a renamed archive cannot smuggle its way
-//! through. Unsupported formats fail fast with `ArchiveUnsupportedFormat`.
-//!
-//! Safety rules enforced for every entry:
-//!
-//! * No `..` segments, no absolute paths, no root or drive prefixes.
-//! * No symlinks, no hardlinks. (These are how tar escape exploits work.)
-//! * No FIFOs, character/block devices, or other special types.
-//! * Per-entry size cap and cumulative extracted size cap. Streams abort
-//!   mid-entry when either is hit.
+//! Safe archive extractor for untrusted tar/tar.gz/zip. Format comes from
+//! magic bytes, never the extension. Every entry is rejected if it carries
+//! `..`, an absolute path, a symlink or hardlink (the tar escape exploits), a
+//! device or FIFO, or exceeds the per-entry or cumulative size cap.
 
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, Write};
@@ -49,9 +35,7 @@ impl Default for ExtractOpts {
 pub struct ExtractReport {
     pub entries_written: usize,
     pub bytes_written: u64,
-    /// `Some(name)` when every extracted entry shared the same top-level
-    /// directory; otherwise `None`. Callers can use this to flatten a single
-    /// top-level wrapper into the destination's parent name.
+    /// `Some(name)` when every extracted entry shared one top-level directory.
     pub top_level_dir: Option<String>,
 }
 
@@ -62,9 +46,8 @@ enum DetectedFormat {
     Zip,
 }
 
-/// Extract `archive` into `dest`. The destination is created if missing; it
-/// must be empty if it already exists, and must not be (or contain) a
-/// symlink — `File::create` would otherwise happily follow a swap-in
+/// Extract `archive` into `dest`. `dest` must be empty if it exists and must
+/// not be (or contain) a symlink: `File::create` would follow a swap-in
 /// symlink directory and write entries outside `dest`.
 pub fn extract_archive(archive: &Path, dest: &Path, opts: &ExtractOpts) -> Result<ExtractReport> {
     let format = detect_format(archive)?;
@@ -151,9 +134,8 @@ fn detect_format(archive: &Path) -> Result<DetectedFormat> {
     if head.starts_with(b"PK\x03\x04") || head.starts_with(b"PK\x05\x06") {
         return Ok(DetectedFormat::Zip);
     }
-    // tar magic at offset 257: "ustar" (POSIX) or "ustar\0" (GNU) — both
-    // start with "ustar". Without that, treat as unsupported (we do not
-    // accept ambiguous "plain stream" tars to avoid false positives).
+    // tar magic at offset 257. Ambiguous "plain stream" tars stay unsupported
+    // to avoid false positives.
     if head.len() >= 263 && &head[257..262] == b"ustar" {
         return Ok(DetectedFormat::Tar);
     }
@@ -175,8 +157,6 @@ fn extract_tar(
     } else {
         Box::new(buffered)
     };
-    // The tar crate accepts `Read` but its high-level API consumes the
-    // archive value, so we route through it directly.
     let mut tar = TarArchive::new(&mut archive);
 
     let mut total_bytes: u64 = 0;
@@ -431,10 +411,8 @@ fn sanitize_relative_path(raw: &Path) -> Result<PathBuf> {
 }
 
 fn ensure_inside(target: &Path, dest_canonical: &Path, raw: &Path) -> Result<()> {
-    // Belt-and-suspenders: sanitize_relative_path already rejects traversal
-    // before we build `target`. A second textual check guards against host
-    // OS quirks (case folding, NTFS reserved names) once we add Windows
-    // support later.
+    // Second check behind `sanitize_relative_path`, guarding host OS quirks
+    // like case folding and reserved names.
     if !target.starts_with(dest_canonical) {
         return Err(StackError::ArchiveUnsafeEntry {
             kind: "escape",
@@ -487,9 +465,8 @@ fn copy_capped<R: Read>(
     Ok(written)
 }
 
-// `Seek` is required for `zip::ZipArchive::new` to function — keep an
-// explicit reference so dead-code analysis does not silently drop it from
-// the dependency surface if `tar` ever stops requiring it.
+// `Seek` is required for `zip::ZipArchive::new`; the explicit reference keeps
+// dead-code analysis from dropping it if `tar` stops requiring it.
 #[allow(dead_code)]
 fn _seek_marker<T: Seek>(_: T) {}
 
@@ -611,13 +588,12 @@ mod tests {
             header.set_size(3);
             header.set_mode(0o644);
             header.set_cksum();
-            // tar's append_data strips the leading slash by design, so build
-            // a synthetic header manually.
+            // tar's append_data strips the leading slash, so build the header
+            // manually.
             let mut h = tar::Header::new_gnu();
             h.set_path("etc/passwd").unwrap();
             h.set_size(3);
             h.set_mode(0o644);
-            // Manually set the name field bytes to include a leading slash.
             let name_bytes = h.as_old_mut().name.as_mut();
             name_bytes.fill(0);
             let abs = b"/etc/passwd";

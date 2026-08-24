@@ -65,8 +65,7 @@ pub(crate) fn write_installed_skill(root: &Path, name: &str, descriptor: &str) {
     std::fs::create_dir_all(&skill_dir).expect("skill dir");
     std::fs::write(skill_dir.join(SKILL_DESCRIPTOR), descriptor).expect("descriptor");
     std::fs::write(skill_dir.join("script.sh"), "true\n").expect("script");
-    // Mirrors the marker written at install time; removal refuses directories
-    // without it.
+    // Mirrors the install-time marker; removal refuses directories without it.
     std::fs::write(skill_dir.join(MANAGED_SKILL_MARKER), "test-source\n").expect("marker");
 }
 

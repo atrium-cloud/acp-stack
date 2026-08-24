@@ -91,8 +91,7 @@ fn permission_reconcile_orphans_categorizes_by_source() {
     assert_eq!(after_cmd.status, "expired");
 
     // Audit-trail invariant: every terminal request row must have a matching
-    // permission_decisions row. Reconcile must insert these to honor the
-    // same contract `decide_permission` upholds during normal operation.
+    // permission_decisions row, including ones reconcile inserted.
     let counts = store.counts().expect("counts");
     assert_eq!(counts.permission_decisions, 2, "expected 2 decision rows");
 }
@@ -164,9 +163,8 @@ fn reconcile_orphaned_commands_settles_dependent_permissions() {
         .expect("decision row");
     assert_eq!(reason, "command-reconciled");
 
-    // Invariant the incident violated: after the command sweep alone (no
-    // permission sweep), no failed command may leave an approvable
-    // command-source permission behind.
+    // After the command sweep alone, no failed command may leave an
+    // approvable command-source permission behind.
     let orphaned: i64 = connection
         .query_row(
             r#"

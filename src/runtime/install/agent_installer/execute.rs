@@ -1,19 +1,8 @@
-//! Registry-resolved install execution.
-//!
-//! The parent module owns orchestration and persistence; this module drives a
-//! single resolved registry entry to completion: sequencing harness and adapter
-//! steps (in parallel when both are declared), walking each field's
-//! `shell → npm → github_release` fallback chain, and skipping paths whose
-//! prerequisite tools are absent. Every attempt produces a row so the fallback
-//! chain stays visible in `acps installer history`.
+//! Drives one resolved registry entry to completion: harness/adapter sequencing and each field's `shell → npm → github_release` fallback chain.
 
 use super::*;
 
-/// Run the resolved-registry installer WITHOUT holding the state store across
-/// steps. Returns all rows that should be persisted (in order) and the final
-/// outcome. When `progress` is provided, each executed step is inserted as a
-/// `running` row at start and finalized in place at finish (its draft then
-/// carries `persisted_run_id` so the caller skips re-appending it).
+/// Run the resolved-registry installer WITHOUT holding the state store across steps, returning the rows to persist in order plus the final outcome.
 pub fn install_resolved_capture(
     agent: &AgentConfig,
     entry: &RegistryEntry,
@@ -24,9 +13,7 @@ pub fn install_resolved_capture(
 ) -> InstallerSequenceResult {
     let mut rows = Vec::new();
     let installer_env = HashMap::new();
-    // An operator adapter override turns the entry adapter-kind so the
-    // harness+adapter sequencing below drives the operator's adapter install
-    // alongside the managed harness recipe.
+    // An operator adapter override turns the entry adapter-kind, so the sequencing below drives the operator's adapter alongside the managed harness recipe.
     let entry =
         match crate::runtime::install::agent_registry::effective_registry_entry(entry, agent) {
             Ok(entry) => entry,
@@ -38,9 +25,8 @@ pub fn install_resolved_capture(
             }
         };
     let entry = &*entry;
-    // A declared sha256 pin downgrades step-level spawn gates to the header
-    // check (which never executes the file); `final_verification` then owns
-    // the pin check followed by the probe.
+    // A declared sha256 pin downgrades step-level spawn gates to the header check, which never
+    // executes the file; `final_verification` then owns the pin check followed by the probe.
     let pin_declared = agent.expected_sha256.is_some();
     if let Err(err) = entry.ensure_supported() {
         return InstallerSequenceResult {
@@ -49,13 +35,9 @@ pub fn install_resolved_capture(
         };
     }
 
-    // Step 1: install the upstream agent harness. Native entries speak ACP from
-    // this binary; most adapter-backed entries wrap it with an adapter in step 2.
     let harness = match entry.harness.as_ref() {
         Some(h) => h,
         None => {
-            // The registry validator should have caught this; fail-fast with a
-            // typed error if it didn't.
             return InstallerSequenceResult {
                 outcome: Err(StackError::RegistryLoad {
                     reason: format!("registry entry `{}` has no harness block", entry.id),
@@ -107,10 +89,7 @@ pub fn install_resolved_capture(
             return final_verification(agent, workspace_root, dest_dir, rows);
         }
 
-        // Harness + adapter install in parallel. Each side tries its
-        // priority chain (shell → npm → github_release for floating,
-        // github → npm for pinned) internally so a single broken path
-        // doesn't abort the install when a sibling would have worked.
+        // Harness and adapter install in parallel, each walking its own priority chain.
         let harness_workspace = workspace_root.to_path_buf();
         let harness_dest = dest_dir.to_path_buf();
         let harness_env = installer_env.clone();
@@ -124,12 +103,9 @@ pub fn install_resolved_capture(
         let adapter_install = adapter.install.clone();
         let adapter_github = adapter.github.clone();
         let adapter_id = entry.id.clone();
-        // Scoped threads (not `thread::spawn`) so the borrowed `progress`
-        // sink can cross; both handles are joined manually inside the scope,
-        // so a panicking installer thread still lands in the `unwrap_or_else`
-        // fallback instead of propagating at scope exit. The step guard in
-        // `install_one_with_fallback` finalizes the panic's `running` row
-        // before the unwind reaches the join.
+        // Scoped threads so the borrowed `progress` sink can cross, and both handles are joined
+        // manually inside the scope so a panicking installer thread lands in `unwrap_or_else`
+        // rather than propagating at scope exit.
         let (harness_chain, adapter_chain) = std::thread::scope(|scope| {
             let harness_thread = scope.spawn(move || {
                 install_one_with_fallback(
@@ -217,22 +193,13 @@ pub fn install_resolved_capture(
     final_verification(agent, workspace_root, dest_dir, rows)
 }
 
-/// Result of walking the `[shell, npm, github]` chain for one install
-/// field. `rows` contains the per-attempt `installer_runs` draft (so
-/// every attempt is preserved for audit, not just the winner);
-/// `terminal_error` is `None` when any path succeeded. When several
-/// paths were attempted or skipped, the terminal error enumerates each
-/// path's failure so no single path's error masks the others.
+/// Result of walking the `[shell, npm, github]` chain for one install field; `terminal_error` is `None` when any path succeeded.
 pub(crate) struct FallbackChain {
     pub(crate) rows: Vec<InstallerRowDraft>,
     pub(crate) terminal_error: Option<StackError>,
 }
 
-/// Fold the per-path outcomes into the single error surfaced to the
-/// operator. A lone attempt keeps its typed error unchanged; multiple
-/// entries collapse into `AgentInstallAllPathsFailed` listing each
-/// path's failure (`shell: …; npm: …; github: …`), including paths
-/// that were skipped for missing prerequisite tools.
+/// Fold the per-path outcomes into one error: a lone attempt keeps its typed error, several collapse into `AgentInstallAllPathsFailed`.
 fn terminal_error_from(
     attempts: &[(&'static str, String)],
     last_error: Option<StackError>,
@@ -245,8 +212,7 @@ fn terminal_error_from(
     if attempts.is_empty() {
         return None;
     }
-    // Recorded attempts with no typed error still must not read as
-    // success — fold whatever was recorded into the enumerated error.
+    // Recorded attempts with no typed error still must not read as success.
     let summary = attempts
         .iter()
         .map(|(path, error)| format!("{path}: {error}"))
@@ -255,14 +221,7 @@ fn terminal_error_from(
     Some(StackError::AgentInstallAllPathsFailed { summary })
 }
 
-/// Try each install path declared on the given field in priority order
-/// (shell → npm → github_release for floating versions; github → npm for
-/// pinned). Returns once one succeeds, or once all declared paths have
-/// been exhausted. Each attempt is recorded so the operator can see the
-/// fallback chain after the fact via `acps installer history`. When
-/// `progress` is provided, every executed attempt is also visible
-/// in-flight: a `running` row is inserted before the step spawns and
-/// finalized in place when it exits.
+/// Try each install path declared on the field in priority order (shell → npm → github_release for floating versions; github → npm for pinned), recording every attempt.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn install_one_with_fallback(
     agent_id: &str,
@@ -293,18 +252,13 @@ pub(crate) fn install_one_with_fallback(
             Ok(spec) => spec,
             Err(err) => {
                 if rows.is_empty() {
-                    // No path was ever runnable. Surface that as the
-                    // single registry error with a placeholder row so
-                    // the audit log records the attempt.
                     rows.push(InstallerRowDraft::config_error(step_label));
                     return FallbackChain {
                         rows,
                         terminal_error: Some(err),
                     };
                 }
-                // `rows` non-empty implies a step ran and failed, so
-                // `last_error` is Some here; the `else` arm is defensive
-                // so a select error can never be silently dropped.
+                // The `else` arm is defensive so a select error can never be silently dropped.
                 let terminal_error = if last_error.is_some() {
                     terminal_error_from(&attempts, last_error)
                 } else {
@@ -363,12 +317,9 @@ pub(crate) fn install_one_with_fallback(
                 };
             }
             Err(err) => {
-                // `public_message` reads better in the enumerated summary
-                // than raw Display (e.g. `status 9`, not `status Some(9)`).
                 attempts.push((path_label_of(kind), err.public_message()));
                 last_error = Some(err);
-                // Drop the path we just exhausted so the next select
-                // resolves a different one.
+                // Drop the exhausted path so the next select resolves a different one.
                 match kind {
                     InstallPathKind::Shell => remaining.shell = None,
                     InstallPathKind::Npm => remaining.npm = None,
@@ -385,13 +336,7 @@ pub(crate) fn install_one_with_fallback(
     }
 }
 
-/// Run one resolved step behind a panic guard. A panicking step would
-/// otherwise strand its `running` row: the thread-join fallback at the call
-/// site only sees the dead thread, not the row id, and the active-runs query
-/// has no age cutoff, so the row would read as in-flight forever even though
-/// the daemon survived. The guard finalizes the row as `error` — associating
-/// it with the panic — then resumes the unwind so the join fallback still
-/// records the panic as the install's terminal error.
+/// Run one resolved step behind a panic guard: the guard finalizes the `running` row as `error` before resuming the unwind, or the row reads as in-flight forever.
 pub(super) fn run_guarded_install_step(
     step_label: &'static str,
     method: &'static str,

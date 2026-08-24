@@ -1,21 +1,7 @@
 //! Snapshot/restore primitives for the per-agent headless config files written
-//! by `agent_headless_config::provision_agent_headless_config`. Used by the
-//! model discovery flow so a failed validation can roll back to the
-//! state on disk before provisioning ran.
-//!
-//! Per-agent list of headless-config files that `provision_agent_headless_config`
-//! may write into. Kept in sync with the per-agent provisioners in
-//! `agent_headless_config.rs`. Used to snapshot prior contents BEFORE
-//! provisioning runs so a failed discovery/validation can roll back to true
-//! prior state (a snapshot taken AFTER provision would capture the just-
-//! written bytes and "restore" them on rejection, leaking state).
-//!
-//! Custom-provider variants additionally write a side file —
-//! `~/.config/goose/custom_providers/<id>.json` for Goose,
-//! `~/.pi/agent/models.json` for Pi — so the candidate list covers those
-//! too when a custom provider is configured. Without this, a failed validation
-//! on a custom-provider init could leave the side file behind even though
-//! `acps-config.toml` was never written.
+//! by `agent_headless_config::provision_agent_headless_config`. Snapshots MUST
+//! be taken BEFORE provisioning: one taken after would capture the just-written
+//! bytes and "restore" them on rejection.
 
 use std::path::{Path, PathBuf};
 
@@ -43,11 +29,8 @@ pub(super) fn headless_config_candidate_paths(agent_id: &str, home: &Path) -> Ve
     }
 }
 
-/// Per-agent extra directories whose new files should be rolled back on
-/// discovery/validation rejection. Today this covers Goose's
-/// `custom_providers/` sidecar dir — its file names are operator-supplied
-/// (`<provider_id>.json`) so they can't be enumerated up front the way the
-/// primary headless-config files can.
+/// Per-agent directories holding provisioner side files whose names are
+/// operator-supplied, so they cannot be enumerated up front.
 pub(super) fn headless_config_side_dirs(agent_id: &str, home: &Path) -> Vec<PathBuf> {
     match agent_id {
         "goose" => vec![home.join(".config").join("goose").join("custom_providers")],
@@ -55,13 +38,8 @@ pub(super) fn headless_config_side_dirs(agent_id: &str, home: &Path) -> Vec<Path
     }
 }
 
-/// Capture the existing file names in each given directory before
-/// provisioning runs. On rejection, anything new in those directories
-/// matching a known provisioner side-effect pattern is removed — covers
-/// codex backup files (`~/.codex/config.<provider>.toml`) and Goose
-/// custom-provider sidecars (`~/.config/goose/custom_providers/<id>.json`)
-/// that the per-agent provisioner writes without exposing the paths through
-/// its return value.
+/// Capture existing file names per directory before provisioning, so anything
+/// new matching a known side-effect pattern can be removed on rejection.
 pub(super) fn capture_dir_listings_for(
     dirs: &[PathBuf],
 ) -> Result<Vec<(PathBuf, std::collections::HashSet<std::ffi::OsString>)>> {
@@ -104,12 +82,8 @@ pub(super) fn remove_new_files_in_dirs(
                 continue;
             }
             let path = entry.path();
-            // Only remove regular files matching a known side-effect
-            // pattern (today: `config.<provider>.toml` backups codex
-            // writes alongside the primary config). Skip anything
-            // else so a legitimate sibling file written during the
-            // short discovery window (logs, lockfiles, the agent's
-            // own ephemeral state) is preserved.
+            // Only known side-effect patterns are removed, so a legitimate
+            // sibling written during the discovery window survives.
             if path.is_file()
                 && is_known_provisioner_side_artifact(&dir, &name)
                 && let Err(error) = std::fs::remove_file(&path)
@@ -128,16 +102,12 @@ fn is_known_provisioner_side_artifact(dir: &Path, name: &std::ffi::OsStr) -> boo
     let Some(name) = name.to_str() else {
         return false;
     };
-    // Codex OpenAI backup files: `config.<provider>.toml` or
-    // `config.<provider>-<n>.toml`. See `unique_codex_backup_path` in
-    // `runtime/agent/agent_headless_config.rs`.
+    // Codex backup files, per `unique_codex_backup_path`.
     if name.starts_with("config.") && name.ends_with(".toml") && name != "config.toml" {
         return true;
     }
-    // Goose custom-provider sidecar: any `<provider_id>.json` written
-    // under `~/.config/goose/custom_providers/`. The operator-supplied
-    // provider id can't be enumerated up front, so we match by parent
-    // dir name + .json suffix instead.
+    // Goose custom-provider sidecar; the operator-supplied provider id cannot be
+    // enumerated, so match by parent dir name plus `.json`.
     if dir
         .file_name()
         .and_then(|n| n.to_str())
@@ -167,10 +137,8 @@ pub(super) fn capture_path_snapshots(paths: &[PathBuf]) -> Result<Vec<(PathBuf, 
     Ok(snapshots)
 }
 
-/// Best-effort restore: write each prior content back, or delete the file
-/// we created. A restore failure is logged but does not mask the real
-/// discovery/validation error — the operator still sees the root cause and
-/// can correct it on the next run.
+/// Best-effort restore of prior contents; a restore failure is logged rather
+/// than masking the real discovery/validation error.
 pub(super) fn restore_headless_snapshots(snapshots: Vec<(PathBuf, Option<Vec<u8>>)>) {
     for (path, prior) in snapshots {
         match prior {

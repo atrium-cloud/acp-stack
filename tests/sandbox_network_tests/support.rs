@@ -40,9 +40,8 @@ pub(crate) fn bin_available(name: &str, version_arg: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Build a `__sandbox-supervise` invocation mirroring the production wrapper:
-/// diag fd 3 is wired to the test's stderr the same way the daemon wires its
-/// own stderr, and the inner chain is `unshare --net … __sandbox-exec -- work`.
+/// Build a `__sandbox-supervise` invocation mirroring the production wrapper,
+/// diag fd 3 included.
 pub(crate) fn supervise_command(
     provider: &[&str],
     timeout: &str,
@@ -95,9 +94,8 @@ pub(crate) fn supervise_command(
     cmd
 }
 
-/// Write an executable provider script. Provider processes start with a
-/// cleared environment, so the script sets its own PATH — exactly what real
-/// providers must do.
+/// Write an executable provider script. Provider processes start with a cleared
+/// environment, so the script MUST set its own PATH, as real providers do.
 pub(crate) fn write_provider_script(dir: &Path, body: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let path = dir.join("provider.sh");

@@ -36,9 +36,7 @@ fn validate_code_source(
         .as_deref()
         .ok_or_else(|| invalid("repo is required when type is git".to_owned()))?;
     require_workspace_field("repo", repo, invalid)?;
-    // `git+https://` (Cargo-style) is not accepted because the host `git`
-    // binary does not understand it; operators must use a bare `https://`
-    // URL or an `ssh://`/`git@…:…` reference.
+    // Cargo-style `git+https://` is rejected because the host `git` binary does not understand it.
     require_url_with_scheme("repo", repo, &["https", "ssh"], invalid)?;
     if let Some(branch) = source.branch.as_deref() {
         require_nonempty_trimmed("branch", branch, invalid)?;
@@ -125,9 +123,8 @@ fn validate_data_source(
         }
     };
 
-    // Numeric caps that may be set on the source. We validate non-zero
-    // and reject them on source types that ignore them so operators do
-    // not write configs that load cleanly but silently no-op the cap.
+    // Caps are rejected on source types that ignore them, so a config cannot load cleanly while
+    // silently no-opping the cap.
     let reject_numeric_for_type = |field: &'static str, value: Option<u64>| -> Result<()> {
         match value {
             Some(0) => Err(invalid(format!("{field} must be greater than zero"))),
@@ -223,8 +220,7 @@ fn validate_data_source(
                 require_nonempty_trimmed("prefix", prefix, invalid)?;
             }
             require_nonzero("max_download_bytes", source.max_download_bytes)?;
-            // S3 ingest does not extract archives, so the extracted cap
-            // would be silently ignored. Reject it explicitly.
+            // S3 ingest does not extract archives, so the extracted cap would be ignored.
             reject_numeric_for_type("max_extracted_bytes", source.max_extracted_bytes)?;
             reject_for_type("path", source.path.as_deref())?;
             reject_for_type("url", source.url.as_deref())?;
@@ -259,12 +255,8 @@ pub(crate) fn derive_data_source_name(
     }
     let derived = match source.source_type.as_str() {
         "local" => {
-            // Local paths can point at either a file (`/data/dataset.tar.gz`)
-            // or a directory (`/data/reports.v1`). We cannot tell which at
-            // validation time, and stripping the extension blindly would
-            // mangle directory names like `reports.v1` into `reports`.
-            // Preserve the basename as-is; operators who want stripping
-            // should set `name = "..."` explicitly.
+            // The basename is preserved as-is: a local path may be a file or a directory, and
+            // stripping the extension would mangle directory names like `reports.v1`.
             let path = source.path.as_deref().unwrap_or("");
             let leaf = Path::new(path)
                 .file_name()
@@ -339,8 +331,7 @@ fn strip_archive_extension(name: &str) -> &str {
             return stripped;
         }
     }
-    // Only strip a trailing extension when the prefix is non-empty;
-    // otherwise names like `.tmpXYZ` would collapse to "".
+    // Only strip when the prefix is non-empty, or a name like `.tmpXYZ` collapses to "".
     if let Some(dot) = name.rfind('.')
         && dot > 0
     {
@@ -387,10 +378,7 @@ where
         && value.contains(':')
         && !value.starts_with("http://")
         && !value.starts_with("https://");
-    // Absolute filesystem paths are valid git "URLs" (file:// shorthand) and
-    // are useful for tests and on-host mirrors. We accept them only when
-    // the caller's allowlist includes a path-shaped scheme — git is the
-    // only one today.
+    // Absolute filesystem paths are valid git "URLs", accepted only for path-shaped allowlists.
     let looks_like_path = allowed_prefixes.contains(&"https")
         && Path::new(value).is_absolute()
         && !value.contains("://");

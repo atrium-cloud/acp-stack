@@ -59,12 +59,9 @@ pub fn resolve_source(
     }
 }
 
-/// Resolve a day-2 source reference against, in order: the embedded catalog by
-/// alias, then configured user sources (`[[skills.sources]]`), then an ad-hoc
-/// `github:<owner>` (→ `<owner>/skills`) or `github:<owner>/<repo>`. The catalog
-/// is checked first so a hand-edited `[[skills.sources]]` entry whose alias
-/// collides with a curated one cannot hijack it (the add route already refuses
-/// to create such an alias; this keeps the invariant even for direct edits).
+/// Resolve a day-2 source reference. ORDER MATTERS: the embedded catalog wins
+/// first so a hand-edited `[[skills.sources]]` alias cannot hijack a curated
+/// one, then user sources, then ad-hoc `github:<owner>[/<repo>]`.
 pub fn resolve_source_ref(
     source_ref: &str,
     user_sources: &[UserSkillSource],
@@ -118,9 +115,8 @@ fn resolve_ad_hoc_github(rest: &str) -> Result<ResolvedSkillSource> {
     }
 }
 
-/// Build a non-catalog `ResolvedSkillSource` for a whole GitHub repo. Skills
-/// are expected flat under `skills/` (the same convention as `github:<owner>`);
-/// nested/frontmatter-indexed layouts are the curated catalog's domain.
+/// Build a non-catalog `ResolvedSkillSource` for a whole GitHub repo, expecting
+/// skills flat under `skills/`.
 fn github_repo_source(
     id: String,
     name: String,

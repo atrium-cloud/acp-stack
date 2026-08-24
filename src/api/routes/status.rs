@@ -441,9 +441,6 @@ mod tests {
 
     #[test]
     fn failed_resolution_never_reports_restart_required() {
-        // A running agent with a loaded snapshot but empty (failed) configured
-        // set must not read as needing a restart — the raw predicate says true,
-        // the guarded status helper must say false.
         let loaded = vec![provider(Some("go_1"), "revision-1")];
         assert!(provider_snapshot_requires_restart(
             AgentStateLabel::Running,
@@ -456,7 +453,6 @@ mod tests {
             Some(&loaded),
             &[],
         ));
-        // When resolution succeeds the guard defers to the raw predicate.
         assert!(provider_restart_required_for_status(
             false,
             AgentStateLabel::Running,

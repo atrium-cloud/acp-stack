@@ -15,17 +15,12 @@ pub fn run() -> Result<()> {
 }
 
 fn run_cli(cli: Cli) -> Result<()> {
-    // The internal sandbox helper runs inside the sandbox namespaces, where the
-    // state DB may be masked, and on success it execs and never returns. Dispatch
-    // it before the output/error-recording machinery so a failure never tries to
-    // open (or spuriously write) the durable `cli.error` log.
+    // The sandbox helpers MUST dispatch before the output/error-recording
+    // machinery: they run inside the sandbox namespaces where the state DB may
+    // be masked, and their stdio belongs to the workload.
     if let Command::SandboxExec { args } = cli.command {
         return crate::runtime::sandbox::run_exec(args);
     }
-    // Same reasoning for the network supervisor: its stdio belongs to the
-    // workload (the ACP transport for agent spawns), and it terminates itself
-    // mirroring the workload's status, so it must never reach the output or
-    // error-recording machinery.
     if let Command::SandboxSupervise { args } = cli.command {
         return crate::runtime::sandbox::supervise::run_supervise(args);
     }
@@ -106,9 +101,8 @@ fn run_cli(cli: Cli) -> Result<()> {
         Command::Deps { command } => {
             crate::cli::deps::run_deps_command(command, output.effective())
         }
-        // Runs detached with stdio redirected to its log file; a failure is
-        // still worth a durable `cli.error` row, so it dispatches through the
-        // normal error-recording tail unlike the sandbox helpers.
+        // Detached with stdio redirected to its log file, but a failure is still
+        // worth a durable `cli.error` row, unlike the sandbox helpers.
         Command::DepsApplyRun { args } => crate::cli::deps_apply_worker::run_worker(args),
         Command::Security { command } => {
             crate::cli::security::run_security_command(command, output)
@@ -126,10 +120,8 @@ fn run_cli(cli: Cli) -> Result<()> {
     };
 
     if let Err(error) = &result {
-        // `acps reset` dry-run intentionally returns this error to signal the
-        // operator must pass `--yes`. The dry-run contract is "exits without
-        // touching the filesystem" — recording a `cli.error` row into
-        // state.sqlite would violate that, so we skip the durable log for it.
+        // `acps reset` dry-run returns this error to demand `--yes`, and its
+        // contract is to exit without touching the filesystem at all.
         if !matches!(error, StackError::ResetNotConfirmed) {
             record_cli_error_message(&strip_ansi(&error.to_string()));
         }
@@ -146,7 +138,7 @@ fn record_cli_error_message(error_message: &str) {
     if !state_path.exists() {
         return;
     }
-    // Repair the existing file's mode before opening, so the error row is not written
+    // Repair the file mode BEFORE opening, so the error row is never written
     // while the database is still readable by other local users.
     if set_owner_only_file(&state_path).is_err() {
         return;

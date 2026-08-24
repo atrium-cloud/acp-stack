@@ -72,13 +72,9 @@ impl AgentSwitchProviderStatus {
     }
 }
 
-/// A stored endpoint override lives in the configured agent's native config,
-/// so every agent-change path (planned switch, existing-Array-target
-/// selection, init agent apply) must prove the override survives the target
-/// before committing: a target with no field to write it into, or a target
-/// whose provider is the overridden one on a pair that cannot carry an
-/// override, would silently drop a live routing decision and send protected
-/// traffic back to the vendor.
+/// Every agent-change path MUST call this before committing: a stored endpoint
+/// override lives in the agent's native config, and a target that cannot carry
+/// it would silently send protected traffic back to the vendor.
 pub fn ensure_endpoint_override_survives_target(
     target_agent_id: &str,
     target_supports_base_url: bool,
@@ -134,9 +130,8 @@ pub fn plan_agent_switch(
     apply_switch_registry_entry(&mut config, entry);
     let (provider_status, required_env_refs, secret_migrations) =
         configure_switch_provider(current, &mut config, entry, request)?;
-    // Runs after provider resolution so the pair-level refusal (e.g. codex +
-    // openai) sees the provider the target would actually run — which also
-    // covers reusing the current provider unchanged.
+    // MUST run after provider resolution so the pair-level refusal sees the
+    // provider the target would actually run.
     ensure_endpoint_override_survives_target(
         &entry.id,
         entry.set_provider_base_url,
@@ -779,7 +774,6 @@ mod tests {
         .expect("switch planned");
 
         assert_eq!(plan.target_agent_id, "hermes");
-        // Hermes is provider-backed, unlike Kimi's direct agent secret.
         assert_eq!(
             plan.provider_status,
             AgentSwitchProviderStatus::Reused {
@@ -1048,14 +1042,10 @@ mod tests {
         assert!(error.to_string().contains("custom provider migration"));
     }
 
-    // Serializes every test that can observe a staged endpoint override. The
-    // override guard resolves the secret store through `$HOME`, and the guard
-    // tests below repoint HOME at a temp home holding a staged override — so
-    // any other test calling `plan_agent_switch` while one of them runs would
-    // read that staged store and see its switch rejected. Every
-    // `plan_agent_switch` call in this module therefore goes through
-    // `plan_agent_switch_locked` (or runs while holding the lock via
-    // `HomeEnvGuard`), which makes the outcome independent of test scheduling.
+    // Serializes every test that can observe a staged endpoint override: the
+    // guard resolves the secret store through `$HOME`, so every
+    // `plan_agent_switch` call here must hold this lock or its outcome depends
+    // on test scheduling.
     static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -1107,8 +1097,7 @@ mod tests {
         }
     }
 
-    /// Stage an externally-owned credential carrying an endpoint override, the
-    /// way a managed-state apply would leave it.
+    /// Stage an externally-owned credential carrying an endpoint override.
     fn stage_endpoint_override(home: &std::path::Path, provider_id: &str) {
         let mut store = crate::secrets::SecretStore::open_or_create(home).expect("secret store");
         store
@@ -1155,8 +1144,6 @@ mod tests {
             .expect("no override stored means any target passes");
     }
 
-    /// An override for `openai` plus a codex target selecting `openai` fresh:
-    /// the pair cannot carry an override, so the plan is rejected.
     #[test]
     fn plan_switch_rejects_codex_openai_pair_with_fresh_provider() {
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -1171,8 +1158,7 @@ mod tests {
         });
         let registry = RegistryCatalog::load_embedded().expect("registry loads");
 
-        // `super::` because the lock is already held: these guard tests stage
-        // the override themselves and must not re-acquire HOME_LOCK.
+        // `super::` because HOME_LOCK is already held and must not re-acquire.
         let error = super::plan_agent_switch(
             &config,
             &registry,
@@ -1191,8 +1177,6 @@ mod tests {
         );
     }
 
-    /// Same refusal when the provider is reused rather than re-selected: the
-    /// target would still land on the overridden provider.
     #[test]
     fn plan_switch_rejects_codex_openai_pair_with_reused_provider() {
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -1225,8 +1209,6 @@ mod tests {
         );
     }
 
-    /// Control: an override for `openrouter` does not block a codex switch
-    /// that selects `openrouter` — that pair accepts endpoint overrides.
     #[test]
     fn plan_switch_allows_codex_openrouter_with_openrouter_override() {
         let tempdir = tempfile::tempdir().expect("tempdir");

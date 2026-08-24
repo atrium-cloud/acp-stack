@@ -1,10 +1,5 @@
-//! Top-level config validation orchestrator.
-//!
-//! `validate_config` runs every per-domain check in the same order the
-//! pre-split monolith did so error messages and test fixtures are
-//! preserved verbatim. Cross-cutting walkers that need to traverse the
-//! whole `Config` (the two secret-ref sweeps and the small Supabase
-//! check) live here; per-domain validators are exposed as submodules.
+//! Top-level config validation orchestrator plus the cross-cutting walkers (the
+//! two secret-ref sweeps and the Supabase check); per-domain checks are submodules.
 
 pub mod agent;
 pub mod commands;
@@ -69,9 +64,6 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
         "security.http.auth_failures_per_minute",
         config.security.http.auth_failures_per_minute,
     )?;
-    // Parsed at runtime by `http_hardening`; validate at config load too so a
-    // malformed or absurd block window surfaces here, with the shared 1970
-    // hardstop applied like every other duration field.
     self::primitives::validate_duration_field(
         "security.http.auth_block_duration",
         &config.security.http.auth_block_duration,
@@ -82,21 +74,13 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
     validate_nonzero("workspace.max_file_bytes", config.workspace.max_file_bytes)?;
     validate_no_parent_dir_segments("workspace.root", &config.workspace.root)?;
     validate_no_parent_dir_segments("workspace.uploads", &config.workspace.uploads)?;
-    // Lexical pre-check: uploads must live under root. With `..` segments
-    // already rejected above, `starts_with` is sound. The runtime layer
-    // also re-resolves the upload destination against workspace.root, so a
-    // symlink inside the workspace that points outside is caught at write
-    // time; this check rejects the obvious misconfiguration up front and
-    // keeps `workspace_relative_string` from emitting absolute paths.
+    // Lexical pre-check only; `..` segments were rejected above, so `starts_with`
+    // is sound. Runtime still re-resolves upload destinations against the root.
     if !Path::new(&config.workspace.uploads).starts_with(Path::new(&config.workspace.root)) {
         return Err(StackError::WorkspaceUploadsNotUnderRoot);
     }
-    // `acps init` materializes code/data sources beneath
-    // `<workspace.root>/usr/code/` and `<workspace.root>/usr/data/`. If
-    // operators point `workspace.uploads` at either lane root (or any
-    // ancestor that overlaps), upload write paths can collide with
-    // source materialization. Reject the overlap at config-load time so
-    // the conflict is impossible to hit at runtime.
+    // Reject uploads overlapping the workspace-init source lanes at load time, so
+    // upload writes can never collide with source materialization at runtime.
     let root = Path::new(&config.workspace.root);
     let uploads = Path::new(&config.workspace.uploads);
     for lane in [
@@ -115,9 +99,8 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
             });
         }
     }
-    // Sandbox: a custom backend with no wrapper is unusable and would otherwise
-    // only fail at the first agent spawn; mask/allow paths are bind/mount targets
-    // and must be absolute. Fail closed at config load.
+    // Fail closed at load: a custom backend with no wrapper would otherwise only
+    // fail at the first agent spawn, and mask/allow paths are bind/mount targets.
     let sandbox = &config.workspace.sandbox;
     if sandbox.mode == crate::config::SandboxMode::Custom && sandbox.wrapper.is_empty() {
         return Err(StackError::InvalidParam {
@@ -148,11 +131,9 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
     validate_edge(&config.edge)?;
     validate_dependencies(&config.dependencies)?;
     self::skills::validate_skills(&config.skills)?;
-    // The screening sweep must run before any name-shape validation
-    // (validate_mcp included): a screening rejection redacts the offending
-    // value, a name-shape rejection echoes it, and secret-shaped strings
-    // (`sk-...`, `xoxb-...`) fail identifier validation precisely because of
-    // their dashes.
+    // The screening sweep MUST run before any name-shape validation (validate_mcp
+    // included): a screening rejection redacts the offending value, a name-shape
+    // rejection echoes it, and secret-shaped strings fail name validation.
     validate_secret_refs_not_looking_like_values(config)?;
     validate_mcp(&config.mcp)?;
     validate_secret_refs(config)?;
@@ -199,9 +180,8 @@ fn validate_array(config: &Config) -> Result<()> {
                 reason: format!("duplicate target id `{}`", target.id),
             });
         }
-        // Per-target agent validation reuses the static `agent.*` field names.
-        // Wrap any failure with the target id so a multi-target config still
-        // identifies which target's agent block is invalid.
+        // Per-target validation reuses the static `agent.*` field names, so wrap
+        // failures with the target id to keep multi-target errors identifiable.
         validate_agent_config(&target.agent).map_err(|err| StackError::InvalidParam {
             field: "array.targets.agent",
             reason: format!("target `{}`: {err}", target.id),
@@ -217,13 +197,9 @@ fn validate_array(config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// The credential catalog holds one credential set per custom provider id
-/// instance-wide, and resolution reads the api-key ref first-wins across
-/// declarations. Two declarations of the same custom id with different refs
-/// would therefore make which ref receives the credential depend on iteration
-/// order, so the id → ref binding must be unique across the primary agent,
-/// subagents, and every array target. Sharing one ref across targets stays
-/// legal.
+/// One credential set is stored per custom provider id instance-wide, so the
+/// id → api-key-ref binding must be unique across every agent and array target;
+/// conflicting refs would make delivery depend on iteration order.
 fn validate_custom_provider_api_key_refs(config: &Config) -> Result<()> {
     let mut bindings: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
     let agents = std::iter::once(&config.agent).chain(
@@ -311,11 +287,8 @@ fn validate_agent_config(agent: &AgentConfig) -> Result<()> {
             });
         }
         agent::validate_agent_adapter_override(adapter_override)?;
-        // The launch command doubles as the adapter identity for the
-        // install/update lanes, so it must be the override's launch command.
-        // Init keeps the two in step; an imported or hand-edited config that
-        // lets them diverge would launch the bare harness while the managed
-        // lanes track the adapter.
+        // The launch command doubles as the adapter identity for install/update, so
+        // divergence would launch the bare harness while those lanes track the adapter.
         if agent.command != adapter_override.command || agent.args != adapter_override.args {
             return Err(StackError::InvalidParam {
                 field: "agent.command",
@@ -380,8 +353,7 @@ fn validate_agent_config(agent: &AgentConfig) -> Result<()> {
     Ok(())
 }
 
-/// Stack self-update polls GitHub Releases, so a day is the finest cadence
-/// worth allowing. Shared with init's `--stack-update-frequency` handling.
+/// Stack self-update polls GitHub Releases, so a day is the finest cadence allowed.
 pub(crate) const STACK_UPDATE_FREQUENCY_LIMITS: primitives::DurationLimits =
     primitives::DurationLimits::new(
         &[
@@ -400,14 +372,8 @@ fn validate_stack_updates(config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Walk every secret-ref name in the config and ensure the name itself is a
-/// syntactically valid identifier and is not declared twice.
-///
-/// Only whole-value declarations participate in `DuplicateSecretRef` dedupe.
-/// Refs *inside* `${NAME}` templates are validated for name shape but may
-/// repeat freely — composing the same secret into a header and an env value
-/// is the point of templating, not a declaration conflict. Env var names
-/// produced within one env list must still be unique.
+/// Check every secret-ref name for identifier shape and duplicate declaration.
+/// Only whole-value declarations dedupe; refs inside `${NAME}` templates may repeat.
 fn validate_secret_refs(config: &Config) -> Result<()> {
     let mut seen: HashSet<String> = HashSet::new();
 
@@ -421,13 +387,9 @@ fn validate_secret_refs(config: &Config) -> Result<()> {
         Ok(())
     };
 
-    // Each Array target is a separate process with its own env namespace, so
-    // sharing a secret ref ACROSS targets (e.g. two harnesses both referencing
-    // ANTHROPIC_API_KEY) is intentionally allowed. The primary target's env
-    // refs still feed the global `seen` set so they are deduped against the
-    // other config sources (supabase, mcp, ...). Every other target is deduped
-    // only WITHIN itself, so an intra-target duplicate is still caught for each
-    // one instead of being silently skipped.
+    // Each Array target is a separate process with its own env namespace, so a ref
+    // shared ACROSS targets is allowed: only the primary feeds the global `seen`
+    // set, and every other target dedupes only WITHIN itself.
     for target in &config.array.targets {
         validate_env_var_names_unique("agent.env", &target.agent.env)?;
         if target.id == config.array.primary_target {
@@ -473,8 +435,6 @@ fn validate_secret_refs(config: &Config) -> Result<()> {
     for server in &config.mcp.servers {
         match server {
             McpServerConfig::Stdio(s) => {
-                // Per-server env var name uniqueness is already enforced by
-                // `validate_mcp`, which runs before this sweep.
                 for env_ref in &s.env {
                     match parse_env_entry("mcp.servers.env", env_ref)? {
                         EnvEntry::WholeValueRef(name) => record(&name, "mcp.servers.env")?,
@@ -499,9 +459,8 @@ fn validate_secret_refs(config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// The env var names an env list produces must be unique within that list,
-/// regardless of entry form. This is the fail-fast backstop for code that
-/// appends a bare `NAME` entry without noticing an existing `NAME=template`.
+/// Backstop against code appending a bare `NAME` entry over an existing
+/// `NAME=template`: env var names must be unique within one list.
 fn validate_env_var_names_unique(field: &'static str, env: &[String]) -> Result<()> {
     let mut seen: HashSet<&str> = HashSet::new();
     for entry in env {
@@ -524,12 +483,9 @@ fn validate_secret_refs_not_looking_like_values(config: &Config) -> Result<()> {
         Ok(())
     };
 
-    // Templates get the same paste-a-credential screening as ref names: both
-    // the refs inside `${}` and the literal fragments around them, so
-    // `value = "sk-...${X}"` fails just like a `sk-...` ref name would. This
-    // sweep runs before any name validation and must stay parse-error-free:
-    // a screening rejection redacts the value, a name-shape rejection echoes
-    // it, so echoing errors may only fire after screening has passed.
+    // This sweep runs before any name validation and MUST stay parse-error-free:
+    // screening rejections redact the value, name-shape rejections echo it, so an
+    // echoing error may only fire once screening has passed.
     for target in &config.array.targets {
         for env_ref in &target.agent.env {
             screen_env_entry("agent.env", env_ref)?;
@@ -592,11 +548,8 @@ fn validate_supabase_logging(supabase: Option<&SupabaseLoggingConfig>) -> Result
     Ok(())
 }
 
-/// Reject Supabase schema/table-prefix values that are unsafe as Postgres
-/// identifiers. Shared by config validation and `acps logging supabase sql`,
-/// which builds DDL directly from CLI arguments — including PL/pgSQL
-/// `format()` string literals where a stray `'` or `%` would corrupt the
-/// generated revoke statements.
+/// Reject Supabase schema/table-prefix values unsafe as Postgres identifiers;
+/// `acps logging supabase sql` builds DDL directly from these.
 pub(crate) fn validate_supabase_identifiers(schema: &str, table_prefix: &str) -> Result<()> {
     if !is_safe_pg_identifier(schema) {
         return Err(StackError::InvalidSupabaseSchema {
@@ -611,9 +564,8 @@ pub(crate) fn validate_supabase_identifiers(schema: &str, table_prefix: &str) ->
     Ok(())
 }
 
-/// Match Postgres' rules for an unquoted identifier: starts with `a-z` or `_`,
-/// followed by `[a-z0-9_]`, up to 63 chars total. We deliberately reject
-/// uppercase to keep the `Content-Profile` header lowercase and avoid quoting.
+/// Postgres unquoted-identifier rules, with uppercase deliberately rejected so the
+/// `Content-Profile` header stays lowercase and needs no quoting.
 fn is_safe_pg_identifier(s: &str) -> bool {
     if s.is_empty() || s.len() > 63 {
         return false;

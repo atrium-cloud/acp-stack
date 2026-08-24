@@ -344,9 +344,8 @@ fn reset_dry_run_does_not_write_cli_error_event() {
         .assert()
         .failure();
 
-    // The dry-run contract is "exits without touching the filesystem".
-    // Recording a `cli.error` event row would touch state.sqlite, so the
-    // event log must show no error rows after a dry-run reset.
+    // A dry run must not touch the filesystem, and a `cli.error` row would
+    // write to state.sqlite.
     acps_command()
         .env("HOME", tempdir.path())
         .args(["logs", "query", "--level", "error"])
@@ -387,14 +386,12 @@ fn reset_with_yes_wipes_config_state_age_key_and_secret_store() {
             .exists()
     );
 
-    // Re-running reset is idempotent and does not error on missing files.
     acps_command()
         .env("HOME", tempdir.path())
         .args(["reset", "--yes"])
         .assert()
         .success();
 
-    // Fresh init after reset produces a different admin key than the first.
     let init_after = acps_command()
         .env("HOME", tempdir.path())
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])

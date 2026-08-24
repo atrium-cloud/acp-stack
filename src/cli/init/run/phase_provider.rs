@@ -21,13 +21,9 @@ pub(super) fn run_provider_configure_step(flow: &mut InitFlow) -> Result<()> {
         4,
         step_kind::PROVIDER_CONFIGURE,
         || {
-            // Provider config is idempotent only when there's no explicit
-            // change requested for any lane this step owns (provider, model,
-            // mode, effort). We always re-run on resume so partial writes
-            // (e.g. missing secret refs) get re-collected, and so a resumed
-            // `--model`/`--mode`/`--effort` still gets validated and persisted
-            // rather than silently skipped because the prior succeeded row
-            // passes the verifier.
+            // Idempotent only when no lane this step owns has an explicit change
+            // requested; otherwise a resumed `--model`/`--mode`/`--effort` would be
+            // skipped because the prior succeeded row passes the verifier.
             let secret_store = SecretStore::open(&provider_verify_home)?;
             Ok(args.provider.is_none()
                 && args.model.is_none()
@@ -40,13 +36,8 @@ pub(super) fn run_provider_configure_step(flow: &mut InitFlow) -> Result<()> {
                 ))
         },
         || {
-            // All three lanes live inside one step, so a step-level failure
-            // alone could not say which of them broke; the lane badges itself
-            // before the error propagates. The model/mode lanes badge
-            // themselves from inside `configure_model_and_mode_for_init`, which
-            // is the only place that knows which of the two was live.
-            // Settlement rides the config writes, the one place each value is
-            // written.
+            // All three lanes share one step, so each badges itself before the error
+            // propagates; a step-level failure alone could not say which one broke.
             let provider_configured =
                 configure_provider_for_init(args, registry, config, config_path, secret_store)
                     .inspect_err(|error| signal_category_failed(InitCategory::Provider, error))?;
@@ -66,9 +57,8 @@ pub(super) fn run_provider_configure_step(flow: &mut InitFlow) -> Result<()> {
                 config_path,
                 secret_store,
             )?;
-            // Custom agents skip provider/model discovery, so they would
-            // otherwise never spawn during init. Gate on an ACP session here so a
-            // non-ACP or broken custom binary is caught now, not at first session.
+            // Custom agents skip provider/model discovery and would otherwise never
+            // spawn during init, so a broken binary must be caught here.
             if is_custom_agent(config, registry) {
                 verify_agent_acp_connection(home, config, output_mode.is_text())?;
             }
@@ -121,11 +111,9 @@ pub(super) fn configure_stack_update(flow: &mut InitFlow) -> Result<()> {
     Ok(())
 }
 
-/// Managed agent auto-update: override the `[agent.auto_update]` default that
-/// `apply_registry_entry_to_config` seeded. Whether the agent is managed comes
-/// from the registry, not block presence, so an imported/re-init config that
-/// lacks the block is still treated as managed. Same interactivity gate as the
-/// stack-update step; the prompt only appears for managed registry agents.
+/// Managed agent auto-update: override the seeded `[agent.auto_update]` default.
+/// Managed-ness comes from the registry, not block presence, so an imported config
+/// missing the block is still treated as managed.
 pub(super) fn configure_agent_update(flow: &mut InitFlow) -> Result<()> {
     let agent_update_outcome = (|| -> Result<()> {
         let managed = !is_custom_agent(&flow.config, &flow.registry);

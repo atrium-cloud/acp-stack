@@ -206,8 +206,7 @@ fn init_agent_update_off_disables_auto_update() {
             "placebo",
             "--agent-update",
             "off",
-            // A frequency is accepted but ignored when auto-update is off, so an
-            // otherwise sub-day value must not fail here.
+            // A frequency is accepted but ignored when auto-update is off.
             "--agent-update-frequency",
             "6m",
             "--skip-testflight",
@@ -265,8 +264,8 @@ fn init_agent_update_on_writes_enabled_and_frequency() {
 fn init_agent_update_on_accepts_hourly_frequency() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    // Managed agent updates accept hour granularity (unlike the stack
-    // self-update's day minimum), so a 12h cadence is valid.
+    // Managed agent updates accept hour granularity, unlike the stack self-update's
+    // day minimum.
     acps_command()
         .env("HOME", tempdir.path())
         .args([
@@ -376,8 +375,6 @@ fn init_agent_update_default_enabled_non_interactive() {
     let written = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
         .expect("config should be readable");
     let config = load_config_from_str(&written).expect("config should validate");
-    // No --agent-update flag and non-interactive: init keeps the managed-agent
-    // default (auto-update on, daily).
     let auto_update = config
         .agent
         .auto_update
@@ -391,8 +388,8 @@ fn init_agent_update_default_enabled_non_interactive() {
 fn init_agent_update_on_rejected_for_custom_agent() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    // Custom/escape-hatch agents carry no [agent.auto_update] block because the
-    // managed updater cannot drive them, so enabling auto-update is rejected.
+    // Custom agents carry no [agent.auto_update] block because the managed updater
+    // cannot drive them.
     acps_command()
         .env("HOME", tempdir.path())
         .args([
@@ -424,8 +421,6 @@ fn init_agent_update_on_rejected_for_custom_agent() {
 fn init_agent_update_off_noop_for_custom_agent() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    // `--agent-update off` for a custom agent is already satisfied (custom agents
-    // carry no [agent.auto_update] block), so it succeeds without writing one.
     acps_command()
         .env("HOME", tempdir.path())
         .args([
@@ -480,10 +475,8 @@ fn init_agent_update_off_strips_stale_block_for_custom_agent() {
         .assert()
         .success();
 
-    // A hand-edited config may carry an auto_update block even for a custom
-    // agent (canonical form: [array.targets.agent.auto_update]); the daemon
-    // would only ever skip it, so `--agent-update off` must strip the block
-    // rather than leaving the recurring skip in place.
+    // A hand-edited config may carry an auto_update block even for a custom agent;
+    // `--agent-update off` must strip it rather than leave a recurring skip.
     let written = fs::read_to_string(&config_path).expect("config should be readable");
     fs::write(
         &config_path,
@@ -532,8 +525,7 @@ fn init_agent_update_seeds_block_for_registry_config_missing_it() {
         .assert()
         .success();
 
-    // Simulate a pre-feature (or hand-edited) config for a registry agent that
-    // has no [agent.auto_update] block; a bare re-run never re-seeds it.
+    // A registry agent with no [agent.auto_update] block: a bare re-run never re-seeds.
     let written = fs::read_to_string(&config_path).expect("config should be readable");
     let mut skipping = false;
     let mut stripped = String::new();
@@ -559,8 +551,7 @@ fn init_agent_update_seeds_block_for_registry_config_missing_it() {
     load_config_from_str(&stripped).expect("stripped config should still validate");
     fs::write(&config_path, &stripped).expect("stripped config should be writable");
 
-    // `--agent-update on` must treat this as the managed registry agent it is —
-    // seeding the block, not rejecting it as an escape-hatch install.
+    // `--agent-update on` must seed the block, not reject it as an escape-hatch install.
     acps_command()
         .env("HOME", tempdir.path())
         .args([

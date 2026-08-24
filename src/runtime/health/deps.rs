@@ -1,8 +1,5 @@
-//! Dependency-apply health collectors.
-//!
-//! The deps signal is derived from `installer_runs` rows written by the
-//! deps_apply runner. Rows are grouped by `apply_run_id` where present, with a
-//! timestamp-neighborhood fallback for legacy rows that predate migration 013.
+//! Dependency-apply health collectors, deriving the deps signal from
+//! `installer_runs` rows grouped by `apply_run_id`.
 
 use super::*;
 
@@ -22,10 +19,9 @@ pub(super) fn collect_deps(store: &StateStore) -> DepsHealth {
             };
         }
     };
-    // Belt-and-suspenders: the SQL filter pivots on `agent_id`, but an
-    // operator who set `agent.id = "deps_apply"` would otherwise leak agent
-    // installer rows into the deps signal. Cross-check `step` here so the
-    // signal is bound to rows the deps_apply runner itself wrote.
+    // The SQL filter pivots on `agent_id`, so an operator who set
+    // `agent.id = "deps_apply"` would leak agent installer rows in; the `step`
+    // cross-check binds the signal to rows the deps_apply runner wrote.
     let rows: Vec<_> = rows
         .into_iter()
         .filter(|row| row.step == DEPS_APPLY_STEP)
@@ -87,9 +83,8 @@ fn legacy_timestamp_cluster_has_failure(
     latest: &InstallerRun,
     iter: impl Iterator<Item = InstallerRun>,
 ) -> bool {
-    // Legacy rows predate migration 013 and have no apply-run identity. Keep
-    // the old timestamp neighborhood as a compatibility fallback only; new
-    // rows use exact `apply_run_id` grouping above.
+    // Fallback for legacy rows predating migration 013, which carry no
+    // apply-run identity.
     let mut cluster_has_failure = deps_status_is_failure(&latest.status);
     if let Ok(mut previous_at) = chrono::DateTime::parse_from_rfc3339(&latest.started_at) {
         for row in iter {
@@ -163,9 +158,8 @@ mod tests {
     fn collect_deps_surfaces_probe_error_when_installer_runs_missing() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = StateStore::open(dir.path().join("state.sqlite")).expect("open");
-        // Skip migrate(); `installer_runs` does not exist. The probe must
-        // surface this as `probe_error` instead of returning "no apply runs"
-        // (regression test for the silent-swallow finding from Codex audit).
+        // No migrate(), so `installer_runs` is absent: the probe must surface
+        // `probe_error` rather than a silent "no apply runs".
         let deps = collect_deps(&store);
         assert!(
             deps.probe_error.is_some(),
@@ -188,9 +182,8 @@ mod tests {
 
     #[test]
     fn collect_deps_partial_failure_in_same_invocation_marks_cluster_failed() {
-        // Regression for the Codex-audit P1: A fails at t=0, B succeeds at
-        // t=5s. The latest row alone (B=installed) would falsely report
-        // healthy; the cluster heuristic must surface the failure.
+        // The latest row alone (B=installed) would falsely report healthy; the
+        // cluster heuristic must surface A's failure.
         let dir = tempfile::tempdir().expect("tempdir");
         let store = StateStore::open(dir.path().join("state.sqlite")).expect("open");
         store.migrate().expect("migrate");
@@ -211,10 +204,8 @@ mod tests {
 
     #[test]
     fn collect_deps_retry_outside_cluster_window_does_not_taint_latest() {
-        // Apply 1 fails at t=0. Operator fixes the dep and re-applies at
-        // t=30min — outside the 15-minute cluster window, so the older
-        // failed row should not taint the healthy retry. Window covers the
-        // 10-min worst-case per-step timeout in `runtime/dependencies/deps_apply.rs`.
+        // A retry 30min later is outside the 15-minute cluster window, so the
+        // older failed row must not taint it.
         let dir = tempfile::tempdir().expect("tempdir");
         let store = StateStore::open(dir.path().join("state.sqlite")).expect("open");
         store.migrate().expect("migrate");
@@ -291,12 +282,9 @@ mod tests {
 
     #[test]
     fn collect_deps_long_apply_keeps_cluster_via_walking_gap() {
-        // Regression for the second Codex-audit finding: a long sequential
-        // apply that writes `failed@T+0`, `installed@T+4m`, `installed@T+8m`
-        // is one cluster even though T+0 is 8 minutes away from T+8m. The
-        // walking-gap heuristic compares each row to its immediate
-        // predecessor, so adjacent 4-minute gaps stay inside the 15-minute
-        // window.
+        // The walking-gap heuristic compares each row to its predecessor, so a
+        // long sequential apply spanning more than the window is still one
+        // cluster.
         let dir = tempfile::tempdir().expect("tempdir");
         let store = StateStore::open(dir.path().join("state.sqlite")).expect("open");
         store.migrate().expect("migrate");
@@ -323,14 +311,9 @@ mod tests {
 
     #[test]
     fn collect_deps_filters_by_step_to_avoid_agent_id_sentinel_collision() {
-        // Belt-and-suspenders: if an operator sets `agent.id = "deps_apply"`,
-        // agent installer rows would share the `agent_id` filter. The `step`
-        // filter cross-checks so only rows that the deps_apply runner wrote
-        // contribute to the deps signal.
         let dir = tempfile::tempdir().expect("tempdir");
         let store = StateStore::open(dir.path().join("state.sqlite")).expect("open");
         store.migrate().expect("migrate");
-        // Agent installer row that happens to share `agent_id = "deps_apply"`.
         store
             .append_installer_run(crate::state::InstallerRunInput {
                 agent_id: DEPS_APPLY_AGENT_ID,

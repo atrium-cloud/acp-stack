@@ -318,9 +318,7 @@ fn neutral_fields_with_literal_credentials_are_removed_across_formats() {
 
 #[test]
 fn codex_mcp_maps_real_stdio_schema_and_blocks_unrepresentable_servers() {
-    // Field shapes from developers.openai.com/codex/config-sample:
-    // timeouts and object-form env_vars are importable; a literal `env`
-    // table or a `cwd` cannot be represented in the acps MCP schema.
+    // Field shapes from developers.openai.com/codex/config-sample.
     let inspected = inspect_native_config(
         "codex",
         Some("config.toml"),
@@ -400,9 +398,7 @@ env_vars = ["MCP_TOKEN", { name = "OTHER_TOKEN", source = "keychain" }]
 
 #[test]
 fn amp_maps_dotted_mcp_and_blocks_permission_and_policy_keys() {
-    // Field shapes from ampcode.com/manual: flat dotted keys, MCP servers
-    // under `amp.mcpServers` with literal `env`/`headers` objects, command
-    // allowlists and tool-disable filters that must stay owned by acps.
+    // Field shapes from ampcode.com/manual.
     let inspected = inspect_native_config(
         "amp",
         Some("settings.json"),
@@ -449,7 +445,6 @@ fn amp_maps_dotted_mcp_and_blocks_permission_and_policy_keys() {
     let manifest_json = serde_json::to_string(manifest).expect("manifest json");
     assert!(!manifest_json.contains("sk-live-1234"));
     let residual: JsonValue = serde_json::from_slice(inspected.residual()).expect("json");
-    // Benign settings survive; secrets and owned keys never do.
     assert_eq!(residual["amp.notifications.enabled"], true);
     assert!(residual.get("amp.mcpServers").is_none());
     assert!(residual.get("amp.commands.allowlist").is_none());
@@ -463,12 +458,7 @@ fn amp_maps_dotted_mcp_and_blocks_permission_and_policy_keys() {
 
 #[test]
 fn pi_maps_provider_model_and_blocks_exec_permission_credential_keys() {
-    // Field shapes from earendil-works/pi settings.md: `defaultProvider`
-    // (bare provider id) and `defaultModel` (bare model id) select the
-    // lane; `shellPath`/`npmCommand` run commands; `packages`/`skills`
-    // load third-party code; `defaultProjectTrust` is a permission; a
-    // credential-bearing `httpProxy` and any literal secret must never
-    // survive; benign UI/thinking keys do.
+    // Field shapes from earendil-works/pi settings.md.
     let inspected = inspect_native_config(
         "pi",
         Some("settings.json"),
@@ -511,9 +501,8 @@ fn pi_maps_provider_model_and_blocks_exec_permission_credential_keys() {
             .iter()
             .any(|field| field.path == "httpProxy" && field.reason == BlockedReason::Credentials)
     );
-    // `trackingId` ends in `id` but Pi documents it as an analytics id;
-    // it is not a credential key, so it survives. The literal value must
-    // still never leak through a managed/blocked field.
+    // `trackingId` ends in `id` but Pi documents it as an analytics id, not a
+    // credential, so it survives while its literal value must not leak.
     for category in [
         ExecutableCategory::CommandHelpers,
         ExecutableCategory::Plugins,
@@ -528,24 +517,19 @@ fn pi_maps_provider_model_and_blocks_exec_permission_credential_keys() {
     assert!(!manifest_json.contains("claude-sonnet-4-20250514"));
     assert!(!manifest_json.contains("pass@proxy"));
     let residual: JsonValue = serde_json::from_slice(inspected.residual()).expect("json");
-    // Benign keys survive; managed/owned/credential keys never do.
     assert_eq!(residual["defaultThinkingLevel"], "high");
     assert_eq!(residual["theme"], "dark");
     assert!(residual.get("defaultProvider").is_none());
     assert!(residual.get("defaultModel").is_none());
     assert!(residual.get("defaultProjectTrust").is_none());
     assert!(residual.get("httpProxy").is_none());
-    // Executable roots stay in the residual (they are provisioned/owned
-    // downstream, not credentials) but are flagged via executable
-    // categories so selection requires acknowledgement.
+    // Executable roots stay in the residual but are flagged so selection
+    // requires acknowledgement.
     assert!(residual.get("packages").is_some());
 }
 
 #[test]
 fn pi_unmappable_provider_is_incompatible_candidate() {
-    // A provider Pi supports but acps does not map for `pi` yields an
-    // incompatible candidate rather than a hard failure, matching the
-    // opencode/codex unmappable-provider path.
     let inspected = inspect_native_config(
         "pi",
         Some("settings.json"),
@@ -563,12 +547,7 @@ fn pi_unmappable_provider_is_incompatible_candidate() {
 
 #[test]
 fn goose_maps_provider_model_extensions_and_blocks_mode_planner_credentials() {
-    // Field shapes from block/goose config-files.md + extension.rs:
-    // `GOOSE_PROVIDER`/`GOOSE_MODEL` select the lane; `extensions` carries
-    // stdio (`cmd`/`args`/`env_keys`) and remote (`streamable_http`/`uri`)
-    // MCP servers; `envs` literal tables and `builtin`/disabled extensions
-    // block; `GOOSE_MODE`/`GOOSE_ALLOWLIST` are permissions; planner keys
-    // are managed-unsupported; benign tuning keys survive.
+    // Field shapes from block/goose config-files.md and extension.rs.
     let inspected = inspect_native_config(
         "goose",
         Some("config.yaml"),
@@ -624,33 +603,27 @@ extensions:
         .expect("model candidate");
     assert_eq!(model.kind, ManagedFieldKind::Model);
 
-    // stdio extension with `env_keys` (name-forwarding) maps cleanly.
     assert!(
         manifest
             .managed_fields
             .iter()
             .any(|field| field.id == "mcp:fetcher" && field.compatible)
     );
-    // remote streamable_http with a credential-free uri maps to http.
     assert!(
         manifest
             .managed_fields
             .iter()
             .any(|field| field.id == "mcp:remote")
     );
-    // literal `envs` carrying a sensitive key blocks as credentials.
     assert!(manifest.blocked_fields.iter().any(|field| {
         field.path == "extensions.literal_env" && field.reason == BlockedReason::Credentials
     }));
-    // builtin extension has nothing external to run.
     assert!(manifest.blocked_fields.iter().any(|field| {
         field.path == "extensions.builtin_dev" && field.reason == BlockedReason::McpUnmappable
     }));
-    // disabled extension is unmappable.
     assert!(manifest.blocked_fields.iter().any(|field| {
         field.path == "extensions.disabled" && field.reason == BlockedReason::McpUnmappable
     }));
-    // GOOSE_MODE / GOOSE_ALLOWLIST are permission surfaces.
     assert!(
         manifest
             .blocked_fields
@@ -660,24 +633,21 @@ extensions:
     assert!(manifest.blocked_fields.iter().any(|field| {
         field.path == "GOOSE_ALLOWLIST" && field.reason == BlockedReason::Permissions
     }));
-    // Planner model is a second lane acps cannot provision.
     assert!(manifest.blocked_fields.iter().any(|field| {
         field.path == "GOOSE_PLANNER_MODEL" && field.reason == BlockedReason::ManagedUnsupported
     }));
-    // stdio extensions surface as command-helper executables.
     assert!(
         manifest
             .executable_categories
             .contains(&ExecutableCategory::CommandHelpers)
     );
 
-    // The manifest is value-free: no provider/model/secret literals leak.
+    // The manifest must stay value-free: no provider/model/secret literals.
     let manifest_json = serde_json::to_string(manifest).expect("manifest json");
     assert!(!manifest_json.contains("anthropic"));
     assert!(!manifest_json.contains("claude-sonnet-4-5"));
     assert!(!manifest_json.contains("sk-live-abc"));
 
-    // Residual keeps only benign keys and round-trips as valid YAML.
     let residual: YamlValue =
         serde_norway::from_str(std::str::from_utf8(inspected.residual()).expect("utf8"))
             .expect("residual yaml parses");
@@ -690,7 +660,6 @@ extensions:
         residual.get(YamlValue::String("GOOSE_CONTEXT_STRATEGY".to_owned())),
         Some(&YamlValue::String("summarize".to_owned()))
     );
-    // Managed, permission, planner, and MCP keys never survive.
     for key in [
         "GOOSE_PROVIDER",
         "GOOSE_MODEL",
@@ -725,7 +694,6 @@ fn goose_unmappable_provider_is_incompatible_candidate() {
 
 #[test]
 fn goose_invalid_yaml_and_non_string_keys_are_redacted_errors() {
-    // Malformed YAML must fail closed with a redacted error.
     let error = inspect_native_config(
         "goose",
         Some("config.yaml"),
@@ -735,9 +703,8 @@ fn goose_invalid_yaml_and_non_string_keys_are_redacted_errors() {
     .expect("invalid yaml rejected");
     assert_eq!(error.error_code(), "agent.native_config_invalid");
 
-    // A mapping with a non-string key has no JSON representation and no
-    // legitimate place in a Goose config; reject it without echoing the
-    // sensitive value that follows.
+    // A non-string mapping key has no JSON representation; rejecting it must not
+    // echo the sensitive value that follows.
     let error = inspect_native_config(
         "goose",
         Some("config.yaml"),
@@ -826,15 +793,13 @@ fn rejects_auth_state_and_project_scope_filenames() {
         ("codex", "auth.json"),
         ("codex", ".codex/config.toml"),
         ("opencode", "auth.json"),
-        // Pi accepts only `settings.json`: credential-bearing and
-        // out-of-scope files must be rejected.
+        // Pi accepts only `settings.json`.
         ("pi", "models.json"),
         ("pi", "auth.json"),
         ("pi", "trust.json"),
         ("pi", "mcp.json"),
-        // Goose accepts only `config.yaml`: `secrets.yaml` holds
-        // keyring-fallback API keys and `permission.yaml` carries per-tool
-        // approval levels, both of which must never import.
+        // Goose accepts only `config.yaml`; `secrets.yaml` holds API keys and
+        // `permission.yaml` per-tool approvals, so neither may import.
         ("goose", "secrets.yaml"),
         ("goose", "permission.yaml"),
     ] {

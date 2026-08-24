@@ -1,5 +1,4 @@
-//! API security-surface integration tests: `/v1/security/*`, HTTP hardening
-//! (body limits, origins, rate limiting) and auth-failure audit behavior.
+//! API security-surface integration tests: `/v1/security/*`, HTTP hardening, auth-failure audit.
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -73,9 +72,8 @@ async fn security_check_requires_admin_key() {
             .expect("findings")
             .is_empty()
     );
-    // run_id is the durable handle into `acps security show`; it must be
-    // present even on clean runs so the operator can correlate the response
-    // with the persisted history row.
+    // run_id is the durable handle into `acps security show`, so it must be present even on a
+    // clean run.
     let run_id = body["data"]["run_id"].as_str().expect("run_id present");
     assert!(
         run_id.starts_with("srun_"),
@@ -186,7 +184,6 @@ async fn security_history_show_returns_404_for_unknown_run() {
 async fn security_history_paginates_with_keyset_cursor() {
     let harness = ServerHarness::spawn().await;
     let client = reqwest::Client::new();
-    // Three sequential checks; each creates a fresh history row.
     let mut ids = Vec::new();
     for _ in 0..3 {
         let body: Value = client
@@ -249,8 +246,7 @@ async fn security_history_paginates_with_keyset_cursor() {
 #[tokio::test]
 async fn security_history_show_preserves_finding_order_and_details() {
     let harness = ServerHarness::spawn().await;
-    // Loosen the state DB so a critical path_mode_loose finding is emitted
-    // with structured details attached to it.
+    // Loosen the state DB so a critical path_mode_loose finding is emitted with details.
     std::fs::set_permissions(&harness.state_path, std::fs::Permissions::from_mode(0o644))
         .expect("loosen state db mode");
     let client = reqwest::Client::new();
@@ -346,10 +342,7 @@ async fn security_check_reports_public_bind_proxy_and_auth_failure_findings() {
     assert!(codes.contains(&"http.trust_proxy_without_trusted_proxies"));
     assert!(codes.contains(&"auth.failure_threshold"));
 
-    // Every finding in the response must carry an operator-actionable
-    // remediation string. Asserted here so a regression in `SecurityFinding`
-    // construction shows up in the integration tier, not just in the unit
-    // tests for `security::check`.
+    // Every finding must carry an operator-actionable remediation string.
     for finding in findings {
         let code = finding["code"].as_str().expect("code");
         let remediation = finding["remediation"]
@@ -361,8 +354,7 @@ async fn security_check_reports_public_bind_proxy_and_auth_failure_findings() {
         );
     }
 
-    // Spot-check that hint text actually names something the operator can do,
-    // not just describe the problem again.
+    // Spot-check that the hint names an action, not just the problem again.
     let trust_proxy = findings
         .iter()
         .find(|f| f["code"] == "http.trust_proxy_without_trusted_proxies")
@@ -538,8 +530,6 @@ async fn security_check_uses_effective_bind_and_recent_auth_failures_only() {
 async fn duplicate_authorization_headers_are_rejected() {
     let harness = ServerHarness::spawn().await;
     let before = harness.auth_failure_count().await;
-    // reqwest accepts multiple values for the same header; send two so the
-    // server sees a request with two Authorization values.
     let response = reqwest::Client::new()
         .get(format!("{}/v1/status", harness.base_url))
         .header("Authorization", format!("Bearer {SESSION_KEY}"))
@@ -558,9 +548,7 @@ async fn duplicate_authorization_headers_are_rejected() {
 #[tokio::test]
 async fn unknown_path_returns_envelope_not_plain_404() {
     let harness = ServerHarness::spawn().await;
-    // Authenticated session calling a route that does not exist. Without the
-    // envelope-rewrapping middleware, axum's fallback would return a plain
-    // text 404 with no `{ok:false, ...}` body.
+    // Without the envelope-rewrapping middleware, axum's fallback returns a plain-text 404.
     let response = reqwest::Client::new()
         .get(format!("{}/v1/nope", harness.base_url))
         .header("Authorization", format!("Bearer {SESSION_KEY}"))
@@ -575,9 +563,8 @@ async fn unknown_path_returns_envelope_not_plain_404() {
 
 #[tokio::test]
 async fn medium_request_body_does_not_hit_axum_default_limit() {
-    // Axum's default extractor limit is 2 MiB. Confirm a 4 MiB body — well
-    // below the configured 100 MiB cap — is accepted (with a 400 only from
-    // TOML parsing). Without DefaultBodyLimit::disable() this would 413.
+    // Axum's default extractor limit is 2 MiB, so without `DefaultBodyLimit::disable()` this
+    // 4 MiB body would 413 well below the configured 100 MiB cap.
     let harness = ServerHarness::spawn().await;
     let body = vec![b'a'; 4 * 1024 * 1024];
     let response = reqwest::Client::new()
@@ -587,8 +574,7 @@ async fn medium_request_body_does_not_hit_axum_default_limit() {
         .send()
         .await
         .expect("send");
-    // 4 MiB of `a`s is invalid TOML, so 400 (config.invalid) is the expected
-    // outcome — what matters is that the body was not silently size-capped.
+    // 4 MiB of `a`s is invalid TOML; what matters is that it was not silently size-capped.
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let json: Value = response.json().await.expect("json");
     assert_eq!(json["error"]["code"], "config.invalid");
@@ -596,16 +582,9 @@ async fn medium_request_body_does_not_hit_axum_default_limit() {
 
 #[tokio::test]
 async fn oversize_body_with_bad_auth_records_auth_failure_first() {
-    // Reorder ensures auth runs ahead of body_limit: an oversized body with
-    // missing/invalid auth must still leave an `auth_failures` row. Without
-    // this ordering, body_limit shortcircuits to 413 and the durable
-    // hardening trail is broken.
-    //
-    // The server returns 401 immediately on bad auth and closes the
-    // connection; reqwest may surface that as either a clean 401 response
-    // or a `ConnectionReset` (when it was still streaming the oversize
-    // body). The durable signal is the `auth_failures` row, which is
-    // written before the response is sent.
+    // Auth MUST run ahead of body_limit, or an oversized bad-auth request 413s and leaves no
+    // `auth_failures` row. The 401 closes the connection, so reqwest may surface a
+    // `ConnectionReset` instead; the row is the durable signal either way.
     let harness = ServerHarness::spawn().await;
     let before = harness.auth_failure_count().await;
     let body = vec![b'a'; 200 * 1024 * 1024]; // 200 MiB, well over the 100 MiB cap
@@ -626,9 +605,7 @@ async fn oversize_body_with_bad_auth_records_auth_failure_first() {
 
 #[tokio::test]
 async fn method_not_allowed_preserves_allow_header() {
-    // POST against a GET-only route. axum returns 405 with an `Allow`
-    // header. ensure_envelope rewraps the body but must preserve the
-    // semantic header so method-discovery keeps working.
+    // ensure_envelope rewraps the 405 body but must preserve axum's `Allow` header.
     let harness = ServerHarness::spawn().await;
     let response = reqwest::Client::new()
         .post(format!("{}/v1/status", harness.base_url))
@@ -651,9 +628,8 @@ async fn method_not_allowed_preserves_allow_header() {
 
 #[tokio::test]
 async fn oversize_body_with_admin_key_on_session_route_logs_wrong_kind() {
-    // Strict-tiering contract: admin keys on session routes are rejected
-    // BEFORE body_limit sees the request, even when the body is oversized.
-    // Otherwise tower-http would 413 and swallow the wrong_kind signal.
+    // Strict tiering: an admin key on a session route MUST be rejected before body_limit sees the
+    // request, or tower-http 413s and swallows the wrong_kind signal.
     let harness = ServerHarness::spawn().await;
     let before = harness.auth_failure_count().await;
     let body = vec![b'a'; 200 * 1024 * 1024]; // 200 MiB, well over the 100 MiB cap
@@ -858,10 +834,8 @@ async fn wildcard_origin_accepts_http_and_websocket_without_denial_events() {
 
 #[tokio::test]
 async fn unauthenticated_rate_limit_returns_429_envelope_and_security_event() {
-    // burst=8 → per-IP cap 8, unauth cap ceil(8/4)=2. Auth'd requests don't
-    // tick the unauth bucket, so the test can issue many unauth probes (tied
-    // to the per-IP cap of 8 from the same IP) and then still read the audit
-    // trail with the session key.
+    // burst=8 gives a per-IP cap of 8 and an unauth cap of ceil(8/4)=2. Auth'd requests do not
+    // tick the unauth bucket, so the audit trail is still readable with the session key.
     let mut config = test_config();
     config.security.http.burst = 8;
     config.security.http.rate_limit_per_minute = 60;
@@ -889,7 +863,6 @@ async fn unauthenticated_rate_limit_returns_429_envelope_and_security_event() {
     assert_eq!(limited_body["ok"], false);
     assert_eq!(limited_body["error"]["code"], "auth.rate_limited");
 
-    // GET /v1/logs/security must surface a security.rate_limited event.
     let logs_response = reqwest::Client::new()
         .get(format!("{}/v1/logs/security", harness.base_url))
         .header("Authorization", format!("Bearer {SESSION_KEY}"))
@@ -908,10 +881,7 @@ async fn unauthenticated_rate_limit_returns_429_envelope_and_security_event() {
     let payload: Value =
         serde_json::from_str(rate_limited["payload_json"].as_str().expect("payload_json"))
             .expect("payload is JSON");
-    // Scope label is `unauthenticated` since the trip happened on a
-    // bearer-less request. (per_ip would also be acceptable if the auth'd
-    // probe used the same IP and exhausted that bucket first, but with
-    // burst=8 we hit unauth first.)
+    // `per_ip` is also acceptable if that bucket happened to exhaust first.
     let scope = payload["scope"].as_str().unwrap_or("");
     assert!(
         scope == "unauthenticated" || scope == "per_ip",
@@ -924,12 +894,7 @@ async fn unauthenticated_rate_limit_returns_429_envelope_and_security_event() {
 
 #[tokio::test]
 async fn per_key_rate_limit_returns_429_for_authd_burst() {
-    // burst=3 → per-IP cap 3 AND per-key cap 3. Either bucket will trip
-    // before 6 requests at 60/min refill. The point of this test is that
-    // an authenticated burst is rate-limited (i.e., a valid key cannot
-    // bypass the limiter), not which scope fires first. The fingerprint
-    // round-trip and "no raw bearer in payload" guarantees are covered by
-    // the unit tests in `http_hardening.rs`.
+    // The point is that a valid key cannot bypass the limiter, not which bucket trips first.
     let mut config = test_config();
     config.security.http.burst = 3;
     config.security.http.rate_limit_per_minute = 60;

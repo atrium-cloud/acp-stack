@@ -1,8 +1,5 @@
-//! Sub-modules for individual security rules. Each rule exposes a
-//! `pub(super) fn check_<name>(inputs, findings)` entry point; the
-//! orchestrator in `crate::security::check` calls them in the same order
-//! the original linear implementation emitted findings, preserving the
-//! finding sequence the test suite asserts.
+//! Individual security rules, each exposing a `check_<name>(inputs, findings)` entry point. The
+//! orchestrator's call order is the asserted finding sequence.
 
 mod bind;
 mod cloudflare;

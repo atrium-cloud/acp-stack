@@ -13,13 +13,10 @@ fn antigravity_settings_path(home: &Path) -> PathBuf {
         .join(ANTIGRAVITY_SETTINGS_FILE)
 }
 
-/// The ACP server reads `~/.gemini/antigravity-acp/settings.json` — a
-/// different file and shape from the interactive CLI's
-/// `antigravity-cli/settings.json` (`modelProvider`) documented for `agy`.
-/// Headless auth needs `auth.type = "gemini-api-key"` here plus
-/// `GEMINI_API_KEY` in the process env; without both, `session/new` is
-/// rejected with "Authentication required" and the alternatives are browser
-/// OAuth or GCP credentials, which a headless runtime cannot complete.
+/// The ACP server reads `~/.gemini/antigravity-acp/settings.json`, a different file and shape from
+/// the interactive CLI's `antigravity-cli/settings.json` (`modelProvider`). Headless auth needs
+/// `auth.type = "gemini-api-key"` here plus `GEMINI_API_KEY` in the env; without both, `session/new`
+/// is rejected and the alternatives are browser OAuth or GCP credentials.
 pub(super) fn provision_antigravity_config(_config: &Config, home: &Path) -> Result<Vec<PathBuf>> {
     let path = antigravity_settings_path(home);
     let mut root = read_json_object(&path)?;
@@ -49,8 +46,7 @@ pub(super) fn cleanup_antigravity_config(
         return Ok(cleaned);
     }
     let mut root = read_json_object(&path)?;
-    // Only the managed value is removed; an operator-set auth type is not
-    // acps state to clean up.
+    // Only the managed value is removed; an operator-set auth type is not acps state.
     let managed = root
         .get(ANTIGRAVITY_AUTH_KEY)
         .and_then(|auth| auth.get(ANTIGRAVITY_AUTH_TYPE_KEY))
@@ -191,9 +187,8 @@ mod tests {
         assert!(cleaned.is_empty());
     }
 
-    /// The daemon-path verification run (Sprite VM, 2026-08-21) passed with a
-    /// hand-written settings file; this pins the provisioner to that exact
-    /// managed shape so the passing run transfers to the provisioned path.
+    /// Pins the provisioner to the exact settings shape the 2026-08-21 daemon-path verification run
+    /// passed with by hand.
     #[test]
     fn antigravity_provision_matches_the_verified_settings_shape() {
         let tempdir = tempfile::tempdir().expect("tempdir");

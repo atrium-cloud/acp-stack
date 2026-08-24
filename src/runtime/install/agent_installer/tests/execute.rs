@@ -37,8 +37,8 @@ fn init_resume_creates_resolver_checks_local_bin_and_workspace_relative_paths() 
 fn installer_env_is_non_interactive_and_reserved_names_resist_agent_env() {
     let (tempdir, store) = open_store();
     let capture = tempdir.path().join("env-capture");
-    // The script records the env the installer actually ran with; `creates`
-    // is left unresolvable so the outcome itself is irrelevant to the pin.
+    // The script records the env the installer ran with; `creates` is left
+    // unresolvable because only the env matters here.
     let script = format!(
         "printf '%s:%s:%s' \"$CI\" \"$TERM\" \"$CUSTOM\" > {}",
         shell_quote_literal(&capture.display().to_string())
@@ -66,7 +66,6 @@ fn installer_env_is_non_interactive_and_reserved_names_resist_agent_env() {
 
 #[test]
 fn precheck_short_circuits_when_creates_resolves() {
-    // `true` ships on every POSIX system; the installer should skip.
     let (_tempdir, store) = open_store();
     let install = install_config("false", "true");
     let outcome = run_installer(
@@ -89,7 +88,6 @@ fn precheck_short_circuits_when_creates_resolves() {
 #[test]
 fn missing_creates_after_run_returns_creates_missing() {
     let (_tempdir, store) = open_store();
-    // A successful shell that does NOT actually produce the named binary.
     let install = install_config("true", "definitely-not-a-real-binary-xyz123");
     let err = run_installer(
         "test-agent",
@@ -174,17 +172,14 @@ fn sha256_mismatch_returns_typed_error() {
 #[test]
 fn output_truncation_keeps_rows_bounded() {
     let (_tempdir, store) = open_store();
-    // Emit ~200 KiB to stdout via printf inside the shell; the cap should
-    // hold the resulting row well below twice the cap. `head -c` is
-    // POSIX-portable enough for our test environments.
+    // Emit ~200 KiB to stdout; the cap should hold the row well below twice it.
     let shell = format!(
         "head -c {} /dev/urandom | base64 | head -c {}",
         MAX_INSTALLER_STREAM_BYTES * 4,
         MAX_INSTALLER_STREAM_BYTES * 4
     );
-    // Use a creates path that won't exist so we go through the "ran" path
-    // and capture stdout. We don't care that this returns an error after
-    // running; we only check the truncation guarantee on what was stored.
+    // A `creates` path that cannot exist forces the "ran" path so stdout is
+    // captured; only the truncation guarantee is under test.
     let install = install_config(&shell, "definitely-not-a-real-binary-xyz123");
     let _ = run_installer(
         "test-agent",
@@ -340,8 +335,8 @@ fn bootstrap_can_install_directly_into_managed_bin() {
 fn running_row_is_visible_while_step_executes() {
     let (tempdir, store) = open_store();
     let workspace_root = workspace_root();
-    // The script blocks until the test releases it, so the test can observe
-    // the `running` row while the step is genuinely in flight.
+    // The script blocks until released, so the `running` row is observable
+    // while the step is genuinely in flight.
     let proceed = tempdir.path().join("proceed");
     let script = format!(
         "for i in $(seq 1 200); do [ -f {proceed} ] && break; sleep 0.05; done",
@@ -382,9 +377,8 @@ fn running_row_is_visible_while_step_executes() {
     assert!(active[0].finished_at.is_none());
 
     std::fs::write(&proceed, b"go").expect("release installer");
-    // The script produces no `creates` binary, so the step finalizes as
-    // failed; the point is the running row was updated in place, not
-    // duplicated by a second insert.
+    // The step finalizes as failed; the point is that the running row was
+    // updated in place rather than duplicated.
     let outcome = worker.join().expect("worker join");
     outcome.expect_err("no creates binary produced");
     let runs = store.query_installer_runs(10).expect("history");

@@ -13,8 +13,8 @@ fn namespace_handle_stays_usable_during_teardown() {
     require_capability(bin_available("nsenter", "--version"), "nsenter unavailable");
     let tmp = tempfile::tempdir().expect("tempdir");
     let markdir = tmp.path();
-    // Teardown runs after the workload (and the whole unshare chain) has died;
-    // entering the namespace still works because the supervisor's fd holds it.
+    // Teardown runs after the whole unshare chain has died; entering the namespace
+    // still works because the supervisor's fd holds it open.
     let provider = write_provider_script(
         markdir,
         "if [ \"$phase\" = teardown ]; then\n\
@@ -51,8 +51,6 @@ fn workload_namespace_matches_supervisor_handle_and_ids_are_unique() {
     );
     let provider_args = [provider.to_str().unwrap(), markdir.to_str().unwrap()];
 
-    // Two overlapping spawns: distinct IDs, distinct namespaces, and each
-    // workload's own ns/net equals the handle its supervisor captured.
     let spawn = |tag: &str| {
         supervise_command(
             &provider_args,
@@ -123,9 +121,8 @@ fn supervisor_stays_on_the_host_network_while_the_workload_is_isolated() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let markdir = tmp.path();
     let workload_ns = markdir.join("workload-ns");
-    // The supervisor is the process a prober reaches first, and it is NOT the
-    // isolated one: only the leaf under `unshare --net` is. Probing the wrong
-    // one reports isolation as broken when it is working.
+    // The supervisor is the process a prober reaches first and is NOT the isolated
+    // one; only the leaf under `unshare --net` is.
     let mut child = supervise_command(
         &[],
         "10s",
@@ -181,8 +178,8 @@ fn deny_all_namespace_cannot_reach_a_parent_listener() {
     );
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind parent listener");
     let port = listener.local_addr().expect("listener addr").port();
-    // Distinct sentinel exit codes so a tooling failure (bash missing, wrapper
-    // error, exit 120/121) can never masquerade as "unreachable".
+    // Distinct sentinel exit codes so a tooling failure can never masquerade as
+    // "unreachable".
     let connect = format!("if exec 3<>/dev/tcp/127.0.0.1/{port}; then exit 42; else exit 43; fi");
 
     // Positive control: reachable from the parent namespace.
@@ -242,8 +239,8 @@ fn veth_provider_enables_only_the_configured_endpoint() {
             .expect("remove ip probe");
         assert!(removed.success());
     }
-    // Pre-clean a stale interface a previously panicked/killed run may have
-    // left behind, so setup does not fail 120 for stale-state reasons.
+    // Pre-clean a stale interface a killed run may have left, so setup does not
+    // fail 120 for stale-state reasons.
     let precleaned = Command::new("ip")
         .args(["link", "del", "acpstest0"])
         .stderr(Stdio::null())
@@ -255,9 +252,8 @@ fn veth_provider_enables_only_the_configured_endpoint() {
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let markdir = tmp.path();
-    // Lifecycle provider: veth pair, child end moved into the namespace and
-    // addressed; only 10.199.99.1 is reachable from inside. Teardown is
-    // idempotent (`|| true`): namespace destruction usually removed the pair.
+    // Lifecycle provider: veth pair with the child end moved into the namespace.
+    // Teardown is idempotent because namespace destruction usually removed the pair.
     let provider = write_provider_script(
         markdir,
         "if [ \"$phase\" = setup ]; then\n\
@@ -272,9 +268,6 @@ fn veth_provider_enables_only_the_configured_endpoint() {
          exit 0",
     );
 
-    // Sentinel codes prove which probe failed: the configured endpoint must
-    // answer, and an address outside the provider's /30 must NOT be reachable
-    // — the "only" half of the guarantee.
     let status = supervise_command(
         &[provider.to_str().unwrap(), markdir.to_str().unwrap()],
         "10s",
@@ -295,8 +288,6 @@ fn veth_provider_enables_only_the_configured_endpoint() {
         "44 = configured endpoint unreachable, 45 = unconfigured address reachable"
     );
 
-    // Exiting destroyed the namespace, which destroyed the veth peer — the
-    // host-side interface must be gone (teardown also deletes it explicitly).
     let leftover = Command::new("ip")
         .args(["link", "show", "acpstest0"])
         .stdout(Stdio::null())

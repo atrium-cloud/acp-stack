@@ -75,12 +75,8 @@ fn init_fails_when_existing_config_is_invalid() {
 #[test]
 fn status_reports_config_state_workspace_agent_sink_and_deps() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
-    // Use a tempdir workspace so the test is deterministic across hosts.
-    // Without this, `acps init` would pick the production default
-    // `/workspace`, which is writable inside Docker dev images and the
-    // Railway runtime but absent on the maintainer's macOS host. Pinning
-    // workspace.root to a controlled tempdir keeps the assertion below
-    // valid in both environments.
+    // Pin workspace.root to a tempdir: the production default `/workspace` is
+    // writable in the Linux dev images but absent on macOS hosts.
     let workspace_dir = tempdir.path().join("workspace");
     std::fs::create_dir_all(&workspace_dir).expect("workspace dir should be created");
     let uploads_dir = workspace_dir.join("uploads");

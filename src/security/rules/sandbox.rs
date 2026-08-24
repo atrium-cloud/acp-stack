@@ -1,11 +1,5 @@
 //! Sandbox-availability rules: `runtime.sandbox_unavailable` and
-//! `runtime.sandbox_available`.
-//!
-//! `acps serve` already refuses to start when a configured (non-`off`) sandbox
-//! cannot run on the host, so a live daemon should not normally reach
-//! `sandbox_unavailable`. The self-check still reports it for the keyless local
-//! diagnostic, and emits the "off but capable" nudge when the operator left the
-//! agent workload sharing the daemon's secrets on a host that could isolate it.
+//! `runtime.sandbox_available`, including the "off but capable" nudge.
 
 use crate::config::SandboxMode;
 use crate::security::SecurityCheckInputs;

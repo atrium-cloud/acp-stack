@@ -27,10 +27,8 @@ pub(super) async fn ws_handler(
 ) -> Response {
     let request_origin =
         crate::http_hardening::request_origin(&headers, Some(peer.ip()), &state.config);
-    // Enforce Origin allowlist on upgrade. Browser clients always send an
-    // Origin header; CLI/local clients don't. We honor the allowlist only
-    // when an Origin is present, so local tools continue to work. The
-    // self-check already warns about wildcard origins on public binds.
+    // The allowlist is enforced only when an Origin is present: browsers always
+    // send one, CLI and local clients never do.
     let origin = headers
         .get(http::header::ORIGIN)
         .and_then(|value| value.to_str().ok());
@@ -141,9 +139,7 @@ async fn ws_connection(
         "duration_ms": duration_ms,
         "reason": disconnect_reason,
     });
-    // `reason` stays the machine-readable cause; the operator's free-form text
-    // is a separate optional annotation, absent unless the disconnect request
-    // carried one.
+    // `reason` stays machine-readable; operator text is a separate annotation.
     if let Some(operator_reason) = operator_reason
         && let Some(object) = payload.as_object_mut()
     {

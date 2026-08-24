@@ -162,8 +162,6 @@ pub(crate) async fn security_check_handler(
         sandbox_off_but_capable,
     });
 
-    // Serialize each finding's details payload once so we can hand the
-    // store borrowed string slices that live for the duration of the call.
     let details_strings: Vec<Option<String>> = findings
         .iter()
         .map(|f| {

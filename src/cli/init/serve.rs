@@ -25,8 +25,6 @@ use crate::error::{Result, StackError};
 use crate::fs_util::{acquire_agent_config_mutation_file_lock, home_dir};
 use crate::runtime::agent::native_config_import::{NativeConfigInspection, NativeConfigSelection};
 use crate::runtime::init_runner::StepDisposition;
-// Step-kind constants are only named by the state-fold reference and the
-// surface tests now; production no longer folds a category view.
 #[cfg(test)]
 use crate::runtime::init_runner::step_kind;
 use crate::state::default_state_path;
@@ -36,9 +34,6 @@ use super::prompt::{
     HostedPromptRequest, HostedPromptStyle,
 };
 use super::state_signal::InitStateSignal;
-// The category/applicability enums and the step→category map are named only by
-// the reference fold and the surface tests now; the instance forwards raw facts
-// and lets the client fold them.
 #[cfg(test)]
 use super::state_signal::{ApplicabilitySource, InitCategory, category_for_step_kind};
 use super::{
@@ -54,19 +49,15 @@ mod response_dto;
 mod routes;
 mod session;
 
-// Feeds the init wire DTOs into the published schema. Dev-tools only; the
-// `pub(crate) use` re-export lifts just the two def-producing functions up to
-// `crate::cli` (see `init.rs`, `cli.rs`) so `schema_export` reaches them without
-// exposing the module-private DTOs themselves.
+// The `pub(crate) use` below lifts only the def-producing functions up to
+// `crate::cli` so `schema_export` reaches them without exposing the DTOs.
 #[cfg(feature = "dev-tools")]
 mod schema_umbrella;
 #[cfg(feature = "dev-tools")]
 pub(crate) use self::schema_umbrella::{init_request_defs, init_response_defs};
 
-// Plain (non-re-exporting) globs make each sibling's `pub(super)` items private
-// members of this parent module, so the other siblings and the `tests` module
-// reach them via `super::NAME` / `super::*`. Nothing here escapes `serve`
-// beyond `run_init_serve`/`InitServeArgs`, which stay defined in this parent.
+// Plain (non-re-exporting) globs keep each sibling's `pub(super)` items private
+// to this parent, so nothing escapes `serve` beyond `run_init_serve`.
 use self::frames::*;
 use self::prompt_driver::*;
 use self::reaper::*;

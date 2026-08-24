@@ -65,9 +65,8 @@ struct ProviderSuperviseOptions {
 
 struct WorkloadPidFd(OwnedFd);
 
-/// Diagnostic writer for the daemon-stderr fd. Falls back to the process
-/// stderr when the fd is not wired (e.g. direct invocation in tests) so
-/// failures are never silent.
+/// Diagnostic writer for the daemon-stderr fd, falling back to process stderr
+/// when the fd is not wired so failures are never silent.
 struct Diag {
     fd: i32,
 }
@@ -106,11 +105,8 @@ fn run_with_options(options: SuperviseOptions) -> Result<()> {
     let mut command = Command::new(&child_command[0]);
     command.args(&child_command[1..]);
     let supervisor_pid = std::process::id() as i32;
-    // A SIGKILL of the supervisor must not orphan the chain: the daemon's
-    // kill_on_drop and any direct-pid kill only reach the supervisor, so
-    // tie unshare's lifetime to it. unshare's own --kill-child then reaps
-    // the workload. pdeathsig survives exec because unshare never changes
-    // credentials.
+    // A SIGKILL of the supervisor must not orphan the chain, so tie unshare's
+    // lifetime to it; unshare's own --kill-child then reaps the workload.
     // SAFETY: prctl/getppid are async-signal-safe; the closure only runs
     // in the forked child before exec.
     unsafe {
@@ -118,8 +114,7 @@ fn run_with_options(options: SuperviseOptions) -> Result<()> {
             if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong) != 0 {
                 return Err(std::io::Error::last_os_error());
             }
-            // The death signal only covers deaths after the prctl call;
-            // re-check that the supervisor did not die during the fork gap.
+            // The death signal only covers deaths after the prctl call.
             if libc::getppid() != supervisor_pid {
                 return Err(std::io::Error::other(
                     "the supervisor died before the sandbox chain started",
@@ -139,10 +134,8 @@ fn run_with_options(options: SuperviseOptions) -> Result<()> {
     close_fd(child_sync, &diag);
     let unshare_pid = child.id() as i32;
 
-    // Phase 1: wait until the in-namespace helper reports ready. Readiness
-    // proves masking completed and the network namespace exists, so opening
-    // /proc/<unshare-pid>/ns/net below cannot race the unshare(2) call and
-    // capture the host namespace by mistake.
+    // Readiness proves the namespace exists, so opening /proc/<pid>/ns/net below
+    // cannot race unshare(2) and capture the host namespace by mistake.
     match wait_for_ready(parent_sync, signal_fd, &mut child, &diag) {
         ReadyOutcome::Ready => {}
         ReadyOutcome::ChildExited(status) => {
@@ -155,13 +148,12 @@ fn run_with_options(options: SuperviseOptions) -> Result<()> {
         }
     }
 
-    // The helper is blocked on the release socket at this point, so its
-    // identity is stable long enough to open and revalidate a pidfd. Hold
-    // that handle through shutdown so a recycled numeric pid can never be
-    // signaled.
+    // The helper is blocked on the release socket, so its identity is stable
+    // long enough to open a pidfd. Hold it through shutdown so a recycled
+    // numeric pid can never be signaled.
     let workload_pidfd = open_workload_pidfd(unshare_pid)?;
 
-    // Phase 2: retain the namespace handle for the whole spawn lifetime.
+    // The namespace handle must stay open for the whole spawn lifetime.
     let ns_file = File::open(format!("/proc/{unshare_pid}/ns/net")).map_err(|source| {
         StackError::SandboxFailed {
             reason: format!("opening /proc/{unshare_pid}/ns/net failed: {source}"),
@@ -180,8 +172,8 @@ fn run_with_options(options: SuperviseOptions) -> Result<()> {
         )
     };
 
-    // Phase 3: provider setup gates workload execution. No provider means
-    // deny-all networking: the namespace stays exactly as unshare made it.
+    // Provider setup gates workload execution. No provider means deny-all
+    // networking: the namespace stays exactly as unshare made it.
     if !options.provider.is_empty()
         && let Err(failure) = provider_phase(ProviderPhase::Setup, Some(unshare_pid))
     {
@@ -206,20 +198,17 @@ fn run_with_options(options: SuperviseOptions) -> Result<()> {
         }
     }
 
-    // Phase 4: release the workload and wait for it, forwarding SIGINT and
-    // SIGTERM so the chain (and, via --kill-child, the workload) shuts down.
-    // A failed release write (the helper died between ready and release)
-    // must not skip teardown: setup already created host-side resources.
-    // Closing the sync fd keeps the fail-closed guarantee — the helper can
-    // only ever see the release byte or EOF.
+    // A failed release write must not skip teardown: setup already created
+    // host-side resources. Closing the sync fd keeps the fail-closed guarantee
+    // — the helper can only ever see the release byte or EOF.
     if let Err(error) = write_byte(parent_sync, RELEASE_BYTE) {
         diag.line(&format!("releasing the workload failed: {error}"));
     }
     close_fd(parent_sync, &diag);
     let status = wait_for_child(&mut child, unshare_pid, &workload_pidfd, signal_fd, &diag);
 
-    // Phase 5: teardown runs while the namespace fd is still open, so the
-    // provider can still enter the namespace even though the workload died.
+    // Teardown must run while the namespace fd is still open, so the provider
+    // can still enter the namespace even though the workload died.
     let teardown_error = if options.provider.is_empty() {
         None
     } else {
@@ -239,8 +228,8 @@ pub(super) fn run_provider_supervise(raw_args: Vec<String>) -> Result<()> {
             reason: "sandbox-provider-supervise must be a process-group leader".to_owned(),
         });
     }
-    // The provider must not inherit the liveness channel. Its monitor is
-    // the only process that watches the supervisor peer for EOF.
+    // The provider must not inherit the liveness channel: its monitor is the
+    // only process that watches the supervisor peer for EOF.
     set_cloexec(options.liveness_fd)?;
 
     let mut command = Command::new(&options.provider_command[0]);
@@ -300,9 +289,8 @@ fn report_provider_status(liveness_fd: i32, status: ExitStatus) -> ! {
         eprintln!("acps sandbox-provider-supervise: reporting provider status failed: {error}");
         kill_own_process_group();
     }
-    // Remain the process-group anchor until the supervisor receives the
-    // provider status and kills the complete group. This closes both the
-    // provider-exits-first orphan window and numeric PGID reuse window.
+    // Remain the process-group anchor until the supervisor kills the group,
+    // closing the provider-exits-first orphan and PGID-reuse windows.
     loop {
         match liveness_peer_closed(liveness_fd) {
             Ok(false) => {}
@@ -362,10 +350,8 @@ impl ProviderPhase {
         }
     }
 
-    /// Setup aborts on SIGINT/SIGTERM (the workload was never released, so
-    /// bailing out is safe). Teardown is cleanup that must not be cut short
-    /// by a shutdown signal — a killed teardown guarantees a host-side
-    /// resource leak — so it is bounded by the provider timeout only.
+    /// Setup aborts on SIGINT/SIGTERM; teardown must not, since a cut-short
+    /// teardown guarantees a host-side resource leak.
     fn interruptible(&self) -> bool {
         matches!(self, ProviderPhase::Setup)
     }
@@ -414,7 +400,6 @@ fn run_provider(
     // The monitor and provider must not resolve anything relative to the
     // agent-writable workload cwd inherited by the sandbox supervisor.
     command.current_dir(PROVIDER_WORKING_DIRECTORY);
-    // The monitor forwards exactly these contract variables to the provider.
     command.env_clear();
     command.env(ENV_NETWORK_PROTOCOL, NETWORK_PROTOCOL_VERSION);
     command.env(ENV_NETWORK_ID, network_id);
@@ -424,7 +409,7 @@ fn run_provider(
     }
     command.stdin(Stdio::null());
     command.stdout(Stdio::null());
-    // Monitor diagnostics always reach the daemon. It independently applies
+    // Monitor diagnostics always reach the daemon; it independently applies
     // provider_stderr when it spawns the actual provider.
     command.stderr(provider_monitor_stderr_stdio(options)?);
     // The monitor leads the group inherited by the actual provider.
@@ -437,9 +422,8 @@ fn run_provider(
             options.provider[0]
         ))
     })?;
-    // Keeping this endpoint alive is the provider monitor's parent-liveness
-    // guarantee. It also carries the actual provider's raw wait status while
-    // the monitor remains alive as the process-group anchor.
+    // Keeping this endpoint alive is the monitor's parent-liveness guarantee;
+    // it also carries the provider's raw wait status.
     let provider_pid = provider.id() as i32;
     let deadline = Instant::now() + options.provider_timeout;
     loop {
@@ -455,9 +439,8 @@ fn run_provider(
         };
         if status_readable {
             let status = read_provider_status(supervisor_liveness.as_raw_fd());
-            // Do not observe the monitor through Child::try_wait before
-            // this kill. Whether it is still running or is an unreaped
-            // zombie, its PID cannot be reused and safely anchors the PGID.
+            // Do not observe the monitor through Child::try_wait before this
+            // kill: unreaped, its PID cannot be reused and anchors the PGID.
             kill_provider_group(provider_pid, &mut provider);
             let status = status.map_err(|source| {
                 ProviderFailure::Failed(format!(
@@ -547,8 +530,8 @@ fn kill_provider_group(provider_pid: i32, provider: &mut Child) {
     }
 }
 
-/// Random per-spawn identifier for `ACPS_SANDBOX_NETWORK_ID`, generated at
-/// supervise time so concurrent spawns from identical argv stay unique.
+/// Random per-spawn identifier for `ACPS_SANDBOX_NETWORK_ID`, so concurrent
+/// spawns from identical argv stay unique.
 fn generate_network_id() -> String {
     let mut bytes = [0u8; 16];
     rand::rng().fill(&mut bytes);

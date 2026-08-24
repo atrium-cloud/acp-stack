@@ -1,10 +1,5 @@
-//! Free codec helpers for ACP session/config option encoding and inbound
-//! request/notification translation.
-//!
-//! Extracted from `acp_bridge.rs` so the bridge file can focus on the
-//! connection lifecycle. These helpers do not need an `AcpBridge` instance;
-//! they translate between ACP protocol types and the daemon's own request
-//! shapes.
+//! Free codec helpers translating between ACP protocol types and the daemon's
+//! own request shapes, without needing an `AcpBridge` instance.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -37,10 +32,9 @@ use super::acp_bridge::{NotificationDrain, NotificationGuard};
 const ACP_STACK_META_KEY: &str = "acpStack";
 const MESSAGE_ID_META_KEY: &str = "messageId";
 
-/// At most one notification may wait behind the worker. A notification owns
-/// both parsed ACP content and its raw JSON payload, so a deeper queue could
-/// multiply memory use for large file diffs. The producer transfers ownership
-/// before waiting, which keeps shutdown cancellation lossless.
+/// At most one notification may wait behind the worker: each owns both parsed
+/// ACP content and its raw JSON payload, so a deeper queue multiplies memory
+/// use for large file diffs.
 const SESSION_NOTIFICATION_BACKLOG: usize = 1;
 
 pub(super) struct QueuedSessionNotification {
@@ -74,10 +68,8 @@ pub(super) fn spawn_session_notification_queue(
     sender
 }
 
-/// Wire shape of the local prompt message-id extension since ACP v1 dropped
-/// the unstable top-level `messageId` fields: the client stamps
-/// `_meta.acpStack.messageId` on `session/prompt`, and an agent that recorded
-/// it echoes the same shape on the `session/prompt` response.
+/// Local prompt message-id extension, needed since ACP v1 dropped the unstable
+/// top-level `messageId` fields: `_meta.acpStack.messageId` on `session/prompt`.
 pub fn prompt_message_id_meta(message_id: &str) -> Meta {
     let mut stack = serde_json::Map::new();
     stack.insert(
@@ -114,11 +106,9 @@ pub fn session_config_id_for_value(
         });
     };
     for option in config_options {
-        // With boolean client capability advertised, an agent may ship a
-        // boolean option under a typed-lane category or id (e.g. a boolean
-        // "thinking" toggle). The typed lanes only speak select values, so a
-        // non-select match must not shadow a later select with the same
-        // category.
+        // An agent may ship a boolean option under a typed-lane category or id
+        // (e.g. a "thinking" toggle). The typed lanes only speak select values,
+        // so a non-select match must not shadow a later select.
         if !matches!(option.kind, SessionConfigKind::Select(_)) {
             continue;
         }
@@ -154,8 +144,7 @@ pub fn session_config_values(
         });
     };
     for option in config_options {
-        // Same select-only guard as `session_config_id_for_value`: the typed
-        // lanes' value lists are meaningful only for select options.
+        // Same select-only guard as `session_config_id_for_value`.
         if !matches!(option.kind, SessionConfigKind::Select(_)) {
             continue;
         }
@@ -233,19 +222,16 @@ fn session_config_option_values(option: &SessionConfigOption) -> Vec<String> {
     }
 }
 
-/// Forward a `session/request_permission` request through the durable
-/// PermissionService, await the decision, and translate the result back to
-/// the ACP `RequestPermissionOutcome`. ACP request cancellation atomically
-/// settles the durable permission before returning JSON-RPC `-32800`.
+/// Forward a `session/request_permission` through the durable
+/// PermissionService and translate the decision back to an ACP
+/// `RequestPermissionOutcome`. ACP request cancellation atomically settles the
+/// durable permission BEFORE returning JSON-RPC `-32800`.
 pub(crate) async fn resolve_acp_permission(
     service: &PermissionService,
     sink: &Arc<dyn SessionEventSink>,
     request: RequestPermissionRequest,
     cancellation: Option<RequestCancellation>,
 ) -> std::result::Result<RequestPermissionOutcome, agent_client_protocol::Error> {
-    // Serialize the full request for the durable detail record. The schema
-    // type is JSON-friendly; failure here only happens for non-JSON-safe
-    // values, which the schema does not contain.
     let detail = match serde_json::to_value(&request) {
         Ok(value) => value,
         Err(err) => {
@@ -320,11 +306,9 @@ async fn wait_for_request_cancellation(cancellation: Option<RequestCancellation>
     }
 }
 
-/// Approve an agent permission request without an operator: pick the first
-/// `AllowOnce` option, else the first `AllowAlways`. One-shot grants come
-/// first so a single testflight prompt never leaves a durable allow behind
-/// in harness-side state. Reject-kind options are never selected; a request
-/// offering no allow option is answered `Cancelled`.
+/// Approve without an operator: first `AllowOnce`, else first `AllowAlways`.
+/// One-shot grants come first so a testflight prompt never leaves a durable
+/// allow behind in harness-side state; reject-kind options are never selected.
 pub(crate) fn auto_approve_acp_permission(
     request: &RequestPermissionRequest,
 ) -> RequestPermissionOutcome {
@@ -352,13 +336,11 @@ pub(crate) fn auto_approve_acp_permission(
     }
 }
 
-/// Byte cap on `fs/read_text_file`. ACP has no size field on the request, so
-/// the client bounds what it will load into memory for one call.
+/// Byte cap on `fs/read_text_file`; ACP has no size field on the request.
 const ACP_FS_READ_MAX_BYTES: u64 = 10 * 1024 * 1024;
 
 /// `fs/read_text_file`: workspace-contained disk read with optional 1-based
-/// `line` offset and `limit` line count. Headless, there are no editor
-/// buffers — the disk is the truth.
+/// `line` offset and `limit` line count.
 pub(crate) async fn handle_read_text_file(
     workspace_root: &Path,
     sink: &Arc<dyn SessionEventSink>,
@@ -435,9 +417,7 @@ fn unknown_session_error(agent_session_id: &str) -> AcpFsError {
     }))
 }
 
-/// Map workspace errors onto the ACP error space: missing file is
-/// resource-not-found, containment/validation failures are invalid-params
-/// with the reason in `data`, everything else is internal.
+/// Map workspace errors onto the ACP error space.
 fn acp_fs_error(error: StackError) -> AcpFsError {
     match &error {
         StackError::WorkspaceNotFound { .. } => AcpFsError::resource_not_found(None),
@@ -471,8 +451,6 @@ pub(super) async fn enqueue_session_notification(
     drain: Arc<NotificationDrain>,
     note: SessionNotification,
 ) {
-    // Serialize the verbatim notification payload so downstream queriers can
-    // reconstruct the full ACP update without re-deriving from the typed enum.
     let payload = match serde_json::to_string(&note) {
         Ok(payload) => payload,
         Err(err) => {
@@ -491,9 +469,8 @@ pub(super) async fn enqueue_session_notification(
         tracing::warn!("session/update worker stopped; dropping notification");
         return;
     }
-    // Ownership has transferred to the drain-owned worker before this await.
-    // The ACP callback is sequential, so at most one additional notification
-    // can queue while the worker is blocked without risking shutdown loss.
+    // Ownership must transfer to the drain-owned worker BEFORE this await, or
+    // a notification in flight is lost at shutdown.
     drain.wait_at_most(SESSION_NOTIFICATION_BACKLOG).await;
 }
 

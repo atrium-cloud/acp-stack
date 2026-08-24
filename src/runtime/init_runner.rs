@@ -1,24 +1,4 @@
-//! Init run orchestrator.
-//!
-//! Wraps each logical phase of `acps init` (config validation, state
-//! migration, secrets, agent install, Agent Skills install, workspace lanes,
-//! headless config, edge artifacts, init-complete event, testflight) so that:
-//!
-//! 1. Every executed/resumed phase is recorded as an `init_steps` row keyed
-//!    by `(run_id, ordinal)`. The CLI driver maintains the ordinal list as
-//!    the canonical phase order — the runner does not invent step numbers.
-//! 2. On rerun the orchestrator consults the prior row before invoking
-//!    the phase body. If the prior status was `succeeded` and the caller-
-//!    supplied verifier still passes, the row is replayed as `skipped` and
-//!    the body is not executed. Anything else (`failed`, `pending`,
-//!    `running`, or `succeeded` with a failing verifier) re-runs the body.
-//! 3. The aggregate `init_runs.status` is settled by the driver via
-//!    [`finalize_run`]: `succeeded` if every step succeeded or was
-//!    skipped; `failed` if the body returned an error.
-//!
-//! Step bodies are arbitrary closures that may capture mutable state. The
-//! runner does not constrain their argument shape — phases that mutate
-//! config or secret-store state simply close over the values they need.
+//! Init run orchestrator: records each `acps init` phase as a durable, resumable `init_steps` row.
 
 use std::path::Path;
 
@@ -29,9 +9,7 @@ use crate::state::{
     INIT_STEP_SUCCEEDED, InitRunRecord, InitStepRecord, NewInitRun, NewInitStep, StateStore,
 };
 
-/// Stable identifiers for each phase of `acps init`. Persisted as
-/// `init_steps.kind`. Adding a new phase means adding a constant here AND
-/// extending the ordinal map in the CLI driver.
+/// Stable `init_steps.kind` identifiers. A new phase needs a constant here AND an entry in the CLI driver's ordinal map.
 pub mod step_kind {
     pub const CONFIG_VALIDATE: &str = "config_validate";
     pub const STATE_INIT: &str = "state_init";
@@ -53,20 +31,12 @@ pub mod step_kind {
 /// Outcome of executing one step. Returned by the body closure.
 #[derive(Debug)]
 pub struct StepOutcome {
-    /// Optional on-disk log directory. Steps that produce a log tree (the
-    /// installer, workspace materialization) populate this so the operator
-    /// can audit a failed run without re-running it; `None` for steps with
-    /// no significant captured output.
+    /// Optional on-disk log directory for steps that capture output.
     pub log_dir: Option<String>,
-    /// Step-specific payload merged into `init_steps.payload_json`. Must be
-    /// a valid JSON object literal (validated by the state layer's
-    /// `json_valid` check).
+    /// Step payload merged into `init_steps.payload_json`; must be a valid JSON object literal.
     pub payload_json: String,
-    /// The body launched the step's work in the background instead of
-    /// completing it. The durable row still records `succeeded` (the launch
-    /// succeeded and must not poison `finalize_init_run`), but the driver's
-    /// signal reports [`StepDisposition::Background`] so clients fold the
-    /// lane as started, not done.
+    /// The body launched its work in the background. The row still records `succeeded` (the launch
+    /// succeeded and must not poison `finalize_init_run`); the disposition reports `Background`.
     pub background: bool,
 }
 
@@ -96,11 +66,7 @@ impl StepOutcome {
     }
 }
 
-/// Result of [`record_step`]. `Executed` means the body ran to completion;
-/// `Background` means the body launched the step's work and returned while it
-/// keeps running; `Skipped` means a prior `succeeded` row's verifier still
-/// passes and the body was not invoked. Driver code uses this to skip
-/// post-execution side effects (e.g. re-printing logs) on resume.
+/// Result of [`record_step`]: body ran, body launched background work, or the verifier let it be skipped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepDisposition {
     Executed,
@@ -108,9 +74,7 @@ pub enum StepDisposition {
     Skipped,
 }
 
-/// Begin a new init run, recording the args context. Returns the new run
-/// record so the driver can persist the id and reference it from each
-/// step.
+/// Begin a new init run, recording the args context.
 pub fn begin_run(
     store: &StateStore,
     runtime_user: Option<&str>,
@@ -124,43 +88,23 @@ pub fn begin_run(
     })
 }
 
-/// Resume the most recent unfinished or failed run, if any. Returns
-/// `None` only when no `pending`/`running`/`failed` row exists. A run
-/// that completed successfully is not resumable — there is nothing to
-/// continue — but a `failed` row IS resumable because that is the exact
-/// case the operator wants to retry. Scans past newer succeeded rows so
-/// a fresh `acps init` landing succeeded does not shadow an older
-/// failed one.
+/// Resume the most recent `pending`/`running`/`failed` run, scanning past newer succeeded rows.
 pub fn find_resumable_run(store: &StateStore) -> Result<Option<InitRunRecord>> {
     store.latest_non_terminal_init_run()
 }
 
-/// Lookup a specific run by id. Used by `acps init resume --run <id>` so
-/// the operator can target a historical row directly.
+/// Lookup a specific run by id.
 pub fn lookup_run(store: &StateStore, run_id: &str) -> Result<Option<InitRunRecord>> {
     store.lookup_init_run(run_id)
 }
 
-/// Mark an init run as `succeeded` or `failed`. The driver calls this
-/// after the final step has settled.
+/// Mark an init run as `succeeded` or `failed`.
 pub fn finalize_run(store: &StateStore, run_id: &str, status: &str) -> Result<()> {
     store.finalize_init_run(run_id, status)
 }
 
-/// Execute one phase, persisting its row to `init_steps`. The ordinal is
-/// caller-managed; passing the same ordinal twice within a run hits the
-/// table's UNIQUE constraint and surfaces as an error.
-///
-/// Resume semantics: if a row with `(run_id, ordinal)` already exists and
-/// its status is `succeeded`, `verify` is consulted. If `verify` returns
-/// `Ok(true)` the row is replayed as `skipped` and `body` is not
-/// executed; otherwise the existing row is reset to `running` and `body`
-/// is re-invoked.
-///
-/// `body` returns either `Ok(StepOutcome)` (recorded as `succeeded`) or
-/// `Err(StackError)` (recorded as `failed` with the error's
-/// `event_kind()` as `error_kind`). The error is then propagated to the
-/// caller so the driver can decide whether to abort or continue.
+/// Execute one phase, persisting its row to `init_steps`. Ordinals are caller-managed and unique per run;
+/// a prior `succeeded` row whose `verify` still passes replays as `skipped` without running `body`.
 pub fn record_step(
     store: &StateStore,
     run: &InitRunRecord,
@@ -172,13 +116,8 @@ pub fn record_step(
     record_step_with_default_log_dir(store, run, ordinal, kind, None, verify, body)
 }
 
-/// Like [`record_step`] but stamps `default_log_dir` onto the
-/// `init_steps` row whether the body succeeds OR fails. Used by phases
-/// (workspace materialization, in-process installers) that pre-create
-/// the on-disk log directory before invoking the body — so a failure
-/// halfway through the body still points the operator at the captured
-/// stdout/stderr instead of recording `log_dir = NULL`. The success
-/// path lets the body override via [`StepOutcome::log_dir`].
+/// Like [`record_step`] but stamps `default_log_dir` on the row whether the body succeeds OR fails,
+/// so a mid-body failure still points at the captured output instead of `log_dir = NULL`.
 #[allow(clippy::too_many_arguments)]
 pub fn record_step_with_default_log_dir(
     store: &StateStore,
@@ -221,13 +160,8 @@ pub fn record_step_with_default_log_dir(
         )
         && verifier_holds(verify)
     {
-        // Postcondition still holds; replay as `skipped` and leave the
-        // body unexecuted. We accept BOTH `succeeded` and `skipped` as
-        // verifier-eligible so a chain of resumes against the same run
-        // doesn't re-execute a verified step just because the prior
-        // resume already marked it `skipped`. Verifier errors are
-        // swallowed as `false` — a verifier that can't read its input
-        // has to re-run the step.
+        // Both `succeeded` and `skipped` are verifier-eligible so chained resumes against the same
+        // run don't re-execute a verified step just because the prior resume marked it `skipped`.
         store.mark_init_step_skipped(&step_id, &resume_payload(existing))?;
         return Ok(StepDisposition::Skipped);
     }
@@ -250,11 +184,8 @@ pub fn record_step_with_default_log_dir(
     }
 }
 
-/// Run a step body, converting a panic into a typed [`StackError`] so the
-/// caller's failure arm settles the durable row and the driver's signal
-/// bracket plus the run's `finalize_with_error` still run. Resuming the unwind
-/// here would skip all of that and strand the `init_steps` row at `running`,
-/// which is exactly the leaked-state the hosted init crash exposed.
+/// Converts a body panic into a typed [`StackError`] so the failure arm still settles the durable row;
+/// letting the unwind through strands the `init_steps` row at `running`.
 fn run_step_body<T>(kind: &str, body: impl FnOnce() -> Result<T>) -> Result<T> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
         Ok(result) => result,
@@ -265,19 +196,15 @@ fn run_step_body<T>(kind: &str, body: impl FnOnce() -> Result<T>) -> Result<T> {
     }
 }
 
-/// Evaluate a step's resume verifier, treating BOTH an error and a panic as
-/// "postcondition not proven" so the body re-runs. The verifier runs before the
-/// row is marked `running`, so it is outside `run_step_body`; catching its panic
-/// here keeps a verifier that reads external state (e.g. `SecretStore::open`)
-/// from unwinding past `finalize_with_error` and stranding the row `pending`.
+/// Treats BOTH an error and a panic as "postcondition not proven" so the body re-runs; the verifier
+/// runs before the row is marked `running`, so an escaping unwind would strand it at `pending`.
 fn verifier_holds(verify: impl FnOnce() -> Result<bool>) -> bool {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(verify))
         .map(|result| result.unwrap_or(false))
         .unwrap_or(false)
 }
 
-/// Best-effort extraction of a panic's message. `catch_unwind` yields the
-/// `panic!`/`unwrap` argument as `&str` or `String`; anything else is opaque.
+/// Best-effort extraction of a panic's message.
 pub(crate) fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
         (*message).to_owned()
@@ -288,11 +215,7 @@ pub(crate) fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> Str
     }
 }
 
-/// Mark a step `failed`, preserving the body error even when the failure write
-/// itself fails. A store write that fails between `running` and this call would
-/// otherwise strand the row at `running` AND replace the body error with the
-/// store error via `?`, hiding the real cause. The write failure is logged (it
-/// is a genuine local-state problem) but never masks the body error.
+/// Mark a step `failed`. A failing settlement write is logged but must never replace the body error.
 fn settle_failed_step(
     store: &StateStore,
     step_id: &str,
@@ -315,11 +238,7 @@ fn settle_failed_step(
     }
 }
 
-/// Variant of [`record_step`] that takes a draft row from the installer
-/// module (already carrying captured stdout/stderr + log_dir) and persists
-/// it alongside the init step. Used by the `agent_install` phase so the
-/// underlying `installer_runs` row's log_dir can be mirrored onto the
-/// init step row without re-walking the filesystem.
+/// Variant of [`record_step`] that persists an installer draft row alongside the init step.
 #[allow(clippy::too_many_arguments)]
 pub fn record_step_with_log_dir(
     store: &StateStore,
@@ -372,12 +291,7 @@ pub fn record_step_with_log_dir(
     store.mark_init_step_running(&step_id)?;
     match run_step_body(kind, body) {
         Ok((mut draft, outcome)) => {
-            // Persisting log files is best-attempted but we'd rather mark
-            // the step as `failed` with a clear error than `succeeded`
-            // with logs missing — the audit copy is the entire point of
-            // this column. Same semantics as the installer module. Route the
-            // failure through `settle_failed_step` so the row never strands at
-            // `running` when the persist itself fails.
+            // A missing audit copy fails the step rather than recording `succeeded` without logs.
             if let Err(error) = persist_step_logs_to_disk(&mut draft, agent_id_for_logs, log_base) {
                 settle_failed_step(store, &step_id, None, &error);
                 return Err(error);
@@ -397,14 +311,7 @@ pub fn record_step_with_log_dir(
     }
 }
 
-/// Build the payload JSON to record on a `skipped` step. Preserves the
-/// prior payload (so installer_run correlations and attempt counters
-/// survive resume) and flags `resume.verified = true` so log readers can
-/// distinguish a fresh-success run from a verifier-skipped one. Uses
-/// serde_json's tree model so nested objects round-trip safely — the
-/// previous string-manipulation form mishandled payloads whose closing
-/// brace was preceded by another `}` (e.g. an already-merged
-/// `resume.verified` block on a third resume).
+/// Build a `skipped` step's payload: the prior payload plus `resume.verified = true`.
 fn resume_payload(existing: &InitStepRecord) -> String {
     let parsed: serde_json::Value = serde_json::from_str(&existing.payload_json)
         .unwrap_or_else(|_| serde_json::Value::Object(Default::default()));
@@ -416,10 +323,7 @@ fn resume_payload(existing: &InitStepRecord) -> String {
     serde_json::Value::Object(object).to_string()
 }
 
-/// Aggregate result for the driver to call [`finalize_run`] with. The
-/// driver tracks per-step dispositions and decides terminal status from
-/// the set: any `failed` step means `INIT_RUN_FAILED`; otherwise
-/// `INIT_RUN_SUCCEEDED`.
+/// Terminal run status to pass to [`finalize_run`]: any errored step means `INIT_RUN_FAILED`.
 pub fn terminal_status_for(dispositions: &[StepDisposition], step_errored: bool) -> &'static str {
     if step_errored {
         INIT_RUN_FAILED
@@ -469,9 +373,6 @@ mod tests {
 
     #[test]
     fn record_step_reports_background_disposition_with_a_succeeded_row() {
-        // A background launch must read as `succeeded` in the durable row —
-        // `finalize_init_run` fails the run over any non-terminal row — while
-        // the driver-facing disposition distinguishes launched from done.
         let (_dir, store) = open_store();
         let run = begin_run(&store, None, None, "{}").expect("begin");
         let disposition = record_step(
@@ -588,11 +489,6 @@ mod tests {
 
     #[test]
     fn record_step_with_default_log_dir_records_log_dir_on_failure() {
-        // Regression: prior to this helper, a phase that pre-created an
-        // on-disk log directory and then failed in the body left
-        // `init_steps.log_dir = NULL`. The operator would then have no
-        // pointer from SQLite to the captured failure logs. The helper
-        // stamps `default_log_dir` on both the success and failure paths.
         let (_dir, store) = open_store();
         let run = begin_run(&store, None, None, "{}").expect("begin");
         record_step_with_default_log_dir(
@@ -634,7 +530,6 @@ mod tests {
                 })
             },
         );
-        // Resume succeeds on second attempt.
         let _ = record_step(
             &store,
             &run,
@@ -661,9 +556,6 @@ mod tests {
         assert_eq!(found.id, in_flight.id);
         assert_eq!(found.status, INIT_RUN_PENDING);
 
-        // Even a failed prior run is resumable — the operator wants to
-        // retry the failed step, not start over. Scan past any newer
-        // succeeded row that may have landed since.
         finalize_run(&store, &in_flight.id, INIT_RUN_FAILED).expect("finalize");
         let still_resumable = find_resumable_run(&store)
             .expect("find")
@@ -671,17 +563,13 @@ mod tests {
         assert_eq!(still_resumable.id, in_flight.id);
         assert_eq!(still_resumable.status, INIT_RUN_FAILED);
 
-        // Once every prior run is succeeded, there is nothing to resume.
         let later_success = begin_run(&store, None, None, "{}").expect("begin");
         finalize_run(&store, &later_success.id, INIT_RUN_SUCCEEDED).expect("finalize");
-        // The failed `in_flight` row is still the latest non-terminal-or-failed,
-        // since later_success is now terminal-succeeded.
         let found = find_resumable_run(&store)
             .expect("find")
             .expect("failed older run still wins");
         assert_eq!(found.id, in_flight.id);
 
-        // Clear out the failed row and confirm a pure-success table yields None.
         finalize_run(&store, &in_flight.id, INIT_RUN_SUCCEEDED).expect("clear");
         let none = find_resumable_run(&store).expect("find");
         assert!(none.is_none(), "all-succeeded table returns None");
@@ -689,11 +577,6 @@ mod tests {
 
     #[test]
     fn resume_payload_survives_nested_objects_across_multiple_skips() {
-        // Regression: the prior string-trim form of resume_payload
-        // chewed off the trailing `}` of an already-merged
-        // `resume.verified` block on the second resume, producing
-        // invalid JSON that the state-layer json_valid CHECK then
-        // rejected — breaking chained resume.
         let step = InitStepRecord {
             id: "istep_x".to_owned(),
             run_id: "irun_x".to_owned(),
@@ -716,10 +599,6 @@ mod tests {
 
     #[test]
     fn record_step_converts_a_body_panic_into_a_failed_row_and_typed_error() {
-        // Regression for the hosted-init crash: a panicking step body must
-        // settle the durable row as `failed` and surface a typed error through
-        // the normal failure arm, never unwind the caller and strand the row at
-        // `running`.
         let (_dir, store) = open_store();
         let run = begin_run(&store, None, None, "{}").expect("begin");
         let error = record_step(
@@ -758,10 +637,6 @@ mod tests {
 
     #[test]
     fn record_step_treats_a_verifier_panic_as_unproven_and_reruns_the_body() {
-        // The resume verifier runs before the row is marked `running`, so a
-        // panic there is outside `run_step_body`. It must be swallowed like a
-        // verifier error (postcondition unproven → re-run the body), never
-        // unwind past `finalize_with_error` and strand the row `pending`.
         let (_dir, store) = open_store();
         let run = begin_run(&store, None, None, "{}").expect("begin");
         record_step(

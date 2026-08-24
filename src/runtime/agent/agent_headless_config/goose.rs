@@ -75,9 +75,8 @@ pub(super) fn provision_goose_config(config: &Config, home: &Path) -> Result<Vec
     for (key, value) in values {
         root.insert(YamlValue::String(key.to_owned()), value);
     }
-    // Mirror the canonical config: if no provider model is configured,
-    // drop any stale `GOOSE_MODEL` from a prior run so the launched
-    // Goose process doesn't keep using it under the new provider.
+    // With no provider model configured, drop any stale `GOOSE_MODEL` so the
+    // launched process does not keep using it under the new provider.
     match configured_provider_model(config) {
         Some(model) => {
             root.insert(
@@ -288,8 +287,8 @@ mod tests {
         )
         .expect("write existing config");
         let mut config = config_with_agent("goose", &["CEREBRAS_API_KEY"]);
-        // New provider, NO model selected — mirrors the L87 init path
-        // where the operator picks a provider but skips model setup.
+        // New provider with no model selected, as when the operator picks a
+        // provider but skips model setup.
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "cerebras".to_owned(),
             model: None,

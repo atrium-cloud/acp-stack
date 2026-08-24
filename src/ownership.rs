@@ -1,10 +1,5 @@
-//! Runtime ownership and permission inspection helpers.
-//!
-//! `acps security check` uses these to surface paths owned by the wrong uid,
-//! paths with looser-than-expected permissions, and a workspace root that
-//! isn't writable by the daemon process. Future deployment automation
-//! (Docker, systemd installer) is expected to reuse `resolve_runtime_user_uid`
-//! when validating an install was set up correctly.
+//! Runtime ownership and permission inspection helpers behind
+//! `acps security check`.
 
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
@@ -12,11 +7,9 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-/// Each `PathKind` carries its own expectation for the mode bits we surface.
-/// Directory paths owned by the runtime user are kept at 0o700; sensitive
-/// files at 0o600. The workspace root is created by the operator (or by an
-/// installer) and we deliberately don't pin its mode — only that the daemon
-/// can write into it.
+/// Each `PathKind` carries its own expectation for the mode bits surfaced:
+/// runtime-owned directories at 0o700, sensitive files at 0o600, and the
+/// operator-provisioned workspace root unpinned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathKind {
     ConfigDir,
@@ -29,9 +22,8 @@ pub enum PathKind {
 }
 
 impl PathKind {
-    /// Mode that `runtime.path_mode_loose` checks against. `WorkspaceRoot`
-    /// returns `None` because the workspace is operator-provisioned and may
-    /// legitimately be group-readable or world-traversable on shared hosts.
+    /// Mode that `runtime.path_mode_loose` checks against; `None` for the
+    /// operator-provisioned workspace root, which is unpinned by design.
     pub fn expected_mode(self) -> Option<u32> {
         match self {
             PathKind::ConfigDir | PathKind::StateDir => Some(0o700),
@@ -62,19 +54,14 @@ pub struct PathPosture {
     pub uid: u32,
     pub mode: u32,
     /// `true` when the inspected path is itself a symlink. The runtime never
-    /// creates symlinks at managed paths (`fs_util::create_dir_owner_only`
-    /// refuses to follow them), so a symlink here is operator-introduced or
-    /// the result of external tampering. The security check uses this flag
-    /// to vary the remediation, because `chmod` and `chown` without
-    /// symlink-aware flags follow the link and mutate the wrong target.
+    /// creates symlinks at managed paths, so one here is external tampering,
+    /// and the remediation must vary: `chmod`/`chown` without symlink-aware
+    /// flags follow the link and mutate the wrong target.
     pub is_symlink: bool,
 }
 
-/// Read uid and permission mode for `path`. Uses `symlink_metadata` so a
-/// symlink at this location is treated as the symlink itself — letting a
-/// symlink substitute for a runtime-managed path would route writes outside
-/// the security-managed tree, matching the policy in
-/// `fs_util::create_dir_owner_only`.
+/// Read uid and permission mode for `path`. MUST use `symlink_metadata`: a
+/// followed symlink would route writes outside the security-managed tree.
 #[cfg(unix)]
 pub fn inspect(path: &Path, kind: PathKind) -> std::io::Result<PathPosture> {
     let metadata = std::fs::symlink_metadata(path)?;
@@ -121,9 +108,7 @@ pub fn process_egid() -> u32 {
     0
 }
 
-/// Resolve a username (e.g. `"acp"`) to a uid via `getpwnam_r`. Returns
-/// `Ok(None)` when the user does not exist, which the caller maps to "skip the
-/// runtime.user_mismatch finding rather than failing the check".
+/// Resolve a username to a uid via `getpwnam_r`; `Ok(None)` means no such user.
 #[cfg(unix)]
 pub fn resolve_runtime_user_uid(name: &str) -> std::io::Result<Option<u32>> {
     let cstr = CString::new(name)
@@ -149,9 +134,8 @@ pub fn resolve_runtime_user_uid(name: &str) -> std::io::Result<Option<u32>> {
                 return Ok(Some(pwd.pw_uid));
             }
             libc::ERANGE => {
-                // Buffer too small; double it and retry. Cap at 1 MiB so a
-                // pathological NSS plugin can't drive us into unbounded
-                // growth.
+                // Capped at 1 MiB so a pathological NSS plugin cannot drive
+                // unbounded growth.
                 if buf.len() >= 1 << 20 {
                     return Err(std::io::Error::other(
                         "getpwnam_r buffer would exceed 1 MiB",
@@ -216,9 +200,7 @@ pub fn current_username() -> std::io::Result<Option<String>> {
         .filter(|value| !value.trim().is_empty()))
 }
 
-/// Probe writability by trying to create a temp file inside `path`. Cleans up
-/// on drop (`NamedTempFile`), so this leaves no artifact. Returns `false` if
-/// the directory does not exist or the daemon cannot write into it.
+/// Probe writability with a temp file inside `path`, leaving no artifact.
 pub fn workspace_writable(path: &Path) -> bool {
     if !path.is_dir() {
         return false;
@@ -299,8 +281,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn workspace_writable_false_for_read_only_dir() {
-        // Skip the test when running as root: 0o555 doesn't block writes for
-        // the superuser.
+        // 0o555 does not block writes for the superuser.
         if process_euid() == 0 {
             return;
         }
@@ -321,7 +302,6 @@ mod tests {
             return;
         }
         assert!(!workspace_writable(&readonly));
-        // Restore mode so the test framework can clean up.
         std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o700))
             .expect("restore mode");
     }

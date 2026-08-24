@@ -15,8 +15,7 @@ use crate::state::StateStore;
 use super::registry_apply::is_custom_agent;
 
 pub(super) fn should_install_agent(config: &Config, registry: &RegistryCatalog) -> Result<bool> {
-    // A custom agent carries its own `[agent.install]` escape hatch and is not
-    // in the registry, so the registry support checks below do not apply.
+    // A custom agent carries its own `[agent.install]` escape hatch, so the registry checks below do not apply.
     if is_custom_agent(config, registry) {
         #[cfg(feature = "test-fixtures")]
         if crate::dev_gates::fixture_enabled(crate::dev_gates::TEST_SKIP_AGENT_INSTALL_ENV) {
@@ -47,15 +46,7 @@ pub(super) fn should_install_agent(config: &Config, registry: &RegistryCatalog) 
     Ok(true)
 }
 
-/// Run the installer for the configured agent. The TTY-only "try the next
-/// install path?" prompt that used to live here is gone: `install_resolved`
-/// already walks `shell → npm → github_release` in sequence, and any
-/// remaining failure is captured by the init orchestrator's
-/// `agent_install` step. The operator re-attempts by running
-/// `acps init --resume`, which re-executes the failed step using the
-/// current registry — picking up a newer harness version, a now-reachable
-/// npm registry, or a freshly released GitHub artifact without ever
-/// requiring a TTY.
+/// Run the installer for the configured agent.
 pub(super) fn install_configured_agent(
     home: &Path,
     config: &Config,
@@ -104,24 +95,15 @@ pub(super) fn local_bin_dir(home: &Path) -> PathBuf {
     crate::runtime::install::local_bin_dir(home)
 }
 
-// CONSTANTS — agent install retry. The installer engine records every attempt
-// to `installer_runs`, so a retried install is fully audited. Preflight has
-// already validated config/support before this point, so failures here are
-// predominantly transient (network, registry, release availability).
+// CONSTANTS — agent install retry.
 pub(super) const MAX_INSTALL_ATTEMPTS: u32 = 10;
 const INSTALL_RETRY_BASE_DELAY: Duration = Duration::from_secs(2);
 const INSTALL_RETRY_MAX_DELAY: Duration = Duration::from_secs(60);
 const INSTALL_RETRY_MAX_EXPONENT: u32 = 5;
-/// Wall-clock ceiling on RETRIES: checked between attempts, so the worst case
-/// is the budget plus one in-flight attempt (up to that step's install budget,
-/// which a registry entry may raise above the installer default).
-/// The attempt cap alone lets a pathological installer that times out every
-/// try hold init hostage for attempts x timeout; the budget bounds that
-/// regardless of how the individual attempts fail.
+/// Wall-clock ceiling on RETRIES, checked between attempts, so the worst case is the budget plus one in-flight attempt. It bounds a pathological installer that times out every try, which the attempt cap alone does not.
 pub(super) const INSTALL_RETRY_TOTAL_BUDGET: Duration = Duration::from_secs(20 * 60);
 
-/// Exponential backoff with a cap, for the 1-based `attempt` that just failed:
-/// `base * 2^(attempt-1)`, clamped to `INSTALL_RETRY_MAX_DELAY`.
+/// Exponential backoff for the 1-based `attempt` that just failed, clamped to `INSTALL_RETRY_MAX_DELAY`.
 pub(super) fn install_retry_backoff(attempt: u32) -> Duration {
     let exponent = attempt.saturating_sub(1).min(INSTALL_RETRY_MAX_EXPONENT);
     INSTALL_RETRY_BASE_DELAY
@@ -130,16 +112,7 @@ pub(super) fn install_retry_backoff(attempt: u32) -> Duration {
         .min(INSTALL_RETRY_MAX_DELAY)
 }
 
-/// Whether an install failure is worth retrying. Deterministic failures — a
-/// hash mismatch, a missing `creates` target, missing prerequisites, an
-/// unconfigured agent, a corrupt registry, or a binary the spawn gate proved
-/// unrunnable — will fail identically on every attempt, so retrying them just
-/// makes the operator wait. The gate failure is deterministic given the same
-/// recipe and host (stub bytes, wrong arch, missing interpreter); the rare
-/// transient fork failure (EAGAIN/ENOMEM) self-heals on the next init run
-/// because the resume verifier treats the broken binary as absent and
-/// reinstalls. Ambiguous failures (a failed install command, a spawn error)
-/// may be transient (network mid install), so those stay retryable.
+/// Whether an install failure is worth retrying: the listed failures are deterministic given the same recipe and host, so they fail identically on every attempt.
 fn install_error_is_retryable(error: &StackError) -> bool {
     !matches!(
         error,
@@ -153,15 +126,7 @@ fn install_error_is_retryable(error: &StackError) -> bool {
     )
 }
 
-/// Run an agent install with bounded exponential-backoff retry.
-/// `attempt_install` performs one install attempt (and renders its own
-/// progress); `on_retry` runs after a failed-but-retryable attempt to log and
-/// sleep; `elapsed` reports wall-clock time spent so far, checked against
-/// `INSTALL_RETRY_TOTAL_BUDGET` before each retry. Returns the first success,
-/// or the last error once attempts or the budget are exhausted or a
-/// non-retryable (deterministic) error is hit. Kept generic over the closures
-/// so the retry/backoff logic is unit-testable without touching the installer
-/// or sleeping.
+/// Run an agent install with bounded exponential-backoff retry; generic over its closures so the retry logic is testable without the installer or real sleeps.
 pub(super) fn run_install_with_retry(
     mut attempt_install: impl FnMut(u32) -> Result<InstallerOutcome>,
     mut on_retry: impl FnMut(u32, &StackError, Duration),
@@ -244,7 +209,6 @@ mod tests {
         assert_eq!(install_retry_backoff(1), Duration::from_secs(2));
         assert_eq!(install_retry_backoff(2), Duration::from_secs(4));
         assert_eq!(install_retry_backoff(4), Duration::from_secs(16));
-        // capped at INSTALL_RETRY_MAX_DELAY (60s) once 2*2^n exceeds it.
         assert_eq!(install_retry_backoff(9), Duration::from_secs(60));
     }
 
@@ -288,8 +252,7 @@ mod tests {
     #[test]
     fn retry_stops_at_total_budget() {
         let attempts = Cell::new(0u32);
-        // Each attempt "costs" the full installer timeout; the budget must
-        // stop the loop well before the attempt cap does.
+        // Each attempt "costs" the full installer timeout, so the budget stops the loop before the attempt cap.
         let result = run_install_with_retry(
             |attempt| {
                 attempts.set(attempt);

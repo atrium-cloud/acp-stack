@@ -1,9 +1,4 @@
 //! Per-path posture rules: ownership, mode/symlink, and uninspectable paths.
-//!
-//! Walks `inputs.path_postures` to emit `runtime.path_ownership` and
-//! `runtime.path_mode_loose` findings, then walks `inputs.path_issues` to
-//! emit `runtime.path_uninspectable` for paths that could not be stat'd at
-//! all.
 
 use crate::security::SecurityCheckInputs;
 use crate::security::findings::{SecurityFinding, shell_quote};
@@ -13,13 +8,8 @@ pub(in crate::security) fn check_paths(
     findings: &mut Vec<SecurityFinding>,
 ) {
     for posture in inputs.path_postures {
-        // Render the path through `shell_quote` so spaces, single quotes, or
-        // other shell metacharacters in the runtime-managed path (which can
-        // come from operator-controlled `workspace.root` config) cannot
-        // produce an unsafe-to-paste command. `chown -h` also operates on
-        // the symlink itself rather than following it — `ownership::inspect`
-        // uses `symlink_metadata`, so a symlinked runtime path reports its
-        // own posture and that's what we want to fix.
+        // `shell_quote` so metacharacters in an operator-controlled path cannot produce
+        // an unsafe-to-paste remediation command.
         let path_quoted = shell_quote(&posture.path.display().to_string());
         if posture.uid != inputs.process_euid {
             findings.push(
@@ -39,16 +29,9 @@ pub(in crate::security) fn check_paths(
                     "actual_uid": posture.uid,
                     "expected_uid": inputs.process_euid,
                 }))
-                // The check compares `posture.uid` against `process_euid` (the
-                // running daemon), so the hint must name the daemon's uid —
-                // not `runtime_user_name`, which could resolve to a different
-                // uid (in which case `runtime.user_mismatch` also fires and
-                // the operator picks one side to fix). We only suggest
-                // `chown`, never "relaunch under {actual}": the path could be
-                // owned by root and `acps serve` explicitly refuses root
-                // execution.
-                // `--` terminates option parsing so a path that happens to
-                // start with `-` is not interpreted as a chown flag.
+                // The hint names the daemon's uid, never `runtime_user_name`, and never
+                // suggests relaunching under the owner: the path could be root-owned
+                // and `acps serve` refuses root execution.
                 .with_remediation(format!(
                     "Run `chown -h {uid} -- {path_quoted}` (as root); uid \
                      {uid} is the running daemon's effective uid. The `-h` \
@@ -62,13 +45,9 @@ pub(in crate::security) fn check_paths(
         if let Some(expected_mode) = posture.kind.expected_mode()
             && posture.mode != expected_mode
         {
-            // Linux `chmod` follows symlinks and has no `-h` equivalent
-            // for permissions, so the usual remediation would mutate the
-            // wrong target. The runtime never installs symlinks at
-            // managed paths (`fs_util::create_dir_owner_only` refuses);
-            // an operator hitting this case is recovering from external
-            // tampering and needs to remove the link, not chmod through
-            // it. Emit a distinct remediation that says so.
+            // Linux `chmod` follows symlinks with no `-h` equivalent, so the usual
+            // remediation would mutate the wrong target; a symlink here means external
+            // tampering and must be removed rather than chmod'd through.
             let remediation = if posture.is_symlink {
                 format!(
                     "{label} at {path_quoted} is a symlink; \

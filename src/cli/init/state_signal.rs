@@ -1,28 +1,14 @@
-//! Machine-readable state signals emitted by the init flow.
-//!
-//! The wizard runs on one thread and knows things no observer can reconstruct
-//! from the progress text: which durable step it is inside, which categories
-//! the registry says this agent even has, and what the live capability probe
-//! contradicted. These signals carry exactly that, so a hosted driver forwards
-//! them as `signal` events for the client to fold into a category view without
-//! parsing prose. Off-hosted runs emit nothing — `prompt::emit_state_signal`
-//! takes a closure and drops it when no driver is installed.
-//!
-//! Step kinds ride as the `init_runner::step_kind` constants verbatim rather
-//! than a parallel enum, so the vocabulary cannot drift from what is persisted
-//! in `init_steps.kind`.
+//! Machine-readable state signals emitted by the init flow, forwarded by a hosted
+//! driver as `signal` events. Step kinds ride as the `init_runner::step_kind`
+//! constants verbatim so the vocabulary cannot drift from `init_steps.kind`.
 
 use serde_json::{Map, Value};
 
 use crate::runtime::init_runner::StepDisposition;
-// `step_kind` is named only by the test-only `category_for_step_kind` and this
-// module's own tests now.
 #[cfg(test)]
 use crate::runtime::init_runner::step_kind;
 
-/// The ten things init can settle. `id` is shared wire surface with hosted
-/// clients (it rides as the `category` field of the `category_*` signals), so a
-/// rename is a wire break.
+/// The things init can settle. `id` is shared wire surface, so a rename is a break.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum InitCategory {
     Agent,
@@ -54,22 +40,17 @@ impl InitCategory {
     }
 }
 
-/// What decided a category's applicability. The ordering is authority, not
-/// chronology: a live `Probe` or `Discovery` verdict overrides whatever the
-/// registry claimed, because the installed harness is the ground truth.
+/// What decided a category's applicability. The ordering is authority, not chronology:
+/// a live `Probe` or `Discovery` verdict overrides whatever the registry claimed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ApplicabilitySource {
     Args,
     Registry,
     Probe,
-    /// `session/new` config_options corrections, ranked above the registry:
-    /// the installed harness is what a session will actually accept.
+    /// `session/new` config_options corrections, ranked above the registry.
     Discovery,
-    /// The live check could not be made at all — a provisional session the
-    /// harness would not complete. It still outranks the registry, since the
-    /// lane demonstrably cannot be driven this run, but it is the absence of
-    /// evidence rather than evidence of absence, so it may not withdraw a lane
-    /// the config already holds a value for.
+    /// The live check could not be made at all. Outranks the registry, but as absence
+    /// of evidence it may not withdraw a lane the config already holds a value for.
     DiscoveryUnavailable,
 }
 
@@ -81,8 +62,6 @@ pub(super) enum InitStateSignal {
     StepFinished {
         kind: &'static str,
         disposition: StepDisposition,
-        /// `StackError::error_code` returns a borrowed `&str`, so the signal
-        /// owns its copy rather than tying the signal's lifetime to the error.
         error_code: Option<String>,
     },
     CategoryApplicability {
@@ -95,11 +74,8 @@ pub(super) enum InitStateSignal {
         category: InitCategory,
         value: Option<String>,
     },
-    /// A value that was already in config when the run started, reported so a
-    /// resumed or fully declared run does not show its harness lanes as
-    /// configured-with-nothing. Indistinguishable from `CategorySettled` on the
-    /// wire; it differs only in that live probe or discovery evidence may still
-    /// withdraw the lane.
+    /// A value already in config when the run started. Differs from `CategorySettled`
+    /// only in that live probe or discovery evidence may still withdraw the lane.
     CategoryProvisionallySettled {
         category: InitCategory,
         value: String,
@@ -110,10 +86,8 @@ pub(super) enum InitStateSignal {
     },
 }
 
-/// The category a step's failure badges. Steps with no category (auth, edge
-/// artifacts, headless config, testflight, init_complete) surface only as
-/// `current_step`. Test-only in the instance now: it forwards step kinds as
-/// opaque strings, and the client fold maps them to categories.
+/// The category a step's failure badges; steps with no category surface only as
+/// `current_step`.
 #[cfg(test)]
 pub(super) fn category_for_step_kind(kind: &str) -> Option<InitCategory> {
     match kind {
@@ -129,8 +103,8 @@ pub(super) fn category_for_step_kind(kind: &str) -> Option<InitCategory> {
 }
 
 impl ApplicabilitySource {
-    /// Wire token for the `source` field of a `category_applicability` signal.
-    /// The client folds authority off this string, so a rename is a wire break.
+    /// Wire token for the `source` field of a `category_applicability` signal; the
+    /// client folds authority off this string, so a rename is a wire break.
     fn wire(self) -> &'static str {
         match self {
             ApplicabilitySource::Args => "args",
@@ -143,10 +117,8 @@ impl ApplicabilitySource {
 }
 
 impl InitStateSignal {
-    /// The `signal` event payload. Each signal rides the wire verbatim — no
-    /// status, no `blocked_on`, no precedence — because the fold that turns
-    /// these facts into a rendered category view is the client's, not the
-    /// instance's. Keys land under the event envelope beside `type`/`seq`.
+    /// The `signal` event payload. Each signal rides the wire verbatim; folding these
+    /// facts into a rendered category view is the client's job, not the instance's.
     pub(super) fn wire_payload(&self) -> Map<String, Value> {
         let mut payload = Map::new();
         match self {
@@ -211,8 +183,8 @@ impl InitStateSignal {
                     "category".to_owned(),
                     Value::String(category.id().to_owned()),
                 );
-                // Settled-with-nothing is a distinct fact from an unsettled lane,
-                // so a null value rides rather than being omitted.
+                // Settled-with-nothing is distinct from an unsettled lane, so a null
+                // value rides rather than being omitted.
                 payload.insert(
                     "value".to_owned(),
                     value.clone().map_or(Value::Null, Value::String),
@@ -308,8 +280,6 @@ mod tests {
 
     #[test]
     fn step_finished_dispositions_use_the_canonical_wire_strings() {
-        // `disposition` is a wire contract clients fold on; `background` is
-        // how a lane reads as started-but-not-done (the async deps apply).
         for (disposition, wire) in [
             (StepDisposition::Executed, "executed"),
             (StepDisposition::Background, "background"),

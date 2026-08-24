@@ -1,17 +1,4 @@
 //! Provider and ACP-advertised model discovery for the unified API.
-//!
-//! `GET /v1/providers` returns the providers supported for the
-//! currently configured agent (id, display name, default API-key ref,
-//! companion/optional env refs). The data is sourced from the embedded
-//! provider/env mapping under `data/`, so this endpoint is offline-only
-//! and does not spawn the agent.
-//!
-//! `GET /v1/models` spawns a provisional ACP session against the
-//! configured agent, reads its `session/new` advertised
-//! `config_options`, and returns the model + mode + effort value lists. This
-//! mirrors what `acps agent set` does interactively, so a UI driver
-//! can render exactly the same picker without shelling out to the CLI.
-//! The endpoint is session-tier (valid session key required).
 
 use axum::extract::State;
 use serde::Serialize;
@@ -118,17 +105,14 @@ const MODELS_SOURCE_ACP_ADVERTISED: &str = "acp_advertised";
 pub(crate) async fn models_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<ModelsResponse>, StackError> {
-    // Resolve the default target from disk so `acps agent default set`
-    // and Array config edits are visible without a daemon restart.
+    // Resolve from disk so config edits are visible without a daemon restart.
     let (config, _) = state.default_agent_target().await?;
     let agent_id = config.agent.id.clone();
     let home = home_dir()?;
 
     // The provider catalog only serves agents whose harness takes the model
-    // verbatim from its on-disk config (adapter-based agents that cannot
-    // discover provider models over ACP). Agents with real ACP discovery
-    // (e.g. OpenCode) advertise harness-specific model values that a raw
-    // provider catalog would not match.
+    // verbatim from its on-disk config; agents with real ACP discovery
+    // advertise harness-specific values a raw catalog would not match.
     let provider_id = config
         .agent
         .provider
@@ -148,8 +132,7 @@ pub(crate) async fn models_handler(
                 let reason = error.to_string();
                 tracing::warn!(reason = %reason, "provider model catalog refresh failed");
                 catalog_error = Some(reason);
-                // A stale-but-usable cache entry still serves the catalog
-                // through a provider outage.
+                // A stale cache entry still serves through a provider outage.
                 provider_id
                     .as_deref()
                     .and_then(|id| cached_models(&home, id))
@@ -160,9 +143,8 @@ pub(crate) async fn models_handler(
     };
 
     if let Some(models) = catalog {
-        // ACP discovery still supplies the mode and effort lists; a discovery
-        // failure must not take down a response the catalog can serve on its
-        // own.
+        // A discovery failure must not take down a response the catalog can
+        // serve on its own.
         let (modes, efforts) = match fetch_session_config_with_timeout(
             &home,
             &config,
@@ -199,15 +181,12 @@ pub(crate) async fn models_handler(
 
     let response =
         fetch_session_config_with_timeout(&home, &config, DEFAULT_MODELS_DISCOVERY_TIMEOUT).await?;
-    // Surface a malformed/missing `model` advertisement as an error for
-    // discovery-backed agents so the operator knows discovery failed rather
-    // than silently rendering an empty picker. `mode` is genuinely optional.
+    // A missing `model` advertisement is an error for discovery-backed agents,
+    // so the operator learns discovery failed instead of seeing an empty picker.
     let models = match advertised_values_for_category(&response, AgentSessionConfigCategory::Model)
     {
         Ok(values) => values,
-        // Explicit-model agents (Hermes Agent) advertise no ACP model options,
-        // so a catalog outage would otherwise fail a request the degraded
-        // empty list can still serve alongside `catalog_error`.
+        // Explicit-model agents (Hermes) advertise no ACP model options at all.
         Err(error) if model_value_is_explicit_without_discovery(&config.agent) => {
             tracing::warn!(error = %error, "no ACP model advertisement; serving empty model list");
             Vec::new()

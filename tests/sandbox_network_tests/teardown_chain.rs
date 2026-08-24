@@ -43,8 +43,8 @@ fn sigkill_of_the_supervisor_kills_the_chain() {
     .parse()
     .expect("child pid parses");
 
-    // SIGKILL bypasses every supervisor cleanup path; PR_SET_PDEATHSIG on the
-    // chain is the only thing standing between this and an orphaned workload.
+    // SIGKILL bypasses every supervisor cleanup path, so PR_SET_PDEATHSIG on the chain is all
+    // that prevents an orphaned workload.
     // SAFETY: supervisor_pid is our direct, still-running child.
     let rc = unsafe { libc::kill(supervisor_pid, libc::SIGKILL) };
     assert_eq!(rc, 0, "SIGKILL to the supervisor failed");
@@ -53,8 +53,8 @@ fn sigkill_of_the_supervisor_kills_the_chain() {
 
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        // cmdline read failing (or coming back empty, for a zombie) means the
-        // unshare process is gone; matching on content guards pid reuse.
+        // A failed or empty cmdline read means the process is gone; matching content guards
+        // against pid reuse.
         let alive = std::fs::read_to_string(format!("/proc/{unshare_pid}/cmdline"))
             .map(|cmdline| cmdline.contains("unshare"))
             .unwrap_or(false);
@@ -291,8 +291,7 @@ fn sigterm_during_teardown_does_not_abort_it() {
     let rc = unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
     assert_eq!(rc, 0, "SIGTERM to the supervisor failed");
 
-    // Teardown is cleanup: a shutdown signal must not cut it short (that would
-    // guarantee a host-side leak), and the workload's real status survives.
+    // Teardown is cleanup: a shutdown signal cutting it short would guarantee a host-side leak.
     let status = child.wait().expect("wait supervise");
     assert_eq!(
         status.code(),

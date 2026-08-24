@@ -28,16 +28,12 @@ fn workspace_with(root: &Path) -> WorkspaceConfig {
     }
 }
 
-// Child stdout/stderr is invisible under libtest capture, so run fixture
-// git through `output()` and carry both streams into the panic message;
-// a bare `assert!(status.success())` left past failures undiagnosable.
 fn run_fixture_git(repo: &Path, args: &[&str]) {
     let mut command = Command::new("git");
     command.args(args).current_dir(repo);
-    // When the test binary runs inside a git hook (pre-commit runs the
-    // suite), git exports repo-scoping vars (GIT_DIR, GIT_INDEX_FILE, ...)
-    // that would point fixture git at the developer's repo instead of the
-    // tempdir, so scrub every inherited GIT_* variable.
+    // Under the pre-commit hook git exports repo-scoping vars (GIT_DIR,
+    // GIT_INDEX_FILE, ...) that would point fixture git at the developer's
+    // real repo, so scrub every inherited GIT_* variable.
     for (name, _) in std::env::vars_os() {
         if name.to_string_lossy().starts_with("GIT_") {
             command.env_remove(&name);
@@ -58,7 +54,6 @@ fn run_fixture_git(repo: &Path, args: &[&str]) {
 
 fn run_git_init(repo: &Path) {
     run_fixture_git(repo, &["init", "-q"]);
-    // Pin local user identity so commits work in CI sandboxes.
     for (k, v) in [
         ("user.email", "test@example.com"),
         ("user.name", "Test"),
@@ -174,7 +169,6 @@ fn clones_git_source_and_records_sentinel() {
     assert!(dest.join("README.md").is_file());
     assert!(dest.join(SOURCE_SENTINEL_FILE).is_file());
 
-    // Rerun is idempotent.
     let report2 = materialize_workspace(&workspace, &secrets, None).expect("rerun");
     assert_eq!(report2.code[0].outcome, MaterializeOutcome::Verified);
 }
@@ -191,9 +185,7 @@ fn git_materialization_ignores_inherited_repo_scope_env() {
     let dest_root = tempdir().expect("dest root");
     let dest = dest_root.path().join("clone");
 
-    // Regression: when this suite runs under the pre-commit hook, git
-    // exports repo-scoping vars to the hook environment, and clone /
-    // rev-parse must not honor them. Bogus paths make any leak fail loudly.
+    // Bogus paths make any leak of the hook's GIT_DIR/GIT_INDEX_FILE fail loudly.
     // SAFETY: tests in this binary share env; other tests spawning git
     // scrub these vars, and we remove them before asserting.
     unsafe {
@@ -241,9 +233,6 @@ fn captures_git_clone_stdout_and_stderr_to_log_dir() {
     let report = materialize_workspace(&workspace, &secrets, Some(&log_paths))
         .expect("clone with log capture");
 
-    // The run-level log dir is recorded on the report so the init
-    // orchestrator can stamp it onto the workspace_materialize
-    // init_steps row.
     let report_log_dir = report
         .log_dir
         .as_ref()
@@ -251,15 +240,12 @@ fn captures_git_clone_stdout_and_stderr_to_log_dir() {
     assert_eq!(report_log_dir, &log_paths.run_dir);
     assert!(report_log_dir.is_dir(), "run-level log dir must exist");
 
-    // Per-source log dir exists and carries the captured streams.
     let source_log_dir = report.code[0]
         .log_dir
         .as_ref()
         .expect("per-source log_dir set");
     assert!(source_log_dir.starts_with(&log_paths.run_dir));
-    // Capture filenames carry a per-attempt nanosecond suffix so a
-    // resume that re-runs the same step doesn't overwrite the prior
-    // failure's capture. Match on the prefix.
+    // Capture filenames carry a per-attempt nanosecond suffix, so match on prefix.
     let captures = capture_names(source_log_dir);
     assert!(
         has_capture(&captures, CAPTURE_TAG_GIT_CLONE, ".stdout"),
@@ -275,7 +261,6 @@ fn captures_git_clone_stdout_and_stderr_to_log_dir() {
         .iter()
         .find(|n| n.starts_with(&format!("{CAPTURE_TAG_GIT_REV_PARSE}.")) && n.ends_with(".stdout"))
         .expect("git-rev-parse.*.stdout capture missing");
-    // git-rev-parse stdout for HEAD is the commit hash + newline.
     let head = std::fs::read_to_string(source_log_dir.join(rev_parse_stdout))
         .expect("read rev-parse stdout");
     assert!(
@@ -315,10 +300,6 @@ fn capture_files_are_created_owner_only() {
 
 #[test]
 fn capture_filenames_do_not_overwrite_across_repeated_calls() {
-    // Regression: prior to the timestamp suffix, two `write_command_capture`
-    // calls into the same dir clobbered each other, losing the first
-    // attempt's audit copy when a resume retried. Each call must
-    // produce a fresh pair of files.
     let dir = tempdir().expect("tempdir");
     let _ = write_command_capture(
         Some(dir.path()),
@@ -327,9 +308,7 @@ fn capture_filenames_do_not_overwrite_across_repeated_calls() {
         b"first stderr",
     )
     .expect("first write");
-    // Spin briefly so the nanosecond stamp differs between calls
-    // even on machines with coarse clocks. 1ms is enough on every
-    // platform we ship to.
+    // Spin briefly so the nanosecond stamp differs on coarse clocks.
     std::thread::sleep(std::time::Duration::from_millis(2));
     let _ = write_command_capture(
         Some(dir.path()),
@@ -581,8 +560,6 @@ fn git_clone_against_nonexistent_path_surfaces_typed_command_failure() {
             exit,
         } => {
             assert_eq!(command, "git clone");
-            // Git surfaces an explanatory stderr; we just assert it's
-            // non-empty so the typed variant carries a useful tail.
             assert!(!stderr_tail.is_empty(), "stderr_tail must not be empty");
             assert!(exit.is_some(), "git clone must report an exit code");
         }
@@ -625,12 +602,8 @@ fn rejects_local_source_containing_symlink() {
 #[test]
 #[cfg(feature = "test-fixtures")]
 fn s3_source_materializes_against_mock_endpoint() {
-    // Spin up a small axum server that speaks the S3 wire format we
-    // need: a `?list-type=2` GET returns the canned XML, and
-    // `/bucket/<key>` GETs return file bodies. Exercises the
-    // SigV4-signed request path end-to-end (the mock ignores the
-    // Authorization header — equivalent to a localhost MinIO with
-    // signing disabled).
+    // The mock ignores the Authorization header, like a localhost MinIO with
+    // signing disabled.
     use axum::Router;
     use axum::extract::{Path as AxumPath, Query};
     use axum::http::header;
@@ -752,8 +725,8 @@ fn s3_source_materializes_against_mock_endpoint() {
     let log_root = tempdir().expect("log root");
     let log_paths = WorkspaceLogPaths::for_run(log_root.path(), "irun_s3_mock");
 
-    // SAFETY: tests in this binary share env; mock URL is per-test.
-    // We unset on the way out so a panic mid-test still cleans up.
+    // SAFETY: tests in this binary share env; the mock URL is per-test and is
+    // unset on the way out.
     unsafe {
         std::env::set_var("ACP_STACK_S3_ENDPOINT_OVERRIDE", format!("http://{addr}"));
     }
@@ -780,7 +753,6 @@ fn s3_source_materializes_against_mock_endpoint() {
     assert!(has_capture(&captures, CAPTURE_TAG_S3_DOWNLOAD, ".stdout"));
     assert!(has_capture(&captures, CAPTURE_TAG_S3_DOWNLOAD, ".stderr"));
 
-    // Rerun must skip cleanly.
     unsafe {
         std::env::set_var("ACP_STACK_S3_ENDPOINT_OVERRIDE", format!("http://{addr}"));
     }
@@ -793,17 +765,13 @@ fn s3_source_materializes_against_mock_endpoint() {
         MaterializeOutcome::Verified
     );
 
-    drop(handle); // Worker thread exits when the runtime drops with the
-    // axum server attached. Detached thread is fine for tests.
+    drop(handle);
 }
 
 #[test]
 fn s3_source_fails_when_secret_refs_missing() {
-    // With s3 materialization wired but no secrets in the store, the
-    // materializer should bail at secret resolution rather than making
-    // a real AWS request. This locks in the gating order:
-    // sentinel-check → ensure_dest_or_fail → create_dir → resolve
-    // creds. Net effect: no network IO and no destination side effects.
+    // Locks in the gating order sentinel-check → ensure_dest_or_fail →
+    // create_dir → resolve creds, so a missing secret means no network IO.
     let root_dir = tempdir().expect("root");
     let mut workspace = workspace_with(root_dir.path());
     workspace.data_sources.push(DataSourceConfig {

@@ -79,11 +79,8 @@ pub(crate) async fn sessions_config_options_set_handler(
     }
     let target = target_for_existing_session(&state, &id, params.target_id.as_deref()).await?;
 
-    // Pre-validate against the stored snapshot so an off-list request gets a
-    // retryable 400 instead of an opaque agent error. An empty snapshot
-    // (session created before the feature, or an agent that advertised
-    // nothing at create) skips the check and lets the agent arbitrate — the
-    // snapshot is observational, not authoritative.
+    // Pre-validate against the stored snapshot so an off-list request gets a retryable 400.
+    // An empty snapshot skips the check: it is observational, not authoritative.
     let session = {
         let store = state.state.lock().await;
         store
@@ -145,10 +142,8 @@ pub(crate) async fn sessions_config_options_set_handler(
         .supervisor
         .set_session_config_option(&id, config_id, value, &state.state)
         .await?;
-    // Re-read the store so the response matches what a follow-up GET serves:
-    // the snapshot write stamped `updated_at`, and when the agent answered
-    // with an empty list (lax adapters refresh via notification instead) the
-    // stored snapshot — not the empty response — is the truthful list.
+    // Re-read so the response matches a follow-up GET: when a lax adapter answers with an
+    // empty list and refreshes by notification, the stored snapshot is the truthful one.
     let stored = {
         let store = state.state.lock().await;
         store

@@ -1,18 +1,5 @@
-//! Installer run history and in-flight progress read surface.
-//!
-//! `GET /v1/installer/runs` reads the `installer_runs` audit table. With
-//! `?active=true` it returns only in-flight steps (`status = "running"`),
-//! each carrying a server-computed `elapsed_seconds` — the polling shape an
-//! orchestrator driving instance init uses to render live install progress
-//! (agent harness/adapter installs can run for minutes). Log contents stay
-//! in the table preview columns and on disk; this endpoint returns step
-//! metadata only.
-//!
-//! Reads go through a short-lived second `StateStore` connection, never the
-//! daemon's shared store mutex: the deps-apply route holds that mutex for its
-//! whole run, and a progress poller must not block behind it. WAL plus the
-//! store busy-timeout make the read see autocommit `running` inserts as they
-//! land.
+//! `GET /v1/installer/runs`: step metadata from the `installer_runs` audit table, plus in-flight
+//! progress under `?active=true`.
 
 use axum::extract::{Query, State};
 use serde::{Deserialize, Serialize};
@@ -141,8 +128,7 @@ mod tests {
     fn read_path_sees_running_rows_committed_by_another_connection() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let path = tempdir.path().join("state.sqlite");
-        // Stands in for the daemon's shared store: migrated, written to,
-        // then untouched — the read path must depend only on the db path.
+        // Stands in for the daemon's shared store; the read path must depend only on the db path.
         let writer = StateStore::open(&path).expect("open");
         writer.migrate().expect("migrate");
         writer

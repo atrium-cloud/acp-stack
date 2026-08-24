@@ -7,8 +7,7 @@ use std::net::TcpListener;
 use std::thread;
 
 // The fixture must advertise a version strictly newer than the running crate,
-// otherwise the updater correctly reports `Skipped`. Deriving patch+1 from the
-// crate version keeps the test valid across release version bumps.
+// or the updater correctly reports `Skipped`.
 fn target_version() -> String {
     let current = env!("CARGO_PKG_VERSION");
     let (rest, patch) = current
@@ -90,8 +89,7 @@ fn make_targz(files: &[(&str, &[u8])]) -> Vec<u8> {
         .expect("finish gzip")
 }
 
-// A minimal blocking HTTP/1.1 fixture: one request per connection, routed by
-// path. Runs on a detached thread for the lifetime of the test process.
+// Minimal blocking HTTP/1.1 fixture: one request per connection, routed by path.
 fn serve(listener: TcpListener, routes: HashMap<String, Vec<u8>>) {
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
@@ -130,7 +128,6 @@ fn serve(listener: TcpListener, routes: HashMap<String, Vec<u8>>) {
                 b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec()
             }
         };
-        // Best-effort: a client that hung up early is fine for a fixture.
         if let Err(error) = stream.write_all(&response) {
             eprintln!("fixture server write failed: {error}");
         }
@@ -139,15 +136,12 @@ fn serve(listener: TcpListener, routes: HashMap<String, Vec<u8>>) {
 
 #[test]
 fn install_stack_update_downloads_and_swaps_binaries() {
-    // Release binaries are Linux-only; `host_target` errors elsewhere, so
-    // the swap path is only meaningful on Linux. Skip the body off-Linux
-    // (the module still compiles everywhere so the test stays type-checked).
+    // Release binaries are Linux-only, so the swap path only runs there.
     if std::env::consts::OS != "linux" {
         eprintln!("skipping apply e2e test: stack release binaries are Linux-only");
         return;
     }
-    // The updater refuses to install inside a container, which would defeat
-    // the test. GitHub-hosted runners aren't containers, but guard anyway.
+    // The updater refuses to install inside a container.
     if std::path::Path::new("/.dockerenv").exists() {
         eprintln!("skipping apply e2e test: running inside a container");
         return;
@@ -160,14 +154,12 @@ fn install_stack_update_downloads_and_swaps_binaries() {
             return;
         }
     };
-    // Mirror the real release artifact name (`acp-stack-<version>-<target>.tar.gz`,
-    // built by scripts/build-release.sh) so the fixture exercises the
+    // Mirrors the real release artifact name so the fixture exercises the
     // production naming contract rather than a stand-in.
     let target_version = target_version();
     let target_tag = target_tag();
     let tarball_name = format!("acp-stack-{target_version}-{target}.tar.gz");
 
-    // Build the release artifacts the fixture serves.
     let tarball = make_targz(&[("acps", b"new-acps-binary")]);
     let tar_sha = sha256_hex(&tarball);
 
@@ -208,8 +200,7 @@ fn install_stack_update_downloads_and_swaps_binaries() {
     routes.insert(format!("/dl/{CHECKSUMS_ASSET}"), checksums);
     routes.insert(format!("/dl/{tarball_name}"), tarball);
 
-    // Pre-seed the install dir: the swap renames the existing files aside,
-    // so they must already exist.
+    // The swap renames existing files aside, so they must already exist.
     let workdir = tempfile::tempdir().expect("tempdir");
     let bin_dir = workdir.path().join("bin");
     std::fs::create_dir(&bin_dir).expect("create bin dir");
@@ -218,10 +209,8 @@ fn install_stack_update_downloads_and_swaps_binaries() {
     }
     std::fs::write(bin_dir.join("acpctl"), b"old-acpctl").expect("seed old acpctl");
 
-    // Activate the fixture seams. SAFETY: set before any other thread is
-    // spawned in this test; removed before the test returns. No other test
-    // reads these vars (only the install path does, which only this test
-    // drives).
+    // SAFETY: set before any other thread is spawned in this test and removed
+    // before it returns; no other test reads these vars.
     unsafe {
         std::env::set_var(GITHUB_API_BASE_ENV, &base);
         std::env::set_var(

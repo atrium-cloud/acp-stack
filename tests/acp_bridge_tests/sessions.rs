@@ -44,8 +44,7 @@ async fn new_session_round_trips_and_prompt_emits_notifications() {
         agent_client_protocol::schema::v1::StopReason::EndTurn
     ));
 
-    // Notifications go through a tokio::spawn inside the sink, so let the
-    // runtime drain microtasks before reading.
+    // The sink notifies via `tokio::spawn`, so drain microtasks before reading.
     tokio::task::yield_now().await;
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     let events = sink.events.lock().expect("sink").len();
@@ -193,9 +192,8 @@ async fn new_session_returns_custom_model_config_option_id() {
     bridge.shutdown().await.expect("shutdown ok");
 }
 
-// A spec-strict agent only returns config options when the client advertised
-// `session.configOptions` at initialize, so this round-trip proves the bridge
-// actually advertises the capability on the wire.
+// A spec-strict agent returns config options only when the client advertised
+// `session.configOptions` at initialize, so this round-trip proves the bridge sends it on the wire.
 #[tokio::test]
 async fn new_session_advertises_config_options_to_strict_agent() {
     let mut config = fake_agent_config();
@@ -230,9 +228,6 @@ async fn new_session_advertises_config_options_to_strict_agent() {
     bridge.shutdown().await.expect("shutdown ok");
 }
 
-// Boolean round-trip: the agent advertises a boolean-kind option, the bridge
-// sends a native boolean payload, and the refreshed list in the response
-// reflects the applied value.
 #[tokio::test]
 async fn set_config_option_sends_boolean_values() {
     use agent_client_protocol::schema::v1::{SessionConfigKind, SessionConfigOptionValue};

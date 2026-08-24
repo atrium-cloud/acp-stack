@@ -3,9 +3,8 @@ use super::*;
 use serde_json::value::RawValue;
 
 /// Substitute wire error for a frame whose payload could not be encoded. Both
-/// halves are plain ASCII with no JSON metacharacters, which is what lets
-/// `encode_failure_frame` splice them without a serializer that could fail the
-/// same way the original frame did.
+/// halves MUST stay plain ASCII with no JSON metacharacters, so
+/// `encode_failure_frame` can splice them without a fallible serializer.
 pub(super) const FRAME_ENCODE_FAILED_CODE: &str = "init.frame_encode_failed";
 pub(super) const FRAME_ENCODE_FAILED_MESSAGE: &str = "init frame payload could not be encoded";
 
@@ -17,15 +16,12 @@ pub(super) enum FrameError {
     ResultNotJson,
 }
 
-/// Every seq-bearing session event. Each variant owns its payload so a caller
-/// can hand one over while holding the session lock without borrowing across
-/// the record.
+/// Every seq-bearing session event.
 pub(super) enum ServerEvent {
     Progress {
         message: String,
     },
-    /// Boxed because `PublicInputRequest` is an order of magnitude larger than
-    /// every other variant, and the enum is passed by value on every event.
+    /// Boxed: `PublicInputRequest` dwarfs every other variant.
     InputRequired {
         input: Box<PublicInputRequest>,
     },
@@ -45,9 +41,7 @@ pub(super) enum ServerEvent {
     ErrorExpired {
         reason: String,
     },
-    /// One raw init state signal, prebuilt into its wire payload. The client
-    /// folds the signal stream into a rendered category view; the instance no
-    /// longer derives one.
+    /// One raw init state signal, prebuilt into its wire payload.
     Signal(Map<String, Value>),
 }
 
@@ -67,10 +61,8 @@ impl ServerEvent {
         }
     }
 
-    /// Scalar variants build their map by hand so no `Serialize` impl sits
-    /// between the caller and the wire; `InputRequired` is the only variant
-    /// carrying a struct, and therefore the only one that can fail. `Signal`
-    /// arrives with its payload already built, so it is infallible too.
+    /// `InputRequired` is the only variant carrying a struct, and therefore
+    /// the only one whose encode can fail.
     pub(super) fn payload(self) -> std::result::Result<Map<String, Value>, FrameError> {
         let mut payload = Map::new();
         match self {
@@ -104,18 +96,16 @@ impl ServerEvent {
             ServerEvent::ErrorExpired { reason } => {
                 payload.insert("reason".to_owned(), Value::String(reason));
             }
-            // The signal's own fields become envelope keys, so the event reads
-            // `{"signal":"category_settled","category":…,"seq":…}` rather than
-            // nesting the payload one level down.
+            // The signal's own fields become envelope keys rather than nesting
+            // the payload one level down.
             ServerEvent::Signal(map) => payload = map,
         }
         Ok(payload)
     }
 }
 
-/// The `error` event payload. Scalar-only and therefore infallible, which is
-/// what lets a session park on a failure without a fallible step that could
-/// fail the same way the frame it is reporting on did.
+/// The `error` event payload. Scalar-only, so reporting a failure can never
+/// fail the same way the frame it reports on did.
 pub(super) fn error_payload(code: &str, message: String) -> Map<String, Value> {
     let mut payload = Map::new();
     payload.insert("code".to_owned(), Value::String(code.to_owned()));
@@ -123,12 +113,10 @@ pub(super) fn error_payload(code: &str, message: String) -> Map<String, Value> {
     payload
 }
 
-/// Wrap an event payload in the `type`/`seq`/`session_id` envelope. Assembly
-/// runs through a `BTreeMap` so the recorded frame keeps the alphabetically
-/// sorted key order clients have always seen — `serde_json::Map` is insertion
-/// ordered in this build (`agent-client-protocol` turns on `preserve_order`)
-/// and cannot be relied on to sort. A payload key colliding with an envelope
-/// key still wins, as it did when the envelope was assembled inline.
+/// Wrap an event payload in the `type`/`seq`/`session_id` envelope. Assembled
+/// through a `BTreeMap` because `serde_json::Map` is insertion-ordered in this
+/// build (`agent-client-protocol` enables `preserve_order`) and clients expect
+/// sorted keys.
 pub(super) fn envelope(
     event_type: &str,
     seq: u64,
@@ -154,11 +142,8 @@ pub(super) enum ServerFrame<'a> {
     Hello {
         session_id: &'a str,
         status: &'a str,
-        /// The whole signal stream so far, in order, so a client that connects
-        /// late — or after the history cap evicted early `signal` events —
-        /// folds it to the current category view without replaying history.
-        /// Bounded by init's structure, not by client chatter, so it is safe
-        /// to carry in full.
+        /// The whole signal stream so far, so a late client can fold it to the
+        /// current view even after the history cap evicted early events.
         signals: &'a [Value],
         last_seq: u64,
         pending_input: Option<&'a PublicInputRequest>,
@@ -185,9 +170,8 @@ pub(super) enum ServerFrame<'a> {
 }
 
 impl ServerFrame<'_> {
-    /// Serialized through derived structs rather than a `Map`, so field order
-    /// is the declaration order these frames have always been written in
-    /// regardless of whether `preserve_order` is enabled downstream.
+    /// Serialized through derived structs rather than a `Map` so field order
+    /// stays declaration order regardless of `preserve_order` downstream.
     pub(super) fn to_json(&self) -> std::result::Result<String, FrameError> {
         match self {
             ServerFrame::Hello {
@@ -236,8 +220,7 @@ impl ServerFrame<'_> {
 }
 
 /// Serialize a seq-less frame, degrading to the encode-failure frame rather
-/// than dropping the client's only notification for this transition. Only
-/// `Hello` carries a struct that can fail; the rest are borrowed scalars.
+/// than dropping the client's only notification for this transition.
 pub(super) fn frame_json(frame: ServerFrame<'_>) -> String {
     frame.to_json().unwrap_or_else(|error| {
         tracing::warn!(
@@ -256,9 +239,7 @@ pub(super) fn encode_failure_frame() -> String {
     )
 }
 
-/// The `result` frame. `payload` borrows the stored result JSON verbatim, so
-/// the plaintext handoff is neither re-encoded nor copied into a second
-/// buffer on its way to the socket.
+/// The `result` frame; `payload` borrows the stored result JSON verbatim.
 #[derive(Serialize)]
 pub(super) struct ResultFrame<'a> {
     #[serde(rename = "type")]

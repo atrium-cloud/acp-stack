@@ -333,8 +333,8 @@ fn retained_tombstone_eviction_does_not_mark_new_sessions_truncated() {
     );
     set_limit_to_retain_oldest_tombstone(&mut store, "older");
     store.enforce_global_limit();
-    // "older" was evicted down to a tombstone whose session id is still
-    // tracked, so sessions the store has never seen keep a clean slate.
+    // "older" evicted down to a tombstone that still tracks its session id, so
+    // never-seen sessions keep a clean slate.
     assert!(store.snapshot("older").truncated);
 
     let fresh = store.snapshot("brand-new");

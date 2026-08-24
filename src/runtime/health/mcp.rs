@@ -1,8 +1,5 @@
-//! MCP health collectors.
-//!
-//! Each configured server is checked without any network probe: stdio servers
-//! resolve their command on `PATH`, and every server's secret refs are matched
-//! against the names present in the secret store.
+//! MCP health collectors: `PATH` resolution and secret-ref presence, with no
+//! network probe.
 
 use super::*;
 
@@ -74,8 +71,7 @@ fn collect_mcp_server(
         McpServerConfig::Stdio(stdio) => {
             let command_path = resolve_command_path(&stdio.command)
                 .map(|path| path.to_string_lossy().into_owned());
-            // Missing refs are reported by secret-ref name (what the operator
-            // types into `acps secrets set`), not by env var name.
+            // Report by secret-ref name (what `acps secrets set` takes), not env var name.
             let refs: Vec<String> = stdio
                 .env
                 .iter()

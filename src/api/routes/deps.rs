@@ -80,32 +80,17 @@ pub(crate) async fn deps_apply_handler(
         }));
     }
 
-    // The runner spawns subprocesses (potentially long-running install
-    // commands), so park it on a blocking thread and let the async
-    // runtime keep handling other requests.
+    // Single-flight is enforced twice: the durable authority is the `deps_apply_runs`
+    // claim inside `apply_dependencies_tracked` (which also covers other processes),
+    // while `deps_apply_lock` is the in-process fast path so a concurrent request 409s
+    // instead of racing the claim. Never a queue.
     //
-    // Single-flight is enforced twice, deliberately. The durable authority is
-    // the `deps_apply_runs` claim inside `apply_dependencies_tracked`, which
-    // also covers applies started by other processes (CLI, detached init
-    // child). `deps_apply_lock` remains as the in-process fast path so a
-    // concurrent request 409s here instead of racing the claim; a held lock
-    // or a lost claim both surface as `deps.apply_in_flight`, never a queue.
-    //
-    // The daemon's shared StateStore mutex is taken only for `migrate()` and
-    // released before any install snippet runs: held across the apply it
-    // would park the whole HTTP surface, because the `api.request` audit
-    // middleware takes that same mutex after every response — even handlers
-    // that touch no state would stop answering for the length of the install.
-    //
-    // The run row and per-action `installer_runs` rows are written through a
-    // second short-lived connection instead. Each of those writes is a single
-    // statement, and WAL plus the store's busy timeout let it wait for the
-    // daemon's connection rather than fail; `acps deps apply` already
-    // records its audit rows from its own connection while the daemon is
-    // live, as does the agent installer's reconnecting progress sink.
+    // The daemon's shared StateStore mutex is taken only for `migrate()` and released
+    // before any install snippet runs; held across the apply it would park the whole
+    // HTTP surface, since the `api.request` audit middleware takes it after every
+    // response. Audit rows go through a second short-lived connection instead.
     let Ok(apply_guard) = state.deps_apply_lock.clone().try_lock_owned() else {
-        // Best-effort id lookup for the 409 body; a read failure degrades to
-        // an empty id but stays visible in the log.
+        // Best-effort id lookup for the 409 body.
         let running = match StateStore::open(&state.runtime_paths.state_path)
             .and_then(|store| store.running_deps_apply_run())
         {
@@ -124,27 +109,21 @@ pub(crate) async fn deps_apply_handler(
     let store_handle = state.state.clone();
     let report = tokio::task::spawn_blocking(
         move || -> std::result::Result<DepsApplyReport, StackError> {
-            // The guard travels into the blocking task rather than staying
-            // with the handler future: a client disconnect drops the future
-            // while the apply keeps running here, and a guard released at
-            // that point would let the next apply interleave with this one.
+            // The guard travels into the blocking task, not the handler future: a
+            // client disconnect drops the future while the apply keeps running, and a
+            // guard released there would let the next apply interleave with this one.
             let _apply_guard = apply_guard;
-            // Migrate under the shared handle — it is fast, must not race
-            // concurrent daemon writes, and the schema has to be current
-            // before the first audit row is written (an install snippet that
-            // ran without a recorded row would break the "side effects always
-            // audited" guarantee).
+            // Migrate under the shared handle: the schema must be current before the
+            // first audit row, or an install snippet could run unrecorded.
             let state_path = {
                 let store = store_handle.blocking_lock();
                 store.migrate()?;
                 store.path().to_path_buf()
             };
             let apply_store = StateStore::open(&state_path)?;
-            // Holding `deps_apply_lock` (the guard above) proves no in-process
-            // apply is live, so any `running` row this daemon owns is a prior
-            // apply whose terminal write failed. Its pid stays live for the
-            // daemon's lifetime, so the liveness reconcile never frees it —
-            // clear it here or the claim below would 409 forever.
+            // Holding the guard proves no in-process apply is live, so a self-owned
+            // `running` row is a prior apply whose terminal write failed. Its pid stays
+            // live for the daemon's lifetime, so only this clears it before the claim.
             let cleared = apply_store.fail_self_owned_stale_deps_apply_runs(
                 i64::from(std::process::id()),
                 crate::runtime::process_runner::current_boot_id().as_deref(),

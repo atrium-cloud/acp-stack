@@ -1,7 +1,4 @@
-//! Reusable provider/API-key compatibility mapping.
-//!
-//! The mapping itself is embedded data, not Rust control flow. Runtime code only
-//! parses, validates, and queries it.
+//! Reusable provider/API-key compatibility mapping, parsed and queried from embedded TOML data.
 
 mod resolve;
 
@@ -28,15 +25,11 @@ pub const CLAUDE_CODE_AGENT_ID: &str = "claude-code";
 pub const CODEX_AGENT_ID: &str = "codex";
 pub const HERMES_AGENT_ID: &str = "hermes";
 pub const KILO_AGENT_ID: &str = "kilo";
-/// Codex plus `openai` is an ordinary keyed provider (`OPENAI_API_KEY`); this
-/// constant exists for the endpoint-override lane only. Codex reserves the
-/// `openai` id for its own built-in provider definition, and the shape a
-/// replacement `[model_providers.openai]` table must take is version-dependent,
-/// so acp-stack cannot synthesize one to carry an endpoint override.
+/// Codex reserves `openai` for its own built-in provider definition, whose replacement table
+/// shape is version-dependent, so this pair cannot carry an endpoint override.
 pub const CODEX_OPENAI_PROVIDER_ID: &str = "openai";
 
-/// Wire transports Hermes accepts on a named `providers:` entry (upstream
-/// `transport`/`api_mode` field).
+/// Wire transports Hermes accepts on a named `providers:` entry.
 const HERMES_API_MODES: [&str; 3] = ["chat_completions", "anthropic_messages", "codex_responses"];
 
 static PROVIDER_KEY_MAPPING: LazyLock<ProviderKeyMapping> = LazyLock::new(|| {
@@ -70,8 +63,7 @@ pub struct ProviderEnvMapping {
     pub companion_env_vars: Vec<String>,
     #[serde(default)]
     pub optional_env_vars: Vec<String>,
-    /// OpenAI-compatible `GET /models` endpoint for live model-catalog
-    /// fetches. Absent when the provider has no compatible listing API.
+    /// OpenAI-compatible `GET /models` endpoint for live model-catalog fetches.
     #[serde(default)]
     pub models_url: Option<String>,
     #[serde(default)]
@@ -80,11 +72,8 @@ pub struct ProviderEnvMapping {
     pub hermes: Option<HermesProviderProfile>,
 }
 
-/// Claude Code-specific headless provisioning metadata for one provider.
-///
-/// `companion_env_vars`/`optional_env_vars` are `Option`s so an omitted list
-/// (fall back to the provider-level and env_vars.toml lists) is
-/// distinguishable from an explicitly empty one.
+/// Claude Code-specific headless provisioning metadata for one provider. The env-var lists are
+/// `Option` so an omitted list (fall back to provider-level) differs from an explicitly empty one.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ClaudeCodeProviderProfile {
     #[serde(default)]
@@ -109,13 +98,8 @@ pub struct ClaudeCodeProviderProfile {
     pub optional_env_vars: Option<Vec<String>>,
 }
 
-/// Hermes-specific headless provisioning metadata for one provider.
-///
-/// `api_mode` is the wire transport declared on the managed named-provider
-/// entry when an endpoint override reroutes this provider. `None` marks the
-/// pair as unable to carry an override — the named entry must state its
-/// transport, and a provider without a known one cannot be rerouted (see
-/// `agent_provider_accepts_endpoint_override`).
+/// Hermes-specific headless provisioning metadata for one provider; a `None` `api_mode` marks
+/// the pair as unable to carry an endpoint override.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct HermesProviderProfile {
     #[serde(default)]
@@ -379,9 +363,8 @@ impl ProviderKeyMapping {
             )?;
             if let Some(models_url) = mapping.models_url.as_deref() {
                 validate_token(&format!("providers.{primary_id}.models_url"), models_url)?;
-                // The fetch sends the operator's API key as a bearer token, so
-                // plaintext endpoints are rejected outright (tests use the
-                // compile-gated ACP_STACK_PROVIDER_MODELS_BASE seam instead).
+                // The fetch sends the operator's API key as a bearer token, so plaintext
+                // endpoints are rejected outright.
                 if !models_url.starts_with("https://") {
                     return provider_mapping_error(format!(
                         "provider `{primary_id}` models_url must be an HTTPS URL"
@@ -394,8 +377,6 @@ impl ProviderKeyMapping {
             if let Some(profile) = &mapping.hermes {
                 self.validate_hermes_profile(mapping, profile)?;
             } else if mapping.agents.iter().any(|agent| agent == HERMES_AGENT_ID) {
-                // The override lane needs the profile to state its wire
-                // transport, so a hermes-enabled provider cannot forget it.
                 return provider_mapping_error(format!(
                     "provider `{primary_id}` supports `{HERMES_AGENT_ID}` but declares no [providers.hermes] profile"
                 ));
@@ -640,8 +621,7 @@ pub fn is_claude_code_profiled_provider(provider_id: &str) -> bool {
     claude_code_profile_for_provider_id(provider_id).is_some()
 }
 
-/// The wire transport the managed Hermes named-provider entry declares for
-/// this provider when an endpoint override reroutes it.
+/// The wire transport the managed Hermes named-provider entry declares for this provider.
 pub fn hermes_api_mode_for_provider_id(provider_id: &str) -> Option<&'static str> {
     ProviderKeyMapping::load_embedded()
         .provider_mapping(provider_id)
@@ -655,17 +635,8 @@ pub fn provider_uses_agent_native_auth(agent_id: &str, provider_id: &str) -> boo
             .is_some_and(|profile| profile.agent_native_auth)
 }
 
-/// Pairs that cannot carry an operator-supplied endpoint:
-/// - Codex plus the built-in `openai` id (see `CODEX_OPENAI_PROVIDER_ID`).
-/// - Hermes plus a mapped provider whose Hermes profile declares no api_mode:
-///   the override rides a named `providers:` entry that must state its wire
-///   transport, and a provider without a known one cannot be rerouted.
-///
-/// Unknown provider ids (configured custom providers) accept: the transport
-/// comes from the custom provider's declared api. Deliberately not
-/// `provider_uses_agent_native_auth`, which also covers Claude Code's
-/// agent-native providers — those do honour an override, via
-/// `ANTHROPIC_BASE_URL`.
+/// Whether an (agent, provider) pair can carry an operator-supplied endpoint. Codex plus the
+/// built-in `openai` id and Hermes pairs with no declared api_mode cannot; unknown ids can.
 pub fn agent_provider_accepts_endpoint_override(agent_id: &str, provider_id: &str) -> bool {
     if agent_id == CODEX_AGENT_ID && provider_id == CODEX_OPENAI_PROVIDER_ID {
         return false;
@@ -695,25 +666,16 @@ pub fn provider_name_for_provider_id(provider_id: &str) -> Option<&'static str> 
         .map(|provider| provider.name.as_str())
 }
 
-/// Compact summary of one provider available to a given agent. Used by
-/// the `/v1/providers` API and the future operator UI to render a
-/// provider picker without any further mapping logic.
+/// Compact summary of one provider available to a given agent, as served by `/v1/providers`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentProviderSummary {
-    /// Operator-facing provider id (the value the operator passes as
-    /// `--provider`). Always a value listed in the embedded mapping.
+    /// Operator-facing provider id (the value passed as `--provider`).
     pub id: &'static str,
     /// Human-readable name pulled from the provider mapping.
     pub name: &'static str,
-    /// Agent-native provider id when the agent uses a different label
-    /// than the operator-facing id (e.g. Codex uses `openai` natively
-    /// but the operator might pass `openai-chat`). `None` when the
-    /// agent uses the same id.
+    /// Agent-native provider id, set only when it differs from the operator-facing id.
     pub agent_provider_id: Option<&'static str>,
-    /// Default API-key env var ref for this (agent, provider) pair, if
-    /// the embedded mapping declares one. `None` indicates the
-    /// operator must configure a custom provider OR the provider uses
-    /// agent-native auth (e.g. Claude Code + Amazon Bedrock).
+    /// Default API-key env var ref for this pair; `None` for custom or agent-native-auth setups.
     pub default_api_key_ref: Option<&'static str>,
     /// Required companion env vars beyond the API key.
     pub companion_env_refs: Vec<&'static str>,
@@ -721,8 +683,7 @@ pub struct AgentProviderSummary {
     pub optional_env_refs: Vec<&'static str>,
 }
 
-/// Every operator-facing provider id supported for `agent_id`, in
-/// embedded-mapping order. Empty when the agent has no provider scope.
+/// Every operator-facing provider id supported for `agent_id`, in embedded-mapping order.
 pub fn providers_for_agent(agent_id: &str) -> Vec<AgentProviderSummary> {
     let mapping = ProviderKeyMapping::load_embedded();
     let mut seen: BTreeSet<&'static str> = BTreeSet::new();
@@ -732,27 +693,18 @@ pub fn providers_for_agent(agent_id: &str) -> Vec<AgentProviderSummary> {
             continue;
         }
         for id in &provider.id {
-            // Each provider mapping may list multiple alias ids
-            // (e.g. `openai` + `openai-chat`). Emit each as its own
-            // operator-facing entry so the API surface mirrors what
-            // `acps init --provider <id>` accepts.
+            // Alias ids each become their own entry, mirroring what `--provider <id>` accepts.
             if !seen.insert(static_str(id)) {
                 continue;
             }
             let id_static = static_str(id);
             let mut default = env_var_for_agent_provider_id(agent_id, id_static);
-            // A native-auth pair takes no API key at all. Advertising a
-            // default here would let a UI client write a config the CLI
-            // then rejects, so clients see "no api_key_ref required" and
-            // route through the harness's own auth instead.
+            // A native-auth pair takes no API key; advertising a default would let a client
+            // write a config the CLI then rejects.
             if provider_uses_agent_native_auth(agent_id, id_static) {
                 default = None;
             }
             let native = provider.agent_native_provider_id(agent_id).map(static_str);
-            // Only surface `agent_provider_id` when it actually differs
-            // from the operator-facing id. Always serializing it
-            // (even when equal) made every provider look like an
-            // alias, which the docs explicitly say it isn't.
             let agent_provider_id = match native {
                 Some(value) if value == id_static => None,
                 other => other,
@@ -770,16 +722,11 @@ pub fn providers_for_agent(agent_id: &str) -> Vec<AgentProviderSummary> {
     summaries
 }
 
-/// Re-borrow an embedded `String` as a `'static` `&str`. The provider
-/// mapping is loaded into a `LazyLock` that lives for the program's
-/// lifetime, so any string borrowed from it is effectively `'static`;
-/// the explicit transmute makes that promise explicit and lets the
-/// summary structs hold `&'static str` for cheap cloning.
+/// Re-borrow an embedded `String` as a `'static` `&str`. Callers MUST pass a string borrowed
+/// from `PROVIDER_KEY_MAPPING`; any other origin makes the lifetime extension unsound.
 fn static_str(value: &str) -> &'static str {
-    // SAFETY: `value` is borrowed from `PROVIDER_KEY_MAPPING`, a
-    // `LazyLock<ProviderKeyMapping>` that is never dropped. Extending
-    // the lifetime to `'static` is sound because the underlying
-    // allocation outlives the program.
+    // SAFETY: `PROVIDER_KEY_MAPPING` is a `LazyLock` that is never dropped, so its allocations
+    // outlive the program.
     unsafe { std::mem::transmute::<&str, &'static str>(value) }
 }
 
@@ -925,14 +872,8 @@ pub fn env_ref_allows_provider(env_var: &str, provider_id: &str) -> bool {
         })
 }
 
-/// Validate env-keyed credential values against a provider's canonical env-var
-/// contract. `field` attributes rejections to the caller's input field.
-///
-/// The supplied keys must include the canonical API-key env var and every
-/// required companion, and may include the provider's optional env vars;
-/// anything else is rejected rather than guessed at, because a guessed mapping
-/// would surface later as a spawn-time env resolution failure instead of a
-/// clear rejection here.
+/// Validate env-keyed credential values against a provider's canonical env-var contract: the
+/// API-key var and every companion are required, optional vars are allowed, anything else rejected.
 pub fn validate_env_keyed_credential_values(
     provider_id: &str,
     values: &BTreeMap<String, String>,
@@ -980,11 +921,8 @@ pub fn validate_env_keyed_credential_values(
     Ok(())
 }
 
-/// Validate env-keyed credential values for a custom (non-mapped) provider.
-/// The contract is the configured `api_key_ref` from the agent TOML: exactly
-/// that one env var, non-empty. Kept beside
-/// [`validate_env_keyed_credential_values`] so the two credential contracts
-/// live together.
+/// Validate env-keyed credential values for a custom provider: exactly the configured
+/// `api_key_ref` env var, non-empty.
 pub fn validate_custom_provider_credential_values(
     provider_id: &str,
     api_key_ref: &str,

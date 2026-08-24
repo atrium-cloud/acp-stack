@@ -38,9 +38,8 @@ mod builders;
 mod deps;
 mod prompts;
 
-// Items consumed by the `init` parent module (its `use self::starter_config::{…}`
-// list) escape `starter_config`, so they are declared `pub(crate)` in their
-// sibling and re-exported here.
+// Items the `init` parent consumes escape `starter_config`, so the sibling declares
+// them `pub(crate)` and they are re-exported here.
 pub(super) use self::builders::{
     mcp_servers_from_prompted, merge_prompted_mcp_servers,
     reject_data_source_args_for_existing_config, reject_starter_only_mcp_args_for_existing_config,
@@ -58,9 +57,8 @@ pub(super) use self::prompts::{
     validate_stack_update_args,
 };
 
-// Plain (non-re-exporting) globs make each sibling's `pub(super)` items private
-// members of this parent module, so the other siblings and the `tests` module
-// reach them via `super::NAME` / `super::*`.
+// Plain globs make each sibling's `pub(super)` items private members here, so the
+// other siblings reach them via `super::NAME`.
 use self::builders::*;
 
 #[cfg(test)]

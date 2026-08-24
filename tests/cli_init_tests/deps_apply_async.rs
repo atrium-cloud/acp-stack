@@ -7,9 +7,7 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-/// Sleep long enough that init's remaining lanes finish while the install is
-/// still running, so the assertions after init exits observe a live
-/// background apply rather than a completed one.
+/// Long enough that init's remaining lanes finish while the install is still running.
 const SLOW_INSTALL_SECONDS: u64 = 8;
 /// Upper bound on waiting for the detached worker to settle its run row.
 const SETTLE_DEADLINE: Duration = Duration::from_secs(60);
@@ -79,8 +77,6 @@ fn init_deps_apply_async_exits_while_the_install_keeps_running() {
         .stdout(predicates::str::contains("initialized acp-stack"));
 
     let store = open_state(tempdir.path());
-    // Init exited while the worker is still sleeping: the run row is live and
-    // the install's artifact does not exist yet.
     let run = latest_run(&store);
     assert_eq!(run.status, DEPS_APPLY_RUN_RUNNING, "{run:?}");
     assert_eq!(run.origin, DEPS_APPLY_ORIGIN_INIT_BACKGROUND);
@@ -122,9 +118,7 @@ fn init_deps_apply_async_exits_while_the_install_keeps_running() {
 fn init_deps_apply_async_failure_settles_retryable_without_failing_init() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    // The same failing action fails init synchronously (covered in
-    // deps_updates.rs); with `--deps-apply-async` init completes and the
-    // failure lands on the queryable run row instead.
+    // The same action fails init synchronously; async moves the failure onto the run row.
     acps_command()
         .env("HOME", tempdir.path())
         .args([
@@ -150,7 +144,6 @@ fn init_deps_apply_async_failure_settles_retryable_without_failing_init() {
     assert_eq!(settled.failed, 1);
     assert_eq!(settled.error_code.as_deref(), Some("deps.apply_failed"));
 
-    // The per-action audit row carries the exit detail.
     let rows = store
         .query_installer_runs_filtered(Some("deps_apply"), 10)
         .expect("installer history should query");
@@ -169,10 +162,8 @@ fn init_deps_apply_async_failure_settles_retryable_without_failing_init() {
 fn init_deps_apply_async_failure_handoff_carries_the_background_run_id() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    // Launch the async worker at the deps step, then fail a LATER step: the
-    // managed Cloudflare edge step resolves a secret ref that was never stored,
-    // so init fails after the background install was already claimed. The
-    // failure handoff frame must still name the run so the platform can poll it.
+    // Launch the async worker at the deps step, then fail a later step (the managed Cloudflare
+    // step resolves a ref that was never stored) so the handoff frame must still name the run.
     let output = acps_command()
         .env("HOME", tempdir.path())
         .args([
@@ -217,7 +208,6 @@ fn init_deps_apply_async_failure_handoff_carries_the_background_run_id() {
         .unwrap_or_else(|| panic!("failure handoff must carry deps_apply_run_id: {body}"));
     assert!(run_id.starts_with("dap_"), "{run_id}");
 
-    // The id names the real launched run row, not a synthesized placeholder.
     let store = open_state(tempdir.path());
     let run = store
         .lookup_deps_apply_run(run_id)
@@ -230,10 +220,8 @@ fn init_deps_apply_async_failure_handoff_carries_the_background_run_id() {
 fn init_deps_apply_async_pre_spawn_setup_failure_settles_the_claimed_row() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    // Plant a regular file where the worker's per-run log directory must be
-    // created, so `create_dir_owner_only` fails AFTER the run row is claimed but
-    // BEFORE the worker spawns. The claimed null-pid row must settle, not sit
-    // `running` and wedge the single-flight slot until the 60s grace expires.
+    // A regular file where the per-run log directory belongs fails `create_dir_owner_only` after
+    // the row is claimed but before the worker spawns; that row must settle, not wedge the slot.
     let log_base = tempdir.path().join(".local/share/acp-stack/installer-logs");
     fs::create_dir_all(&log_base).expect("installer-logs base");
     fs::write(log_base.join("deps_apply"), b"not a directory").expect("plant blocker file");
@@ -285,11 +273,8 @@ fn init_deps_apply_async_rejects_a_foreign_live_background_install() {
     fs::create_dir_all(state_path.parent().expect("state parent")).expect("state dir");
     let seeded = StateStore::open(&state_path).expect("seed store");
     seeded.migrate().expect("seed migrate");
-    // A still-running background install owned by a DIFFERENT init run (live
-    // pid: this test process). A fresh init must not adopt it — that would
-    // record its deps step against foreign work — so the step fails fast
-    // with the in-flight error instead. (Same-run adoption on resume is
-    // covered by the launch-path unit tests in src/cli/init/run/tests.rs.)
+    // A live background install owned by a different init run: adopting it would record this
+    // init's deps step against foreign work, so the step must fail with the in-flight error.
     seeded
         .claim_deps_apply_run(
             NewDepsApplyRun {

@@ -66,8 +66,8 @@ fn resolve_source_ref_rejects_unknown_source() {
 
 #[test]
 fn resolve_source_ref_catalog_alias_wins_over_shadowing_user_source() {
-    // A hand-edited `[[skills.sources]]` entry whose alias collides with a
-    // curated one must not hijack it: the catalog is resolved first.
+    // A declared alias colliding with a curated one must not hijack it: the
+    // catalog resolves first.
     let catalog = SkillCatalog::load_embedded().expect("catalog");
     let sources = vec![user_source("anthropic", "evil/repo", "main")];
 

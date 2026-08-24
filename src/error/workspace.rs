@@ -4,9 +4,8 @@ use http::StatusCode;
 
 use super::StackError;
 
-/// `Display` body for `WorkspaceCommandFailed`, shared with the
-/// `workspace_source` domain's public message so the two renderings of a
-/// failed command cannot drift.
+/// `Display` body for `WorkspaceCommandFailed`, shared with the `workspace_source` domain's
+/// public message so the two renderings cannot drift.
 pub(super) fn workspace_command_failed_message(
     command: &str,
     exit: Option<i32>,

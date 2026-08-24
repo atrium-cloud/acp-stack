@@ -422,8 +422,7 @@ fn init_reports_unsupported_mcp_transport_as_ignored() {
     assert!(payload.contains(r#""probe_status":"ok""#), "{payload}");
     assert!(payload.contains("mcpCapabilities.http"), "{payload}");
 
-    // Non-interactive runs never record the interactive MCP step: MCP arrives
-    // through flags and the ignored-features report, not prompts.
+    // Non-interactive runs never record the interactive MCP step.
     {
         let store = StateStore::open(default_state_path(tempdir.path())).expect("state store");
         let run = store
@@ -437,8 +436,7 @@ fn init_reports_unsupported_mcp_transport_as_ignored() {
         );
     }
 
-    // The probe persists the advertisement so capability routes answer
-    // without the agent ever having been started.
+    // The probe persists the advertisement so capability routes answer without a started agent.
     let store = StateStore::open(default_state_path(tempdir.path())).expect("state store");
     let capabilities = store
         .latest_agent_capabilities("placebo")
@@ -485,9 +483,8 @@ fn init_reports_no_ignores_when_transport_is_advertised() {
 fn init_probe_unavailable_never_fails_init() {
     let tempdir = tempfile::tempdir().expect("tempdir");
 
-    // No capabilities fixture and `--skip-workspace-init` leaves the spawn cwd
-    // unprovisioned, so the probe cannot run. Init must succeed regardless and
-    // record why the probe made no claims.
+    // No capabilities fixture plus `--skip-workspace-init` leaves the spawn cwd unprovisioned, so
+    // the probe cannot run and init must succeed anyway.
     acps_command()
         .env("HOME", tempdir.path())
         .args([

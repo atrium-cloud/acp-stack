@@ -3,9 +3,8 @@
 use super::*;
 
 impl StateStore {
-    /// Apply a partial ACP `session_info_update` to an existing local session.
-    /// The outer `Option` distinguishes an omitted field from an explicit
-    /// `null`; all unrelated metadata keys are preserved.
+    /// Apply a partial ACP `session_info_update`. The outer `Option`
+    /// distinguishes an omitted field from an explicit `null`.
     pub fn update_session_info(
         &self,
         id: &str,
@@ -64,12 +63,9 @@ impl StateStore {
         })
     }
 
-    /// Replace the stored agent-advertised slash-command list for a session
-    /// (ACP `available_commands_update` is latest-wins, so an empty list is a
-    /// legitimate state and still overwrites). Bumping `sessions.updated_at`
-    /// matches the `session_info_update` precedent above. Returns whether a
-    /// write happened; an identical re-advertisement is skipped and returns
-    /// `false`.
+    /// Replace the stored slash-command list. ACP `available_commands_update`
+    /// is latest-wins, so an empty list legitimately overwrites. Returns
+    /// whether a write happened.
     pub fn replace_session_available_commands(
         &self,
         id: &str,
@@ -95,8 +91,7 @@ impl StateStore {
                 field: "sessions.metadata_json",
                 reason: err.to_string(),
             })?;
-        // Agents may re-advertise an identical list on every turn; skip the
-        // row rewrite (and its outbox entry) when nothing changed.
+        // Agents may re-advertise an identical list on every turn.
         if metadata.get(SESSION_METADATA_AVAILABLE_COMMANDS) == Some(&commands_value) {
             return Ok(false);
         }
@@ -128,10 +123,8 @@ impl StateStore {
         Ok(true)
     }
 
-    /// Replace the stored session config-option snapshot (latest-wins, like
-    /// the available-commands twin above). Takes the already-serialized list
-    /// so the state layer stays free of the runtime's projection types.
-    /// Returns whether a write happened; an identical snapshot is skipped.
+    /// Replace the stored session config-option snapshot (latest-wins).
+    /// Returns whether a write happened.
     pub fn replace_session_config_options(
         &self,
         id: &str,
@@ -721,12 +714,9 @@ impl StateStore {
         Ok(row)
     }
 
-    /// Convenience wrapper that derives each record's target from its
-    /// `agent_id` and upserts one record at a time. Unlike a primary-key upsert
-    /// this dedups on `(target_id, agent_session_id)` — the agent's session id
-    /// is the stable external identity, not the internal row `id`. Used by
-    /// tests and any caller that has no explicit per-target grouping; the
-    /// daemon sync path calls `upsert_listed_sessions_for_target` directly.
+    /// Derive each record's target from its `agent_id` and upsert one at a
+    /// time, deduping on `(target_id, agent_session_id)` because the agent's
+    /// session id is the stable external identity, not the row `id`.
     pub fn upsert_listed_sessions(
         &self,
         records: Vec<ListedSessionRecord>,
@@ -834,10 +824,8 @@ impl StateStore {
         if old_target_id == new_target_id {
             return Ok(0);
         }
-        // The UNIQUE(target_id, agent_session_id) index would reject moving a
-        // row whose agent_session_id already exists under new_target_id. Detect
-        // it up front and fail with a subsystem-identifying error instead of
-        // surfacing a raw SQLite UNIQUE violation partway through the move.
+        // Detect UNIQUE(target_id, agent_session_id) collisions up front,
+        // rather than surfacing a raw SQLite violation partway through.
         let collisions = self.connection().query_row(
             r#"
             SELECT COUNT(*)
@@ -883,12 +871,10 @@ impl StateStore {
         Ok(ids.len())
     }
 
-    /// `POST /v1/sessions/{id}/delete`. Hard-deletes the session row together
-    /// with its prompts and per-session events. Returns the deleted record,
-    /// or `None` when the id is unknown — repeat deletes succeed silently per
-    /// ACP `session/delete`. Permission rows stay: they belong to the durable
-    /// security log, not session history. The external log mirror is
-    /// upsert-only, so the enqueued outbox row hydrates to a no-op there.
+    /// Hard-delete the session row with its prompts and events, returning
+    /// `None` for an unknown id (repeat deletes succeed silently per ACP
+    /// `session/delete`). Permission rows stay: they are the durable security
+    /// log, not session history.
     pub fn delete_session(&self, id: &str) -> Result<Option<SessionRecord>> {
         let Some(record) = self.get_session(id)? else {
             return Ok(None);

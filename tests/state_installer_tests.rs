@@ -352,7 +352,7 @@ fn init_step_skipped_keeps_started_at_and_clears_error() {
     assert_eq!(steps[0].status, INIT_STEP_FAILED);
     assert_eq!(steps[0].error_kind.as_deref(), Some("config.invalid"));
 
-    // Re-run: verifier-skipped path must clear the prior error tuple.
+    // The verifier-skipped path must clear the prior error tuple.
     store
         .mark_init_step_skipped(&step.id, r#"{"attempt":1,"verified":true}"#)
         .expect("skipped mark");
@@ -497,8 +497,6 @@ fn installer_run_running_row_is_visible_then_finalized_in_place() {
         ))
         .expect("running row should insert");
 
-    // While the step runs, the row is visible to the active query and the
-    // history query alike, with no finish timestamp yet.
     let active = store
         .query_active_installer_runs(None)
         .expect("active query");
@@ -524,7 +522,7 @@ fn installer_run_running_row_is_visible_then_finalized_in_place() {
         )
         .expect("finish should update the running row");
 
-    // The same row id now carries the terminal state; no second row appears.
+    // The same row id carries the terminal state; no second row appears.
     assert!(
         store
             .query_active_installer_runs(None)
@@ -547,7 +545,7 @@ fn installer_run_running_row_is_visible_then_finalized_in_place() {
         row.log_dir.as_deref(),
         Some("/tmp/installer-logs/test-agent/step")
     );
-    // Identity fields fixed at insert time survive the update untouched.
+    // Identity fields fixed at insert survive the update untouched.
     assert_eq!(row.agent_id.as_deref(), Some("test-agent"));
     assert_eq!(row.step, "harness");
     assert_eq!(row.operation, INSTALLER_OPERATION_INSTALL);
@@ -560,8 +558,7 @@ fn installer_run_concurrent_steps_track_independently() {
     let store = StateStore::open(&path).expect("state should open");
     store.migrate().expect("migration should pass");
 
-    // Adapter-backed installs run harness and adapter steps on parallel
-    // threads; both running rows must be visible and independently finalizable.
+    // Adapter-backed installs run harness and adapter steps on parallel threads.
     let harness = store
         .append_installer_run(running_installer_input(
             "test-agent",
@@ -584,7 +581,6 @@ fn installer_run_concurrent_steps_track_independently() {
     // Oldest first, so a progress view renders steps in start order.
     assert_eq!(active[0].step, "harness");
     assert_eq!(active[1].step, "adapter");
-    // Other agents see nothing.
     assert!(
         store
             .query_active_installer_runs(Some("other-agent"))
@@ -646,8 +642,7 @@ fn finish_installer_run_rejects_unknown_and_completed_rows() {
     store
         .finish_installer_run(&running.id, finish.clone())
         .expect("first finish");
-    // A second finish must not rewrite the completed audit row: the row no
-    // longer matches `status = 'running'`.
+    // A second finish must not rewrite a completed audit row.
     store
         .finish_installer_run(&running.id, finish)
         .expect_err("double finish must fail");

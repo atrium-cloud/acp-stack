@@ -81,18 +81,13 @@ fn init_records_workspace_before_provider_configure() {
 
 #[test]
 fn init_resume_targets_specific_pending_run_by_id() {
-    // Simulate the post-crash shape: a prior init created the run but
-    // never reached `init_complete`, so the row stays `pending`.
-    // `acps init --resume --run-id <id>` must pick it up, run any
-    // remaining steps, and finalize it `succeeded`.
+    // The post-crash shape: a run row left `pending` must be picked up by
+    // `--resume --run-id` and finalized `succeeded`.
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_init_with_home(tempdir.path());
 
     let state_path = tempdir.path().join(".local/share/acp-stack/state.sqlite");
     let store = acp_stack::state::StateStore::open(&state_path).expect("state opens");
-    // Inject a synthetic pending run that resume will discover. Use the
-    // public state API so this test exercises the same code path the
-    // orchestrator would on a real crash mid-init.
     let pending = store
         .create_init_run(acp_stack::state::NewInitRun {
             runtime_user: None,

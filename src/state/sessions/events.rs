@@ -3,11 +3,7 @@
 use super::*;
 
 impl StateStore {
-    /// Append an event scoped to a session. Used by the ACP bridge to persist
-    /// `session/update` notifications. `kind` is the dotted event kind (e.g.
-    /// `session.update`); `payload_json` is the verbatim notification body.
-    /// Wrapper around `append_session_event_with_source` that records the
-    /// default `system` source for callers that have no better label.
+    /// Append a session-scoped event with the default `system` source.
     pub fn append_session_event(
         &self,
         session_id: &str,
@@ -68,11 +64,9 @@ impl StateStore {
         })?;
 
         if let Some(hub) = self.event_hub() {
-            // `logs` subscribers expect every persisted event, and
-            // `sessions.{id}` subscribers also need it so a per-session
-            // WebSocket sees the same row that landed in SQLite. Missing the
-            // second call stranded session-scoped events on the logs topic
-            // only, breaking reconnect/live-tail flows.
+            // Both publishes are required: dropping the second strands
+            // session-scoped events on the logs topic only, which breaks
+            // reconnect/live-tail flows.
             hub.publish_log_event(&event);
             hub.publish_session_update(session_id, &event, &event.payload_json);
         }
@@ -89,10 +83,8 @@ impl StateStore {
         let limit = i64::from(limit);
         match after {
             Some(after_id) => {
-                // Stable ordering pairs `(created_at, id)` so two events sharing
-                // a created_at still progress past the cursor. Compare on the
-                // tuple instead of just id so a slow inserter cannot reorder
-                // pagination across a clock tick.
+                // Compare the `(created_at, id)` tuple, not just id, so a slow
+                // inserter cannot reorder pagination across a clock tick.
                 let mut statement = self.connection().prepare(
                     r#"
                     SELECT e.id, e.created_at, e.level, e.kind, e.message, e.payload_json, e.source, e.session_id
@@ -124,11 +116,8 @@ impl StateStore {
         }
     }
 
-    /// Newest-first window of session-scoped events. Used by the snapshot
-    /// endpoint so a reconnecting client gets the most-recent slice without
-    /// having to page from the beginning of the table. Ordering mirrors
-    /// `query_session_events` (the `(created_at, id)` pair is stable across
-    /// inserts sharing a clock tick), just reversed.
+    /// Newest-first window of session-scoped events, so a reconnecting client
+    /// gets the most-recent slice without paging from the start of the table.
     pub fn latest_session_events(&self, session_id: &str, limit: u32) -> Result<Vec<Event>> {
         let limit = i64::from(limit);
         let mut statement = self.connection().prepare(

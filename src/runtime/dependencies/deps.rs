@@ -1,15 +1,5 @@
-//! Declarative dependency checker.
-//!
-//! `[dependencies]` in the config declares external programs, package names,
-//! runtimes, and MCP servers that the operator expects to be available. This
-//! module reports their status — but **does not install** anything. Per
-//! `docs/specs/api/api.md#dependencies-api`, 0.0.2 reports missing
-//! dependencies; broad automatic installation is out of scope.
-//!
-//! Commands and runtimes are checked as executable names on PATH. Linux package
-//! entries are checked against local package databases when one is available.
-//! MCP entries cross-reference `[[mcp.servers]]` so the operator can see which
-//! declared integrations have actual server configs.
+//! Declarative dependency checker: reports the status of `[dependencies]`
+//! entries and installs nothing.
 
 use std::path::PathBuf;
 use std::process::Command;

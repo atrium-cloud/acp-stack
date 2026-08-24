@@ -1,9 +1,6 @@
-//! Static policy evaluation for the command gateway.
-//!
-//! `evaluate_policy` matches submitted command lines and shell command
-//! segments against `[permissions].deny`/`review` before any subprocess is
-//! spawned. `resolve_cwd_under_workspace` refuses cwds that escape
-//! `workspace.root` via symlink/`..`.
+//! Static policy evaluation for the command gateway: `evaluate_policy` matches command lines and
+//! shell segments against `[permissions]` BEFORE any subprocess is spawned, and
+//! `resolve_cwd_under_workspace` refuses cwds escaping `workspace.root` via symlink or `..`.
 
 mod matching;
 mod normalize;

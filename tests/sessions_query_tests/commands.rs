@@ -99,8 +99,7 @@ async fn sessions_commands_run_submits_prompt_with_advisory_flag() {
             .expect("commands stored");
     }
 
-    // A leading slash is normalized even behind surrounding whitespace; the
-    // composed prompt text carries exactly one slash plus the args.
+    // A leading slash is normalized even behind surrounding whitespace.
     let body: Value = client
         .post(format!(
             "{}/v1/sessions/{}/commands",

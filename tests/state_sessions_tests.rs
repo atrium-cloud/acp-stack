@@ -78,8 +78,7 @@ fn replace_session_available_commands_replaces_and_advances_updated_at() {
     assert_eq!(metadata["available_commands"][0]["name"], "compact");
     assert!(metadata["available_commands_updated_at"].is_string());
 
-    // Re-advertising an identical list is a no-op: no row rewrite, no
-    // updated_at bump.
+    // Re-advertising an identical list is a no-op: no row rewrite, no updated_at bump.
     let unchanged_at = session.updated_at.clone();
     std::thread::sleep(std::time::Duration::from_millis(5));
     let changed = store
@@ -424,9 +423,8 @@ fn renames_session_target_id_for_legacy_agent_switch() {
 
 #[test]
 fn insert_session_for_target_rejects_duplicate_agent_session_id() {
-    // The UNIQUE(target_id, agent_session_id) index is the sole guard against a
-    // duplicate session under one target (insert_session_for_target has no ON
-    // CONFLICT). A second insert of the same pair must error.
+    // `insert_session_for_target` has no ON CONFLICT, so the UNIQUE(target_id, agent_session_id)
+    // index is the sole guard against a duplicate session under one target.
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let path = tempdir.path().join("state.sqlite");
     let store = StateStore::open(&path).expect("state should open");
@@ -480,9 +478,8 @@ fn insert_session_for_target_rejects_duplicate_agent_session_id() {
 
 #[test]
 fn rename_session_target_id_rejects_agent_session_id_collision() {
-    // When the destination target already owns a session whose agent_session_id
-    // matches one being moved in, the rename must fail fast (before any row
-    // moves) rather than surface a raw UNIQUE violation mid-move.
+    // The rename must fail fast, before any row moves, rather than surface a raw UNIQUE violation
+    // mid-move.
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let path = tempdir.path().join("state.sqlite");
     let store = StateStore::open(&path).expect("state should open");
@@ -1007,7 +1004,6 @@ fn delete_session_removes_row_prompts_and_events_and_repeats_silently() {
             .is_empty()
     );
 
-    // Unknown and already-deleted ids succeed silently.
     assert!(
         store
             .delete_session("sess_doomed")

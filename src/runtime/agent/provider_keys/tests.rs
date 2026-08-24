@@ -319,10 +319,6 @@ fn agent_native_provider_ids_are_data_driven() {
 
 #[test]
 fn pi_native_config_provider_ids_resolve_to_canonical() {
-    // `inspect_pi` maps a `defaultProvider` value through
-    // `canonical_provider_id_for_agent_native_id("pi", ...)`. Pi's native
-    // ids match acps canonical ids for shared providers and differ only
-    // where the mapping declares an alias.
     assert_eq!(
         canonical_provider_id_for_agent_native_id("pi", "anthropic"),
         Some("anthropic")
@@ -331,8 +327,6 @@ fn pi_native_config_provider_ids_resolve_to_canonical() {
         canonical_provider_id_for_agent_native_id("pi", "openai"),
         Some("openai")
     );
-    // Pi's `vercel-ai-gateway`/`fireworks`/`together` native ids collapse
-    // to the same canonical id acps stores.
     assert_eq!(
         canonical_provider_id_for_agent_native_id("pi", "vercel-ai-gateway"),
         Some("vercel-ai-gateway")
@@ -341,8 +335,6 @@ fn pi_native_config_provider_ids_resolve_to_canonical() {
         canonical_provider_id_for_agent_native_id("pi", "fireworks"),
         Some("fireworks")
     );
-    // A provider Pi lists but acps does not map for `pi` yields no
-    // canonical id, so the import surfaces an incompatible candidate.
     assert_eq!(
         canonical_provider_id_for_agent_native_id("pi", "totally-unknown-provider"),
         None
@@ -411,8 +403,8 @@ fn claude_code_provider_refs_use_agent_specific_profiles() {
         "claude-code",
         "amazon-bedrock"
     ));
-    // The Claude Code profile declares an explicit optional list so the
-    // Pi-only auth overrides do not leak in via provider-level fallback.
+    // The explicit optional list stops Pi-only auth overrides leaking in via
+    // provider-level fallback.
     let bedrock_optional = optional_env_refs_for_agent_provider_id("claude-code", "amazon-bedrock");
     assert!(bedrock_optional.contains(&"AWS_PROFILE"));
     assert!(!bedrock_optional.contains(&"AWS_BEDROCK_SKIP_AUTH"));
@@ -426,9 +418,8 @@ fn claude_code_provider_refs_use_agent_specific_profiles() {
         "claude-code",
         "microsoft-foundry"
     ));
-    // Codex reads `OPENAI_API_KEY` from its environment, so its built-in
-    // openai lane is key-driven like any other mapped provider. The pair is
-    // still refused an endpoint override, which is a separate capability.
+    // Codex's built-in openai lane is key-driven, yet still refused an endpoint
+    // override — a separate capability.
     assert!(!provider_uses_agent_native_auth("codex", "openai"));
     assert_eq!(
         env_var_for_agent_provider_id("codex", "openai"),
@@ -862,8 +853,7 @@ fn endpoint_override_pairs_are_data_driven() {
         "hermes",
         "openrouter"
     ));
-    // Unknown ids are configured custom providers; the wire shape comes from
-    // the custom provider's declared api.
+    // Unknown ids are configured custom providers.
     assert!(agent_provider_accepts_endpoint_override(
         "hermes",
         "myprovider"
@@ -931,9 +921,8 @@ api_mode = "chat_completions"
 
 #[test]
 fn hermes_profile_may_omit_api_mode_to_refuse_overrides() {
-    // A profile without api_mode is valid: it marks a hermes-enabled provider
-    // whose wire transport is unknown, so the pair refuses endpoint overrides
-    // instead of guessing one.
+    // A profile without api_mode marks an unknown wire transport, so the pair
+    // refuses endpoint overrides instead of guessing one.
     ProviderKeyMapping::from_toml(
         r#"
 [[providers]]

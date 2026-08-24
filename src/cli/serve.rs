@@ -35,8 +35,7 @@ pub(super) enum ServeMode {
 
 const ALLOW_ROOT_ENV: &str = "ACP_STACK_ALLOW_ROOT";
 
-/// Cap on the command-id list embedded in the `server.reconciled` event so a
-/// huge sweep cannot bloat a single payload row.
+/// Cap on the command-id list embedded in the `server.reconciled` event payload.
 const RECONCILED_COMMAND_IDS_CAP: usize = 50;
 
 fn allow_root_env_enabled() -> bool {
@@ -101,9 +100,8 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
     let loaded_config = config::load_for_serve(&config_path)?;
     let config = loaded_config.config;
 
-    // Fail closed: if a sandbox backend is configured but cannot run on this
-    // host, refuse to serve rather than start a daemon that silently fails the
-    // security posture at the first agent spawn.
+    // Fail closed: a configured sandbox backend that cannot run on this host must refuse to serve
+    // rather than silently lose the security posture at the first agent spawn.
     if config.workspace.sandbox.mode != config::SandboxMode::Off
         && let Err(reason) = crate::runtime::sandbox::preflight(
             &config.workspace.sandbox,
@@ -131,25 +129,16 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
     }
     let auth_verifiers = store.load_auth_verifier_pair()?;
 
-    // Open the secret store + resolve any Supabase settings BEFORE running
-    // startup reconciles. The reconciles transition orphaned prompt/command/
-    // permission rows to terminal status; if external logging is enabled but
-    // the flag isn't flipped yet, those terminal writes don't enqueue into
-    // the outbox and Supabase would never see the post-crash settlement.
+    // Ordering: the secret store and Supabase settings must resolve BEFORE the startup reconciles,
+    // or their terminal-status writes land before the outbox flag flips and never reach Supabase.
     let secret_store = SecretStore::open(&home)?;
 
-    // Gate root execution behind a dev-only opt-in. The daemon never drops
-    // privileges itself, so a `User=` directive in the systemd unit or a
-    // non-root `USER` in the Dockerfile is the production path.
     check_root_constraints(process_euid, allow_root)?;
     if process_euid == 0 {
         tracing::warn!("acps dev serve running as root with explicit development opt-in");
     }
 
-    // Resolve the Supabase secret API key only when external logging is
-    // explicitly enabled; per spec, a disabled stanza must never reach into
-    // the secret store. The outbox flag has to flip BEFORE the startup
-    // reconciles so their terminal-status writes get mirrored.
+    // Per spec, a disabled stanza must never reach into the secret store.
     let supabase_settings = if config.logging.supabase.as_ref().is_some_and(|s| s.enabled) {
         let supabase = config
             .logging
@@ -187,18 +176,9 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
         None
     };
 
-    // Startup reconcile sweeps. Each is independently best-effort: a
-    // transient failure (e.g. SQLITE_BUSY from a concurrent writer) must not
-    // abort startup with the earlier sweeps already applied — the missed rows
-    // settle on the next restart instead. Permissions are swept BEFORE
-    // commands so a partial run can only strand a command in `pending`
-    // (visible, poll keeps going), never fail a command while leaving its
-    // permission approvable.
-
-    // Reconcile any prompts left in-flight by a previous crash/restart.
-    // The in-memory task registry is empty at startup, so a `pending` or
-    // `running` row from before would never get a terminal status without
-    // this sweep, leaving CLI/HTTP clients polling forever.
+    // Startup reconcile sweeps, each independently best-effort so a transient failure leaves the
+    // missed rows for the next restart. Permissions sweep BEFORE commands so a partial run can only
+    // strand a command in `pending`, never fail a command while leaving its permission approvable.
     let reconciled_prompts = match store.reconcile_orphaned_prompts("daemon restart") {
         Ok(reconciled) => {
             if reconciled > 0 {
@@ -215,10 +195,8 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
         }
     };
 
-    // Reconcile pending permission rows. ACP-source rows are canceled (the
-    // request channel is gone after restart); command-source rows are
-    // expired so the spec's "clients never see them stay pending forever"
-    // promise holds across restart.
+    // ACP-source permission rows are canceled (their request channel is gone); command-source rows
+    // are expired instead.
     let (perm_canceled, perm_expired) = match store.reconcile_orphaned_permissions() {
         Ok((canceled, expired)) => {
             if canceled > 0 || expired > 0 {
@@ -236,11 +214,7 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
         }
     };
 
-    // Same sweep for the command gateway: a daemon restart kills any
-    // mediated subprocesses via `kill_on_drop`, but their `commands` rows
-    // are not finalized along the way. Mark them `failed` so polling
-    // clients see them settle. Dependent pending permissions are canceled in
-    // the same transaction.
+    // `kill_on_drop` reaps mediated subprocesses on restart without finalizing their `commands` rows.
     let (reconciled_command_ids, command_permissions_canceled) = match store
         .reconcile_orphaned_commands()
     {
@@ -268,10 +242,6 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
         .map_err(|source| StackError::ServeIo { source })?;
 
     runtime.block_on(async move {
-        // Bind first, then record `server.starting`. Recording before bind
-        // would leave a dangling start row whenever the address is already
-        // in use; pairing the lifecycle write with a successful bind keeps
-        // the durable trail truthful.
         let listener = tokio::net::TcpListener::bind(&bind)
             .await
             .map_err(|source| StackError::ServeBind {
@@ -292,10 +262,8 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
                 crate::local_listener::ParentPolicy::RepairOwnerOnly,
             ),
         };
-        // Bind the local UDS *and* record `server.starting` only after every
-        // listener is ready. A bind failure here is a startup-time error, not
-        // a post-start regression — emitting `server.starting` first would
-        // leave a dangling lifecycle row whenever the UDS bind fails.
+        // `server.starting` is recorded only after every listener is bound, so a bind failure
+        // cannot leave a dangling lifecycle row.
         let bound_local = crate::local_listener::bind_local(&socket_path, parent_policy).await?;
         let lifecycle = ServerLifecycle::starting(&store, &local)?;
         let runtime_paths = RuntimePaths::new(config_path, state_path);
@@ -311,10 +279,7 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
         let event_hub = app_state.event_hub.clone();
         lifecycle.started(&state_handle, &event_hub, &local).await?;
 
-        // Durable trace of the startup sweeps. Without this a client sees
-        // rows flip to terminal states across a restart with nothing in the
-        // event log explaining why. Emitted here — after the hub is attached
-        // to the store — so it also fans out live on the `logs` topic.
+        // Emitted after the hub is attached to the store so the sweep trace also fans out live.
         if reconciled_prompts > 0
             || perm_canceled > 0
             || perm_expired > 0
@@ -352,11 +317,7 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
         let agent_supervisor = app_state.agent_supervisor.clone();
         let agent_targets = app_state.agent_targets.clone();
 
-        // Spawn the Supabase sink once the runtime + shared state are ready.
-        // Failures to build the HTTP client are fatal at boot — there is no
-        // good fallback that preserves the spec's at-least-once delivery
-        // guarantee, and we'd rather not start the server than silently lose
-        // outbound events.
+        // Sink construction failures are fatal at boot: no fallback preserves at-least-once delivery.
         let supabase_sink = match supabase_settings {
             Some((supabase, key)) => Some(SupabaseSink::spawn(
                 state_handle.clone(),
@@ -367,11 +328,7 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
             None => None,
         };
 
-        // Background sweep for prompts whose agent stopped streaming. Without
-        // this task an agent that hangs mid-stream leaves the `prompts` row
-        // in `running` forever; the sweeper flips it to terminal `Stalled`
-        // so polling clients always see settlement. Held in scope so it
-        // shuts down before `acps serve` returns.
+        // Held in scope so the sweeper shuts down before `acps serve` returns.
         let stale_prompt_sweeper = StalePromptSweeper::spawn(
             state_handle.clone(),
             app_state.config.prompts.effective_stale_threshold(),
@@ -385,10 +342,8 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
             agent_supervisor.clone(),
         );
 
-        // The local UDS server runs alongside the TCP server. Both subscribe
-        // to the same SIGTERM/SIGINT handler via `axum::serve.with_graceful_shutdown`,
-        // so a single signal stops both. If the TCP serve exits first, the
-        // local task is aborted; its `SocketGuard::drop` unlinks the socket.
+        // Both listeners share one graceful-shutdown signal; aborting the local task lets its
+        // `SocketGuard::drop` unlink the socket when TCP serve exits first.
         let local_handle = tokio::spawn(crate::local_listener::serve_local(
             app_state.clone(),
             bound_local,
@@ -403,43 +358,28 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
                 tracing::warn!(error = %join_err, "local listener task panicked")
             }
         }
-        // Tear down the agent BEFORE recording server.stopped so the
-        // durable trail shows the agent went down first. A leaked agent
-        // process outliving the daemon is a real bug, not a theoretical
-        // one: see superflous-restart guarantees in security.md.
-        //
-        // The Supabase sink is intentionally kept alive across both this
-        // shutdown step and `lifecycle.stopped` below: both write durable
-        // rows (`agent.stopped`, `server.stopped`) that must reach the
-        // external mirror. The sink's own shutdown does one final drain
-        // pass before exiting so those rows are uploaded.
+        // Tear down agents BEFORE recording `server.stopped`, and keep the Supabase sink alive
+        // across both so `agent.stopped` and `server.stopped` still reach the external mirror.
         for target in agent_targets.targets() {
             target
                 .supervisor
                 .shutdown_on_serve_exit(&target.target_id, &state_handle, &event_hub)
                 .await;
         }
-        // Stop the stale-prompt sweeper before recording `server.stopped`.
-        // Otherwise a sweep racing with shutdown could append a
-        // `prompt.stalled` event after the lifecycle row, muddling the
-        // durable shutdown trail.
+        // Stop the sweeper before `server.stopped`, or a racing sweep appends `prompt.stalled`
+        // after the lifecycle row.
         stale_prompt_sweeper.shutdown().await;
         agent_auto_updater.shutdown().await;
         let reason = match &serve_result {
             Ok(()) => "signal",
             Err(_) => "error",
         };
-        // Always record stopped, even on error. Failures from the second
-        // lifecycle write are logged but do not mask the original serve error.
+        // A failing lifecycle write must not mask the original serve error.
         if let Err(err) = lifecycle.stopped(&state_handle, &event_hub, reason).await {
             tracing::error!(error = %err, "failed to record server.stopped");
         }
 
-        // Drain the Supabase sink AFTER agent.stopped + server.stopped have
-        // landed in the outbox so the final lifecycle rows reach Supabase.
-        // The sink's shutdown runs one last batch loop before exiting; any
-        // individual failure persists in `sink_failures_summary` and gets
-        // surfaced on the next start via `security check`.
+        // Drain AFTER `agent.stopped` and `server.stopped` land in the outbox.
         if let Some(sink) = supabase_sink {
             sink.shutdown().await;
         }

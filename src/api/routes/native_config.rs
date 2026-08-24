@@ -37,8 +37,7 @@ mod apply;
 mod record;
 mod rollback;
 
-// Cross-seam helpers keep `pub(super)` visibility; re-import them here so each
-// sibling's `use super::*;` resolves items defined in the other siblings.
+// Re-imported here so each sibling's `use super::*;` resolves items defined in the other siblings.
 use self::apply::*;
 use self::record::*;
 use self::rollback::*;

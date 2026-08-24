@@ -44,9 +44,7 @@ pub(crate) mod lifecycle;
 pub(crate) mod switch;
 pub(crate) mod update;
 
-// Cross-seam helpers keep their visibility; re-import them here so each
-// sibling's `use super::*;` resolves items defined in the other siblings, and
-// re-export the handlers/helpers the router and other routes reference by path.
+// Re-imported here so each sibling's `use super::*;` resolves items defined in the other siblings.
 pub(crate) use self::config_options::agent_config_options_handler;
 pub(crate) use self::lifecycle::{
     agent_restart_blockers_handler, agent_restart_handler, agent_start_handler, agent_stop_handler,
@@ -182,10 +180,8 @@ async fn install_agent_for_config(
     let log_base = crate::state::default_installer_log_base(&home);
 
     let outcome = if let Some(install) = config.agent.install.clone() {
-        // Escape-hatch shell recipe. The step's `running` row is inserted when
-        // the shell starts and finalized in place when it exits, so polling
-        // readers see the in-flight install; anything the sink did not
-        // finalize (skipped rows) is appended after the run.
+        // Escape-hatch shell recipe. The `running` row is finalized in place on exit, so polling
+        // readers see the in-flight install; rows the sink never finalized are appended after.
         let env = open_agent_env(config)?;
         let expected_sha256 = config.agent.expected_sha256.clone();
         let agent_id = config.agent.id.clone();
@@ -310,9 +306,7 @@ async fn load_fresh_config_for_target(
     Ok((config, target))
 }
 
-/// Resolve every configured `[mcp.servers]` entry into the SDK `McpServer`
-/// type. Returns an empty Vec when no MCP servers are configured, so the
-/// secret store is only opened when there's something to resolve.
+/// Resolve every configured `[mcp.servers]` entry into the SDK `McpServer` type.
 pub(super) fn open_mcp_servers(
     config: &Config,
 ) -> Result<Vec<agent_client_protocol::schema::v1::McpServer>> {

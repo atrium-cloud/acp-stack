@@ -1,16 +1,5 @@
-//! Minimal HTTP-only npm registry client used by `acps agent check`.
-//!
-//! The installer flow (`agent_installer::resolve_npm_package_version`) shells
-//! out to `npm view <pkg> version --json` so it inherits the operator's npm
-//! configuration. `acps agent check` is a read-only freshness probe that
-//! deliberately avoids spawning npm — operators may run check from a
-//! minimal container without npm installed, and a stuck npm process would
-//! poison the freshness report.
-//!
-//! The endpoint contract: `https://registry.npmjs.org/<package>/latest`
-//! returns a JSON document whose `.version` field carries the latest
-//! published version. We surface only that field; the rest of the payload
-//! is opaque.
+//! Minimal HTTP-only npm registry client for `acps agent check`, which never spawns npm: check
+//! must work from a container without npm, and a stuck npm would poison the freshness report.
 
 use std::time::Duration;
 
@@ -27,9 +16,7 @@ struct LatestResponse {
     version: String,
 }
 
-/// Return the latest published version for `package` per the public npm
-/// registry. Scoped packages (`@scope/name`) work without additional escaping;
-/// reqwest URL-encodes the path segment.
+/// Return the latest published version for `package`; scoped names need no extra escaping.
 pub fn latest_version(package: &str) -> Result<String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(REQUEST_TIMEOUT)

@@ -28,9 +28,7 @@ async fn session_update_notifications_land_in_events_table() {
         .expect("prompt id")
         .to_owned();
 
-    // Wait for terminal status before querying state — the writer task
-    // settles the prompt row, and only then are all the session.update rows
-    // guaranteed to have flushed.
+    // The session.update rows are only guaranteed flushed once the writer settles the prompt row.
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         if std::time::Instant::now() > deadline {
@@ -57,7 +55,6 @@ async fn session_update_notifications_land_in_events_table() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    // Query the state store directly to assert events landed.
     let store = harness.state.lock().await;
     let events = store
         .query_session_events(&session_id, None, 100)
@@ -73,9 +70,8 @@ async fn session_update_notifications_land_in_events_table() {
 #[tokio::test]
 async fn sessions_snapshot_returns_session_in_flight_prompts_and_recent_events() {
     let harness = Harness::spawn_with(|config| {
-        // Disable the bridge's `session/list` capability so the placebo agent
-        // path leaves the state untouched after start; we want a clean slate
-        // to seed deterministic snapshot fixtures.
+        // Without `session/list` the start path leaves state untouched, so the seeded fixtures
+        // below are the only rows.
         config.agent.args.push("--no-cap-list-session".into());
     })
     .await;
@@ -150,7 +146,6 @@ async fn sessions_snapshot_returns_session_in_flight_prompts_and_recent_events()
         .as_str()
         .expect("last_event_id present");
     assert_eq!(last_event_id, events[0]["id"].as_str().unwrap());
-    // No advertisement yet: the typed list is present and empty.
     assert_eq!(body["data"]["available_commands"], json!([]));
 }
 

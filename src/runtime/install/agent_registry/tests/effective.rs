@@ -65,7 +65,6 @@ fn native_entry_with_override_becomes_adapter_kind_with_harness_untouched() {
         adapter.install.npm.as_ref().map(|npm| npm.package.as_str()),
         Some("custom-acp")
     );
-    // Harness and support metadata stay registry-managed.
     let harness = effective.harness.as_ref().expect("harness");
     assert_eq!(harness.id, "goose");
     assert_eq!(harness.acp_args, vec!["acp".to_owned()]);
@@ -109,8 +108,7 @@ fn entry_without_override_is_borrowed() {
 fn override_for_a_different_agent_id_is_ignored() {
     let catalog = RegistryCatalog::load_embedded().expect("registry");
     let entry = catalog.lookup("goose").expect("goose entry");
-    // An array target's agent block must not leak its override onto lookups
-    // for other entries.
+    // An array target's agent block must not leak its override onto other entries.
     let agent = agent_with_override("opencode", Some(npm_override("custom-acp", "custom-acp")));
     let effective = effective_registry_entry(entry, &agent).expect("passthrough");
     assert!(matches!(effective, Cow::Borrowed(_)));

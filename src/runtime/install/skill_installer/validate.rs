@@ -1,8 +1,6 @@
-//! Name, selector, and relative-path validation for skill installs.
-//!
-//! These rules are the gate between untrusted catalog/archive strings and any
-//! path the installer joins onto a real directory, so they stay purely
-//! syntactic and reject rather than sanitize.
+//! Name, selector, and relative-path validation for skill installs: the gate
+//! between untrusted catalog/archive strings and any path the installer joins
+//! onto a real directory, so these rules reject rather than sanitize.
 
 use super::*;
 

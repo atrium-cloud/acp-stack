@@ -1,16 +1,5 @@
-//! Security self-check run history.
-//!
-//! Two tables back the operator-facing history view:
-//!
-//! - `security_runs` — one row per `GET /v1/security/check` invocation,
-//!   recording the aggregate verdict (`succeeded` when no critical findings
-//!   were emitted, `failed` otherwise), counts, and a redacted snapshot of
-//!   the inputs that drove the check.
-//! - `security_findings` — one row per emitted finding, keyed by
-//!   `(run_id, ordinal)` so the show view replays a run in the order the
-//!   orchestrator produced it.
-//!
-//! Runs are kept indefinitely; trimming is left to future operations work.
+//! Security self-check run history: `security_runs` aggregate verdicts plus the per-finding
+//! `security_findings` rows, keyed by `(run_id, ordinal)` so a run replays in emission order.
 
 use crate::error::Result;
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
@@ -49,9 +38,7 @@ pub struct SecurityFindingRow {
     pub remediation: Option<String>,
 }
 
-/// Input shape for [`StateStore::record_security_run`]. The store generates
-/// the run id and stamps timestamps; the caller supplies the aggregate
-/// outcome plus the ordered list of findings.
+/// Input for [`StateStore::record_security_run`]; the store generates the id and timestamps.
 #[derive(Debug, Clone)]
 pub struct NewSecurityRun<'a> {
     pub started_at: &'a str,
@@ -105,9 +92,7 @@ fn row_to_security_finding(row: &rusqlite::Row<'_>) -> rusqlite::Result<Security
 }
 
 impl StateStore {
-    /// Persist a completed self-check run plus its findings inside a single
-    /// transaction. Returns the generated run id so the route layer can echo
-    /// it back to the caller.
+    /// Persist a completed self-check run plus its findings in a single transaction.
     pub fn record_security_run(&self, input: NewSecurityRun<'_>) -> Result<SecurityRunRecord> {
         validate_json_payload(self.connection(), input.inputs_json)?;
 
@@ -146,11 +131,8 @@ impl StateStore {
             inputs_json: input.inputs_json.to_owned(),
         };
 
-        // `Transaction::new_unchecked` paired with `commit()` lets rusqlite's
-        // `Drop` impl run a real rollback if we bail out early, so we never
-        // leave the shared connection sitting on an open transaction. The
-        // older "manual BEGIN IMMEDIATE / COMMIT / ROLLBACK" sequence cannot
-        // recover from a COMMIT failure cleanly.
+        // `Transaction::new_unchecked` + `commit()` lets rusqlite's `Drop` roll back on an early
+        // bail, so the shared connection is never left holding an open transaction.
         let connection = self.connection();
         let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
         transaction.execute(
@@ -394,7 +376,7 @@ mod tests {
     #[test]
     fn query_runs_keyset_paginates_in_started_at_desc_order() {
         let (_dir, store) = open_store();
-        // Different started_at values so the keyset cursor is unambiguous.
+        // Distinct started_at values keep the keyset cursor unambiguous.
         let mut ids = Vec::new();
         for i in 0..3 {
             let run = store
@@ -417,7 +399,6 @@ mod tests {
             })
             .expect("first page");
         assert_eq!(first.len(), 2);
-        // Inserted in ascending order; expect descending starts.
         assert_eq!(first[0].id, ids[2]);
         assert_eq!(first[1].id, ids[1]);
 
@@ -466,7 +447,6 @@ mod tests {
             message.to_ascii_lowercase().contains("json"),
             "expected json validation error, got: {message}"
         );
-        // Confirm rollback: no rows persisted.
         let runs = store
             .query_security_runs(SecurityRunFilter {
                 limit: 10,

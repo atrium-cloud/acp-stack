@@ -100,9 +100,7 @@ impl AcpBridge {
         }
     }
 
-    /// Typed-lane convenience: mode/model/effort selections are always
-    /// `ValueId` strings, so their callers keep a signature that cannot send
-    /// a boolean by accident.
+    /// Typed lane for mode/model/effort, which are always `ValueId` strings.
     pub async fn set_session_config_option(
         &self,
         session_id: SessionId,
@@ -164,9 +162,7 @@ impl AcpBridge {
         Ok(())
     }
 
-    /// `session/resume`. Stable in ACP v1; gated only by the agent's
-    /// advertised capability. The agent may still reject if it does not
-    /// implement resume — that surfaces as `agent.request_failed`.
+    /// `session/resume`, gated only by the agent's advertised capability.
     pub async fn resume_session(
         &self,
         session_id: SessionId,
@@ -193,8 +189,7 @@ impl AcpBridge {
         Ok(())
     }
 
-    /// `session/close`. Stable in ACP v1; gated only by the agent's
-    /// advertised capability.
+    /// `session/close`, gated only by the agent's advertised capability.
     pub async fn close_session(&self, session_id: SessionId) -> Result<()> {
         if !self.capabilities.supports_close_session() {
             return Err(StackError::AgentUnsupportedCapability {
@@ -214,9 +209,8 @@ impl AcpBridge {
         Ok(())
     }
 
-    /// `session/delete`. Requires the `sessionCapabilities.delete`
-    /// capability. Unlike close, the agent removes the session from its own
-    /// history; repeat deletes are specified to succeed silently.
+    /// `session/delete`. Requires `sessionCapabilities.delete`; the spec makes
+    /// repeat deletes succeed silently.
     pub async fn delete_session(&self, session_id: SessionId) -> Result<()> {
         if !self.capabilities.supports_delete_session() {
             return Err(StackError::AgentUnsupportedCapability {
@@ -236,14 +230,9 @@ impl AcpBridge {
         Ok(())
     }
 
-    /// `session/prompt`. Awaits the turn's final response.
-    ///
-    /// On error, runs the inference-failure classifier so upstream HTTP
-    /// failures (5xx, 429, etc.) become a typed `InferenceRequestFailed`
-    /// variant; everything else falls back to `AgentRequestFailed`. The raw
-    /// `err.to_string()` is never persisted: 4xx/5xx paths surface only the
-    /// vetted reason label, and the generic fallback uses a sanitized message
-    /// to avoid leaking URLs / headers / bodies / secrets into the state row.
+    /// `session/prompt`, awaiting the turn's final response. The raw
+    /// `err.to_string()` is never persisted, so no URL, header, body, or secret
+    /// reaches the state row.
     pub async fn prompt_session(&self, request: PromptRequest) -> Result<PromptResponse> {
         self.capabilities.validate_prompt(&request.prompt)?;
         let connection = self.connection().await?;
@@ -269,10 +258,8 @@ impl AcpBridge {
     }
 }
 
-/// Translate a classified prompt failure into the appropriate `StackError`
-/// variant. Only the classifier's vetted fields (status code + static reason
-/// label) cross into the error; the raw upstream message is dropped so the
-/// state row carries no URLs / headers / bodies / secrets.
+/// Translate a classified prompt failure into a `StackError`. Only the
+/// classifier's vetted fields cross over; the raw upstream message is dropped.
 fn map_prompt_error(classified: Classified) -> StackError {
     match classified.class {
         FailureClass::Inference5xx | FailureClass::Inference4xx => match classified.status_code {
@@ -280,9 +267,8 @@ fn map_prompt_error(classified: Classified) -> StackError {
                 status_code: code,
                 reason_category: classified.reason_category,
             },
-            // Defensive fallback: classifier returned an inference class but no
-            // status code. Treat as a generic agent failure rather than
-            // persisting `status_code = 0`, which would be a meaningless row.
+            // An inference class with no status code would persist
+            // `status_code = 0`, a meaningless row.
             _ => StackError::AgentRequestFailed {
                 method: "session/prompt",
                 message: "prompt request failed".to_owned(),

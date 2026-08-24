@@ -1,5 +1,4 @@
-//! Agent-domain validators: provider, custom provider, adapter install,
-//! restart policy, agent install escape hatch.
+//! Agent-domain validators: provider, custom provider, adapter install, restart policy.
 
 use crate::config::schema::{
     AgentAdapterOverrideConfig, AgentAutoUpdateConfig, AgentConfigOptionValue,
@@ -119,10 +118,8 @@ pub(crate) fn validate_agent_providers(
     Ok(())
 }
 
-/// Bounds for `[agent.config_options]`. Keys follow ACP config-option id
-/// shape: a leading `_` is explicitly legal (ACP reserves `_`-prefixed ids
-/// for implementation-specific options). Values carry no charset restriction
-/// because advertised select ids legitimately contain `/`, `.`, and brackets.
+/// Bounds for `[agent.config_options]`. ACP reserves `_`-prefixed ids for implementation-specific
+/// options, so a leading `_` is legal; values are unrestricted because select ids carry `/` and `.`.
 const MAX_AGENT_CONFIG_OPTIONS: usize = 32;
 const MAX_AGENT_CONFIG_OPTION_KEY_BYTES: usize = 128;
 const MAX_AGENT_CONFIG_OPTION_VALUE_BYTES: usize = 512;
@@ -159,8 +156,7 @@ pub(crate) fn validate_agent_config_options(
                 ),
             });
         }
-        // The typed lanes own their ids (and aliases) so a map entry cannot
-        // silently fight `agent.mode`/`agent.model`/`agent.effort`.
+        // The typed lanes own their ids and aliases, so a map entry cannot silently fight them.
         for category in [
             crate::runtime::agent::acp_bridge::AgentSessionConfigCategory::Mode,
             crate::runtime::agent::acp_bridge::AgentSessionConfigCategory::Model,
@@ -216,9 +212,7 @@ fn validate_mapped_provider_id(
     Ok(())
 }
 
-/// Managed agent updates poll upstream package registries; an hour is the
-/// finest cadence worth allowing, so eager operators can still run e.g. `12h`.
-/// Shared with init's `--agent-update-frequency` handling.
+/// Managed agent updates poll upstream package registries, so an hour is the finest cadence.
 pub(crate) const AGENT_UPDATE_FREQUENCY_LIMITS: DurationLimits = DurationLimits::new(
     &[DurationUnit::Hour, DurationUnit::Day, DurationUnit::Week],
     std::time::Duration::from_secs(3_600),
@@ -289,11 +283,8 @@ fn validate_agent_provider_at(
         validate_secret_ref_name_value(api_key_ref)?;
     }
     if let Some(custom) = provider.custom.as_ref() {
-        // Every runtime and apply site classifies a provider id by registry
-        // membership before it looks at `custom`, so a custom declaration
-        // reusing a registry id resolves down the mapped path and hard-fails at
-        // spawn. Reserve registry ids globally, including ids the registry knows
-        // but does not map for this harness.
+        // Every apply site classifies a provider id by registry membership before it looks at
+        // `custom`, so a custom declaration reusing a registry id would hard-fail at spawn.
         if provider_id_is_known(&provider.id) {
             return Err(StackError::InvalidParam {
                 field: fields.id,
@@ -398,10 +389,8 @@ pub(crate) fn validate_agent_install(install: &AgentInstallConfig) -> Result<()>
     }
 }
 
-/// Structural checks for `[agent.adapter_override]`. These deliberately mirror
-/// the registry `AdapterSpec` invariants so a bad block fails at config load
-/// with `agent.adapter_override.*` field names; the install lane re-validates
-/// through `AdapterSpec::validate` when the block is converted to a spec.
+/// Structural checks for `[agent.adapter_override]`, mirroring the registry `AdapterSpec`
+/// invariants so a bad block fails at config load with `agent.adapter_override.*` field names.
 pub(crate) fn validate_agent_adapter_override(
     override_config: &AgentAdapterOverrideConfig,
 ) -> Result<()> {

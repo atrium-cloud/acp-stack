@@ -1,8 +1,5 @@
-//! Release discovery and integrity verification for the self-updater.
-//!
-//! Fetches the GitHub release metadata, pulls the signed-by-checksum release
-//! manifest, and validates that the manifest agrees with the tag it shipped
-//! under before any bytes reach the binary-swap path in [`super::apply`].
+//! Release discovery and integrity verification for the self-updater: the manifest
+//! must agree with its tag before any bytes reach the binary-swap path.
 
 use super::*;
 

@@ -38,9 +38,8 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
     use StackError::*;
     Some(match err {
         ExtensionNamespaceUnknown { .. } => StatusCode::NOT_FOUND,
-        // A revision-ordering conflict is a concurrency condition the
-        // orchestrator resolves by retrying with fresh state, not a payload
-        // defect; keep it distinct from 400.
+        // A revision-ordering conflict is a concurrency condition the caller
+        // retries with fresh state, not a payload defect, so never 400.
         ExtensionRevisionConflict { .. } => StatusCode::CONFLICT,
         ExtensionStateOwnership { .. } => StatusCode::BAD_REQUEST,
         _ => return None,

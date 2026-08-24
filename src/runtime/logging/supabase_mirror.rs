@@ -104,9 +104,9 @@ pub fn setup_sql(schema: &str, table_prefix: &str, writer_password: &str) -> Str
         .map(|name| enable_rls_sql(schema.as_str(), table_prefix, name))
         .collect::<Vec<_>>()
         .join("\n");
-    // Lock the Supabase REST API roles out of every mirrored relation. PUBLIC is
-    // revoked unconditionally; `anon`/`authenticated` are revoked only when they
-    // exist so the same SQL stays runnable against a non-Supabase Postgres.
+    // Lock the Supabase REST API roles out of every mirrored relation.
+    // `anon`/`authenticated` are revoked only when they exist so the SQL stays
+    // runnable against a non-Supabase Postgres.
     let revoke_base_tables = revoke_api_roles_sql("TABLE", &base_table_names);
     let revoke_views = revoke_api_roles_sql("TABLE", &view_names);
     let revoke_function = revoke_api_roles_sql("FUNCTION", &ingest_function_signature);
@@ -536,11 +536,8 @@ fn enable_rls_sql(quoted_schema: &str, prefix: &str, name: &str) -> String {
 }
 
 /// Revoke every privilege on `targets` from the Supabase REST API roles.
-/// `object_kind` is the SQL object class (`TABLE` or `FUNCTION`) and `targets`
-/// is the already-qualified, comma-joined relation/signature list. PUBLIC is
-/// revoked unconditionally; `anon`/`authenticated` are revoked inside a
-/// `pg_roles` guard so the statement also succeeds where those roles are absent
-/// (e.g. a generic Postgres reached via the printed `acps logging supabase sql`).
+/// `anon`/`authenticated` are revoked inside a `pg_roles` guard so the
+/// statement also succeeds where those roles are absent.
 fn revoke_api_roles_sql(object_kind: &str, targets: &str) -> String {
     let api_role_array = SUPABASE_PUBLIC_API_ROLES
         .iter()
@@ -624,9 +621,9 @@ mod tests {
     fn setup_sql_adds_drift_guards_for_late_commands_columns() {
         let sql = generated_sql();
         let commands = generated_relation("commands");
-        // Existing mirrors created before origin/session_id must gain the
-        // columns additively, or the regenerated ingest function fails on
-        // its EXCLUDED.origin assignment.
+        // Mirrors created before origin/session_id must gain the columns
+        // additively, or the regenerated ingest function fails on
+        // EXCLUDED.origin.
         assert!(sql.contains(&format!(
             "ALTER TABLE {commands} ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'operator';"
         )));
@@ -663,8 +660,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join(", ");
 
-        // PUBLIC is revoked unconditionally; the API roles are revoked only via a
-        // pg_roles existence guard so the SQL is safe on a non-Supabase Postgres.
+        // The API roles are revoked via a pg_roles existence guard so the SQL is
+        // safe on a non-Supabase Postgres.
         for targets in [&table_names, &view_names] {
             assert!(
                 sql.contains(&format!("REVOKE ALL ON TABLE {targets} FROM PUBLIC;")),

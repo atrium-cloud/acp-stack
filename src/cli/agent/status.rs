@@ -220,11 +220,8 @@ fn agent_status_param(
     }
 }
 
-/// Render one line per `installer_runs.step` recorded for this agent, showing
-/// the step name and the resolved version when known. Steps that ran without
-/// a recorded version (shell installs) print "version unknown"
-/// so the operator can tell the difference between "no install row at all"
-/// and "install ran but produced no version".
+/// One line per `installer_runs.step` recorded for this agent; a step that ran
+/// without a version prints "version unknown" rather than being omitted.
 fn print_installed_versions(rows: &[crate::state::InstallerRun]) {
     if rows.is_empty() {
         return;

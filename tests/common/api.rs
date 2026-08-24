@@ -1,5 +1,5 @@
-//! Shared fixtures for the `api_*_tests` binaries: an in-process server
-//! harness plus the SQLite seeding helpers its tests assert against.
+//! Shared fixtures for the `api_*_tests` binaries: an in-process server harness
+//! plus SQLite seeding helpers.
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -26,9 +26,8 @@ pub struct ServerHarness {
     pub local_session_auth: Arc<tokio::sync::RwLock<LocalSessionAuth>>,
     pub config_path: PathBuf,
     pub state_path: PathBuf,
-    // Public so a test binary that needs a bespoke `AppState` (e.g. an
-    // effective bind that differs from `config.api.bind`) can still build a
-    // harness by struct literal rather than through the `spawn*` helpers.
+    // Public so a test needing a bespoke `AppState` can build a harness by
+    // struct literal instead of through the `spawn*` helpers.
     pub join: JoinHandle<acp_stack::error::Result<()>>,
     pub _tempdir: TempDir,
 }
@@ -40,10 +39,8 @@ impl ServerHarness {
 
     pub async fn spawn_with_config(mut config: Config) -> Self {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        // Repoint workspace.root at the tempdir so the security-check route's
-        // workspace-writability probe (Phase 4: runtime.workspace_not_writable)
-        // sees a real, writable directory rather than the fixture's
-        // "/workspace" placeholder.
+        // Repoint workspace.root at the tempdir so the writability probe sees a
+        // real directory instead of the fixture placeholder.
         let workspace_root = tempdir.path().join("workspace");
         std::fs::create_dir_all(&workspace_root).expect("create workspace");
         config.workspace.root = workspace_root.to_string_lossy().into_owned();
@@ -60,10 +57,8 @@ impl ServerHarness {
         Self::spawn_with_prepared_config(config, tempdir).await
     }
 
-    /// Like `spawn_with_config` but does not rewrite `workspace.root`. Use this
-    /// when a test deliberately needs the workspace path to come from the
-    /// passed-in `Config` — e.g. exercising the "workspace not writable" path
-    /// in `/v1/health/ready`.
+    /// Like `spawn_with_config` but keeps the passed-in `workspace.root`, for
+    /// tests that need the workspace path exactly as configured.
     pub async fn spawn_with_unmodified_workspace(config: Config) -> Self {
         let tempdir = tempfile::tempdir().expect("tempdir");
         Self::spawn_with_prepared_config(config, tempdir).await

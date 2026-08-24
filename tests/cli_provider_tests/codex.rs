@@ -314,10 +314,8 @@ fn agent_provider_use_codex_openrouter_accepts_custom_model_without_discovery() 
         .expect("config should be written");
     seed_provider_credential(tempdir.path(), "openrouter", &["OPENROUTER_API_KEY"]);
 
-    // No ACP config-options fixture: codex takes the model verbatim for
-    // OpenRouter, so the command must succeed without spawning the agent.
-    // The dead-port base keeps the best-effort catalog refresh from ever
-    // reaching live `openrouter.ai`.
+    // Codex takes the model verbatim for OpenRouter, so no ACP fixture is
+    // needed; the dead-port base keeps the catalog refresh off the network.
     acps_command()
         .env("HOME", tempdir.path())
         .env("ACP_STACK_PROVIDER_MODELS_BASE", "http://127.0.0.1:1")

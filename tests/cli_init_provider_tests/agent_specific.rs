@@ -12,10 +12,6 @@ use crate::support::write_workspace_init_config;
 
 #[test]
 fn init_provider_change_without_model_clears_stale_opencode_model() {
-    // Pre-existing opencode.json with a stale model from a prior run.
-    // An init that switches provider without picking a new model
-    // (L87 path) must clear the stale model field so the launched
-    // harness doesn't silently use it under the new provider.
     let tempdir = tempfile::tempdir().expect("tempdir");
     write_workspace_init_config(tempdir.path());
     seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test")]);
@@ -59,11 +55,6 @@ fn init_provider_change_without_model_clears_stale_opencode_model() {
 
 #[test]
 fn init_same_provider_without_model_preserves_existing_model() {
-    // First init pins provider=openai, model=openai/gpt-5.5. Second
-    // init re-runs with --provider openai but no --model. The L87
-    // path must print the advertised list while preserving the
-    // previously-pinned model — wiping it would silently change the
-    // launched harness's model on a no-op rerun.
     let tempdir = tempfile::tempdir().expect("tempdir");
     write_workspace_init_config(tempdir.path());
     seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test")]);
@@ -317,9 +308,8 @@ fn init_kilo_writes_env_scoped_config_and_persists_canonical_secret_ref() {
 
 #[test]
 fn init_kilo_records_empty_placeholder_when_provider_native_credential_declared() {
-    // Kilo with a non-Kilo provider: the operator declares OPENROUTER_API_KEY
-    // and never touches KILO_API_KEY. The harness still requires the variable
-    // present (empty accepted), so init records the placeholder itself.
+    // Kilo requires KILO_API_KEY present (empty accepted) even under a non-Kilo
+    // provider, so init records the placeholder itself.
     let tempdir = tempfile::tempdir().expect("tempdir");
     seed_init_secrets(
         tempdir.path(),
@@ -448,7 +438,6 @@ fn init_kimi_without_model_pins_default_and_keeps_operator_selection_on_rerun() 
     assert!(config.contains(r#"model = "kimi-for-coding""#));
     assert!(!config.contains("KIMI_MODEL_"));
 
-    // A model the operator already picked survives a model-less re-init.
     let selected = config.replace(
         r#"model = "kimi-for-coding""#,
         r#"model = "kimi-for-coding-highspeed""#,
@@ -511,8 +500,7 @@ fn init_codex_openrouter_lists_provider_catalog_models() {
         &[("OPENROUTER_API_KEY", "test-openrouter-key")],
     );
     // codex-acp advertises codex-core's bundled OpenAI presets regardless of
-    // the configured provider; the init model list must come from the live
-    // provider catalog instead.
+    // the configured provider, so the model list must come from the catalog.
     let options_path = write_acp_config_options(tempdir.path(), &["gpt-5.5"], &[]);
     let base = spawn_provider_models_server(serde_json::json!({
         "data": [
@@ -555,8 +543,6 @@ fn init_codex_openrouter_lists_provider_catalog_models() {
 fn init_codex_openai_takes_an_api_key_ref() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
-    // Codex reads `OPENAI_API_KEY` from its own environment, so its built-in
-    // openai lane provisions like any other keyed provider.
     let options_path = write_acp_config_options(tempdir.path(), &["gpt-5.5"], &[]);
 
     acps_with_empty_path(tempdir.path())
@@ -592,9 +578,8 @@ fn init_hermes_openrouter_lists_provider_catalog_models() {
         tempdir.path(),
         &[("OPENROUTER_API_KEY", "test-openrouter-key")],
     );
-    // Hermes speaks pre-1.0 ACP and advertises no model config options at all;
-    // the init model list must come from the live provider catalog instead of
-    // failing on the absent advertisement.
+    // Hermes speaks pre-1.0 ACP and advertises no model config options, so the
+    // model list must come from the catalog rather than fail.
     let options_path = write_acp_config_options(tempdir.path(), &[], &[]);
     let base = spawn_provider_models_server(serde_json::json!({
         "data": [
@@ -643,9 +628,8 @@ fn init_hermes_openrouter_without_catalog_skips_model_list() {
     );
     let options_path = write_acp_config_options(tempdir.path(), &[], &[]);
 
-    // Dead endpoint: the catalog refresh degrades to a warning. Before the
-    // provider-catalog lane covered hermes this path failed the whole init
-    // with agent.config_provision_failed on the absent model advertisement.
+    // Dead endpoint: the catalog refresh degrades to a warning instead of
+    // failing the whole init.
     acps_with_empty_path(tempdir.path())
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)

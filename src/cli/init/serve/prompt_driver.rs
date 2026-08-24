@@ -109,9 +109,9 @@ impl HostedPromptDriver for SessionPromptDriver {
     }
 }
 
-/// The streamed set, decided per prompt kind. The match is exhaustive on
-/// purpose: a new prompt site cannot compile until someone decides whether a
-/// hosted client is expected to answer it.
+/// The streamed set, decided per prompt kind. The match is deliberately
+/// exhaustive so a new prompt site cannot compile until someone decides whether
+/// a hosted client answers it.
 pub(super) fn should_handle_hosted_prompt(request: &HostedPromptRequest) -> bool {
     match request.kind {
         HostedPromptKind::Agent
@@ -135,8 +135,8 @@ pub(super) fn should_handle_hosted_prompt(request: &HostedPromptRequest) -> bool
         | HostedPromptKind::McpHttpName
         | HostedPromptKind::McpHttpUrl
         | HostedPromptKind::McpHttpHeaders => true,
-        // The inspection is what the client renders and echoes back in its
-        // revision-matched selection, so a review without one is unanswerable.
+        // A review without an inspection is unanswerable: it is what the client
+        // renders and echoes back in its revision-matched selection.
         HostedPromptKind::NativeConfigReview => request.inspection.is_some(),
         HostedPromptKind::ConfigSource
         | HostedPromptKind::ConfigSourcePath
@@ -225,9 +225,8 @@ fn parse_optional_index(value: &Value, request: &HostedPromptRequest) -> Result<
     if let Some(index) = value.get("index").and_then(Value::as_u64) {
         return validate_index(index as usize, request);
     }
-    // The stable-id form. Bare strings deliberately stay label-only: labels are
-    // display text a client may already be echoing back, and letting them also
-    // match ids would make a reworded label silently resolve to the wrong row.
+    // Bare strings deliberately stay label-only: letting a label also match an
+    // id would make a reworded label silently resolve to the wrong row.
     if let Some(id) = value.get("value").and_then(Value::as_str) {
         let index = request
             .items

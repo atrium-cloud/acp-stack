@@ -7,14 +7,11 @@ use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 use tempfile::TempDir;
 
-/// node-gyp reads `npm_config_python` to decide what to spawn, so the variable
-/// has to reach the installer subprocess itself — not merely be computed. The
-/// step is left to fail on its missing `creates`; the captured stdout is what
-/// proves the child saw it.
+/// node-gyp reads `npm_config_python` to decide what to spawn, so the variable must reach the
+/// installer subprocess itself, not merely be computed.
 #[test]
 fn an_install_step_sees_a_resolved_python_interpreter() {
-    // A host without `python3` has nothing to resolve and the variable is
-    // deliberately left unset, so there is no behavior to assert.
+    // A host without `python3` leaves the variable unset, so there is nothing to assert.
     if resolved_python_interpreter(None).is_none() {
         return;
     }
@@ -55,9 +52,8 @@ fn an_install_step_sees_a_resolved_python_interpreter() {
     );
 }
 
-/// The resolution is skipped rather than guessed when the child's PATH carries
-/// no `python3`: pointing node-gyp at something that is not there would turn a
-/// clear "python not found" into a confusing spawn failure.
+/// Resolution is skipped rather than guessed when the child's PATH has no `python3`; a bad
+/// override turns a clear "python not found" into a confusing spawn failure.
 #[test]
 fn an_empty_path_resolves_no_interpreter() {
     let empty = TempDir::new().expect("tempdir");
@@ -65,10 +61,8 @@ fn an_empty_path_resolves_no_interpreter() {
     assert_eq!(resolved_python_interpreter(Some(&path)), None);
 }
 
-/// A version-manager shim that hangs must degrade to "no override", not wedge
-/// the install thread: the probe runs before the step deadline is computed, so
-/// an unbounded wait would sit outside every budget. The shim sleeps far past
-/// the probe bound; the probe must give up promptly and kill the shim.
+/// A hung version-manager shim must degrade to "no override": the probe runs before the step
+/// deadline is computed, so an unbounded wait would sit outside every budget.
 #[test]
 fn a_hung_python_shim_resolves_no_interpreter_promptly() {
     let tempdir = TempDir::new().expect("tempdir");

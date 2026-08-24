@@ -1,7 +1,5 @@
-//! HTTP-edge auth and request-shape error helpers.
-//!
-//! Covers the runtime `auth.*` namespace (rate limit, IP block, origin
-//! allowlist) plus the `request.invalid_param` query-validation shape.
+//! HTTP-edge auth (`auth.*`) and request-shape (`request.invalid_param`) error
+//! helpers.
 
 use http::StatusCode;
 

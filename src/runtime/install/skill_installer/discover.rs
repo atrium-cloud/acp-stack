@@ -1,22 +1,15 @@
-//! Skill discovery: enumerating installable skills in an extracted archive,
-//! locating one skill directory by selector, walking an existing install root,
-//! and reading `SKILL.md` frontmatter.
+//! Skill discovery over an extracted archive or an existing install root.
 
 use super::*;
 
-/// Download a source and list its installable skills with the `name` and
-/// `description` read from each `SKILL.md`. Blocking (network + extract); call
-/// off the async runtime. Backs `source get`.
+/// Download a source and list its installable skills. Blocking (network + extract), so call it
+/// off the async runtime.
 pub fn inspect_source(source: &ResolvedSkillSource) -> Result<Vec<SkillMetadata>> {
     let (_tempdir, archive_root) = fetch_and_extract_source(source)?;
     discover_source_skills(source, &archive_root)
 }
 
-/// Enumerate installable skills from an already-extracted archive. For a
-/// catalog source this walks the embedded index (exact paths); for a
-/// user/ad-hoc source it discovers `SKILL.md` directories flat under each
-/// installable directory (the `skills/` convention). Split out from
-/// [`inspect_source`] so it is testable without network access.
+/// Enumerate installable skills from an already-extracted archive.
 pub fn discover_source_skills(
     source: &ResolvedSkillSource,
     archive_root: &Path,
@@ -26,11 +19,8 @@ pub fn discover_source_skills(
         for skill in &source.indexed_skills {
             validate_registry_relative_path(&skill.path)?;
             let candidate = archive_root.join(&skill.path);
-            // `add` (via `find_skill_dir`) requires a non-symlink skill dir
-            // with a non-symlink regular SKILL.md whose frontmatter parses and
-            // whose name matches the index, so a catalog skill failing any of
-            // those checks must not be listed here — otherwise `get` would
-            // offer a skill that `add` cannot install.
+            // These checks MUST mirror `find_skill_dir`, or `get` would offer a skill that `add`
+            // cannot install.
             if let Err(error) = validate_skill_candidate(&candidate, &skill.selector) {
                 tracing::warn!(
                     skill = %skill.selector,
@@ -84,7 +74,6 @@ pub fn discover_source_skills(
                 let entry = entry
                     .map_err(|source| skill_io_err("read source directory entry", &base, source))?;
                 let leaf = entry.file_name().to_string_lossy().into_owned();
-                // Only surface entries that are directly installable by selector.
                 if validate_skill_name(&leaf).is_err() {
                     continue;
                 }
@@ -95,11 +84,8 @@ pub fn discover_source_skills(
                 if metadata.file_type().is_symlink() || !metadata.is_file() {
                     continue;
                 }
-                // `add` (via `find_skill_dir`) only requires the descriptor to be
-                // a regular file, not valid frontmatter, so a sibling with a
-                // malformed `SKILL.md` must still appear here (degraded to the
-                // leaf name) rather than failing the whole listing — otherwise
-                // `get` would omit a skill that `add` would happily install.
+                // `add` accepts any regular descriptor, so a malformed `SKILL.md` degrades to the
+                // leaf name here instead of failing the listing.
                 let descriptor = read_skill_descriptor(&descriptor).ok();
                 skills.push(SkillMetadata {
                     selector: leaf.clone(),
@@ -128,12 +114,9 @@ pub(super) fn source_archive_reference(source: &ResolvedSkillSource) -> &str {
 /// How a skill-tree walk treats entries it did not expect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CollectPolicy {
-    /// Port: every unexpected entry is an error, because the walk feeds a copy
-    /// and copying a symlink or special file would be unsafe.
+    /// The walk feeds a copy, so an unexpected entry (symlink, special file) is an error.
     Port,
-    /// Link: nothing is copied — only the skill dir is symlinked — so
-    /// unexpected entries are skipped with a warning and only a failure to
-    /// read the root itself propagates.
+    /// Nothing is copied, so unexpected entries are skipped with a warning.
     Link,
 }
 

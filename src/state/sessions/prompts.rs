@@ -113,15 +113,8 @@ impl StateStore {
     }
 
     /// Update a prompt's lifecycle row. `failure_class` and
-    /// `failure_detail_json` follow a three-valued convention to keep callers
-    /// from clobbering prior taxonomy on a status flip:
-    ///
-    ///   * `None` preserves the existing column value.
-    ///   * `Some("")` writes SQL NULL — used to explicitly clear a value.
-    ///   * `Some(value)` overwrites with the new value.
-    ///
-    /// Phase 1 callers all pass `None, None`; Phase 2 will populate real
-    /// failure taxonomies at the supervisor settle path.
+    /// `failure_detail_json` are three-valued: `None` preserves the existing
+    /// column, `Some("")` writes SQL NULL, `Some(value)` overwrites.
     #[allow(clippy::too_many_arguments)]
     pub fn update_prompt_status(
         &self,
@@ -150,12 +143,9 @@ impl StateStore {
         });
 
         let update = |conn: &rusqlite::Connection| -> Result<bool> {
-            // The WHERE excludes terminal statuses so a late settle from the
-            // supervisor cannot overwrite a prompt that the stale-prompt
-            // sweeper (or any earlier path) already moved to a terminal state.
-            // `stalled` is documented as terminal; without this guard the
-            // supervisor's eventual `completed`/`errored`/`cancelled` write
-            // would race the sweeper.
+            // The WHERE excludes terminal statuses (`stalled` included) so a
+            // late supervisor settle cannot overwrite a prompt the stale-prompt
+            // sweeper already moved to a terminal state.
             let affected = conn.execute(
                 r#"
                 UPDATE prompts
@@ -187,7 +177,6 @@ impl StateStore {
                 ],
             )?;
             if affected == 0 {
-                // Disambiguate: row missing entirely vs row already terminal.
                 let exists: i64 = conn.query_row(
                     "SELECT COUNT(*) FROM prompts WHERE id = ?1",
                     params![id],
@@ -221,12 +210,8 @@ impl StateStore {
         Ok(updated)
     }
 
-    /// Mark every `pending`/`running` prompt row as `errored` with the given
-    /// reason. Called on daemon startup so prompts orphaned by a crash get a
-    /// terminal status — otherwise clients polling those prompts would never
-    /// see them settle. Returns the number of rows transitioned. The rows are
-    /// classified `agent_process` because the daemon restart implies the
-    /// underlying agent subprocess died with the daemon.
+    /// Mark every `pending`/`running` prompt row as `errored`, called on daemon
+    /// startup so prompts orphaned by a crash still settle for pollers.
     pub fn reconcile_orphaned_prompts(&self, reason: &str) -> Result<usize> {
         let now = current_timestamp();
         if !self.external_logging_enabled() {
@@ -244,8 +229,8 @@ impl StateStore {
             )?;
             return Ok(affected);
         }
-        // External logging path: collect affected ids first so we can enqueue
-        // them transactionally with the UPDATE.
+        // Collect affected ids first so the outbox enqueue is transactional
+        // with the UPDATE.
         let tx = rusqlite::Transaction::new_unchecked(
             self.connection(),
             rusqlite::TransactionBehavior::Immediate,
@@ -275,16 +260,8 @@ impl StateStore {
         Ok(affected)
     }
 
-    /// Mark every `pending`/`running` prompt row whose `updated_at` is
-    /// older than `now - threshold` as `Stalled`. Used by the background
-    /// sweeper so prompts whose agent stopped streaming ACP `session/update`
-    /// notifications still settle to a terminal status — otherwise clients
-    /// polling those rows would never see them resolve.
-    ///
-    /// Returns `(prompt_id, session_id)` pairs for every flipped row so the
-    /// caller can emit a per-session `prompt.stalled` event. Idempotent:
-    /// rows already in a terminal status (`completed`, `errored`,
-    /// `cancelled`, `stalled`) are filtered out by the `WHERE` clause.
+    /// Mark every `pending`/`running` prompt older than `now - threshold` as
+    /// `Stalled`, returning `(prompt_id, session_id)` pairs for the flipped rows.
     pub fn mark_stalled_prompts(
         &self,
         threshold: std::time::Duration,
@@ -292,10 +269,8 @@ impl StateStore {
     ) -> Result<Vec<(String, String)>> {
         let now = Utc::now();
         let now_string = now.to_rfc3339_opts(SecondsFormat::Nanos, true);
-        // The threshold cutoff timestamp is formatted the same way as
-        // `prompts.updated_at` so the `<` comparison is exact at the
-        // string level — every row writer goes through `current_timestamp`
-        // which uses identical SecondsFormat::Nanos formatting.
+        // The cutoff MUST use the same SecondsFormat::Nanos formatting as
+        // `current_timestamp`, or the string-level `<` comparison is wrong.
         let threshold_chrono =
             chrono::Duration::from_std(threshold).map_err(|err| StackError::InvalidParam {
                 field: "prompts.stale_threshold",
@@ -328,9 +303,8 @@ impl StateStore {
             })?;
             return Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?);
         }
-        // External logging path: run the UPDATE ... RETURNING inside an
-        // IMMEDIATE transaction and enqueue an outbox row per flipped prompt
-        // so the terminal status reaches Supabase atomically.
+        // The UPDATE ... RETURNING and the per-prompt outbox enqueue must share
+        // one IMMEDIATE transaction so the terminal status reaches the sink atomically.
         let tx = rusqlite::Transaction::new_unchecked(
             self.connection(),
             rusqlite::TransactionBehavior::Immediate,
@@ -362,11 +336,7 @@ impl StateStore {
     }
 
     /// Count of `pending`/`running` prompt rows older than `now - threshold`,
-    /// plus the oldest such row's `updated_at`. Drives the `PromptsHealth`
-    /// subsystem so `/v1/health/ready` and `acps status` can warn an
-    /// operator that a row is stuck before the sweeper has a chance to
-    /// flip it. The threshold matches the sweeper threshold so a single
-    /// idle tick is normal and only persistent overrun shows up here.
+    /// plus the oldest such row's `updated_at`, driving `PromptsHealth`.
     pub fn count_stuck_prompts(
         &self,
         threshold: std::time::Duration,

@@ -1,11 +1,4 @@
 //! SQLite schema migration runner, manifest parser, and embedded DDL.
-//!
-//! Migrations are applied inside a single `BEGIN IMMEDIATE` transaction per
-//! step (DDL plus the matching `schema_migrations` bookkeeping row) so a
-//! crash between them cannot leave managed tables without a version row.
-//! Pre-flight checks reject databases that look corrupted (newer schema than
-//! we know how to read, or managed tables present with no `schema_migrations`
-//! at all).
 
 use crate::error::{Result, StackError};
 use rusqlite::{Connection, Transaction, TransactionBehavior, params};
@@ -15,11 +8,8 @@ use super::core::StateStore;
 use super::ids::current_timestamp;
 
 /// Tables managed by migrations, paired with the migration id that introduces
-/// them. Used by the pre-flight check to verify a non-fresh DB looks intact:
-/// only tables introduced by migrations <= the DB's current schema version
-/// are expected to exist before we run `migrate()`. Without the
-/// `introduced_in` pairing, a DB at schema_version 2 would incorrectly fail
-/// because `agent_capabilities` (introduced in 3) doesn't exist yet.
+/// them; the pairing is what keeps the pre-flight check from failing a
+/// partially-migrated database.
 const MIGRATED_TABLES: &[(&str, i64)] = &[
     ("events", 1),
     ("sessions", 1),
@@ -44,10 +34,7 @@ const MIGRATED_TABLES: &[(&str, i64)] = &[
 
 const MANIFEST_TOML: &str = include_str!("../../migrations/manifest.toml");
 
-/// One migration step in the shared logical sequence. Both dialects ship in
-/// every entry so consumers (the SQLite runtime here, and operator-facing
-/// schema dumps / parity tests) can look up either by id without diverging
-/// from the manifest.
+/// One migration step in the shared logical sequence, carrying both dialects.
 #[derive(Debug, Clone, Copy)]
 pub struct Migration {
     pub id: i64,
@@ -55,17 +42,13 @@ pub struct Migration {
     pub sqlite_file: &'static str,
     pub postgres_file: &'static str,
     pub sqlite: &'static str,
-    // Used by parity tests and reserved for the operator-facing schema dump.
-    // Runtime never applies Postgres DDL itself, hence the lint suppression.
+    // Parity tests and schema dumps only; the runtime never applies Postgres DDL.
     #[allow(dead_code)]
     pub postgres: &'static str,
 }
 
-/// Source of truth for migrations. The TOML manifest is reduced to a
-/// human-readable catalog whose entries must line up with this slice;
-/// `validate_manifest_matches_registry` enforces that. New migrations are
-/// added by appending an entry here AND a `[[migration]]` block to the
-/// manifest in the same change.
+/// Source of truth for migrations. A new migration MUST append an entry here
+/// AND a `[[migration]]` block to the manifest in the same change.
 pub(crate) const MIGRATIONS: &[Migration] = &[
     Migration {
         id: 1,
@@ -269,9 +252,7 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     },
 ];
 
-/// Read-only accessor for the migration registry, including bundled Postgres
-/// SQL. Consumed by parity tests today and reserved for operator-facing schema
-/// dumps; the runtime applies SQLite only.
+/// Read-only accessor for the migration registry, including Postgres SQL.
 #[allow(dead_code)]
 pub fn migrations_postgres_ddl() -> &'static [Migration] {
     MIGRATIONS
@@ -321,10 +302,8 @@ fn validate_manifest_order(manifest: &MigrationManifest) -> Result<()> {
     Ok(())
 }
 
-/// The manifest is a checked catalog; the registry above is the source of
-/// truth. If a manifest entry drifts from the registry the runtime refuses
-/// to start so a misnamed Postgres file or a missing manifest row gets
-/// caught immediately rather than producing a silently wrong Supabase dump.
+/// Refuse to start when the manifest catalog drifts from the registry, rather
+/// than producing a silently wrong Supabase dump.
 fn validate_manifest_matches_registry(manifest: &MigrationManifest) -> Result<()> {
     if manifest.migration.len() != MIGRATIONS.len() {
         return Err(StackError::ManifestRegistryMismatch {
@@ -374,18 +353,12 @@ impl StateStore {
             self.assert_tables_for_version(starting_version)?;
         }
 
-        // Manifest parse is a sanity check that the catalog still lines up with
-        // the registry below; the iteration drives off MIGRATIONS, which is the
-        // source of truth and the only place include_str! reaches.
         parse_manifest()?;
         for entry in MIGRATIONS {
-            // Migration DDL and the schema_migrations bookkeeping must commit together
-            // so a crash between them cannot leave managed tables without a version row,
-            // which would later trip reject_unversioned_managed_tables permanently.
-            //
-            // BEGIN IMMEDIATE acquires the write lock before checking applicability.
-            // Re-checking inside that lock prevents a second process from running
-            // destructive migration SQL after another process already committed it.
+            // DDL and the schema_migrations row MUST commit together, or a crash
+            // between them strands managed tables without a version row. BEGIN
+            // IMMEDIATE takes the write lock before the applicability re-check,
+            // so a second process cannot re-run committed migration SQL.
             let transaction =
                 Transaction::new_unchecked(self.connection(), TransactionBehavior::Immediate)?;
             if migration_is_applied(&transaction, entry.id)? {
@@ -404,9 +377,8 @@ impl StateStore {
             transaction.commit()?;
         }
 
-        // Defense-in-depth: even if schema_migrations claims a version is applied, the
-        // underlying tables may have been dropped or never created. Surface that as a
-        // clear corruption error instead of a downstream "no such table" failure.
+        // schema_migrations can claim a version whose tables were dropped or never
+        // created; surface that as corruption, not a downstream "no such table".
         self.assert_required_tables_present()?;
 
         Ok(())
@@ -422,9 +394,7 @@ impl StateStore {
     }
 
     /// Like `assert_required_tables_present`, but only checks tables
-    /// introduced by migrations whose id is <= `version`. Lets the pre-flight
-    /// check succeed on partially-migrated databases without lowering the
-    /// post-flight bar.
+    /// introduced by migrations whose id is <= `version`.
     fn assert_tables_for_version(&self, version: i64) -> Result<()> {
         for &(table, introduced_in) in MIGRATED_TABLES {
             if introduced_in <= version && !self.table_exists(table)? {
@@ -610,10 +580,8 @@ mod tests {
         assert!(matches!(error, StackError::ManifestRegistryMismatch { .. }));
     }
 
-    /// Captures CREATE TABLE / ALTER TABLE ADD COLUMN / CREATE INDEX from a
-    /// dialect file in a normalized form. Comments and CHECK clauses are
-    /// stripped before extraction so dialect-specific predicates (Postgres
-    /// type literals, SQLite `json_valid` calls) don't confuse the parser.
+    /// Normalized CREATE TABLE / ALTER TABLE ADD COLUMN / CREATE INDEX shape
+    /// of one dialect file.
     #[derive(Default, Debug)]
     struct DialectShape {
         /// Map of `table -> ordered set of columns added by this migration`.
@@ -641,8 +609,8 @@ mod tests {
         shape
     }
 
-    /// Strip `--` line comments and parenthesized `CHECK (...)` predicates so
-    /// the column extractor sees just `name TYPE [NOT NULL] [DEFAULT ...]`.
+    /// Strip `--` line comments and `CHECK (...)` predicates so the column
+    /// extractor sees just `name TYPE [NOT NULL] [DEFAULT ...]`.
     fn strip_comments_and_checks(sql: &str) -> String {
         let mut out = String::with_capacity(sql.len());
         for raw_line in sql.lines() {
@@ -656,8 +624,7 @@ mod tests {
         strip_parenthesized_after_keyword(&out, "CHECK")
     }
 
-    /// Remove every `CHECK (...)` clause (handling nested parens) so the
-    /// column-name extractor isn't fooled by SQL inside the predicate.
+    /// Remove every `CHECK (...)` clause, handling nested parens.
     fn strip_parenthesized_after_keyword(sql: &str, keyword: &str) -> String {
         let upper = sql.to_ascii_uppercase();
         let upper_keyword = keyword.to_ascii_uppercase();
@@ -771,9 +738,7 @@ mod tests {
             return None;
         }
         let upper = trimmed.to_ascii_uppercase();
-        // Skip table-level constraints: PRIMARY KEY (...), FOREIGN KEY (...),
-        // UNIQUE (...), CONSTRAINT name ..., CHECK (...) (CHECK already
-        // stripped, but FOREIGN KEY constructs survive).
+        // Skip table-level constraints, which are not columns.
         for prefix in [
             "PRIMARY KEY",
             "FOREIGN KEY",
@@ -803,8 +768,6 @@ mod tests {
                 Some(t) => t.to_string(),
                 None => break,
             };
-            // Re-anchor on the substring starting at the table name to find the
-            // `ADD COLUMN <name>` triple that follows.
             let table_offset = rest.find(&table).unwrap_or(0);
             let after_table = &rest[table_offset + table.len()..];
             let after_upper = after_table.to_ascii_uppercase();
@@ -870,8 +833,8 @@ mod tests {
         out
     }
 
-    /// Drop direction markers (`ASC`/`DESC`) and whitespace so two dialects
-    /// that disagree only on case or spacing still compare equal.
+    /// Drop direction markers and whitespace so two dialects that disagree only
+    /// on case or spacing still compare equal.
     fn normalize_index_columns(raw: &str) -> String {
         raw.split(',')
             .map(|chunk| {
@@ -908,8 +871,6 @@ mod tests {
 
     #[test]
     fn dialects_have_matching_tables_columns_and_indexes_per_migration() {
-        // Use the public accessor so any future caller of
-        // migrations_postgres_ddl() exercises the same invariant.
         let registry = migrations_postgres_ddl();
         assert_eq!(registry.len(), MIGRATIONS.len());
         for migration in registry {

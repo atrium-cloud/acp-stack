@@ -38,10 +38,8 @@ pub(crate) async fn sessions_delete_handler(
     Path(id): Path<String>,
     Query(params): Query<SessionsTargetParams>,
 ) -> std::result::Result<ApiSuccess<SessionsDeleteResponse>, StackError> {
-    // Unknown ids are a silent success per ACP session/delete, so the stored
-    // target comes from a single lookup here instead of the shared resolvers
-    // (which error on missing sessions and would turn a concurrent delete
-    // racing this handler into a 404).
+    // Unknown ids are a silent success per ACP session/delete, so this uses a single lookup rather
+    // than the shared resolvers, which would turn a concurrent delete racing this handler into a 404.
     let stored_target_id = {
         let store = state.state.lock().await;
         store.get_session(&id)?.map(|record| record.target_id)
@@ -85,9 +83,6 @@ async fn cancel_pending_acp_permissions_for_session(
     session_id: &str,
     reason: &str,
 ) {
-    // Read every pending row, filter by source=acp + subject_id=session.
-    // The list is small in practice (one prompt turn at a time); no need to
-    // push the filter into SQL.
     let pending = match state.permissions.pending(MAX_LOGS_LIMIT).await {
         Ok(rows) => rows,
         Err(err) => {

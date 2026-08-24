@@ -1,19 +1,5 @@
-//! Init run state machine records.
-//!
-//! Two tables back the top-level orchestrator:
-//!
-//! - `init_runs` — one row per `acps init` invocation. Records the runtime
-//!   user, agent id, args, and an aggregate status (`pending` while in
-//!   flight, `succeeded` once every step succeeded or was verified-and-
-//!   skipped, `failed` otherwise).
-//! - `init_steps` — one row per logical phase that executes or resumes.
-//!   Carries the postcondition verifier's status (`succeeded`, `skipped`,
-//!   or `failed`), the per-step log directory, and a typed error tuple for
-//!   `failed` rows.
-//!
-//! The orchestrator (`crate::runtime::init_runner`) uses these rows to drive
-//! resume: on rerun, any `succeeded` row whose postcondition still verifies
-//! is replayed as `skipped`; everything else is re-executed.
+//! `init_runs`/`init_steps` records backing the init orchestrator, which drives resume by
+//! replaying any `succeeded` step whose postcondition still verifies as `skipped`.
 
 use crate::error::Result;
 use rusqlite::{OptionalExtension, params};
@@ -63,17 +49,15 @@ pub struct NewInitStep<'a> {
     pub payload_json: &'a str,
 }
 
-/// Step status sentinels persisted to `init_steps.status`. Centralised here
-/// so the orchestrator and the CLI history view agree on the wire form.
+/// Step status sentinels persisted to `init_steps.status`.
 pub const INIT_STEP_PENDING: &str = "pending";
 pub const INIT_STEP_RUNNING: &str = "running";
 pub const INIT_STEP_SUCCEEDED: &str = "succeeded";
 pub const INIT_STEP_SKIPPED: &str = "skipped";
 pub const INIT_STEP_FAILED: &str = "failed";
 
-/// Run-level status sentinels persisted to `init_runs.status`. `pending`
-/// covers both not-yet-started and in-progress; the orchestrator only
-/// transitions to `succeeded`/`failed` once every step has settled.
+/// Run-level status sentinels persisted to `init_runs.status`; `pending` covers not-yet-started
+/// and in-progress alike, and a terminal status is only set once every step has settled.
 pub const INIT_RUN_PENDING: &str = "pending";
 pub const INIT_RUN_RUNNING: &str = "running";
 pub const INIT_RUN_SUCCEEDED: &str = "succeeded";
@@ -108,8 +92,7 @@ fn row_to_init_step(row: &rusqlite::Row<'_>) -> rusqlite::Result<InitStepRecord>
 }
 
 impl StateStore {
-    /// Create a fresh `init_runs` row with status `pending`. Returns the
-    /// generated id so the orchestrator can attach steps to it.
+    /// Create a fresh `init_runs` row with status `pending`, returning its generated id.
     pub fn create_init_run(&self, input: NewInitRun<'_>) -> Result<InitRunRecord> {
         validate_json_payload(self.connection(), input.args_json)?;
         let record = InitRunRecord {
@@ -139,9 +122,7 @@ impl StateStore {
         Ok(record)
     }
 
-    /// Settle an init run's aggregate status. The orchestrator calls this
-    /// after every step has settled — once with `succeeded` on the happy
-    /// path, once with `failed` if any step failed.
+    /// Settle an init run's aggregate status, once every step has settled.
     pub fn finalize_init_run(&self, run_id: &str, status: &str) -> Result<()> {
         let finished_at = current_timestamp();
         self.connection().execute(
@@ -171,10 +152,8 @@ impl StateStore {
             .optional()?)
     }
 
-    /// Most recent non-terminal init run, scanning past any newer terminal
-    /// rows so a fresh `acps init` that landed on `succeeded` after a prior
-    /// `failed`/`pending` row doesn't shadow the failed one. Used by
-    /// `acps init --resume` (no `--run-id`).
+    /// Most recent non-terminal init run, scanning past newer terminal rows so a later
+    /// `succeeded` run cannot shadow an earlier failed one. Backs `acps init --resume`.
     pub fn latest_non_terminal_init_run(&self) -> Result<Option<InitRunRecord>> {
         Ok(self
             .connection()
@@ -221,9 +200,8 @@ impl StateStore {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Insert a `pending` step row pinned to (`run_id`, `ordinal`). The
-    /// uniqueness constraint guards against double-registration when an
-    /// orchestrator bug would otherwise drift step numbering.
+    /// Insert a `pending` step row pinned to (`run_id`, `ordinal`), whose uniqueness constraint
+    /// guards against double-registration drifting step numbering.
     pub fn append_init_step(&self, input: NewInitStep<'_>) -> Result<InitStepRecord> {
         validate_json_payload(self.connection(), input.payload_json)?;
         let record = InitStepRecord {
@@ -263,9 +241,7 @@ impl StateStore {
         Ok(record)
     }
 
-    /// Mark a step `running` and stamp `started_at`. Called at the entry of
-    /// every executed step; verifier-only `skipped` paths bypass this and
-    /// call [`Self::mark_init_step_skipped`] directly.
+    /// Mark a step `running` and stamp `started_at`; verifier-only skips bypass this.
     pub fn mark_init_step_running(&self, step_id: &str) -> Result<()> {
         let started_at = current_timestamp();
         self.connection().execute(
@@ -306,10 +282,8 @@ impl StateStore {
         Ok(())
     }
 
-    /// Record that a previously `succeeded` step's postcondition still holds
-    /// and was reused on this run. Leaves `started_at` untouched (the
-    /// original run's timestamp); stamps a fresh `finished_at` so the
-    /// operator can see when the verifier last confirmed.
+    /// Record that a `succeeded` step's postcondition still holds and was reused. `started_at`
+    /// keeps the original run's timestamp; `finished_at` records this verification.
     pub fn mark_init_step_skipped(&self, step_id: &str, payload_json: &str) -> Result<()> {
         validate_json_payload(self.connection(), payload_json)?;
         let finished_at = current_timestamp();
@@ -369,8 +343,7 @@ impl StateStore {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Convenience used by the orchestrator's resume path to look up a
-    /// previously recorded step before deciding to re-execute or skip.
+    /// Look up a recorded step, used by resume to decide between re-execute and skip.
     pub fn lookup_init_step(&self, run_id: &str, ordinal: i64) -> Result<Option<InitStepRecord>> {
         Ok(self
             .connection()

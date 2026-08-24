@@ -177,12 +177,9 @@ fn auto_frequency_skip_report(
             field: "updates.acp_stack.frequency",
         },
     )?;
-    // Skip rows are themselves persisted as INSTALL+auto runs stamped at "now";
-    // using one as the frequency reference would re-arm the window on every
-    // timer fire and never let an update through once frequency exceeds the
-    // timer cadence. Only runs that actually attempted an update count, and
-    // the query must not be bounded by a recent-row window that accumulated
-    // skip rows could push the real attempt out of.
+    // Only runs that actually ATTEMPTED an update may serve as the frequency
+    // reference: skip rows are themselves stamped at "now", so counting one
+    // would re-arm the window on every timer fire and starve real updates.
     let Some(recent) = state.latest_stack_auto_install_attempt()? else {
         return Ok(None);
     };
@@ -456,9 +453,7 @@ fn update_decision(
     if normalize_version(current_version) == normalize_version(&manifest.version) {
         return StackUpdateDecision::UpToDate;
     }
-    // Auto mode must never downgrade: if upstream `latest` resolves below the
-    // running version (e.g. a newer release was yanked), leave the rollback
-    // decision to an explicit manual install command.
+    // Auto mode must never downgrade; a rollback needs an explicit manual install.
     if auto && is_version_downgrade(current_version, &manifest.version) {
         return StackUpdateDecision::ManualOnly;
     }
@@ -513,11 +508,9 @@ fn running_in_container() -> bool {
     railway || Path::new("/.dockerenv").exists()
 }
 
-// A release version is the strict semver core from Cargo.toml plus an
-// optional nightly component that exists only in tags and packaging names
-// (v0.1.1.2). A nightly orders after its base release (0.1.1 < 0.1.1.1) and
-// before the next patch release (0.1.1.9 < 0.1.2); the derived Ord gives
-// exactly this because Option orders None before Some.
+// Semver core plus an optional nightly component that exists only in tags
+// (v0.1.1.2). FIELD ORDER IS THE SORT ORDER: the derived `Ord` places a nightly
+// after its base release and before the next patch, since None precedes Some.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct ReleaseVersion {
     major: u64,
@@ -596,12 +589,7 @@ fn policy_as_str(policy: StackUpdatePolicy) -> &'static str {
 #[cfg(test)]
 mod tests;
 
-// End-to-end self-update apply test. Stands up a local HTTP fixture standing in
-// for the GitHub Releases API and drives `install_stack_update` through the full
-// fetch -> verify -> extract -> swap path, asserting the binaries on disk are
-// actually replaced. Gated to `test-fixtures` because the `GITHUB_API_BASE` /
-// install-dir redirection seams (and thus the binary swap) only activate under
-// that feature; the test body itself skips on non-Linux hosts since
-// `host_target` rejects them.
+// End-to-end self-update apply test, gated to `test-fixtures` because the
+// GitHub-API and install-dir redirection seams only activate under that feature.
 #[cfg(all(test, feature = "test-fixtures"))]
 mod apply_e2e_tests;

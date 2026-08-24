@@ -238,11 +238,8 @@ fn validate_history_args(args: &SecurityHistoryArgs) -> Result<()> {
     Ok(())
 }
 
-/// Reject any run id that would need URL encoding. The runtime emits ids of
-/// the form `srun_<digits>_<digits>_<digits>` so accepting `[A-Za-z0-9_]+`
-/// covers every legitimate value and keeps the URL builder simple. A weird
-/// value (spaces, slashes, query chars) is almost certainly a CLI typo, so
-/// failing here gives a clearer error than a 404 from the daemon.
+/// Reject any run id that would need URL encoding; `[A-Za-z0-9_]+` covers
+/// every id the runtime emits and keeps the URL builder simple.
 fn validate_run_id(value: &str, field: &'static str) -> Result<()> {
     if value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         Ok(())

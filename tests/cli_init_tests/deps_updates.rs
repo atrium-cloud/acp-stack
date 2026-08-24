@@ -99,8 +99,8 @@ fn init_deps_apply_requires_yes_noninteractive() {
 fn init_deps_apply_runs_pending_action_and_surfaces_failure() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    // The tool is not on PATH (pending), so the apply step runs its shell,
-    // which exits non-zero — proving the step executes and surfaces failure.
+    // The tool is not on PATH, so the apply step runs its shell, which exits
+    // non-zero.
     let output = acps_command()
         .env("HOME", tempdir.path())
         .args([
@@ -135,16 +135,14 @@ fn init_deps_apply_runs_pending_action_and_surfaces_failure() {
 fn init_deps_apply_skips_system_scope_without_sudo_and_continues() {
     // SAFETY: `geteuid()` is always safe — no preconditions.
     if unsafe { libc::geteuid() } == 0 {
-        // As root the escalation probe short-circuits to "run directly"
-        // and the skip path under test is unreachable.
+        // As root the escalation probe runs directly, so the skip path under
+        // test is unreachable.
         return;
     }
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    // Deterministic "no passwordless sudo": prepend a fake sudo that always
-    // exits 1 (as if a password were required), so the escalation probe
-    // resolves it and collapses to Unavailable regardless of the host's
-    // real sudoers state. The rest of PATH stays intact for the init run.
+    // A fake sudo that always exits 1 makes the escalation probe collapse to
+    // Unavailable regardless of the host's real sudoers state.
     let fake_bin = tempdir.path().join("fake-bin");
     fs::create_dir_all(&fake_bin).expect("fake bin dir");
     let fake_sudo = fake_bin.join("sudo");
@@ -154,8 +152,8 @@ fn init_deps_apply_skips_system_scope_without_sudo_and_continues() {
     let host_path = std::env::var("PATH").expect("PATH should be set");
     let path_with_fake_sudo = format!("{}:{host_path}", fake_bin.to_string_lossy());
 
-    // The system-scope action would succeed if it ran; the point is that it
-    // must NOT run — it is skipped on privilege and init still completes.
+    // The system-scope action would succeed if it ran; it must instead be
+    // skipped on privilege while init still completes.
     acps_command()
         .env("HOME", tempdir.path())
         .env("PATH", path_with_fake_sudo)
@@ -185,7 +183,6 @@ fn init_deps_apply_skips_system_scope_without_sudo_and_continues() {
         ))
         .stdout(predicates::str::contains("initialized acp-stack"));
 
-    // The skip is still visible in the audit log as privilege_required.
     let store =
         StateStore::open(default_state_path(tempdir.path())).expect("state store should open");
     let rows = store

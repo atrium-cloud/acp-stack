@@ -24,15 +24,10 @@ const ADMIN_KEY: &str = "acps_admin_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 const NAMESPACE: &str = "platform-state";
 const PEER_NAMESPACE: &str = "peer-state";
 
-/// Serializes HOME mutations across the parallel-by-default `#[tokio::test]`
-/// functions in this file (same pattern as tests/common/mod.rs). The
-/// handler resolves the secret store through `$HOME`, so each test repoints
-/// HOME at its own tempdir for the full test body.
-///
-/// WARNING: this is sound only while every HOME read in this test binary goes
-/// through a test holding this guard. A new test (or helper) that reads HOME
-/// without taking `HomeEnvGuard::set` races the unsafe `set_var` below and is
-/// undefined behavior on multi-threaded runs — route it through the guard.
+/// Serializes HOME mutations across the parallel `#[tokio::test]` functions
+/// here. Sound only while EVERY HOME read in this binary holds this guard: a
+/// test or helper that reads HOME without `HomeEnvGuard::set` races the unsafe
+/// `set_var` below and is undefined behavior on multi-threaded runs.
 static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 struct HomeEnvGuard<'a> {
@@ -46,9 +41,8 @@ impl HomeEnvGuard<'_> {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let previous = std::env::var_os("HOME");
-        // SAFETY: HOME_LOCK serializes tests that mutate HOME via this guard.
-        // Tests in this binary that depend on HOME route through here, so
-        // there's no read racing the mutation.
+        // SAFETY: HOME_LOCK is held, and every HOME read in this binary routes
+        // through this guard, so no read races the mutation.
         unsafe {
             std::env::set_var("HOME", home);
         }
@@ -61,8 +55,7 @@ impl HomeEnvGuard<'_> {
 
 impl Drop for HomeEnvGuard<'_> {
     fn drop(&mut self) {
-        // SAFETY: lock still held; restore the prior HOME before releasing it
-        // so the next test sees a clean slate.
+        // SAFETY: lock still held while the prior HOME is restored.
         unsafe {
             match self.previous.take() {
                 Some(value) => std::env::set_var("HOME", value),
@@ -86,8 +79,7 @@ impl ServerHarness {
     async fn spawn() -> Self {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let home_guard = HomeEnvGuard::set(tempdir.path());
-        // Initialize the age key + encrypted store the way `acps init` would,
-        // so the handler's SecretStore::open finds an existing store.
+        // The handler's SecretStore::open requires an existing store.
         SecretStore::open_or_create(tempdir.path()).expect("create secret store");
 
         let state_path = tempdir.path().join("state.sqlite");
@@ -146,9 +138,8 @@ impl ServerHarness {
         SecretStore::open(&self.home).expect("reopen secret store")
     }
 
-    /// The handler reloads the runtime config from disk on every apply, so a
-    /// test can stage config changes (e.g. an init writing a custom provider)
-    /// by rewriting the file the harness pointed `RuntimePaths` at.
+    /// The handler reloads the runtime config from disk on every apply, so
+    /// rewriting the file stages a config change mid-test.
     fn rewrite_runtime_config(&self, config: &Config) {
         std::fs::write(
             self.home.join("acps-config.toml"),
@@ -267,7 +258,6 @@ async fn rejects_nonpositive_revision() {
 #[tokio::test]
 async fn rejects_missing_desired_and_missing_selection_keys() {
     let harness = ServerHarness::spawn().await;
-    // Absent `desired` must be a parse error.
     let response = harness
         .post_apply(
             NAMESPACE,
@@ -424,9 +414,8 @@ async fn custom_provider_apply_uses_configured_api_key_ref_contract() {
     );
 }
 
-/// A credential rotation must not be held hostage by an unrelated bad
-/// declaration: the handler reload is lenient, so an MCP server the strict
-/// loader would reject is dropped rather than failing the apply.
+/// The handler reload is lenient: an MCP server the strict loader would
+/// reject is dropped rather than failing an unrelated credential rotation.
 #[tokio::test]
 async fn apply_succeeds_when_the_runtime_config_carries_an_invalid_mcp_server() {
     use acp_stack::config::{McpServerConfig, McpStdioServer};
@@ -455,7 +444,6 @@ async fn apply_succeeds_when_the_runtime_config_carries_an_invalid_mcp_server() 
     let body: Value = response.json().await.expect("envelope");
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(body["data"]["outcome"], "applied");
-    // The custom-provider env contract still came from the lenient load.
     let store = harness.reopen_store();
     let (credential, _alias) = store
         .provider_credential_set("my-custom")
@@ -473,7 +461,6 @@ async fn custom_provider_apply_rejects_keys_outside_configured_contract() {
     let harness = ServerHarness::spawn().await;
     harness.rewrite_runtime_config(&config_with_custom_provider());
 
-    // Extra key beside the configured ref.
     let response = harness
         .post_apply(
             NAMESPACE,
@@ -489,7 +476,6 @@ async fn custom_provider_apply_rejects_keys_outside_configured_contract() {
         .await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-    // Single key that is not the configured ref.
     let response = harness
         .post_apply(
             NAMESPACE,
@@ -516,8 +502,7 @@ async fn custom_provider_apply_rejects_keys_outside_configured_contract() {
 async fn custom_provider_apply_retries_same_revision_after_config_lands() {
     let harness = ServerHarness::spawn().await;
 
-    // The runtime config does not declare the custom provider yet, so the
-    // apply is rejected before any watermark persists.
+    // No custom provider declared yet: rejected before any watermark persists.
     let response = harness
         .post_apply(
             NAMESPACE,
@@ -535,7 +520,6 @@ async fn custom_provider_apply_retries_same_revision_after_config_lands() {
             .is_none()
     );
 
-    // Once init writes the provider, the same revision replays cleanly.
     harness.rewrite_runtime_config(&config_with_custom_provider());
     let response = harness
         .post_apply(
@@ -553,7 +537,6 @@ async fn custom_provider_apply_retries_same_revision_after_config_lands() {
 async fn apply_replay_conflict_stale_and_clear_lifecycle() {
     let harness = ServerHarness::spawn().await;
 
-    // Apply at revision 7.
     let response = harness
         .post_apply(
             NAMESPACE,
@@ -579,7 +562,6 @@ async fn apply_replay_conflict_stale_and_clear_lifecycle() {
         );
     }
 
-    // Identical replay at revision 7 is a noop.
     let response = harness
         .post_apply(
             NAMESPACE,
@@ -591,7 +573,6 @@ async fn apply_replay_conflict_stale_and_clear_lifecycle() {
     let body: Value = response.json().await.expect("envelope");
     assert_eq!(body["data"]["outcome"], "noop");
 
-    // Different content at revision 7 conflicts.
     let response = harness
         .post_apply(
             NAMESPACE,
@@ -603,13 +584,11 @@ async fn apply_replay_conflict_stale_and_clear_lifecycle() {
     let body: Value = response.json().await.expect("envelope");
     assert_eq!(body["error"]["code"], "extensions.revision_conflict");
 
-    // A stale revision conflicts.
     let response = harness
         .post_apply(NAMESPACE, ADMIN_KEY, apply_body(6, Value::Null))
         .await;
     assert_eq!(response.status(), StatusCode::CONFLICT);
 
-    // Clear at revision 8 removes the credential, retains the watermark.
     let response = harness
         .post_apply(NAMESPACE, ADMIN_KEY, apply_body(8, Value::Null))
         .await;
@@ -635,18 +614,16 @@ fn openai_selection_with_base_url(value: &str, base_url: &str) -> Value {
     })
 }
 
-/// An endpoint override is written into the configured agent's native config,
-/// so it is only accepted for an agent whose registry entry declares
-/// `set_provider_base_url`. The harness config runs the placebo agent, which
-/// declares no such field; these tests repoint it at one that does.
+/// An endpoint override is only accepted for an agent whose registry entry
+/// declares `set_provider_base_url`, so these tests repoint the placebo.
 fn use_endpoint_capable_agent(harness: &ServerHarness) {
     let mut config = test_config();
     config.agent.id = "opencode".to_owned();
     harness.rewrite_runtime_config(&config);
 }
 
-/// Codex also declares `set_provider_base_url`, so it clears the agent-level
-/// check and exercises the per-provider one.
+/// Codex declares `set_provider_base_url`, so it exercises the per-provider
+/// check rather than the agent-level one.
 fn use_codex_agent(harness: &ServerHarness) {
     let mut config = test_config();
     config.agent.id = "codex".to_owned();
@@ -680,7 +657,6 @@ async fn rejects_a_base_url_for_an_agent_without_an_endpoint_field() {
         body["error"].to_string().contains("custom endpoint"),
         "{body}"
     );
-    // Rejected before any watermark or catalog persist.
     let store = harness.reopen_store();
     assert!(store.managed_state_record(NAMESPACE).is_none());
     assert!(store.provider_credential_set("openai").is_none());
@@ -710,15 +686,13 @@ async fn rejects_a_base_url_for_codex_built_in_openai() {
         "{body}"
     );
     assert!(body["error"].to_string().contains("openrouter"), "{body}");
-    // Rejected before any watermark or catalog persist.
     let store = harness.reopen_store();
     assert!(store.managed_state_record(NAMESPACE).is_none());
     assert!(store.provider_credential_set("openai").is_none());
 }
 
-/// The endpoint refusal is scoped to the routing decision, not to the key:
-/// Codex reads `OPENAI_API_KEY` natively, so a raw key for its built-in openai
-/// provider is an ordinary managed credential.
+/// The endpoint refusal is scoped to routing, not to the key: a raw key for
+/// Codex's built-in openai provider is an ordinary managed credential.
 #[tokio::test]
 async fn codex_accepts_a_keyed_openai_selection_without_a_base_url() {
     let harness = ServerHarness::spawn().await;
@@ -755,8 +729,7 @@ async fn a_rejected_endpoint_revision_stays_reusable() {
         .await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-    // Nothing persisted, so the orchestrator retries the same revision without
-    // the endpoint rather than being forced to burn one.
+    // Nothing persisted, so the orchestrator can retry the same revision.
     let response = harness
         .post_apply(
             NAMESPACE,
@@ -877,7 +850,6 @@ async fn replay_at_the_same_revision_with_a_changed_base_url_conflicts() {
         .await;
     assert_eq!(response.status(), StatusCode::OK);
 
-    // Identical replay still no-ops.
     let response = harness
         .post_apply(
             NAMESPACE,
@@ -892,8 +864,8 @@ async fn replay_at_the_same_revision_with_a_changed_base_url_conflicts() {
     let body: Value = response.json().await.expect("envelope");
     assert_eq!(body["data"]["outcome"], "noop");
 
-    // Same values, different endpoint: the effective routing changed, so the
-    // orchestrator must advance the revision rather than silently no-op.
+    // Same values, different endpoint: routing changed, so the revision must
+    // advance rather than silently no-op.
     let response = harness
         .post_apply(
             NAMESPACE,
@@ -908,7 +880,6 @@ async fn replay_at_the_same_revision_with_a_changed_base_url_conflicts() {
     let body: Value = response.json().await.expect("envelope");
     assert_eq!(body["error"]["code"], "extensions.revision_conflict");
 
-    // Dropping the endpoint entirely is likewise a content change.
     let response = harness
         .post_apply(
             NAMESPACE,
@@ -978,7 +949,6 @@ async fn refuses_operator_owned_and_foreign_namespace_entries() {
     let body: Value = response.json().await.expect("envelope");
     assert_eq!(body["error"]["code"], "extensions.state_ownership");
 
-    // A different namespace cannot take over another namespace's provider.
     let response = harness
         .post_apply(
             NAMESPACE,
@@ -1045,7 +1015,6 @@ async fn resolves_source_refs_from_secret_store() {
         "PLATFORM_OPENAI_KEY"
     );
 
-    // Unknown refs are a payload error, not a 404.
     let response = harness
         .post_apply(
             NAMESPACE,
@@ -1094,9 +1063,8 @@ async fn audit_event_records_outcome_without_values() {
     );
 }
 
-/// At most one provider may be rerouted at a time: a second namespace applying
-/// a `base_url` for a different provider is rejected before its watermark
-/// persists, and the same revision succeeds once the first endpoint clears.
+/// At most one provider may be rerouted at a time: a second namespace's
+/// `base_url` for a different provider is rejected until the first clears.
 #[tokio::test]
 async fn a_second_provider_endpoint_override_is_rejected_until_the_first_is_cleared() {
     let harness = ServerHarness::spawn().await;
@@ -1141,7 +1109,6 @@ async fn a_second_provider_endpoint_override_is_rejected_until_the_first_is_clea
         "rejected before the watermark persists, so the revision stays reusable"
     );
 
-    // Clearing the first namespace's endpoint unblocks the same revision.
     let response = harness
         .post_apply(NAMESPACE, ADMIN_KEY, apply_body(2, Value::Null))
         .await;

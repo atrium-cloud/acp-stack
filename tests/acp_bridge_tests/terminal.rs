@@ -1,8 +1,5 @@
-//! terminal/* round-trips.
-//!
-//! The placebo drives the client's terminal handlers during a prompt and
-//! reports the round-trip as a `terminal-report:{json}` message chunk, which
-//! these tests read back out of the sink.
+//! terminal/* round-trips, read back out of the sink as the placebo's
+//! `terminal-report:{json}` message chunk.
 
 use crate::support::{
     INVALID_PARAMS_CODE, RESOURCE_NOT_FOUND_CODE, open_test_state, run_terminal_probe,
@@ -12,8 +9,7 @@ use crate::support::{
 async fn terminal_create_returns_output_and_records_acp_command() {
     let (_tempdir, state) = open_test_state();
     let event_hub = acp_stack::events::EventHub::new();
-    // Subscribe before the probe runs: the hub is a broadcast channel, so
-    // only events published after subscription are observable.
+    // The hub is a broadcast channel, so subscribe before the probe runs.
     let mut live_events = event_hub.subscribe();
     let (report, bridge, _sink) = run_terminal_probe(
         &[
@@ -51,8 +47,6 @@ async fn terminal_create_returns_output_and_records_acp_command() {
     assert_eq!(row.status, "exited");
     assert!(row.session_id.is_some());
 
-    // Terminal output and lifecycle transitions must fan out on the
-    // per-command live topic exactly like gateway commands do.
     let topic = format!("commands.{}", row.id);
     let mut saw_output_chunk = false;
     let mut saw_exited = false;
@@ -151,7 +145,6 @@ async fn terminal_kill_terminates_but_output_remains_readable() {
         signal == "SIGTERM" || signal == "SIGKILL",
         "unexpected signal {signal}"
     );
-    // Output was read AFTER the kill and is still the buffered content.
     assert_eq!(report["output"], "started");
     bridge.shutdown().await.expect("shutdown ok");
 }
@@ -178,9 +171,8 @@ async fn terminal_wait_cancellation_preserves_the_terminal() {
 }
 
 // The strict placebo only touches terminal/* when the client advertised
-// `terminal: true`, so a non-skipped full lifecycle proves the capability is
-// on the wire: create -> output (with byte limit) -> kill -> wait -> output ->
-// release -> post-release error.
+// `terminal: true`, so a non-skipped lifecycle proves the capability is on the
+// wire.
 #[tokio::test]
 async fn terminal_full_lifecycle_under_advertised_capability() {
     let (report, bridge, _sink) = run_terminal_probe(
@@ -242,7 +234,6 @@ async fn shutdown_kills_live_terminals() {
     .await;
     assert_eq!(report["orphaned"], true);
 
-    // Wait until the child has written its pid, proving it is alive.
     let mut pid: Option<i32> = None;
     for _ in 0..100 {
         if let Ok(text) = std::fs::read_to_string(&pid_file)

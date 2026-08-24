@@ -265,9 +265,8 @@ impl AgentCapabilitiesDto {
     }
 
     pub(super) fn from_initialize_response(response: &InitializeResponse) -> Result<Self> {
-        // The SDK's `AgentCapabilities` is a typed struct that may rename
-        // fields between minor versions; serialize through serde_json to keep
-        // our durable storage and API contract independent of that surface.
+        // The SDK struct may rename fields between minor versions, so go through
+        // serde_json to keep durable storage and the API contract independent.
         let raw_caps = serde_json::to_value(&response.agent_capabilities).map_err(|err| {
             StackError::AgentInitializeFailed {
                 reason: format!("failed to serialize agent capabilities: {err}"),
@@ -361,8 +360,6 @@ mod tests {
 
     #[test]
     fn partition_keeps_stdio_when_any_mcp_capability_is_claimed() {
-        // sse:true is evidence the agent engages with MCP, so the stdio
-        // baseline rides along even though http stays skipped.
         let capabilities = capabilities_with(json!({ "sse": true }));
         let partitioned = capabilities
             .partition_mcp_servers(vec![stdio_server("local"), http_server("linear")])
@@ -378,8 +375,8 @@ mod tests {
 
     #[test]
     fn unadvertised_transport_no_longer_fails_the_whole_session() {
-        // Regression: a `[[mcp.servers]] type = "http"` declaration against an
-        // adapter that only speaks stdio used to make session create impossible.
+        // Regression: an http server against a stdio-only adapter used to make
+        // session create impossible.
         let capabilities = capabilities_with(json!({}));
         let partitioned = capabilities
             .partition_mcp_servers(vec![http_server("linear")])

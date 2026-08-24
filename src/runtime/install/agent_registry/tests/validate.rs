@@ -34,8 +34,7 @@ creates = "bad"
 
 #[test]
 fn validate_rejects_removed_supports_mcp_field() {
-    // MCP support is determined by the post-install capability probe, never
-    // declared in the registry; the old field must not silently round-trip.
+    // MCP support comes from the post-install capability probe, never the registry.
     let body = r#"
 [[agents]]
 id = "bad"
@@ -147,8 +146,7 @@ timeout_secs = 0
 
 #[test]
 fn validate_rejects_shell_timeout_past_the_cap() {
-    // A near-u64::MAX budget would overflow the `Instant::now() + timeout`
-    // deadline arithmetic in `run_captured`; the 24h cap rejects it at parse.
+    // A near-u64::MAX budget would overflow the `Instant::now() + timeout` arithmetic in `run_captured`.
     let body = r#"
 [[agents]]
 id = "bad"
@@ -303,8 +301,7 @@ creates = "bad"
 
 #[test]
 fn validate_rejects_shell_rerun_without_a_shell_install() {
-    // The flag means "re-run the recipe", so an entry without a recipe has
-    // declared an update path that cannot exist.
+    // The flag means "re-run the recipe", so an entry without one declares an impossible update path.
     let body = r#"
 [[agents]]
 id = "bad"
@@ -367,7 +364,6 @@ creates = "bad"
 
 #[test]
 fn validate_rejects_blank_acp_arg() {
-    // A whitespace-only argument is as unusable as an empty string.
     let body = r#"
 [[agents]]
 id = "bad"

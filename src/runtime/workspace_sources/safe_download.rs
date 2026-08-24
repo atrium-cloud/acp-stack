@@ -1,21 +1,6 @@
-//! Safe HTTPS downloader for untrusted external sources.
-//!
-//! Used by the workspace init materializer to pull archives from public URLs
-//! (Drive/Dropbox/arbitrary hosts) and other Phase 4 download paths. Hardened
-//! against the failure modes that matter for untrusted endpoints:
-//!
-//! * Scheme allowlist on the requested URL **and** every redirect target.
-//!   Production callers stick to `https`; tests can broaden the allowlist.
-//! * Bounded redirect chain (default 3) so a hostile server cannot spin us
-//!   forever or trick us into following a downgrade.
-//! * Streaming body copy with a hard byte cap. Oversized responses abort
-//!   mid-stream rather than buffering the whole body.
-//! * Optional sha256 verification on the fully-written file.
-//! * Connect and read timeouts so a slow loris cannot keep us hanging.
-//!
-//! Intentionally NOT done here: archive extraction, mime-type inference, or
-//! content-disposition parsing — those live in `safe_extract` and the
-//! materializer. This module owns the wire.
+//! Safe HTTPS downloader for untrusted external sources: scheme allowlist on the
+//! request and every redirect target, bounded redirect chain, hard streaming byte
+//! cap, optional sha256 verification, and connect/read timeouts.
 
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
@@ -31,15 +16,12 @@ use crate::error::{Result, StackError};
 const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_READ_TIMEOUT_SECS: u64 = 600;
 const DEFAULT_MAX_REDIRECTS: usize = 3;
-/// Cap on individual downloads when callers do not provide an explicit
-/// limit. Public so other materializers (notably the S3 ingest path) can
-/// share the same default size budget.
-pub const DEFAULT_MAX_DOWNLOAD_BYTES: u64 = 500 * 1024 * 1024; // 500 MiB
+/// Default cap on individual downloads, shared by every materializer.
+pub const DEFAULT_MAX_DOWNLOAD_BYTES: u64 = 500 * 1024 * 1024;
 const STREAM_CHUNK_BYTES: usize = 32 * 1024;
 const USER_AGENT: &str = concat!("acp-stack/", env!("CARGO_PKG_VERSION"));
 
-/// Options for a single download. Defaults are tuned for archive ingestion
-/// from untrusted hosts; callers tighten via the builder methods.
+/// Options for a single download, defaulted for archive ingestion from untrusted hosts.
 #[derive(Debug, Clone)]
 pub struct DownloadOpts {
     /// Schemes we accept on the requested URL and on each redirect target.
@@ -78,10 +60,8 @@ pub struct DownloadReport {
     pub final_url: String,
 }
 
-/// Download `url` to `dest`, enforcing scheme/redirect/size policy.
-///
-/// `dest` is overwritten if it exists. On any failure the partial file is
-/// removed so callers do not see a half-written artifact.
+/// Download `url` to `dest`, enforcing scheme/redirect/size policy. `dest` is
+/// overwritten, and on any failure the partial file is removed.
 pub fn download_to_file(url: &str, dest: &Path, opts: &DownloadOpts) -> Result<DownloadReport> {
     enforce_scheme(url, &opts.allowed_schemes)?;
 
@@ -124,7 +104,6 @@ pub fn download_to_file(url: &str, dest: &Path, opts: &DownloadOpts) -> Result<D
         });
     }
 
-    // Stream the body through a size-capped, hashing writer.
     let outcome = write_streaming(response, dest, opts);
     match outcome {
         Ok((bytes_written, sha256)) => {
@@ -299,8 +278,7 @@ mod tests {
     use tokio::sync::oneshot;
 
     fn http_opts() -> DownloadOpts {
-        // Tests serve over plain HTTP. Production callers use the
-        // HTTPS-only default.
+        // Tests serve over plain HTTP; production callers use the HTTPS-only default.
         DownloadOpts {
             allowed_schemes: vec!["http".to_owned(), "https".to_owned()],
             ..DownloadOpts::default()
@@ -398,7 +376,6 @@ mod tests {
         );
         let on_disk = std::fs::read(&dest).expect("read back");
         assert_eq!(&on_disk, b"hello, acp\n");
-        // sha256("hello, acp\n")
         let mut hasher = Sha256::new();
         hasher.update(b"hello, acp\n");
         let expected = format!("{:x}", hasher.finalize());
@@ -407,7 +384,6 @@ mod tests {
 
     #[test]
     fn aborts_when_body_exceeds_cap() {
-        // 16 KiB body, but cap at 8 KiB.
         let router = Router::new().route(
             "/big",
             get(|| async {
@@ -427,30 +403,18 @@ mod tests {
         };
         let err = download_to_file(&server.url("/big"), &dest, &opts).expect_err("too large");
         assert!(matches!(err, StackError::SafeDownloadTooLarge { .. }));
-        // Partial file removed.
         assert!(!dest.exists());
     }
 
     #[test]
     fn rejects_http_redirect_when_only_https_allowed() {
-        // Production callers use https-only. We confirm redirect targets are
-        // checked against the scheme allowlist by serving an HTTP redirect
-        // while the client says it allows only https. We have to also allow
-        // http on the initial request so we can reach the test server, so we
-        // construct the opts manually.
+        // http stays allowed so the initial hit reaches the test server; the redirect
+        // target uses a scheme outside the allowlist instead.
         let router = Router::new().route(
             "/r",
             get(|| async { Redirect::temporary("http://127.0.0.1:1/elsewhere") }),
         );
         let server = spawn_test_server(router);
-        // Allow http only on the initial request; redirect target uses http
-        // too, so we must restrict the *redirect* by another mechanism. For
-        // this test we narrow the allowlist after the initial hit by serving
-        // a redirect with a forbidden scheme. The simplest way is to keep
-        // http allowed (we are testing redirect handling, not the initial
-        // hit's scheme check) and instead serve a redirect to a `gopher://`
-        // URL.
-        // Re-spawn with a gopher redirect instead.
         drop(server);
         let router = Router::new().route(
             "/r",
@@ -460,12 +424,8 @@ mod tests {
         let dest_dir = tempfile::tempdir().expect("tempdir");
         let dest = dest_dir.path().join("download.bin");
         let err = download_to_file(&server.url("/r"), &dest, &http_opts()).expect_err("blocked");
-        // The reqwest redirect policy emits an opaque error; we surface it
-        // through SafeDownloadFailed. Either is acceptable signalling.
-        // reqwest wraps our Policy error generically as "error following
-        // redirect"; either that or our own InsecureRedirect mapping is
-        // acceptable signalling — the test's point is that the gopher://
-        // hop did not happen.
+        // reqwest wraps the Policy error opaquely, so either it or our own
+        // InsecureRedirect mapping is acceptable; the point is the hop did not happen.
         match err {
             StackError::SafeDownloadFailed { .. }
             | StackError::SafeDownloadInsecureRedirect { .. } => {}
@@ -476,7 +436,6 @@ mod tests {
 
     #[test]
     fn enforces_redirect_limit() {
-        // Each /a -> /a -> /a … forever, but capped redirects = 1.
         let count = Arc::new(AtomicUsize::new(0));
         let count_for_handler = Arc::clone(&count);
         let router = Router::new().route(
@@ -500,7 +459,6 @@ mod tests {
         };
         let err = download_to_file(&server.url("/loop/0"), &dest, &opts).expect_err("loop");
         assert!(matches!(err, StackError::SafeDownloadFailed { .. }));
-        // Hit at most max_redirects + 1 endpoints (the initial + one follow).
         assert!(count.load(Ordering::SeqCst) <= 2, "redirects: {count:?}");
     }
 

@@ -403,8 +403,7 @@ fn operator_replace_refuses_to_clobber_external_entries() {
         StackError::ExtensionStateOwnership { .. }
     ));
 
-    // An operator replace that carries the external entry through
-    // unchanged is fine.
+    // An operator replace carrying the external entry through unchanged is fine.
     let carried = store.provider_credentials().clone();
     store
         .replace_provider_credentials(carried, &[])

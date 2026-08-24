@@ -1,32 +1,5 @@
-//! Runtime supervisor lifecycle hooks.
-//!
-//! Two units live here:
-//!
-//! 1. [`ServerLifecycle`] records the daemon's own start/stop transitions
-//!    (`server.starting`, `server.started`, `server.stopped`) into
-//!    `agent_lifecycle`. One per `acps serve` invocation.
-//!
-//! 2. [`AgentSupervisor`] owns the spawned ACP agent's lifecycle: it spawns
-//!    the agent through [`AcpBridge`], persists capabilities, records the
-//!    `agent.*` lifecycle events, and tears the agent down on stop or on
-//!    daemon shutdown. One per running daemon.
-//!
-//! State machine for the agent supervisor:
-//!
-//! ```text
-//! Stopped --start()--> Starting --(initialize succeeds)--> Running
-//!                          \--(initialize fails)----------> Stopped
-//! Running --stop()---> Stopping --(child reaped)--> Stopped
-//! Stopped --begin_update()--> Updating --finish_update()--> Stopped
-//! ```
-//!
-//! `Starting` exists so that two concurrent `POST /v1/agent/start` requests
-//! during a slow initialize cannot both spawn an agent — the second one
-//! sees `Starting` and returns `agent.already_running`.
-//!
-//! `record_*` helpers come in two flavors: sync (`&StateStore`) for use before
-//! the store is moved into `AppState`, and async (`&Arc<Mutex<StateStore>>`)
-//! for use after, where a brief lock acquires the connection.
+//! Runtime supervisor lifecycle hooks: [`ServerLifecycle`] for the daemon's own
+//! start/stop rows, [`AgentSupervisor`] for the spawned ACP agent's state machine.
 
 mod bridge;
 mod parse;
@@ -467,8 +440,8 @@ impl AgentSupervisor {
     /// `agent_capabilities`. On failure, transitions back to `Stopped` so a
     /// retry can succeed without an intervening `stop`.
     pub async fn start(&self, request: AgentStartRequest<'_>) -> Result<AgentCapabilitiesDto> {
-        // First lock: atomically transition Stopped -> Starting. Refusing
-        // any other start under the same lock prevents concurrent spawns.
+        // Atomically transition Stopped -> Starting under one lock so concurrent
+        // starts cannot both spawn.
         {
             let mut guard = self.state.lock().await;
             match &*guard {
@@ -511,9 +484,8 @@ impl AgentSupervisor {
                 Ok(capabilities)
             }
             Err(err) => {
-                // Roll back to Stopped unconditionally so the next start
-                // can proceed. `do_start` is responsible for tearing down
-                // any partially-spawned bridge before returning.
+                // Roll back to Stopped unconditionally so the next start can
+                // proceed; `do_start` already tore down any partial bridge.
                 {
                     let mut guard = self.state.lock().await;
                     *guard = AgentState::Stopped;
@@ -594,26 +566,22 @@ impl AgentSupervisor {
             match mem::replace(&mut *guard, AgentState::Stopping) {
                 AgentState::Running(bridge) => bridge,
                 other => {
-                    // Restore whatever state we found so we don't accidentally
-                    // leave the supervisor in `Stopping`.
                     *guard = other;
                     return Err(StackError::AgentNotRunning);
                 }
             }
         };
 
-        // Cancel every in-flight prompt before shutting the bridge down so
-        // the background tasks settle with `status='cancelled'` instead of
-        // an opaque `agent.request_failed` racing against the IO loop teardown.
+        // Cancel in-flight prompts before the bridge goes away so they settle as
+        // `cancelled` rather than racing the IO loop teardown into an opaque error.
         self.cancel_all_prompts().await;
 
         let started_at = Instant::now();
         let shutdown_result = bridge.shutdown().await;
         let elapsed_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
 
-        // Always transition to Stopped FIRST, even if shutdown or DB writes
-        // fail. Without this an error here would leave the supervisor stuck
-        // in `Stopping`, and future starts and stops would both refuse.
+        // Transition to Stopped FIRST, even if shutdown or the DB write failed;
+        // otherwise the supervisor stays wedged in `Stopping` forever.
         {
             let mut guard = self.state.lock().await;
             *guard = AgentState::Stopped;
@@ -621,9 +589,6 @@ impl AgentSupervisor {
         *self.last_pid.write().await = None;
         *self.loaded_providers.write().await = None;
 
-        // Record the lifecycle row best-effort. A DB error is logged but
-        // does not mask the original shutdown outcome — the supervisor is
-        // already in a coherent state thanks to the transition above.
         let exit = shutdown_result?;
         let data = json!({
             "target_id": target_id,
@@ -658,8 +623,6 @@ impl AgentSupervisor {
         state: &Arc<TokioMutex<StateStore>>,
         event_hub: &EventHub,
     ) {
-        // Determine whether there's anything to stop without holding the
-        // lock across the entire shutdown sequence.
         let needs_stop = matches!(*self.state.lock().await, AgentState::Running(_));
         if !needs_stop {
             return;

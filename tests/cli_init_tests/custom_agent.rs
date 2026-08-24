@@ -9,9 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 fn init_custom_agent_writes_install_config() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    // Completing init at all proves the registry-only gates were bypassed:
-    // `should_install_agent` would otherwise fail `lookup_required` on a
-    // non-registry id even when agent install is fixture-skipped.
+    // Completing init at all proves the registry-only gates were bypassed.
     acps_command()
         .env("HOME", tempdir.path())
         .args([
@@ -50,7 +48,6 @@ fn init_custom_agent_writes_install_config() {
     assert_eq!(install.install_type, "shell");
     assert_eq!(install.creates, "my-agent-bin");
     assert_eq!(install.shell.as_deref(), Some("echo install my-agent"));
-    // The custom agent block must round-trip canonical TOML.
     let canonical = config
         .to_canonical_toml()
         .expect("custom agent config should round-trip canonical TOML");
@@ -364,8 +361,7 @@ fn init_custom_agent_acp_gate_skips_when_spawn_cwd_absent() {
 #[test]
 fn init_agent_env_ref_appends_to_config() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
-    // Pre-seed the referenced secret; `--agent-env-ref` references an existing
-    // secret and fails fast otherwise.
+    // `--agent-env-ref` references an existing secret and fails fast otherwise.
     seed_init_secrets(tempdir.path(), &[("MY_AGENT_TOKEN", "token-value")]);
 
     acps_command()
@@ -419,8 +415,8 @@ fn init_agent_env_ref_missing_secret_fails_fast() {
         stderr.contains("secret `MISSING_TOKEN` was not found in the secret store"),
         "{stderr}"
     );
-    // The ref must NOT be persisted to agent.env when verification fails, or a
-    // later `--resume` would complete with an unresolved env ref.
+    // The ref must NOT persist to agent.env when verification fails, or a later
+    // `--resume` would complete with an unresolved env ref.
     let config_path = tempdir.path().join(".config/acp-stack/acps-config.toml");
     if config_path.is_file() {
         let written = fs::read_to_string(&config_path).expect("config should be readable");
@@ -471,8 +467,7 @@ fn init_agent_env_ref_rejected_for_existing_config() {
 fn init_custom_agent_acp_gate_skips_when_binary_absent() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    // The custom binary is not on PATH (install is fixture-skipped), so the
-    // connection gate skips cleanly and init still completes.
+    // The custom binary is not on PATH, so the connection gate skips cleanly.
     acps_command()
         .env("HOME", tempdir.path())
         .args([
@@ -498,8 +493,7 @@ fn init_custom_agent_acp_gate_fails_for_non_acp_binary() {
     let workspace = tempdir.path().join("ws");
     std::fs::create_dir_all(&workspace).expect("workspace dir should be created");
 
-    // `true` is a real binary on PATH but does not speak ACP, so the gate runs
-    // and surfaces a connection failure instead of completing init.
+    // `true` is a real binary on PATH but does not speak ACP, so the gate runs.
     let output = acps_command()
         .env("HOME", tempdir.path())
         .args([
@@ -535,9 +529,8 @@ fn init_staging_failure_finalizes_run_for_resume() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
 
-    // With an existing config the unknown agent survives preflight and fails
-    // during staging, after the run row exists; the failure must finalize the
-    // run instead of leaving a pending row for a later `--resume` to adopt.
+    // The failure lands after the run row exists, so it must finalize the run instead
+    // of leaving a pending row for a later `--resume` to adopt.
     let output = acps_command()
         .env("HOME", tempdir.path())
         .args([

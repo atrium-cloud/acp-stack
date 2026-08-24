@@ -23,11 +23,8 @@ pub(super) fn provision_opencode_config(
         json!("https://opencode.ai/config.json"),
         &path,
     )?;
-    // Mirror the canonical config: if no provider model is configured,
-    // also clear any stale `model` key in opencode.json. Otherwise an
-    // earlier `acps agent set --model X` would silently override a
-    // subsequent provider switch where the operator deliberately did
-    // not pick a new model.
+    // Mirror the canonical config: a stale `model` key from an earlier
+    // `acps agent set --model X` would silently override a later provider switch.
     match configured_provider_model(config) {
         Some(model) => {
             root.insert("model".to_owned(), json!(model));
@@ -176,9 +173,8 @@ fn write_opencode_provider_config(
     insert_if_missing(provider_config, "models", json!({}), path)?;
     let options = ensure_object_field(provider_config, "options", path)?;
     options.insert("apiKey".to_owned(), json!(format!("{{env:{api_key_ref}}}")));
-    // acps owns `options.baseURL` for a mapped provider: writing it routes the
-    // provider at the override, and removing it on a re-provision without one
-    // is what restores the vendor endpoint when the override is cleared.
+    // acps owns `options.baseURL` for a mapped provider: removing it on a
+    // re-provision without an override is what restores the vendor endpoint.
     match base_url_override {
         Some(base_url) => {
             options.insert("baseURL".to_owned(), json!(base_url));
@@ -319,8 +315,6 @@ mod tests {
             "{env:OPENAI_API_KEY}"
         );
 
-        // Clearing the override re-provisions without the key, which is what
-        // restores the vendor endpoint.
         provision_opencode_config(&config, tempdir.path(), None).expect("provision without");
         let value = opencode_config_value(tempdir.path());
         assert!(

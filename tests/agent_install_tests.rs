@@ -1,25 +1,7 @@
 #![cfg(feature = "test-fixtures")]
 
-//! End-to-end install flow against a mocked GitHub Releases API.
-//!
-//! Phase 4 / Test Hardening: the `install_resolved_capture` two-step
-//! flow (harness install + adapter install for adapter-backed entries)
-//! has unit tests for each install path in isolation, but no integration
-//! test that exercises the production GitHub Release driver against a
-//! deterministic mock. This file plugs that gap.
-//!
-//! The mock is an axum server bound to `127.0.0.1:0` serving:
-//!
-//! - `GET /repos/test-owner/<repo>/releases/latest` — release JSON whose
-//!   asset URLs point back at the same mock so the asset download stays
-//!   in-process.
-//! - `GET /assets/<filename>` — raw asset bytes (a tiny executable so
-//!   the `creates` postcheck resolves a real file on PATH).
-//!
-//! `ACP_STACK_GITHUB_API_BASE` redirects `github_release::fetch_release`
-//! at the mock; the rest of the install path (asset matching, byte
-//! download, raw-binary write, sha256 hashing, final `creates` probe)
-//! runs unchanged.
+//! End-to-end `install_resolved_capture` flow against a mocked GitHub Releases
+//! API, redirected there by `ACP_STACK_GITHUB_API_BASE`.
 
 use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt;
@@ -39,19 +21,11 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use serde_json::json;
 
-/// Cargo runs `#[test]` functions in parallel inside one binary, and
-/// `ACP_STACK_GITHUB_API_BASE` is a process-wide env var that the
-/// installer threads read. A naïve `set_var` per test would let two
-/// tests step on each other (test A sees test B's mock URL, or the
-/// var disappears mid-flight when B's RAII guard drops). Hold this
-/// mutex for the duration of any test that mutates env so the env
-/// state is per-test serialized.
+/// Serializes every test that mutates the process-wide installer env vars.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-/// RAII guard that sets a single env var on construction and restores
-/// the prior value on drop. Holds `ENV_LOCK` for its lifetime, which
-/// guarantees only one test at a time mutates the var even if a panic
-/// inside the test unwinds.
+/// RAII env-var guard holding `ENV_LOCK` for its lifetime, so only one test at
+/// a time mutates the var even if a panic unwinds.
 struct EnvGuard<'a> {
     _lock: std::sync::MutexGuard<'a, ()>,
     key: &'static str,
@@ -64,20 +38,9 @@ impl<'a> EnvGuard<'a> {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let previous = std::env::var_os(key);
-        // SAFETY: `std::env::set_var` is unsafe in the Rust 2024
-        // edition because it mutates process-wide environment state
-        // that other threads may concurrently read. Two threads exist
-        // in this test binary:
-        //   1. Other `#[test]` threads: `ENV_LOCK` (held for the full
-        //      lifetime of this guard) serializes them. While we hold
-        //      the lock, no other test is inside an `EnvGuard`.
-        //   2. Per-test mock-server threads: these are pure axum
-        //      handlers that never read this env var or any GitHub
-        //      env var. They cannot observe the mutation.
-        // Production code reads the env var once at the entry of
-        // `github_release::install`/`latest_release_tag`, then uses
-        // the resolved value for both the token decision and the URL,
-        // so a concurrent flip between reads cannot break invariants.
+        // SAFETY: `ENV_LOCK` is held for this guard's whole lifetime, so no
+        // other test thread is inside an `EnvGuard`, and the mock-server
+        // threads never read this var.
         unsafe { std::env::set_var(key, value) };
         Self {
             _lock: lock,
@@ -89,10 +52,8 @@ impl<'a> EnvGuard<'a> {
 
 impl Drop for EnvGuard<'_> {
     fn drop(&mut self) {
-        // SAFETY: ENV_LOCK still held (drop fires before _lock
-        // releases). Same threading argument as `new`. Restore the
-        // prior value, or remove the var if it was unset coming in,
-        // so the next test sees a clean slate.
+        // SAFETY: `ENV_LOCK` is still held here — drop fires before `_lock`
+        // releases — so the threading argument from `new` still holds.
         unsafe {
             match &self.previous {
                 Some(value) => std::env::set_var(self.key, value),
@@ -111,9 +72,7 @@ const ADAPTER_ASSET: &str = "fake-adapter";
 const HARNESS_TAG: &str = "v0.4.2";
 const ADAPTER_TAG: &str = "v1.0.0";
 
-/// Mock GitHub releases server. `addr` is the bind address; routes serve
-/// release JSON and asset bytes. Stays bound for the lifetime of the
-/// test process — the OS reclaims the socket when the test binary exits.
+/// Mock GitHub releases server serving release JSON and asset bytes.
 struct MockGithub {
     addr: SocketAddr,
 }
@@ -124,9 +83,7 @@ struct MockState {
 }
 
 fn binary_bytes(label: &str) -> Vec<u8> {
-    // Minimal shell-script "binary" — enough to satisfy a `creates`
-    // probe that just checks `is_file()`. We don't actually exec the
-    // result, so a script with the correct shebang is fine.
+    // Never exec'd, so a script is enough to satisfy the `creates` probe.
     format!("#!/bin/sh\necho {label}\n").into_bytes()
 }
 
@@ -303,10 +260,6 @@ fn install_resolved_two_step_flow_against_mocked_github_api() {
         &format!("http://{}", mock.addr),
     );
     let entry = adapter_kind_entry();
-    // The final verification step needs `agent.command` to resolve. The
-    // adapter is what speaks ACP from the runtime's POV, so it's the
-    // command. install_resolved_capture writes both binaries into
-    // dest_dir.
     let result = install_resolved_capture(
         &agent_config(ADAPTER_BIN),
         &entry,
@@ -335,7 +288,6 @@ fn install_resolved_two_step_flow_against_mocked_github_api() {
         }
     }
 
-    // Two `installer_runs` drafts: one harness row, one adapter row.
     assert_eq!(
         result.rows.len(),
         2,
@@ -365,7 +317,6 @@ fn install_resolved_two_step_flow_against_mocked_github_api() {
         "adapter row should record the release tag returned by the mock",
     );
 
-    // Both binaries landed at dest_dir with executable bit.
     let harness_path = dest_dir.path().join(HARNESS_BIN);
     let adapter_path = dest_dir.path().join(ADAPTER_BIN);
     assert!(harness_path.is_file(), "harness binary missing");
@@ -399,12 +350,10 @@ fn install_resolved_runs_adapter_step_for_native_entry_with_override() {
         "ACP_STACK_GITHUB_API_BASE",
         &format!("http://{}", mock.addr),
     );
-    // Native entry: harness only, installed from the mocked release.
     let mut entry = adapter_kind_entry();
     entry.kind = RegistryKind::Native;
     entry.adapter = None;
-    // The operator's designated adapter installs via a shell recipe that
-    // drops an executable into dest, mirroring a build-from-source install.
+    // Mirrors a build-from-source install: a shell recipe drops an executable.
     let adapter_path = dest_dir.path().join("override-acp");
     let mut agent = agent_config("override-acp");
     agent.adapter_override = Some(acp_stack::config::AgentAdapterOverrideConfig {
@@ -457,11 +406,7 @@ fn install_resolved_runs_adapter_step_for_native_entry_with_override() {
 
 #[test]
 fn install_resolved_records_failure_when_release_endpoint_missing() {
-    // Mock declares only the adapter repo; the harness repo's release
-    // endpoint returns 404. The harness step fails, the adapter step
-    // never completes a successful install (because both run
-    // concurrently and either failure aborts the overall outcome), and
-    // both rows are persisted for audit.
+    // The mock declares only the adapter repo, so the harness release 404s.
     let mock = start_mock_github();
     let dest_dir = tempfile::tempdir().expect("dest tempdir");
 
@@ -469,7 +414,6 @@ fn install_resolved_records_failure_when_release_endpoint_missing() {
         "ACP_STACK_GITHUB_API_BASE",
         &format!("http://{}", mock.addr),
     );
-    // Point the harness at a repo the mock does NOT know about.
     let mut entry = adapter_kind_entry();
     entry.github = Some("https://github.com/test-owner/missing-repo".to_owned());
     let result = install_resolved_capture(
@@ -486,25 +430,20 @@ fn install_resolved_records_failure_when_release_endpoint_missing() {
         "harness 404 must surface as a failed outcome, got {:?}",
         result.outcome,
     );
-    // Both rows persisted — the audit log must show what each side did.
     let harness_row = result
         .rows
         .iter()
         .find(|r| r.step == "harness")
         .expect("harness row should be persisted even on failure");
-    // Status sentinel for non-zero installer outcomes is `error`
-    // (see InstallerRowDraft::config_error / the install machinery's
-    // failure branches); `failed` is the init_steps sentinel, not the
-    // installer_runs one.
+    // `installer_runs` uses `error` for a non-zero outcome; `failed` is the
+    // init_steps sentinel.
     assert!(
         matches!(harness_row.status.as_str(), "error" | "failed"),
         "harness row should record a non-success status, got `{}`",
         harness_row.status,
     );
-    // The adapter side runs concurrently against the still-reachable
-    // adapter repo and may either succeed or be cut short by the
-    // harness failure; either way an `installer_runs` row for it must
-    // exist so the operator can see what happened on both halves.
+    // The adapter side runs concurrently and may succeed or be cut short; a row
+    // must exist either way.
     let adapter_row = result
         .rows
         .iter()

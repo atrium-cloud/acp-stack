@@ -6,11 +6,8 @@ pub(crate) struct SessionsCreateBody {
     cwd: Option<String>,
     #[serde(default, alias = "target")]
     target_id: Option<String>,
-    // `mcp_servers` is intentionally omitted from the public surface in this
-    // batch. The spec (`docs/specs/acp/acp-bridge.md`) declares MCP servers
-    // through admin-controlled config, not the session API. Accepting an
-    // ad-hoc list from session-tier callers would let any session-key
-    // holder request arbitrary agent-side process execution.
+    // `mcp_servers` is deliberately absent: accepting an ad-hoc list from session-tier
+    // callers would let any session-key holder request arbitrary agent-side execution.
 }
 
 pub(crate) async fn sessions_create_handler(
@@ -24,12 +21,8 @@ pub(crate) async fn sessions_create_handler(
         .session_agent_target(payload.target_id.as_deref())
         .await?;
     ensure_agent_started(&state, &target.target_id).await?;
-    // Read the agent block from the live cache instead of the cached
-    // `state.config.agent`. After `POST /v1/agent/restart` updates
-    // the cache, this is how subsequent session creates see the new
-    // `agent.model` / `agent.mode` / `agent.provider`. Without this,
-    // a post-restart session would still receive the stale config
-    // and silently downgrade to the prior model.
+    // The live cache, not `state.config.agent`: without it a post-restart session would
+    // receive the stale config and silently downgrade to the prior model.
     let agent_for_session = target.live_agent_config.lock().await.clone();
     let outcome = target
         .supervisor

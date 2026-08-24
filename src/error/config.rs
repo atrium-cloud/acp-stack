@@ -1,8 +1,5 @@
-//! Config / filesystem / import error helpers.
-//!
-//! Covers every variant whose `error_code()` is in the `config.*`, `import.*`,
-//! `io.*`, or `reset.*` namespaces. The `_ => None` arms let the top-level
-//! dispatcher fall through to the next domain.
+//! Config / filesystem / import error helpers, covering the `config.*`,
+//! `import.*`, `io.*`, and `reset.*` namespaces.
 
 use http::StatusCode;
 

@@ -36,9 +36,7 @@ fn absent_shell_timeout_keeps_the_default_budget() {
 #[test]
 fn timed_out_step_keeps_the_installer_output_it_captured() {
     let tempdir = TempDir::new().expect("tempdir");
-    // One second of budget against a recipe that prints and then hangs: the
-    // kill lands mid-run, which is exactly the case whose output used to be
-    // thrown away.
+    // One second of budget against a recipe that prints and then hangs, so the kill lands mid-run.
     let install = shell_install_set_with_timeout(
         "printf 'installer-progress\\n'; printf 'installer-warning\\n' >&2; sleep 30",
         "timeout-agent",
@@ -84,8 +82,6 @@ fn timed_out_step_keeps_the_installer_output_it_captured() {
         row.stderr
     );
 
-    // The captured streams are non-empty, so the audit copy lands on disk
-    // instead of being skipped as an empty-stream row.
     let log_base = tempdir.path().join("installer-logs");
     persist_step_logs_to_disk(row, "timeout-agent", Some(&log_base)).expect("logs persist");
     let log_dir = row

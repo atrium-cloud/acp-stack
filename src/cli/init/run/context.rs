@@ -1,10 +1,7 @@
 use super::*;
 use crate::cli::init::skills::InitSkillInstallPlan;
 
-/// Everything the tracked phases inherit from the untracked preflight: the
-/// resolved paths, the open state store, the run row being recorded into, and
-/// the config as it stands once staging has applied every declaration that
-/// precedes the first step.
+/// Everything the tracked phases inherit from the untracked preflight.
 pub(super) struct InitSetup {
     pub(super) args: InitArgs,
     pub(super) output_mode: InitOutputMode,
@@ -23,17 +20,15 @@ pub(super) struct InitSetup {
     pub(super) init_native_config_record:
         Option<crate::runtime::agent::native_config_import::NativeConfigOperationRecord>,
     pub(super) edge_requested: bool,
-    /// `selected_agent.is_some()`: the selection itself borrows the registry,
-    /// so only the fact that a selection was applied outlives staging.
+    /// `selected_agent.is_some()`; the selection itself borrows the registry, so only
+    /// this fact outlives staging.
     pub(super) agent_selected: bool,
     pub(super) skill_install_plan: Option<InitSkillInstallPlan>,
     pub(super) mutation: crate::fs_util::AgentConfigMutationFileLock,
 }
 
-/// The mutable frame the tracked steps thread through. Field order is drop
-/// order: `key_handover` renders the handover (or the failure frame) and must
-/// run before the config-mutation lock is released, exactly as the locals it
-/// replaced did.
+/// The mutable frame the tracked steps thread through. Field order IS drop order:
+/// `key_handover` must render before the config-mutation lock is released.
 pub(super) struct InitFlow {
     pub(super) key_handover: KeyHandover,
     pub(super) secret_store: SecretStore,
@@ -67,15 +62,13 @@ pub(super) struct InitFlow {
     pub(super) provisioned_agent_configs:
         Vec<crate::runtime::agent::agent_headless_config::ProvisionedAgentConfig>,
     pub(super) provisioned_edge_artifacts: Vec<crate::edge::GeneratedCloudflareArtifact>,
-    /// Held, never read: the config-mutation lock is released when the flow is
-    /// dropped, which is after the handover has rendered.
+    /// Held, never read; released on drop, after the handover has rendered.
     pub(super) _mutation: crate::fs_util::AgentConfigMutationFileLock,
 }
 
 impl InitFlow {
-    /// Opens the secret store and arms the key handover. From here on a failure
-    /// return renders the handover's failure frame, which is why nothing
-    /// fallible may be hoisted above it.
+    /// Opens the secret store and arms the key handover. Nothing fallible may be
+    /// hoisted above it, since from here a failure return renders the failure frame.
     pub(super) fn begin(setup: InitSetup) -> Result<Self> {
         let auth_status: &'static str = "preserved existing API keys";
         let mut key_handover = KeyHandover {

@@ -1,16 +1,7 @@
-//! Golden byte pins for the server→client frame surface. These assert the
-//! exact serialized bytes, not just the fields, because the platform proxy
-//! and its recorded fixtures read them. Two different key orders are in
-//! play and both are load-bearing: seq-bearing events are assembled through
-//! a `BTreeMap` and come out alphabetically sorted, while every seq-less
-//! frame comes out in declaration order. `agent-client-protocol` turns on
-//! `serde_json/preserve_order` for the whole build, so `Map` is insertion
-//! ordered and neither order can be assumed to be the other.
-//!
-//! Frames are read back from the recorded history rather than the broadcast
-//! channel: history is written while the session lock is held, so it is
-//! race-free against the wizard thread, and the WebSocket sends exactly
-//! `frame.to_string()` of the same `Value`.
+//! Golden byte pins for the server→client frame surface, asserted as exact
+//! bytes because the platform proxy and its recorded fixtures read them. Two
+//! key orders are in play: seq-bearing events sort alphabetically through a
+//! `BTreeMap`, seq-less frames stay in declaration order.
 
 use super::super::*;
 use super::support::*;
@@ -24,7 +15,6 @@ fn golden_progress_event_bytes() {
         session: session.clone(),
     };
     driver.progress("materializing workspace".to_owned());
-    // The session constructor records the first progress event itself.
     assert_eq!(
         recorded_frame(&session, 1),
         r#"{"message":"init session started","seq":1,"session_id":"init_golden_progress","type":"progress"}"#
@@ -58,12 +48,9 @@ fn golden_input_required_and_input_accepted_event_bytes() {
         .expect("driver result");
     assert!(matches!(outcome, HostedPromptOutcome::Handled(Some(1))));
 
-    // The nested `input` object is the only frame body whose key order
-    // comes from a `Serialize` impl rendered into a `Map`, so it is the
-    // only one that would silently reorder if `preserve_order` ever went
-    // away. Pinning it as bytes (with the per-request `request_id`
-    // spliced in) is what makes that visible. `kind` sits after
-    // `request_id` and each option's `value` after its `index`.
+    // The nested `input` object is the only frame body whose key order comes
+    // from a `Serialize` impl into a `Map`, so it is the only one that would
+    // silently reorder if `preserve_order` went away.
     assert_eq!(
         recorded_frame(&session, 2),
         format!(
@@ -71,8 +58,6 @@ fn golden_input_required_and_input_accepted_event_bytes() {
             pending.request_id
         )
     );
-    // A prompt raises no state frame now, so the acceptance is seq 3 directly
-    // behind the prompt.
     assert_eq!(
         recorded_frame(&session, 3),
         format!(
@@ -84,9 +69,7 @@ fn golden_input_required_and_input_accepted_event_bytes() {
 
 #[test]
 fn golden_signal_event_bytes() {
-    // One `signal` event per fact, each carrying only its own raw fields — no
-    // status, no `blocked_on`, no derived view. The envelope sorts every key
-    // alphabetically like every other seq-bearing event.
+    // One `signal` event per fact, carrying only its own raw fields.
     let session = test_session("init_golden_state");
     session.apply_state_signal(InitStateSignal::StepStarted {
         kind: step_kind::PROVIDER_CONFIGURE,
@@ -126,8 +109,8 @@ fn golden_signal_event_bytes() {
 #[test]
 fn golden_result_ready_result_frame_and_result_acked_bytes() {
     let session = test_session("init_golden_result");
-    // Nested objects and non-ASCII text pin the `format!` splice: the
-    // stored result is forwarded verbatim, never re-encoded or re-ordered.
+    // Nested objects and non-ASCII text pin that the stored result is
+    // forwarded verbatim, never re-encoded or re-ordered.
     session.set_result(json!({
         "note": "héllo ✅",
         "handoff": {"token": "t", "nested": {"a": [1, 2]}}
@@ -189,17 +172,14 @@ fn golden_error_expired_event_bytes() {
 
 #[test]
 fn golden_hello_frame_bytes() {
-    // `signals` sits beside `status`: a fresh session has emitted none, so the
-    // replay is empty and the client folds it to the starting view itself. The
-    // hello body is declaration-ordered, unlike the sorted signal events.
+    // The hello body is declaration-ordered, unlike the sorted signal events.
     let session = test_session("init_golden_hello");
     assert_eq!(
         session.hello_frame(),
         r#"{"type":"hello","session_id":"init_golden_hello","status":"running","signals":[],"last_seq":1,"pending_input":null,"result_available":false,"error":null}"#
     );
     // The errored hello pins the nested `PublicError` object, the one part of
-    // the frame that goes through a `Serialize` impl. A between-steps failure
-    // emits no signal, so the replay stays empty.
+    // the frame that goes through a `Serialize` impl.
     session.set_error("init.boom", "it broke".to_owned());
     assert_eq!(
         session.hello_frame(),
@@ -209,10 +189,7 @@ fn golden_hello_frame_bytes() {
 
 #[test]
 fn golden_hello_frame_with_pending_input_and_result_bytes() {
-    // The reconnect cases: a hello sent while the wizard is blocked on a prompt,
-    // and one sent after the result is waiting to be acked. Both populate fields
-    // the fresh-session hello leaves null; neither adds a signal, since a prompt
-    // and its answer settle nothing on their own.
+    // Reconnect cases: blocked on a prompt, and waiting for a result ack.
     let session = test_session("init_golden_hello_pending");
     let driver = SessionPromptDriver {
         session: session.clone(),
@@ -225,8 +202,6 @@ fn golden_hello_frame_with_pending_input_and_result_bytes() {
     );
     let handle = std::thread::spawn(move || driver.text(request));
     let pending = wait_for_pending_input(&session);
-    // The pending prompt is the whole signal that `model` awaits input; the
-    // client derives that from `pending_input.kind`, so the replay stays empty.
     assert_eq!(
         session.hello_frame(),
         format!(
@@ -243,8 +218,6 @@ fn golden_hello_frame_with_pending_input_and_result_bytes() {
         .expect("driver result");
 
     session.set_result(json!({"status": "initialized"}));
-    // The answered prompt released the frontier and settled nothing, so the
-    // completed hello still carries an empty replay.
     assert_eq!(
         session.hello_frame(),
         r#"{"type":"hello","session_id":"init_golden_hello_pending","status":"completed_awaiting_ack","signals":[],"last_seq":4,"pending_input":null,"result_available":true,"error":null}"#
@@ -320,10 +293,8 @@ fn golden_protocol_error_frame_bytes() {
 
 #[test]
 fn golden_encode_failure_frame_is_valid_json() {
-    // This frame is spliced from constants instead of serialized, which is
-    // what makes it the one frame that cannot itself fail to encode. That
-    // only holds while neither constant contains a JSON metacharacter, so
-    // the round-trip is asserted rather than assumed.
+    // Spliced from constants, so it cannot itself fail to encode — but only
+    // while neither constant contains a JSON metacharacter.
     let frame = encode_failure_frame();
     assert_eq!(
         frame,
@@ -336,11 +307,8 @@ fn golden_encode_failure_frame_is_valid_json() {
 
 #[test]
 fn serde_json_map_is_insertion_ordered() {
-    // A canary, not a preference: `agent-client-protocol` turns on
-    // `serde_json/preserve_order` for the whole build, which is why
-    // seq-bearing events are assembled through a `BTreeMap` and seq-less
-    // frames through derived structs. If a dependency change ever drops
-    // the feature, this fails loudly instead of quietly re-sorting keys
-    // the golden pins above cannot all observe.
+    // Canary: `agent-client-protocol` turns on `serde_json/preserve_order`
+    // for the whole build. If a dependency change drops it, this fails loudly
+    // instead of quietly re-sorting keys the golden pins cannot all observe.
     assert_eq!(json!({"b": 1, "a": 2}).to_string(), r#"{"b":1,"a":2}"#);
 }

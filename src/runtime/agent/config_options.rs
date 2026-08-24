@@ -1,12 +1,5 @@
-//! Generic projection of ACP session config options.
-//!
-//! The typed model/mode/effort lanes read specific categories out of
-//! `session/new`; this module projects the *whole* advertised option set —
-//! every category (including `model_config`, `_`-prefixed customs, and
-//! category-less options) and every encodable kind — into one wire/storage
-//! shape. It backs `GET /v1/agent/config-options`, the per-session
-//! config-option snapshot stored in `sessions.metadata_json`, and the
-//! per-session get/set routes.
+//! Generic projection of the whole advertised ACP session config option set
+//! into one wire/storage shape, backing the config-option routes and snapshots.
 
 use agent_client_protocol::schema::v1::{
     SessionConfigKind, SessionConfigOption, SessionConfigSelectOptions,

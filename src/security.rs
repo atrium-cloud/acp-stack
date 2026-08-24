@@ -1,13 +1,5 @@
-//! Runtime security self-check.
-//!
-//! Examines effective config plus a recent auth-failure count and returns a
-//! list of `SecurityFinding`s. The same helper is called by both
-//! `GET /v1/security/check` on both the admin-tier HTTP API and the local UDS
-//! surface, so the policy stays in one place.
-//!
-//! The individual checks live under `rules::*`; this file is the orchestrator
-//! that wires inputs through the rules in the order the original linear
-//! implementation emitted findings.
+//! Runtime security self-check: orchestrates the `rules::*` checks over the
+//! effective config and returns the resulting `SecurityFinding`s.
 
 mod findings;
 mod rules;
@@ -20,9 +12,7 @@ use crate::ownership::PathPosture;
 use crate::runtime::dependencies::deps::DepsReport;
 
 /// Maximum dependency rows copied into the `deps.required_unavailable` details
-/// payload. Operators still get the complete report from `acps deps check`;
-/// the self-check detail stays bounded so one oversized config cannot bloat
-/// security history rows indefinitely.
+/// payload, so one oversized config cannot bloat security history rows.
 pub const MAX_DEPENDENCY_FINDING_DETAILS: usize = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,65 +37,44 @@ pub fn dependency_security_failures(report: &DepsReport) -> Vec<DependencySecuri
         .collect()
 }
 
-/// Inputs to the security self-check. Decoupled from `AppState` so the helper
-/// can live outside `api.rs` without pulling that module into `security.rs`.
+/// Inputs to the security self-check, decoupled from `AppState`.
 pub struct SecurityCheckInputs<'a> {
     pub effective_bind: &'a str,
     pub http: &'a SecurityHttpConfig,
     pub recent_auth_failures: i64,
-    /// Count of `sink_outbox` rows that are stuck in pending+failing state.
-    /// Non-zero means the Supabase sink has unfinished work and has retried
-    /// at least once; surfaced so operators know external logging is lagging.
+    /// Count of `sink_outbox` rows stuck in pending+failing state.
     pub sink_open_failures: i64,
-    /// Most recent error captured by the sink worker, taken verbatim from
-    /// `sink_failures_summary.last_error`. Truncated by the worker before
-    /// it lands in the table, so passing through here is safe.
+    /// Most recent sink-worker error; already truncated by the worker.
     pub sink_last_error: Option<&'a str>,
-    /// Inspection result for each runtime-managed path; produced by the
-    /// caller via `ownership::inspect`. The check emits one
-    /// `runtime.path_mode_loose` / `runtime.path_ownership` finding per
-    /// offending path.
+    /// Inspection result for each runtime-managed path, via `ownership::inspect`.
     pub path_postures: &'a [PathPosture],
-    /// Paths that could not be inspected at all. Missing or unreadable
-    /// runtime-managed files are security findings too; otherwise a deleted
-    /// age key or state DB can make the check look cleaner than reality.
+    /// Paths that could not be inspected. A missing or unreadable age key or
+    /// state DB is itself a finding, or the check looks cleaner than reality.
     pub path_issues: &'a [PathInspectionIssue],
-    /// `geteuid()` of the daemon process. Used to verify path ownership
-    /// matches the running user.
+    /// `geteuid()` of the daemon process.
     pub process_euid: u32,
-    /// Uid resolved from `workspace.runtime_user` via `getpwnam_r`. `None`
-    /// when the user does not exist in the password database.
+    /// Uid resolved from `workspace.runtime_user` via `getpwnam_r`.
     pub runtime_user_uid: Option<u32>,
-    /// Configured `workspace.runtime_user` string, included verbatim in the
-    /// `runtime.user_mismatch` message so operators can correlate with their
-    /// systemd `User=` directive.
+    /// Configured `workspace.runtime_user` string.
     pub runtime_user_name: &'a str,
-    /// Result of `ownership::workspace_writable(workspace.root)` — whether
-    /// the daemon can create files inside the configured workspace root.
+    /// Whether the daemon can create files inside the workspace root.
     pub workspace_writable: bool,
-    /// Configured workspace root path, surfaced in
-    /// `runtime.workspace_not_writable` for operator clarity.
+    /// Configured workspace root path.
     pub workspace_root: &'a str,
-    /// True when the daemon is running inside Railway's managed runtime.
-    /// Railway terminates public HTTP at its edge and may run the container as
-    /// root when a persistent volume is attached, even though the image's
-    /// normal Docker posture remains `USER acp`.
+    /// True inside Railway's managed runtime, which terminates public HTTP at
+    /// its edge and may run the container as root when a volume is attached.
     pub railway_platform: bool,
     pub cloudflare: Option<&'a CloudflareEdgeConfig>,
     pub cloudflared_available: bool,
     pub recent_direct_cloudflare_mode_requests: i64,
     pub recent_missing_cloudflare_header_requests: i64,
     pub dependency_failures: &'a [DependencySecurityFailure],
-    /// Configured agent sandbox mode. `off` plus `sandbox_off_but_capable`
-    /// drives the "you could sandbox but aren't" nudge; non-`off` plus
-    /// `sandbox_unavailable_reason` drives the unavailability finding.
+    /// Configured agent sandbox mode.
     pub sandbox_mode: crate::config::SandboxMode,
-    /// `Some(reason)` when the configured (non-`off`) sandbox backend cannot run
-    /// on this host, taken from `sandbox::preflight`. Owned because it is built
-    /// per-request, not borrowed from config.
+    /// `Some(reason)` when the configured non-`off` backend cannot run here.
     pub sandbox_unavailable_reason: Option<String>,
-    /// True when the sandbox is `off` but the host could run the `unshare`
-    /// backend, so the agent workload needlessly shares the daemon's secrets.
+    /// True when the sandbox is `off` but the host could run `unshare`, so the
+    /// agent workload needlessly shares the daemon's secrets.
     pub sandbox_off_but_capable: bool,
 }
 
@@ -379,10 +348,8 @@ mod tests {
         );
     }
 
-    /// A symlinked managed path must NOT receive the `chmod` remediation —
-    /// Linux `chmod` follows symlinks and would mutate the target, leaving
-    /// the finding unresolved. The hint instead directs the operator to
-    /// remove the link and recreate the path.
+    /// A symlinked managed path must NOT get the `chmod` remediation: Linux
+    /// `chmod` follows symlinks and would mutate the target instead.
     #[test]
     fn path_mode_loose_symlink_directs_to_recreate_not_chmod() {
         let http = baseline_http();
@@ -405,9 +372,8 @@ mod tests {
             .remediation
             .as_deref()
             .expect("path_mode_loose remediation");
-        // The remediation must not contain a `chmod ...` command to run — it
-        // may still mention `chmod` to explain why the command isn't safe
-        // here. So we look specifically for the "Run `chmod" command-form.
+        // Matches the command-form only; the prose may still mention `chmod`
+        // to explain why it is unsafe here.
         assert!(
             !remediation.contains("Run `chmod"),
             "symlink remediation must not suggest a `chmod` command (would \
@@ -500,18 +466,15 @@ mod tests {
             .remediation
             .as_deref()
             .expect("path_ownership remediation");
-        // Hint must name the daemon's effective uid (the value the check
-        // enforces), not the configured runtime_user_name. `chown {uid}`
-        // (without a gid) leaves the group unchanged, matching what the
-        // check actually validates.
+        // Hint must name the daemon's effective uid (what the check
+        // enforces), not the configured runtime_user_name.
         assert!(
             remediation.contains("chown -h 1000 -- '/workspace'"),
             "expected symlink-safe shell-quoted chown hint with `--` option \
              terminator, got: {remediation}"
         );
-        // We must not nudge operators to relaunch under whatever owns the
-        // path — for root-owned paths that violates the project's no-root
-        // execution policy.
+        // Never nudge operators to relaunch under whatever owns the path; for
+        // root-owned paths that violates the no-root execution policy.
         assert!(
             !remediation.contains("relaunch"),
             "remediation must not suggest relaunching the daemon under the \
@@ -595,9 +558,6 @@ mod tests {
 
     #[test]
     fn workspace_root_skips_mode_check() {
-        // WorkspaceRoot.expected_mode() is None — the workspace's actual mode
-        // must not produce a `runtime.path_mode_loose` finding even when the
-        // mode is wide-open.
         let http = baseline_http();
         let posture = PathPosture {
             path: std::path::PathBuf::from("/workspace"),
@@ -643,8 +603,7 @@ mod tests {
     }
 
     /// Paths in remediation strings must be POSIX shell-escaped so a
-    /// workspace.root or HOME containing a single quote can't produce a
-    /// pasted command injection. `'foo'` becomes `'foo'\''bar'` after escape.
+    /// workspace.root containing a quote can't produce a pasted injection.
     #[test]
     fn path_remediation_escapes_embedded_single_quotes() {
         let http = baseline_http();
@@ -667,19 +626,14 @@ mod tests {
             .remediation
             .as_deref()
             .expect("path_ownership remediation");
-        // POSIX single-quote escape: each embedded `'` becomes `'\''`. With
-        // the escape applied AND a `--` option terminator before the path,
-        // `/work'; touch …` renders as `-- '/work'\''; touch …'` — a quoted
-        // token after option parsing ends, not an open-quote + injection.
         assert!(
             remediation.contains("-- '/work'\\''; touch /tmp/pwn #'"),
             "expected POSIX shell escape and `--` terminator for the path, got: {remediation}"
         );
     }
 
-    /// When the configured runtime_user resolves to uid 0, the hint must not
-    /// tell operators to relaunch the daemon as root — that breaks the
-    /// no-root-execution policy. Direct them to update the config instead.
+    /// A runtime_user resolving to uid 0 must not produce a "relaunch as root"
+    /// hint; that breaks the no-root-execution policy.
     #[test]
     fn runtime_user_mismatch_root_directs_to_update_config_not_relaunch() {
         let http = baseline_http();
@@ -736,9 +690,8 @@ mod tests {
             .as_deref()
             .expect("workspace_not_writable remediation");
         assert!(remediation.contains("/workspace"));
-        // Hint must name the daemon's effective uid (matches what the
-        // `workspace_writable` probe actually tests), not the configured
-        // runtime_user — see the comment on the finding emission.
+        // Hint must name the daemon's effective uid, matching what the
+        // `workspace_writable` probe tests, not the configured runtime_user.
         assert!(
             remediation.contains("uid 1000"),
             "expected effective-uid hint, got: {remediation}"
@@ -801,13 +754,8 @@ mod tests {
     }
 
     /// Every finding produced by `check()` must carry a non-empty remediation.
-    /// Phase 4 ("Add remediation hints for incorrect ownership") is broader
-    /// than ownership findings — operators benefit from an actionable hint on
-    /// every finding, so we lint the entire set in one place.
     #[test]
     fn every_finding_has_a_non_empty_remediation() {
-        // Construct an input that triggers every check at once and assert
-        // remediation across the resulting finding set.
         let mut http = baseline_http();
         http.allowed_origins = vec!["*".to_owned()];
         http.trust_proxy_headers = true;
@@ -860,8 +808,8 @@ mod tests {
         let findings = check(inputs);
         assert_remediations_present(&findings);
 
-        // Make sure this input covers every code that `check()` can
-        // emit, so a future code with no remediation can't sneak past.
+        // Cover every code `check()` can emit, so a future code with no
+        // remediation can't sneak past.
         let mut codes: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
         for f in &findings {
             codes.insert(f.code.as_str());

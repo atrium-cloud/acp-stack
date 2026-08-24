@@ -13,8 +13,6 @@ use crate::support::*;
 
 #[test]
 fn agent_check_reports_no_runs_when_state_is_empty() {
-    // Without successful installer_runs the check command should report the
-    // expected native install step as missing without hitting the network.
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
@@ -161,7 +159,6 @@ fn installer_history_renders_rows_with_filter() {
         .expect("seed adapter row");
     drop(store);
 
-    // No filter: both rows visible, newest (codex) first.
     acps_command()
         .env("HOME", tempdir.path())
         .args(["installer", "history"])
@@ -173,7 +170,6 @@ fn installer_history_renders_rows_with_filter() {
         .stdout(predicates::str::contains("v1.0.0"))
         .stdout(predicates::str::contains("failed"));
 
-    // Filter to opencode: only the harness row should appear.
     acps_command()
         .env("HOME", tempdir.path())
         .args(["installer", "history", "--agent", "opencode"])
@@ -425,8 +421,8 @@ fn deps_apply_exits_nonzero_and_prints_manual_commands_on_privilege_skip() {
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
 
-    // Deterministic "no passwordless sudo": a fake sudo that exits 1, first
-    // on PATH, collapses the escalation probe to Unavailable.
+    // A fake sudo that exits 1, first on PATH, collapses the escalation probe
+    // to Unavailable deterministically.
     let fake_bin = tempdir.path().join("fake-bin");
     fs::create_dir_all(&fake_bin).expect("fake bin dir");
     let fake_sudo = fake_bin.join("sudo");

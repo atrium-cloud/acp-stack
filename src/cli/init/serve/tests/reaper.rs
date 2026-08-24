@@ -51,13 +51,11 @@ async fn idle_reaper_skips_sessions_with_connected_websocket() {
         manager.clone(),
         Some(std::time::Duration::from_secs(10)),
     ));
-    // A listen-only backend holds the socket past the timeout; the
-    // session must survive.
+    // A listen-only backend holds the socket past the timeout.
     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
     assert_eq!(session.status(), "running");
     session.ws_disconnected();
-    // Disconnect restarts the idle clock so a dropped backend gets the
-    // full timeout to reconnect and ack before the reaper fires.
+    // Disconnect restarts the idle clock.
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     assert_eq!(session.status(), "running");
     tokio::time::timeout(
@@ -78,8 +76,6 @@ async fn idle_reaper_respects_route_lookup_activity() {
         Some(std::time::Duration::from_secs(10)),
     ));
     tokio::time::sleep(std::time::Duration::from_secs(8)).await;
-    // Polling the status endpoint is API activity; it is what keeps a
-    // REST-polling backend's session alive.
     let (status, _) = request_json(
         app,
         Method::GET,
@@ -114,8 +110,7 @@ async fn status_reports_idle_age_before_counting_itself() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    // The age is the idleness leading up to the poll; the poll itself
-    // must not reset the value it reports.
+    // The poll must not reset the idleness value it reports.
     assert_eq!(body["data"]["last_activity_age_secs"], 30);
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     let (_, body) = request_json(
@@ -138,8 +133,7 @@ async fn idle_reaper_respects_pre_session_api_activity() {
         Some(std::time::Duration::from_secs(10)),
     ));
     tokio::time::sleep(std::time::Duration::from_secs(8)).await;
-    // Even a 404 poll for a not-yet-created session is authenticated API
-    // activity and restarts the pre-session idle clock.
+    // Even a 404 poll is authenticated API activity.
     let (status, _) = request_json(
         app,
         Method::GET,
@@ -214,11 +208,8 @@ async fn websocket_closes_when_session_turns_terminal() {
     assert!(hello.is_text());
     let hello: Value =
         serde_json::from_str(hello.to_text().expect("hello text")).expect("hello json");
-    // A fresh session has emitted no signals; the client folds the empty replay
-    // to the starting view.
     assert_eq!(hello["signals"], json!([]));
 
-    // Signals reach a real socket, not just the history.
     session.apply_state_signal(InitStateSignal::CategorySettled {
         category: InitCategory::Agent,
         value: Some("opencode".to_owned()),
@@ -235,9 +226,8 @@ async fn websocket_closes_when_session_turns_terminal() {
     assert_eq!(signal["category"], json!("agent"));
     assert_eq!(signal["value"], json!("opencode"));
 
-    // A reaper expiry while a client holds the socket must end the
-    // connection server-side; waiting on the client would let a hung
-    // backend pin the process past --max-lifetime.
+    // Expiry must end the connection server-side; waiting on the client would
+    // let a hung backend pin the process past --max-lifetime.
     session.expire("max_lifetime");
 
     let mut saw_canceled = false;
@@ -340,8 +330,7 @@ fn expire_clears_unacked_result_and_secrets() {
         "admin_key": "acps_admin_expire_secret"
     }));
     assert_eq!(session.status(), "completed_awaiting_ack");
-    // Backend-driven cancel must not kill a session holding an un-acked
-    // result; only the internal reaper may.
+    // Backend-driven cancel must not kill a session holding an un-acked result.
     session.cancel("backend_cancel");
     assert_eq!(session.status(), "completed_awaiting_ack");
     session.expire("idle_timeout");
@@ -353,7 +342,6 @@ fn expire_clears_unacked_result_and_secrets() {
     let events = serde_json::to_string(&session.events_after(0)).expect("events");
     assert!(events.contains("idle_timeout"));
     assert!(!events.contains("acps_session_expire_secret"));
-    // A second expiry is a no-op on an already terminal session.
     session.expire("max_lifetime");
     assert_eq!(session.status(), "cancelled");
 }

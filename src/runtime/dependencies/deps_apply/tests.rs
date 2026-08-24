@@ -13,9 +13,6 @@ fn config_with_dep(entry: DependencyEntry) -> Config {
 
 #[test]
 fn candidates_filter_to_install_blocks_only() {
-    // One dep with install, one without — only the first is a
-    // candidate. Proves the "narrow, explicit" Phase 4 contract:
-    // no auto-derivation, just operator-declared snippets.
     let mut config = config_with_dep(DependencyEntry {
         name: "with-install".into(),
         required: true,
@@ -71,9 +68,6 @@ fn candidates_honor_feature_filter() {
 
 #[test]
 fn apply_skips_when_creates_already_resolves() {
-    // `/bin/sh` is on PATH in every environment we run tests in.
-    // The runner should short-circuit to AlreadyPresent without
-    // spawning the (intentionally crashing) install script.
     let config = config_with_dep(DependencyEntry {
         name: "sh".into(),
         required: true,
@@ -96,15 +90,9 @@ fn apply_skips_when_creates_already_resolves() {
 
 #[test]
 fn apply_runs_shell_and_verifies_creates_postcheck() {
-    // Shell that creates a sentinel binary in a controlled
-    // tempdir. We extend PATH for this test so the `creates`
-    // postcheck can find it. Verifies: the shell ran, the
-    // postcheck resolved, the outcome is Installed.
     let tempdir = tempfile::tempdir().expect("tempdir");
     let bin = tempdir.path().join("apply-test-marker");
     let bin_str = bin.to_string_lossy().into_owned();
-    // Use the absolute path as `creates` so the postcheck doesn't
-    // depend on $PATH munging.
     let config = config_with_dep(DependencyEntry {
         name: "apply-test-marker".into(),
         required: true,
@@ -128,8 +116,6 @@ fn apply_runs_shell_and_verifies_creates_postcheck() {
 
 #[test]
 fn apply_marks_failed_when_shell_exits_nonzero() {
-    // creates resolves to a path that the failing shell will not
-    // produce; outcome must be Failed with exit_code captured.
     let config = config_with_dep(DependencyEntry {
         name: "definitely-not-installed-acps-apply-fail".into(),
         required: true,
@@ -173,13 +159,8 @@ fn system_dep(name: &str, shell: &str, creates: &str) -> DependencyEntry {
 
 #[test]
 fn escalation_unavailable_still_refuses_system_scope() {
-    // Injected Unavailable escalation must short-circuit to
-    // PrivilegeRequired without spawning anything, regardless of the
-    // uid the test actually runs under.
     let config = config_with_dep(system_dep(
         "definitely-not-installed-acps-priv-check",
-        // Shell is intentionally destructive-looking to make it
-        // obvious if a test bug let it actually run.
         "echo SHOULD NOT EXECUTE >&2; exit 99",
         "definitely-not-installed-acps-priv-check",
     ));
@@ -205,9 +186,8 @@ fn escalation_unavailable_still_refuses_system_scope() {
 
 #[test]
 fn outcome_kinds_serialize_as_snake_case() {
-    // The `kind` discriminator is a wire value read by API clients and
-    // mirrored by hand in `crate::cli::deps`; word-joined spellings like
-    // `alreadypresent` are not part of the contract.
+    // `kind` is a wire value read by API clients and mirrored by hand in
+    // `crate::cli::deps`.
     let kind_of = |outcome: &DepApplyOutcome| {
         serde_json::to_value(outcome).expect("serialize outcome")["kind"]
             .as_str()
@@ -231,11 +211,8 @@ fn outcome_kinds_serialize_as_snake_case() {
 
 #[test]
 fn not_needed_escalation_is_revalidated_against_euid_at_apply_time() {
-    // `NotNeeded` doubles as "nothing was pending at probe time, so no
-    // probe ran". If a system-scope action becomes pending afterwards,
-    // apply_one must re-derive the decision from the live euid instead
-    // of running a root-intended script unprivileged. As non-root that
-    // means PrivilegeRequired; as actual root it runs directly.
+    // `NotNeeded` also means "no probe ran", so apply_one must re-derive from
+    // the live euid rather than run a root-intended script unprivileged.
     let tempdir = tempfile::tempdir().expect("tempdir");
     let bin = tempdir.path().join("system-direct-marker");
     let bin_str = bin.to_string_lossy().into_owned();
@@ -273,9 +250,7 @@ fn not_needed_escalation_is_revalidated_against_euid_at_apply_time() {
     }
 }
 
-/// Fake `sudo` that records its argv (one per line) and then execs the
-/// remaining command, skipping the `-n` flag. Lets the escalated code
-/// path run end to end without real privileges.
+/// Fake `sudo` that records its argv and then execs the remaining command.
 fn write_fake_sudo(dir: &Path, argv_log: &Path) -> PathBuf {
     let path = dir.join("sudo");
     let script = format!(
@@ -402,8 +377,7 @@ fn manual_privileged_command_quotes_embedded_single_quotes() {
     );
 }
 
-/// Write an executable script that exits with `code`, standing in for
-/// sudo in probe tests.
+/// Write an executable script that exits with `code`.
 fn write_exit_stub(dir: &Path, name: &str, code: i32) -> PathBuf {
     let path = dir.join(name);
     std::fs::write(&path, format!("#!/bin/sh\nexit {code}\n")).expect("write stub");
@@ -423,17 +397,13 @@ fn probe_collapses_missing_and_denied_sudo_to_unavailable() {
         probe_privilege_escalation_with(1001, None),
         PrivilegeEscalation::Unavailable { uid: 1001 },
     );
-    // A "sudo" that exits non-zero (password required) is Unavailable.
     let denied_sudo = write_exit_stub(tempdir.path(), "sudo-denied", 1);
     assert_eq!(
         probe_privilege_escalation_with(1001, Some(denied_sudo)),
         PrivilegeEscalation::Unavailable { uid: 1001 },
     );
-    // A "sudo" that exits zero advertises escalation with its path.
-    // The probe deliberately collapses transient spawn errors (e.g.
-    // fork EAGAIN when the whole suite runs in parallel) to
-    // Unavailable, so give the load-sensitive granted case a couple
-    // of retries before declaring the logic wrong.
+    // The probe collapses transient spawn errors (fork EAGAIN under a parallel
+    // suite) to Unavailable, so retry the granted case before failing.
     let granted_sudo = write_exit_stub(tempdir.path(), "sudo-granted", 0);
     let mut granted = probe_privilege_escalation_with(1001, Some(granted_sudo.clone()));
     for _ in 0..2 {
@@ -450,7 +420,6 @@ fn probe_collapses_missing_and_denied_sudo_to_unavailable() {
             uid: 1001,
         },
     );
-    // Root short-circuits without touching the candidate path at all.
     assert_eq!(
         probe_privilege_escalation_with(0, None),
         PrivilegeEscalation::NotNeeded,
@@ -507,12 +476,10 @@ fn pending_system_candidates_filters_scope_and_presence() {
         "true",
         "definitely-not-installed-acps-system-pending",
     ));
-    // Present system dep (creates resolves) — excluded.
     config
         .dependencies
         .commands
         .push(system_dep("sh-present", "true", "sh"));
-    // Pending user dep — excluded by scope.
     config.dependencies.commands.push(DependencyEntry {
         name: "definitely-not-installed-acps-user-pending".into(),
         required: true,
@@ -560,12 +527,6 @@ fn reap_with_grace_bounds_wait_and_reaps_exited_children() {
 
 #[test]
 fn before_after_status_honors_absolute_creates_path() {
-    // Regression: before/after originally went through
-    // check_dependencies(config) which resolves entry.name on
-    // PATH. A dep whose install.creates is an absolute path would
-    // succeed but the after-status would still say "missing".
-    // Now the report uses check_one for command deps with an
-    // install block, so absolute `creates` resolves correctly.
     let tempdir = tempfile::tempdir().expect("tempdir");
     let bin = tempdir.path().join("apply-before-after");
     let bin_str = bin.to_string_lossy().into_owned();
@@ -594,19 +555,13 @@ fn before_after_status_honors_absolute_creates_path() {
 
 #[test]
 fn timeout_kills_entire_process_group() {
-    // Regression: kill on just the shell child would let
-    // grandchildren keep the pipes open, hanging the join
-    // threads past the operator-declared timeout. With process
-    // group cleanup, a `sleep 999` inside the shell is reaped
-    // and the call returns within the timeout window.
+    // Killing only the shell child would leave grandchildren holding the pipes
+    // open, hanging the join threads past the declared timeout.
     let config = config_with_dep(DependencyEntry {
         name: "definitely-not-installed-timeout-check".into(),
         required: true,
         feature: None,
         install: Some(DependencyInstallAction {
-            // Background a long sleep + a foreground long sleep
-            // so killing only the shell would still leave a live
-            // descendant with the pipes open.
             shell: "sleep 60 & sleep 60".into(),
             creates: Some("definitely-not-installed-timeout-check".into()),
             scope: DependencyInstallScope::User,
@@ -633,20 +588,9 @@ fn timeout_kills_entire_process_group() {
 
 #[test]
 fn stderr_tail_captures_actual_tail_when_stream_blows_past_cap() {
-    // Regression: the prior implementation stored only the first
-    // 64 KiB of stderr and computed `tail` from that prefix —
-    // for verbose installers, the actual failure diagnostic at
-    // the very end would be lost. The rolling-tail buffer
-    // ensures the last `STDERR_TAIL_BYTES` of the full stream
-    // make it into the report, regardless of how chatty the
-    // installer was.
     let marker = "FINAL_DIAGNOSTIC_AT_THE_END_aaa";
-    // Push ~80 KiB of noise into STDERR (the reader's 64 KiB
-    // prefix fills well before the marker arrives), then print
-    // the marker, then exit 1. The marker can ONLY survive if
-    // the rolling-tail buffer is doing its job. The previous
-    // test wrote the noise to stdout instead, so the rolling
-    // tail was never exercised.
+    // ~80 KiB of stderr noise fills the reader's 64 KiB prefix before the
+    // marker arrives, so the marker survives only via the rolling tail.
     let shell = format!(
         "yes 'noise line that is long enough to push past 64 KiB quickly' | head -n 1500 1>&2; \
          printf %s {marker} 1>&2; exit 1"
@@ -676,11 +620,8 @@ fn stderr_tail_captures_actual_tail_when_stream_blows_past_cap() {
 
 #[test]
 fn finish_failure_does_not_abort_apply() {
-    // Hold a write lock on a second connection past the apply store's busy
-    // timeout while the dep's shell runs, so both the finish and the
-    // best-effort error mark hit SQLITE_BUSY. The apply must still report
-    // the step's real outcome instead of aborting, and exactly one row must
-    // exist (no duplicate fallback append).
+    // Hold a write lock past the apply store's busy timeout so both the finish
+    // and the error mark hit SQLITE_BUSY.
     let tempdir = tempfile::tempdir().expect("tempdir");
     let path = tempdir.path().join("state.sqlite");
     let store = StateStore::open(&path).expect("open");
@@ -695,8 +636,8 @@ fn finish_failure_does_not_abort_apply() {
         required: true,
         feature: None,
         install: Some(DependencyInstallAction {
-            // The sleep leaves a window for the test to take the write lock
-            // after the running row lands but before the step finishes.
+            // The sleep leaves a window to take the write lock after the
+            // running row lands but before the step finishes.
             shell: format!(
                 "sleep 0.5; printf '#!/bin/sh\\nexit 0\\n' > {bin_str} && chmod 755 {bin_str}"
             ),
@@ -709,8 +650,6 @@ fn finish_failure_does_not_abort_apply() {
     let worker =
         std::thread::spawn(move || apply_dependencies(&config, None, Some(&store), "/bin/sh"));
 
-    // Wait for the dep's `running` row (written before the shell spawns),
-    // then hold the write lock until well past the finish attempt.
     let reader = StateStore::open(&path).expect("reader connection");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -747,9 +686,7 @@ fn finish_failure_does_not_abort_apply() {
         "the step itself succeeded; got {:?}",
         report.results[0].outcome,
     );
-    // One row total: the running row is never duplicated by a fallback
-    // append. Here the contention outlasted even the error-mark attempt, so
-    // it is still `running` — the documented residual worst case.
+    // One row total: the running row is never duplicated by a fallback append.
     let runs = reader
         .query_installer_runs_filtered(None, 10)
         .expect("history");
@@ -809,7 +746,6 @@ fn tracked_apply_settles_succeeded_with_matching_run_and_action_ids() {
     assert_eq!(run.installed, 1);
     assert_eq!(run.completed, 1);
     assert!(run.finished_at.is_some());
-    // Per-action audit rows share the run row's key.
     let actions = store
         .query_installer_runs_for_apply_run(DEPS_APPLY_AGENT_ID, DEPS_APPLY_STEP, &run.id)
         .expect("actions");

@@ -1,8 +1,5 @@
-//! Code lane: Git-based materialization (`git clone` + `git rev-parse`).
-//!
-//! Drives the host `git` binary in a non-interactive mode, persists every
-//! subprocess capture under the per-source log directory, and stamps a
-//! Git-flavored sentinel onto the destination on success.
+//! Code lane: Git-based materialization (`git clone` + `git rev-parse`), capturing
+//! every subprocess and stamping a Git sentinel onto the destination on success.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -20,13 +17,9 @@ use super::{
     WORKSPACE_STDERR_TAIL_BYTES,
 };
 
-// Repo-scoping variables git exports to hooks and subprocesses. If the
-// runtime is itself launched from such an environment (observed: the test
-// suite running under a pre-commit hook), an inherited GIT_DIR or
-// GIT_INDEX_FILE silently redirects clone/rev-parse at the launcher's
-// repository, so every git we spawn must drop them. Enumerated rather than
-// a GIT_* prefix sweep so operator-intended env such as GIT_SSH_COMMAND or
-// proxy settings keeps working.
+// Every spawned git MUST drop these: an inherited GIT_DIR or GIT_INDEX_FILE (observed
+// under a pre-commit hook) silently redirects clone/rev-parse at the launcher's
+// repository. Enumerated rather than a GIT_* sweep so GIT_SSH_COMMAND still works.
 const GIT_REPO_SCOPE_ENV_VARS: &[&str] = &[
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -110,17 +103,12 @@ pub(super) fn materialize_code_source(
         log_dir,
     );
     if let Err(err) = outcome {
-        // Clean up the partially-clobbered destination so a rerun can retry.
         return Err(cleanup_partial_destination(&dest, err));
     }
 
-    // Everything from here to the sentinel write is "after a successful
-    // clone but before the source is durably marked done". A failure
-    // here — git rev-parse, the per-step log writes that now run inside
-    // it, or the sentinel write itself — leaves a populated destination
-    // without a sentinel, which the next `acps init` would reject under
-    // the non-empty destination guard. Funnel every failure through
-    // `cleanup_partial_destination` so a retry can proceed.
+    // Between a successful clone and the sentinel write, EVERY failure must funnel
+    // through `cleanup_partial_destination`: a populated destination with no sentinel
+    // is rejected by the next `acps init` under the non-empty destination guard.
     let commit = match run_git_rev_parse(&dest, log_dir) {
         Ok(commit) => commit,
         Err(err) => return Err(cleanup_partial_destination(&dest, err)),
@@ -172,11 +160,8 @@ pub(super) fn run_git_clone(
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     scrub_repo_scope_env(&mut cmd);
 
-    // Force non-interactive auth. If we pass a credential, it goes via
-    // GIT_ASKPASS so the token never lands in process args (which would
-    // leak through ps/audit logs). The askpass helper just echoes the
-    // token; this only fires when libcurl asks for a password, so
-    // unauthenticated clones still work.
+    // A credential travels via GIT_ASKPASS so the token never lands in process args,
+    // where ps and audit logs would expose it.
     cmd.env("GIT_TERMINAL_PROMPT", "0");
     cmd.env("GIT_HTTP_LOW_SPEED_LIMIT", "1000");
     cmd.env("GIT_HTTP_LOW_SPEED_TIME", "60");
@@ -191,12 +176,8 @@ pub(super) fn run_git_clone(
         .map_err(|source| StackError::WorkspaceMaterializeFailed {
             reason: format!("spawning `git clone` failed: {source}"),
         })?;
-    // Persist captured streams to disk so a failed clone is auditable
-    // without re-running. Successful clones land the same capture so the
-    // operator can inspect what git actually did. Write before the
-    // exit-status check; the failure tail in `WorkspaceCommandFailed`
-    // remains the primary error surface, but the full capture is the
-    // audit copy.
+    // Written before the exit-status check so a failed clone is auditable without
+    // re-running.
     write_command_capture(
         log_dir,
         CAPTURE_TAG_GIT_CLONE,
@@ -255,9 +236,8 @@ pub(super) fn write_askpass_helper() -> Result<PathBuf> {
         tempfile::TempDir::new().map_err(|source| StackError::WorkspaceMaterializeFailed {
             reason: format!("create askpass tempdir: {source}"),
         })?;
-    // Leak the TempDir so the askpass helper survives long enough for
-    // `git` to exec it. Acceptable in `acps init` (one-shot CLI). Newer
-    // `tempfile` deprecates `into_path` in favor of `keep`.
+    // Leak the TempDir so the helper survives long enough for `git` to exec it;
+    // acceptable in the one-shot `acps init` CLI.
     let path = dir.keep().join("askpass.sh");
     let script = "#!/bin/sh\nprintf %s \"$ACP_STACK_GIT_TOKEN\"\n";
     std::fs::write(&path, script).map_err(|source| StackError::WorkspaceMaterializeFailed {

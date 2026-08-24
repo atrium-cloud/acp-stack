@@ -1,9 +1,5 @@
-//! Generic JSON / YAML / TOML read/write helpers used by per-agent headless
-//! config provisioners.
-//!
-//! Extracted from `agent_headless_config.rs` so the provisioner file can
-//! focus on agent-specific shapes. These helpers preserve unrelated fields
-//! across writes and only mutate the keys the caller targets.
+//! Generic JSON / YAML / TOML read/write helpers for the per-agent headless
+//! config provisioners; unrelated fields survive every write.
 
 use std::path::Path;
 

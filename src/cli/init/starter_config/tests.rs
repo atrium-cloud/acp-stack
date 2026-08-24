@@ -1,7 +1,5 @@
-use super::*;
-// The `deps` `pub(super)` consts are referenced only here; this glob makes
-// them reachable without widening their visibility in the parent.
 use super::deps::*;
+use super::*;
 use clap::Parser;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -153,8 +151,7 @@ fn mcp_http_url_allows_loopback_http_only() {
     assert!(error.to_string().contains("https://"), "{error}");
 }
 
-// A fresh agent-env name that collides with a secret already in the store
-// must be rejected before the upsert, leaving the existing secret untouched.
+// A colliding name must be rejected before the upsert, leaving the existing secret untouched.
 #[test]
 fn apply_agent_env_refuses_to_overwrite_existing_secret() {
     let home = tempdir().expect("tempdir");
@@ -166,8 +163,7 @@ fn apply_agent_env_refuses_to_overwrite_existing_secret() {
     let error = apply_agent_env_collection(&mut store, &collection(&[("ADMIN_KEY", "attacker")]))
         .expect_err("collision with an existing secret must be rejected");
     assert!(error.to_string().contains("already exists"), "got: {error}");
-    // A valid ref name can still be credential-shaped, so the collision
-    // complaint names the condition and not the entry.
+    // A ref name can itself be credential-shaped, so the complaint quotes nothing back.
     assert!(!error.to_string().contains("ADMIN_KEY"), "got: {error}");
     assert_eq!(
         store.get("ADMIN_KEY").expect("preserved"),
@@ -187,9 +183,8 @@ fn apply_agent_env_rejects_invalid_ref_name() {
         error.to_string().contains("secret ref name must use"),
         "got: {error}"
     );
-    // The rejected entry is most often a credential pasted where its ref
-    // name belongs, so the complaint states the constraint and quotes
-    // nothing back.
+    // The rejected entry is often a credential pasted where a ref name belongs, so the
+    // complaint states the constraint and quotes nothing back.
     assert!(!error.to_string().contains("bad-name"), "got: {error}");
 }
 
@@ -203,9 +198,7 @@ fn apply_agent_env_stores_a_new_secret() {
     assert_eq!(store.get("GITHUB_TOKEN").expect("stored"), "ghp_value");
 }
 
-// Scripts the hosted-prompt driver so the interactive environment-config flow
-// can be exercised headlessly: `selects`/`confirms` are dequeued in call order,
-// and text/password return None so any add-loop finishes immediately.
+// Scripted hosted-prompt driver: `selects`/`confirms` dequeue in call order.
 struct ScriptedPromptDriver {
     selects: Mutex<VecDeque<Option<usize>>>,
     confirms: Mutex<VecDeque<bool>>,
@@ -271,8 +264,7 @@ impl prompt::HostedPromptDriver for ScriptedPromptDriver {
         &self,
         _request: prompt::HostedPromptRequest,
     ) -> Result<prompt::HostedPromptOutcome<Option<String>>> {
-        // An empty queue keeps the pre-password-queue behavior (None ends
-        // any add-loop immediately) so wizard tests need no scripting.
+        // An empty queue yields None, ending any add-loop, so wizard tests need no scripting.
         Ok(prompt::HostedPromptOutcome::Handled(
             self.passwords
                 .lock()
@@ -287,8 +279,7 @@ impl prompt::HostedPromptDriver for ScriptedPromptDriver {
     fn result(&self, _payload: serde_json::Value) {}
 }
 
-// Models a hosted driver that leaves the environment-config prompt outside its
-// v1 scope: every prompt is Unhandled, so the flow must skip cleanly.
+// A hosted driver whose prompts are all Unhandled, so flows must skip cleanly.
 struct UnhandledPromptDriver;
 
 impl prompt::HostedPromptDriver for UnhandledPromptDriver {
@@ -336,10 +327,8 @@ fn run_environment_configuration(
     })
 }
 
-// Standard Setup (path index 0): essential deps + browser-use accepted,
-// skills skipped for a non-skills agent, data declined. It must touch none
-// of the Advanced-only seams and must make exactly one select (the path
-// choice) — extra selects would drain the single-item queue and panic.
+// Standard Setup (path index 0) makes exactly one select; an extra one drains the queue
+// and panics, which is what pins the lane to the Standard seams only.
 #[test]
 fn standard_setup_enables_essential_deps_and_browser_use() {
     let driver = Arc::new(ScriptedPromptDriver::new(
@@ -413,11 +402,8 @@ fn standard_setup_keeps_explicit_skill_flags() {
     assert!(!args.essential_skills);
 }
 
-// Advanced Setup (path index 1) with a non-skills agent: deps off, agent
-// env on, data off. `placebo` is absent from the embedded registry, so
-// `agent_supports_skills` is false and the skills prompt is skipped —
-// hence three confirms. MCP prompting is not part of the wizard: it runs
-// in the post-probe `mcp_configure` init step.
+// Advanced Setup (path index 1): `placebo` is absent from the embedded registry, so the
+// skills prompt is skipped and only three confirms are consumed.
 #[test]
 fn advanced_setup_routes_agent_env_without_standard_fields() {
     let driver = Arc::new(ScriptedPromptDriver::new(
@@ -434,8 +420,7 @@ fn advanced_setup_routes_agent_env_without_standard_fields() {
     assert!(!args.browser_use_profile);
 }
 
-// Advanced Setup offers the skills step only when the agent supports skills;
-// `opencode` does, so accepting it routes into the skills flow.
+// The skills step is offered only for a skills-capable agent, which `opencode` is.
 #[test]
 fn advanced_setup_routes_agent_skills_for_skills_capable_agent() {
     let driver = Arc::new(ScriptedPromptDriver::new(
@@ -450,8 +435,7 @@ fn advanced_setup_routes_agent_skills_for_skills_capable_agent() {
     assert!(!args.prompt_agent_env_refs);
 }
 
-// A hosted driver that leaves the path prompt Unhandled skips environment
-// configuration instead of failing, matching non-interactive behavior.
+// An Unhandled path prompt skips configuration instead of failing.
 #[test]
 fn unhandled_hosted_prompt_skips_environment_configuration() {
     let driver = Arc::new(UnhandledPromptDriver);
@@ -465,8 +449,7 @@ fn unhandled_hosted_prompt_skips_environment_configuration() {
     assert!(!args.prompt_agent_env_refs);
 }
 
-// Drives the post-probe `mcp_configure` transport loop headlessly; the
-// caller keeps a driver clone to inspect the recorded select requests.
+// Drives the post-probe `mcp_configure` transport loop; callers keep a clone to inspect requests.
 fn run_mcp_prompt(
     driver: Arc<ScriptedPromptDriver>,
     args: &mut InitArgs,
@@ -485,9 +468,7 @@ fn select_labels(driver: &ScriptedPromptDriver, index: usize) -> Vec<String> {
         .collect()
 }
 
-// The HTTP transport is offered only when the agent advertised
-// `mcpCapabilities.http`; without the advertisement the select is stdio
-// plus Done.
+// HTTP is offered only when the agent advertised `mcpCapabilities.http`.
 #[test]
 fn mcp_prompt_omits_http_transport_when_not_advertised() {
     let driver = Arc::new(ScriptedPromptDriver::new(vec![Some(1)], Vec::new()));
@@ -517,9 +498,7 @@ fn mcp_prompt_offers_http_transport_when_advertised() {
     assert!(args.prompt_mcp_http.is_empty());
 }
 
-// Choosing stdio enters the row loop (the driver's text prompts return
-// None, so the loop ends immediately with no rows) and control returns to
-// the transport select, where Done exits.
+// Choosing stdio enters the row loop and returns to the transport select, where Done exits.
 #[test]
 fn mcp_prompt_stdio_choice_returns_to_transport_select() {
     let driver = Arc::new(ScriptedPromptDriver::new(
@@ -587,10 +566,8 @@ fn merge_prompted_mcp_servers_rejects_name_already_in_config() {
     assert_eq!(existing.len(), 1, "rejected batch must not append");
 }
 
-// Builds the config a hosted request with one stdio env ref, one HTTP
-// header ref, and one S3 source would produce; declared refs iterate in
-// BTreeSet order: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, FILES_TOKEN,
-// PRESENT_REF, SEARCH_API_KEY.
+// Declared refs iterate in BTreeSet order: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+// FILES_TOKEN, PRESENT_REF, SEARCH_API_KEY.
 fn declared_refs_config() -> Config {
     let mut args = parse_init_args(&["--agent", "placebo"]);
     args.prompt_mcp_stdio.push(InitMcpStdioServer {
@@ -663,8 +640,7 @@ fn collect_declared_secret_refs_prompts_missing_and_skips_unanswered() {
     assert!(!store.contains("AWS_SECRET_ACCESS_KEY"));
 }
 
-// A hosted client that leaves password prompts outside its scope must not
-// wedge init: Unhandled maps to skip and the collection is a clean no-op.
+// Unhandled password prompts map to skip, so collection is a clean no-op rather than a wedge.
 #[test]
 fn collect_declared_secret_refs_is_noop_under_unhandled_driver() {
     let home = tempdir().expect("tempdir");
@@ -732,10 +708,8 @@ fn structured_declarations_rejected_for_existing_config() {
     assert!(reject_data_source_args_for_existing_config(&parse_init_args(&[])).is_ok());
 }
 
-// A declared-but-unsatisfiable skills install is a hard error (the wizard
-// gates the offer instead; a hosted request is a declaration and silently
-// skipping it would be worse). run_init_with_output routes this failure
-// through finalize_with_error so the init run row turns terminal.
+// A declared-but-unsatisfiable skills install is a hard error; the wizard gates the offer
+// instead, and silently skipping a hosted declaration would be worse.
 #[test]
 fn essential_skills_declaration_fails_for_agent_without_skills_support() {
     let home = tempdir().expect("tempdir");
@@ -802,13 +776,12 @@ fn sandbox_override_must_match_existing_config() {
         "unshare",
     ]));
 
-    // Re-running with the same value is a no-op, not a conflict.
     let same = parse_init_args(&["--agent", "placebo", "--sandbox", "unshare"]);
     validate_deployment_overrides_match_existing(&same, &existing)
         .expect("a matching sandbox override is accepted");
 
-    // A different value is rejected rather than silently ignored, so an
-    // operator cannot believe they enabled a sandbox that stays off.
+    // A conflicting value is rejected, not ignored: an operator must never believe they
+    // enabled a sandbox that stays off.
     let conflict = parse_init_args(&["--agent", "placebo", "--sandbox", "off"]);
     let error = validate_deployment_overrides_match_existing(&conflict, &existing)
         .expect_err("a conflicting sandbox override must be rejected");

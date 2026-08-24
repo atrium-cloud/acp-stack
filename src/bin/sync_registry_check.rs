@@ -1,19 +1,6 @@
-//! Dev tool: compare our embedded `data/agents.toml` against upstream ACP
-//! `registry.json`. Not shipped in release artifacts — `cargo install` the
-//! daemon and this binary stays in the workspace.
-//!
-//! Usage:
-//!
-//! ```sh
-//! cargo run --bin sync-registry-check
-//! ```
-//!
-//! The embedded registry is intentionally a small curated subset. Every
-//! embedded sync id (`adapter.sync_id`, `adapter.id`, entry `sync_id`, or `id`) must still exist
-//! upstream; upstream entries that are not embedded are reported for awareness
-//! but do not fail the check. Entries flagged `sync_exempt` in the catalog are
-//! excluded from the requirement but printed in their own report section so
-//! the exemption stays visible on every run.
+//! Dev tool comparing the embedded `data/agents.toml` against upstream ACP
+//! `registry.json`. Every embedded sync id must still exist upstream unless the
+//! entry is flagged `sync_exempt`; unmatched upstream entries only warn.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::ExitCode;
@@ -230,10 +217,9 @@ mod tests {
         assert!(embedded_sync_ids(&catalog).contains(&"claude-acp"));
         assert!(!embedded_sync_ids(&catalog).contains(&"amp"));
         assert!(!embedded_sync_ids(&catalog).contains(&"claude-agent-acp"));
-        // Native agents sync under their plain catalog ids.
         assert!(embedded_sync_ids(&catalog).contains(&"kilo"));
-        // Unless the entry declares its own sync_id because upstream names it
-        // differently than the installed binary.
+        // Entries whose upstream name differs from the installed binary declare
+        // their own `sync_id`.
         assert!(embedded_sync_ids(&catalog).contains(&"antigravity-acp"));
         assert!(!embedded_sync_ids(&catalog).contains(&"antigravity"));
     }

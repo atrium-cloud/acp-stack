@@ -1,11 +1,7 @@
 #![cfg(feature = "test-fixtures")]
 
-//! End-to-end coverage for the agent lifecycle HTTP routes: install, start,
-//! capabilities, restart, stop, provider/model discovery, the array target
-//! routes, and the session/admin tier enforcement on those.
-//!
-//! All tests drive a real `acps` HTTP server against a `Config` whose
-//! `[agent].command` is the standalone placebo ACP fixture.
+//! End-to-end coverage for the agent lifecycle HTTP routes, driving a real `acps` HTTP server
+//! against the standalone placebo ACP fixture.
 
 mod common;
 

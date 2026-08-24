@@ -1,11 +1,7 @@
 #![cfg(feature = "test-fixtures")]
 
-//! End-to-end coverage for `POST /v1/agent/switch` and the native-config
-//! import routes: target install, skill porting, provider-secret migration,
-//! source cleanup, and the inspect/import/cancel rollback loop.
-//!
-//! All tests drive a real `acps` HTTP server against a `Config` whose
-//! `[agent].command` is the standalone placebo ACP fixture.
+//! End-to-end coverage for `POST /v1/agent/switch` and the native-config import
+//! routes, driving a real `acps` server against the placebo ACP fixture.
 
 mod common;
 

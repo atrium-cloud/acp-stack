@@ -1,15 +1,4 @@
-//! The Serialize-contract umbrella: every top-level body the `/v1` API emits,
-//! plus the shared response envelope. Registered here so `acps_schema` pulls
-//! them (and their transitive field types) into `#/$defs/response/*`. The init
-//! API's responses are contributed separately (see `crate::cli::init_response_defs`).
-//!
-//! The success envelope `{ok, data}` is registered once as
-//! [`ApiSuccess<serde_json::Value>`]; per-endpoint responses are the bare `data`
-//! payload types. See `docs/specs/api/api.md` for the enveloping rule.
-//!
-//! This is a hand-maintained registration point: a new response body must be
-//! added here. The `schema_covers_every_handler_wire_type` coverage test
-//! (see `super::coverage`) guards against a handler payload with no schema entry.
+//! Hand-maintained registration point for every top-level body the `/v1` API emits: a new response body must be added here, and the `schema_covers_every_handler_wire_type` coverage test guards the omission.
 
 /// Umbrella over every response payload. Never serialized itself — only its
 /// derived `JsonSchema` matters, which forces each variant's type into `$defs`.

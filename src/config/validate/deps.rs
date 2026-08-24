@@ -1,4 +1,4 @@
-//! Dependencies validation: per-category dedup + Phase 4 [install] action
+//! Dependencies validation: per-category dedup and `[install]` action
 //! constraints on `dependencies.commands`.
 
 use std::collections::HashSet;
@@ -26,12 +26,9 @@ pub(crate) fn validate_dependencies(deps: &DependenciesConfig) -> Result<()> {
     check("packages", &deps.packages)?;
     check("runtimes", &deps.runtimes)?;
     check("mcp", &deps.mcp)?;
-    // The `install` block is only meaningful for command deps —
-    // `acps deps apply` runs install actions exclusively against
-    // `dependencies.commands`. Reject install metadata on the other
-    // categories so the operator doesn't declare it expecting it to
-    // do something and silently get nothing (the "narrow supported
-    // actions" contract from Phase 4 spec L62/L67).
+    // `acps deps apply` runs install actions only against
+    // `dependencies.commands`, so install metadata elsewhere is rejected
+    // rather than silently ignored.
     for (category, list) in [
         ("packages", &deps.packages),
         ("runtimes", &deps.runtimes),
@@ -54,10 +51,6 @@ pub(crate) fn validate_dependencies(deps: &DependenciesConfig) -> Result<()> {
         let Some(install) = entry.install.as_ref() else {
             continue;
         };
-        // Catch operator typos at config-load. An empty shell snippet
-        // would no-op the install; a blank `creates` would produce an
-        // impossible postcheck; `timeout_secs = 0` would surface as
-        // an instant timeout on every run.
         if install.shell.trim().is_empty() {
             return Err(StackError::InvalidParam {
                 field: "dependencies",

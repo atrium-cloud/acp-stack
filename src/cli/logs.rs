@@ -17,24 +17,19 @@ use super::core::{OutputFormatChoice, daemon_base_url, resolve_session_key};
 
 // === CONSTANTS ===
 
-/// Default `--limit` used by `acps logs query`. Matches the historical 50-row
-/// default the operator was already getting before the JSON flag landed.
+/// Default `--limit` used by `acps logs query`.
 const DEFAULT_QUERY_LIMIT: u32 = 50;
 
-/// CLI sort-direction tokens. Kept narrow on purpose: an unknown value should
-/// fail the parse, not silently fall back to a default.
+/// CLI sort-direction tokens; an unknown value fails the parse rather than defaulting.
 const ORDER_TOKEN_ASC: &str = "asc";
 const ORDER_TOKEN_DESC: &str = "desc";
 
-/// WebSocket topic clients subscribe to for the unified `events` fanout. Used
-/// by both `acps logs tail` and `acps logs query --follow`.
+/// WebSocket topic for the unified `events` fanout.
 const WS_TOPIC_LOGS: &str = "logs";
 
 #[derive(Debug, Subcommand)]
 pub enum LogsCommand {
-    // Boxed because `LogsQueryArgs` is materially larger than `LogsTailArgs`
-    // and clippy's `large_enum_variant` would otherwise complain. The box only
-    // costs an allocation per `acps logs query` invocation, which is fine.
+    // Boxed to keep the variants balanced for clippy's `large_enum_variant`.
     Query(Box<LogsQueryArgs>),
     Tail(LogsTailArgs),
 }
@@ -114,9 +109,7 @@ pub struct LogsTailArgs {
     session_key: Option<String>,
 }
 
-/// JSON envelope returned by `acps logs query --json`. Mirrors the HTTP
-/// `LogsEventsResponse` field shape so a client that already consumes the API
-/// can reuse the same deserializer when piping CLI output.
+/// JSON envelope returned by `acps logs query --json`, mirroring the HTTP `LogsEventsResponse` shape.
 #[derive(Debug, Serialize)]
 struct LogsQueryOutput {
     events: Vec<EventJson>,
@@ -148,8 +141,7 @@ impl From<&Event> for EventJson {
     }
 }
 
-/// Owned watermark used by follow mode to drop live frames that the backfill
-/// already printed. The keyset cursor for `events` is `(created_at, id)`.
+/// Follow-mode watermark over the `(created_at, id)` keyset, used to drop already-printed frames.
 #[derive(Debug, Clone, Default)]
 struct Watermark {
     created_at: String,
@@ -185,10 +177,7 @@ fn run_logs_query(args: LogsQueryArgs, output: OutputFormatChoice) -> Result<()>
         None => None,
         Some(value) => Some(SecurityCategory::from_str(value)?),
     };
-    // `--order` and `--follow` are mutually exclusive via clap; when
-    // `--follow` is set we always backfill ASC so the live tail picks up
-    // right after the last printed row. Without `--follow`, parse the user's
-    // `--order` (defaulting to DESC for newest-first).
+    // `--follow` always backfills ASC so the live tail picks up right after the last printed row.
     let backfill_order = if args.follow {
         LogOrder::Asc
     } else {
@@ -304,8 +293,7 @@ fn parse_order_token(value: &str) -> Result<LogOrder> {
     }
 }
 
-/// Promote the saturated-page heuristic into a helper so JSON mode and text
-/// mode pick the same cursor. Mirrors `paging_cursor` in the API layer.
+/// Saturated-page cursor heuristic shared by JSON and text mode; mirrors `paging_cursor` in the API layer.
 fn next_cursor_from(events: &[Event], limit: u32) -> Option<String> {
     if (events.len() as u32) < limit {
         return None;
@@ -339,9 +327,7 @@ fn event_watermark(event: &Event) -> Watermark {
     }
 }
 
-/// Accept either a duration suffix (`30m`, `1h`, `2d`) or an RFC3339
-/// timestamp. The suffix form resolves relative to `now`; the RFC3339 form is
-/// returned verbatim after a parse round-trip to confirm it's well-formed.
+/// Accept either a duration suffix (`30m`, `1h`, `2d`), resolved relative to `now`, or an RFC3339 timestamp.
 fn resolve_time_bound(
     raw: Option<&str>,
     field: &'static str,
@@ -367,8 +353,7 @@ fn resolve_time_bound(
     ))
 }
 
-/// Filter dimensions for the live-tail path. Owned strings so the long-lived
-/// WS loop doesn't have to thread lifetimes through the futures it returns.
+/// Owned filter dimensions for the live-tail path, avoiding lifetimes across the long-lived WS loop.
 #[derive(Debug, Clone, Default)]
 struct OwnedLogFilter {
     level: Option<String>,
@@ -412,9 +397,7 @@ impl OwnedLogFilter {
     }
 }
 
-/// Pre-resolved WS connection inputs shared between `tail` and follow-mode
-/// `query`. Bundling them here means both modes go through the same config
-/// load + session-key open path.
+/// Pre-resolved WS connection inputs shared between `tail` and follow-mode `query`.
 struct WsSessionContext {
     session_key: String,
     base_url: String,
@@ -471,8 +454,6 @@ async fn tail_ws_loop(base_url: &str, session_key: &str, topics: Vec<String>) ->
         tokio::select! {
             biased;
             _ = &mut ctrl_c => {
-                // Best-effort close; if the writer is already gone we surface
-                // an error rather than mask it with `let _ =`.
                 if let Err(error) = writer.send(Message::Close(None)).await {
                     eprintln!("acps logs tail: close send failed: {error}");
                 }
@@ -548,11 +529,8 @@ async fn follow_query_loop(
 async fn subscribe_to_logs(writer: &mut WsWriter) -> Result<()> {
     use tokio_tungstenite::tungstenite::protocol::Message;
 
-    // Subscribe only to the `logs` topic. Even when --session is supplied the
-    // unified `events` row is what the matcher inspects; sessions.{id} carries
-    // a different payload shape (the ACP session update envelope), not the raw
-    // event row, so we'd have to special-case it. Operators who want the raw
-    // session-update stream should still use `acps logs tail --topic sessions.{id}`.
+    // `logs` only, even under `--session`: `sessions.{id}` carries the ACP session-update envelope,
+    // not the raw event row the matcher inspects.
     let subscribe = serde_json::json!({"type": "subscribe", "topics": [WS_TOPIC_LOGS]});
     writer
         .send(Message::Text(subscribe.to_string().into()))
@@ -647,14 +625,8 @@ async fn open_ws_stream(base_url: &str, session_key: &str) -> Result<(WsWriter, 
     Ok(stream.split())
 }
 
-/// Reconstruct an `Event` from a `logs`-topic frame so it can be matched by
-/// `LogFilter::matches`. The frame shape is set by
-/// `EventHub::publish_log_event` in `src/events.rs`: `topic == "logs"`,
-/// `payload.kind`, `payload.data.{level,kind,source,message,payload,session_id?}`.
-/// Returns `Ok(None)` for non-`logs` frames so the caller can keep reading.
-/// Missing required fields are treated as protocol bugs and surface as
-/// `ServeIo`; only `payload` (legitimately encoded as Null) and the optional
-/// `session_id` get lenient handling.
+/// Reconstruct an `Event` from a `logs`-topic frame shaped by `EventHub::publish_log_event`;
+/// `Ok(None)` for non-`logs` frames so the caller keeps reading.
 fn parse_logs_frame(text: &str) -> Result<Option<Event>> {
     let parsed: Value = serde_json::from_str(text).map_err(|source| StackError::ServeIo {
         source: std::io::Error::other(format!("invalid websocket frame JSON: {source}")),
@@ -675,14 +647,12 @@ fn parse_logs_frame(text: &str) -> Result<Option<Event>> {
     let kind = require_string_field(data, "kind", "logs frame missing data.kind")?;
     let message = require_string_field(data, "message", "logs frame missing data.message")?;
     let source = require_string_field(data, "source", "logs frame missing data.source")?;
-    // `session_id` is only present for events that came from
-    // `append_session_event_with_source`; absent means a global write.
+    // Absent `session_id` means a global write, not a malformed frame.
     let session_id = data
         .get("session_id")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    // `payload` is legitimately Null when the source event had an empty
-    // payload, so we keep the lenient default here.
+    // `payload` is legitimately Null when the source event had an empty payload.
     let payload_value = data.get("payload").cloned().unwrap_or(Value::Null);
     let payload_json =
         serde_json::to_string(&payload_value).map_err(|source| StackError::ServeIo {

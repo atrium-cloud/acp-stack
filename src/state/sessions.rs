@@ -30,26 +30,15 @@ pub const MAX_SESSION_STATUS_WINDOW_SECS: i64 = 999 * 60 * 60;
 pub const SESSION_ACTIVITY_ACTOR_AGENT: &str = "agent";
 pub const SESSION_ACTIVITY_ACTOR_USER: &str = "user";
 
-/// Session-scoped event kind: the prompt's underlying inference endpoint
-/// returned an HTTP error (5xx, 429, etc.). Payload carries `prompt_id`,
-/// `status_code`, and `reason_category`.
+/// The prompt's inference endpoint returned an HTTP error (5xx, 429, etc.).
 pub const EVENT_KIND_PROMPT_INFERENCE_FAILED: &str = "prompt.inference_failed";
-/// Session-scoped event kind: the prompt was forcibly transitioned to
-/// `stalled` because no progress was observed within the inactivity
-/// threshold. Payload carries `prompt_id` and the last-update timestamp.
+/// The prompt was forced to `stalled` past the inactivity threshold.
 pub const EVENT_KIND_PROMPT_STALLED: &str = "prompt.stalled";
-/// Session-scoped event kind: the prompt reached a terminal `errored`
-/// status for a non-inference reason. Payload carries `prompt_id` and the
-/// `error_code` string.
+/// The prompt reached terminal `errored` for a non-inference reason.
 pub const EVENT_KIND_PROMPT_ERRORED: &str = "prompt.errored";
-/// Session-scoped event kind: configured MCP servers were dropped from the
-/// session because the running agent does not advertise their transport.
-/// Payload carries `session_id` and the skipped `name`/`capability` pairs.
+/// MCP servers were dropped because the agent does not advertise their transport.
 pub const EVENT_KIND_MCP_SESSION_SKIPPED: &str = "mcp.session_skipped";
-/// Session-scoped event kind: a configured capability-backed feature (mode,
-/// model) was ignored because the agent does not advertise the capability.
-/// The session proceeds with the agent's default. Payload carries
-/// `session_id` and the ignored `feature`/`target`/`capability` entries.
+/// A configured mode or model was ignored because the agent lacks the capability.
 pub const EVENT_KIND_SESSION_CAPABILITY_IGNORED: &str = "session.capability_ignored";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,8 +55,7 @@ pub struct SessionRecord {
     pub metadata_json: String,
 }
 
-/// Metadata key under `sessions.metadata_json` holding the latest agent-advertised
-/// slash-command list (ACP `available_commands_update`, latest-wins replace).
+/// Metadata key holding the latest agent-advertised slash-command list.
 pub const SESSION_METADATA_AVAILABLE_COMMANDS: &str = "available_commands";
 /// Companion timestamp key so consumers can reason about staleness of the list.
 pub const SESSION_METADATA_AVAILABLE_COMMANDS_UPDATED_AT: &str = "available_commands_updated_at";
@@ -75,19 +63,15 @@ pub const SESSION_METADATA_AVAILABLE_COMMANDS_UPDATED_AT: &str = "available_comm
 /// session row without limit; the raw notification stays durable regardless.
 pub const MAX_SESSION_AVAILABLE_COMMANDS: usize = 256;
 
-/// Metadata key under `sessions.metadata_json` holding the latest advertised
-/// session config-option list (latest-wins replace, seeded at session create
-/// and refreshed from `session/set_config_option` responses and
-/// `config_option_update` notifications).
+/// Metadata key holding the latest advertised session config-option list.
 pub const SESSION_METADATA_CONFIG_OPTIONS: &str = "config_options";
 /// Companion timestamp key so consumers can reason about staleness.
 pub const SESSION_METADATA_CONFIG_OPTIONS_UPDATED_AT: &str = "config_options_updated_at";
 /// Bound on the stored option list, mirroring the available-commands cap.
 pub const MAX_SESSION_CONFIG_OPTIONS: usize = 64;
 
-/// Compact projection of an ACP `AvailableCommand`. `_meta` is deliberately
-/// dropped (agent-opaque and unbounded); the verbatim `session.update` event
-/// remains the source of truth for the full payload.
+/// Compact projection of an ACP `AvailableCommand`; `_meta` is deliberately
+/// dropped, leaving the verbatim `session.update` event as the full record.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SessionAvailableCommand {
     pub name: String,
@@ -206,13 +190,10 @@ pub struct PromptRecord {
     pub prompt_json: String,
     pub message_id: Option<String>,
     pub message_id_acknowledged: bool,
-    /// Internal failure taxonomy (see `FailureClass`). Populated only for
-    /// terminal `errored`/`stalled` rows; otherwise NULL in the DB and `None`
-    /// here. Phase 2 wires up the supervisor call sites.
+    /// Internal failure taxonomy (see `FailureClass`), set only on terminal
+    /// `errored`/`stalled` rows.
     pub failure_class: Option<String>,
-    /// JSON envelope with class-specific details (e.g. underlying error
-    /// code, last heartbeat timestamp, agent stderr tail). Free-form on
-    /// purpose so each taxonomy class can attach whatever is useful.
+    /// Free-form JSON envelope with class-specific failure details.
     pub failure_detail_json: Option<String>,
 }
 
@@ -230,9 +211,8 @@ pub enum PromptStatus {
     Completed,
     Errored,
     Cancelled,
-    /// Terminal status for prompts the runtime gave up on (e.g. no agent
-    /// progress past the inactivity threshold). Distinct from `Errored` so
-    /// dashboards and clients can surface stalled prompts separately.
+    /// Terminal status for prompts the runtime gave up on, kept distinct from
+    /// `Errored` so clients can surface them separately.
     Stalled,
 }
 
@@ -248,9 +228,7 @@ impl PromptStatus {
         }
     }
 
-    /// True for statuses that will not transition further. Lets supervisor
-    /// reconciliation skip rows that are already done instead of forcing
-    /// them through another taxonomy pass.
+    /// True for statuses that will not transition further.
     pub fn terminal(self) -> bool {
         matches!(
             self,
@@ -281,9 +259,8 @@ impl std::str::FromStr for PromptStatus {
     }
 }
 
-/// Internal taxonomy attached to terminal `errored` and `stalled` prompt
-/// rows so operators can group failures by root cause without scraping
-/// `error_message`. Persisted as snake_case strings in `prompts.failure_class`.
+/// Root-cause taxonomy for terminal prompt rows, persisted as snake_case
+/// strings in `prompts.failure_class`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureClass {
     /// Agent-side request failure (ACP protocol error, bad request shape).

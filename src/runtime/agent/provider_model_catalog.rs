@@ -1,19 +1,7 @@
-//! Live provider model catalogs.
-//!
-//! Adapter-based agents (Claude Code, Codex) cannot discover a third-party
-//! provider's models over ACP: their adapters only relay the harness's own
-//! catalog. This module fetches the provider's OpenAI-compatible `GET /models`
-//! endpoint (declared as `models_url` in `data/providers.toml`) with the
-//! operator's stored API key and caches the result on disk, so provisioning
-//! and the `/v1/models` API can serve real model slugs without hardcoding any.
-//! A managed endpoint override reroutes the fetch along with inference, so the
-//! catalog is discovered through whatever endpoint the agent will actually
-//! call rather than against a vendor host the stored value cannot authenticate
-//! to.
-//!
-//! Fetches are event-driven (provider/model changes and catalog reads), not
-//! scheduled. Every failure degrades: callers keep the previous cache entry or
-//! proceed without a catalog.
+//! Live provider model catalogs, fetched from the provider's OpenAI-compatible `GET /models`
+//! (`models_url` in `data/providers.toml`) and cached on disk, because adapter-based agents cannot
+//! discover a third-party provider's models over ACP. Fetches are event-driven, and every failure
+//! degrades to the previous cache entry or no catalog at all.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -35,12 +23,9 @@ const PROVIDER_MODEL_CACHE_FILE: &str = "provider-models.json";
 const PROVIDER_MODEL_CACHE_VERSION: u32 = 1;
 /// Bounded so an unreachable provider never stalls `acps agent set`/`init`.
 const PROVIDER_MODELS_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
-/// A cache entry younger than this satisfies a refresh without a network
-/// call, so a polling `/v1/models` client cannot hammer the provider.
+/// A cache entry younger than this satisfies a refresh without a network call.
 const PROVIDER_MODELS_CACHE_TTL: Duration = Duration::from_secs(300);
-/// Bounds how often a down provider is retried: without it, every polling
-/// `/v1/models` request would stall up to the fetch timeout and re-hammer
-/// the provider.
+/// Bounds how often a down provider is retried, so polling clients cannot re-hammer it.
 const PROVIDER_MODELS_FAILURE_BACKOFF: Duration = Duration::from_secs(30);
 
 /// One model as reported by the provider's listing endpoint.
@@ -54,8 +39,7 @@ pub struct ProviderModel {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct CachedProviderModels {
-    /// Last *successful* fetch; failure markers live in the fields below so
-    /// an outage never rewrites the catalog's freshness.
+    /// Last successful fetch; an outage writes the markers below instead, never this.
     fetched_at: u64,
     models: Vec<ProviderModel>,
     #[serde(default)]
@@ -71,8 +55,8 @@ struct ProviderModelCacheFile {
     providers: BTreeMap<String, CachedProviderModels>,
 }
 
-/// Deserialization envelope for the cache file. Entries are raw values so one
-/// provider's malformed row can be skipped without dropping the others.
+/// Cache-file envelope. Entries stay raw so one malformed row can be skipped without dropping the
+/// others.
 #[derive(Debug, Deserialize)]
 struct ProviderModelCacheEnvelope {
     version: u32,
@@ -86,8 +70,7 @@ pub fn cache_path(home: &Path) -> PathBuf {
         .join(PROVIDER_MODEL_CACHE_FILE)
 }
 
-/// Read the cached catalog for one provider. Corrupt or missing cache files
-/// read as `None`; a cache problem must never break provisioning.
+/// Read the cached catalog for one provider; a corrupt or missing file reads as `None`.
 pub fn cached_models(home: &Path, provider_id: &str) -> Option<Vec<ProviderModel>> {
     let path = cache_path(home);
     let file = read_cache_file(&path)?;
@@ -107,8 +90,7 @@ fn fresh_cached_models(home: &Path, provider_id: &str) -> Option<Vec<ProviderMod
         .then(|| entry.models.clone())
 }
 
-/// Stored failure reason while it is still inside the backoff window, so a
-/// refresh can skip a retry that would almost certainly fail again.
+/// The stored failure reason while it is still inside the backoff window.
 fn recent_failure_reason(home: &Path, provider_id: &str) -> Option<String> {
     let path = cache_path(home);
     let file = read_cache_file(&path)?;
@@ -118,8 +100,8 @@ fn recent_failure_reason(home: &Path, provider_id: &str) -> Option<String> {
     (age < PROVIDER_MODELS_FAILURE_BACKOFF.as_secs()).then(|| entry.last_error.clone())?
 }
 
-/// Persist a fetch failure without touching the cached catalog or
-/// `fetched_at`: a stale-but-usable entry must survive provider outages.
+/// Persist a fetch failure without touching the cached catalog or `fetched_at`, so a
+/// stale-but-usable entry survives provider outages.
 fn record_fetch_failure(home: &Path, provider_id: &str, reason: &str) -> Result<()> {
     let path = cache_path(home);
     let mut file = read_cache_file(&path).unwrap_or_default();
@@ -138,12 +120,8 @@ fn record_fetch_failure(home: &Path, provider_id: &str, reason: &str) -> Result<
     write_cache_file(&path, provider_id, &file)
 }
 
-/// Fetch the provider's live model list and persist it in the cache.
-///
-/// `Ok(None)` means the configured provider declares no `models_url` (custom
-/// providers included) — there is nothing to fetch. Errors are returned so the
-/// caller owns the fallback decision; on error the previous cache entry is
-/// left untouched.
+/// Fetch the provider's live model list and persist it. `Ok(None)` means no `models_url` is
+/// declared; errors leave the previous cache entry untouched for the caller to fall back on.
 pub async fn refresh_provider_models(
     home: &Path,
     config: &Config,
@@ -160,13 +138,11 @@ pub async fn refresh_provider_models(
     if let Some(fresh) = fresh_cached_models(home, &provider.id) {
         return Ok(Some(fresh));
     }
-    // Short-circuit before API-key resolution: the backoff path must not
-    // touch the secret store on every poll while the provider is down.
+    // Short-circuit before anything that opens the secret store: a down provider must not pay that
+    // cost on every poll.
     if let Some(reason) = recent_failure_reason(home, &provider.id) {
         return Err(catalog_error(&provider.id, reason));
     }
-    // Read after the backoff short-circuit: this opens the secret store, and a
-    // down provider must not pay that cost on every poll.
     let endpoint = crate::secrets::managed_provider_endpoint_override_for_home(home)?;
     let models_url = resolve_models_url(&provider.id, declared_url, endpoint.as_ref());
 
@@ -176,17 +152,13 @@ pub async fn refresh_provider_models(
             Ok(Some(models))
         }
         Err(error) => {
-            // Store the inner reason, not the full Display: the short-circuit
-            // above re-wraps it in `catalog_error`, and a stored Display would
-            // double the "model catalog fetch failed" prefix. Key-resolution
-            // failures are recorded too — the marker self-heals within the
-            // backoff window once the operator fixes the key.
+            // Store the inner reason, not the full Display: the short-circuit above re-wraps it in
+            // `catalog_error`, and a stored Display would double the prefix.
             let reason = match &error {
                 StackError::ProviderModelCatalog { reason, .. } => reason.clone(),
                 _ => error.to_string(),
             };
-            // Best-effort: losing the marker only means the next poll retries
-            // sooner, which the fetch timeout still bounds.
+            // Best-effort: losing the marker only means the next poll retries sooner.
             if let Err(write_error) = record_fetch_failure(home, &provider.id, &reason) {
                 tracing::warn!(error = %write_error, "provider model catalog failure marker not recorded");
             }
@@ -195,11 +167,8 @@ pub async fn refresh_provider_models(
     }
 }
 
-/// Drop one provider's cache entry (catalog and failure markers) so the next
-/// read refetches: an endpoint override apply/clear changes where the listing
-/// is fetched from, and a stale entry would keep serving the old endpoint's
-/// catalog. A missing or corrupt cache is not an error — there is nothing to
-/// invalidate.
+/// Drop one provider's cache entry so the next read refetches; an endpoint override apply or clear
+/// changes where the listing comes from, and a stale entry would serve the old endpoint's catalog.
 pub fn invalidate_provider_models(home: &Path, provider_id: &str) -> Result<()> {
     let path = cache_path(home);
     let Some(mut file) = read_cache_file(&path) else {
@@ -211,9 +180,7 @@ pub fn invalidate_provider_models(home: &Path, provider_id: &str) -> Result<()> 
     write_cache_file(&path, provider_id, &file)
 }
 
-/// Resolve the API key, fetch the provider's listing endpoint, and parse the
-/// payload. Split from [`refresh_provider_models`] so every failure mode is
-/// recorded against the cache in one place.
+/// Resolve the API key, fetch the listing endpoint, and parse the payload.
 async fn fetch_provider_models(
     home: &Path,
     config: &Config,
@@ -271,11 +238,8 @@ fn catalog_error(provider_id: &str, reason: String) -> StackError {
     }
 }
 
-/// A managed endpoint override outranks the `ACP_STACK_PROVIDER_MODELS_BASE`
-/// dev gate: the override is a live routing decision for the same provider the
-/// agent will call, while the gate only ever stands in for a vendor URL.
-/// Without an override the gate still applies (`{base}/{provider_id}/models`),
-/// and otherwise the declared `models_url` is used verbatim.
+/// A managed endpoint override outranks the `ACP_STACK_PROVIDER_MODELS_BASE` dev gate, which in
+/// turn outranks the declared `models_url`.
 fn resolve_models_url(
     provider_id: &str,
     declared: &str,
@@ -290,12 +254,8 @@ fn resolve_models_url(
     }
 }
 
-/// An override base names the provider's inference base, and the catalog is
-/// read from `{base}/models` — the same suffix every shipped `models_url`
-/// uses. The one exception is novita-ai, whose listing does not live under
-/// its inference base: its fetch under an override fails, and the catalog
-/// degrades to the last cached entry while inference still follows the
-/// override.
+/// `{base}/models`, the suffix every shipped `models_url` uses. novita-ai is the exception: its
+/// listing is not under its inference base, so its fetch degrades to the last cached entry.
 fn models_url_for_base(base_url: &str) -> String {
     format!("{}/models", base_url.trim_end_matches('/'))
 }
@@ -308,10 +268,8 @@ fn resolve_provider_api_key(home: &Path, config: &Config, provider_id: &str) -> 
         .and_then(|provider| provider.api_key_ref.as_deref())
         .or_else(|| env_var_for_agent_provider_id(&config.agent.id, provider_id))
         .ok_or_else(|| catalog_error(provider_id, "no API key reference configured".to_owned()))?;
-    // No secret-free shortcut here: every provider that declares a
-    // `models_url` carries its key through the secret store, so
-    // `resolve_agent_environment_without_secrets` could only ever yield an
-    // empty environment and a spurious missing-key error.
+    // No secret-free shortcut: every provider declaring a `models_url` carries its key through the
+    // secret store, so the without-secrets path could only yield a spurious missing-key error.
     let store = SecretStore::open(home)?;
     let env = resolve_agent_environment(config, &store)?.env;
     env.get(api_key_ref)
@@ -325,11 +283,8 @@ fn resolve_provider_api_key(home: &Path, config: &Config, provider_id: &str) -> 
         })
 }
 
-/// Parse an OpenAI-shaped `GET /models` payload: `data[].id` required,
-/// `data[].name`/`display_name` optional. Entries without a string `id` are
-/// skipped so one malformed row cannot poison the whole catalog; an empty
-/// list after filtering is an error so a good cache entry is never clobbered
-/// by a degenerate response.
+/// Parse an OpenAI-shaped `GET /models` payload. A row without a string `id` is skipped, but an
+/// empty list after filtering is an error so a degenerate response never clobbers a good cache.
 fn parse_models_response(provider_id: &str, body: &Value) -> Result<Vec<ProviderModel>> {
     let entries = body
         .get("data")
@@ -382,8 +337,7 @@ fn read_cache_file(path: &Path) -> Option<ProviderModelCacheFile> {
     if envelope.version != PROVIDER_MODEL_CACHE_VERSION {
         return None;
     }
-    // Salvage entry-by-entry: one provider's malformed row must not drop
-    // every other provider's cached catalog on the next write.
+    // Salvage entry-by-entry: one malformed row must not drop every other provider's catalog.
     let mut providers = BTreeMap::new();
     for (provider_id, raw_entry) in envelope.providers {
         match serde_json::from_value::<CachedProviderModels>(raw_entry) {
@@ -414,8 +368,7 @@ fn write_cache_entry(home: &Path, provider_id: &str, models: &[ProviderModel]) -
     let path = cache_path(home);
     let mut file = read_cache_file(&path).unwrap_or_default();
     file.version = PROVIDER_MODEL_CACHE_VERSION;
-    // A fresh entry drops the failure markers: a successful fetch clears the
-    // backoff recorded by `record_fetch_failure`.
+    // A fresh entry drops the failure markers, clearing the recorded backoff.
     file.providers.insert(
         provider_id.to_owned(),
         CachedProviderModels {
@@ -691,11 +644,9 @@ mod tests {
 
     #[test]
     fn invalidate_tolerates_missing_unknown_and_corrupt_caches() {
-        // No cache file at all.
         let home = temp_home();
         invalidate_provider_models(home.path(), "openrouter").expect("missing cache is fine");
 
-        // A provider with no entry.
         write_cache_entry(
             home.path(),
             "moonshotai",
@@ -707,7 +658,6 @@ mod tests {
         .expect("write moonshot");
         invalidate_provider_models(home.path(), "openrouter").expect("unknown entry is fine");
 
-        // A corrupt cache file.
         let path = cache_path(home.path());
         std::fs::write(&path, b"not json").expect("write");
         invalidate_provider_models(home.path(), "openrouter").expect("corrupt cache is fine");
@@ -770,9 +720,8 @@ mod tests {
         let error = refresh_provider_models(home.path(), &config)
             .await
             .expect_err("backoff must fail with the stored reason");
-        // The stored reason proves the short-circuit fired: a real attempt
-        // would fail key resolution first (this temp home has no secret
-        // store), never reaching the network.
+        // The stored reason proves the short-circuit fired: a real attempt would fail key
+        // resolution first, never reaching the network.
         assert!(
             error.to_string().contains("boom"),
             "expected stored failure reason, got: {error}"

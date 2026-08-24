@@ -1,13 +1,5 @@
-//! Cross-lane primitives shared by every workspace materializer:
-//!
-//! * Capture-file plumbing (`write_command_capture`, `write_operation_capture`,
-//!   `capture_error`, `sync_capture_dir`, the `CaptureFiles` pair reservation,
-//!   and the owner-only create helper).
-//! * Destination/lane safety guards (`ensure_lane_root`,
-//!   `ensure_destination_not_symlink`, `ensure_dest_or_fail`,
-//!   `destination_is_empty_except_sentinel`, `cleanup_partial_destination`).
-//! * Sentinel encoding/decoding (`Sentinel`, `SentinelBody`).
-//! * Path-segment sanitization for log directories.
+//! Cross-lane primitives shared by every workspace materializer: capture-file plumbing,
+//! destination/lane safety guards, and sentinel encoding.
 
 use std::path::{Path, PathBuf};
 
@@ -32,11 +24,8 @@ pub(super) fn sanitize_segment(value: &str) -> String {
 }
 
 pub(super) fn ensure_workspace_log_dir(path: &Path) -> Result<()> {
-    // Workspace captures contain full git stdout/stderr, which can
-    // include private repo URLs and (rarely) credentials in error
-    // messages. Match the project-wide owner-only directory convention
-    // so a permissive umask doesn't leak any of that to other local
-    // users. `create_dir_owner_only` is idempotent.
+    // Captures carry raw git stdout/stderr, which can include private repo URLs and credentials,
+    // so the directory must be owner-only regardless of umask.
     crate::fs_util::create_dir_owner_only(path)
 }
 
@@ -46,11 +35,8 @@ pub(super) fn ensure_workspace_base_dir(path: &Path, label: &str) -> Result<()> 
     })
 }
 
-/// Persist a subprocess capture to `<log_dir>/<command>.{stdout,stderr}`.
-/// Errors propagate — losing the audit copy on success would mean the
-/// promise of "structured step status + per-step log files" is violated
-/// for the operator. Empty streams are still written so the operator can
-/// distinguish "ran with no output" from "logs never persisted".
+/// Persist a subprocess capture to `<log_dir>/<command>.{stdout,stderr}`. Empty streams are still
+/// written so "ran with no output" stays distinguishable from "logs never persisted".
 pub(super) fn write_command_capture(
     log_dir: Option<&Path>,
     command_tag: &str,
@@ -60,15 +46,8 @@ pub(super) fn write_command_capture(
     let Some(dir) = log_dir else {
         return Ok(None);
     };
-    // Each call lands a fresh pair of files so a resume that re-runs
-    // the same step preserves the prior failure's capture chain. The
-    // base suffix is a wall-clock nanosecond stamp (natural sort
-    // order). On collision — two captures landing in the same
-    // nanosecond on a coarse clock, or under a concurrent resume — we
-    // extend with a 2-digit sequence number and try `create_new` again.
-    // `create_new` is the O_CREAT|O_EXCL atomic-create syscall, so the
-    // loop terminates with file ownership guaranteed by the OS rather
-    // than by an existence probe.
+    // Each call lands a fresh pair so a resume preserves the prior failure's capture chain; the
+    // nanosecond stamp sorts naturally and `create_new` (O_CREAT|O_EXCL) settles collisions.
     let base_stamp = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0).max(0);
     let CaptureFiles {
         stdout_path,
@@ -88,10 +67,8 @@ pub(super) fn write_command_capture(
             reason: format!("write `{}`: {source}", stderr_path.display()),
         }
     })?;
-    // fsync both the files AND the parent directory before returning,
-    // so a crash between this point and SQLite's `init_steps.log_dir`
-    // write cannot leave the row pointing at a missing or zero-length
-    // file. Matches the installer log persistence contract.
+    // fsync the files AND the parent directory, so a crash before SQLite's `init_steps.log_dir`
+    // write cannot leave the row pointing at a missing or zero-length file.
     stdout_file
         .sync_all()
         .map_err(|source| StackError::WorkspaceMaterializeFailed {
@@ -147,13 +124,8 @@ pub(super) struct CaptureFiles {
     pub(super) stderr_file: std::fs::File,
 }
 
-/// Reserve the stdout AND stderr filenames for one capture as an
-/// atomic pair. Picking each independently would let two concurrent
-/// resumes interleave: process A claims `stdout.00`, process B then
-/// claims `stdout.01` followed by `stderr.00`, and process A finally
-/// claims `stderr.01` — mismatched pairs that defeat the audit log.
-/// This loop reserves both files at the same suffix or rolls both on
-/// any collision.
+/// Reserve stdout AND stderr for one capture at the same suffix, rolling both on collision;
+/// picking each independently lets concurrent resumes interleave into mismatched pairs.
 pub(super) fn create_capture_file_pair(
     dir: &Path,
     command_tag: &str,
@@ -186,8 +158,7 @@ pub(super) fn create_capture_file_pair(
                 });
             }
             Err(CaptureCreateError::Collision) => {
-                // Roll the pair: drop the stdout we just claimed so a
-                // concurrent resume sees a clean slot at the next suffix.
+                // Release the stdout slot so a concurrent resume sees a clean pair at this suffix.
                 drop(stdout_file);
                 let _ = std::fs::remove_file(&stdout_path);
                 continue;
@@ -221,10 +192,8 @@ pub(super) fn create_new_owner_only(
     options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        // Captures can carry private repo URLs and (rarely) credential
-        // material in error messages. Set 0o600 atomically at create
-        // time so a permissive umask never opens a window for other
-        // local users to read the bytes between create and chmod.
+        // 0o600 is set atomically at create time; a create-then-chmod would leave a window where
+        // other local users could read captured repo URLs or credential material.
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
@@ -238,10 +207,8 @@ pub(super) fn create_new_owner_only(
 }
 
 pub(super) fn ensure_lane_root(path: &Path) -> Result<()> {
-    // Lane roots themselves must be real directories, not symlinks an
-    // attacker could swap in to redirect every materialization. We probe
-    // with `symlink_metadata` first so we don't auto-follow a swap-in. The
-    // `create_dir_all` call only fires when the path doesn't exist yet.
+    // Probe with `symlink_metadata` so a swapped-in lane-root symlink cannot redirect every
+    // materialization out of the workspace.
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             return Err(StackError::WorkspaceDestinationOutsideRoot {
@@ -274,10 +241,8 @@ pub(super) fn ensure_lane_root(path: &Path) -> Result<()> {
 }
 
 pub(super) fn ensure_destination_not_symlink(dest: &Path) -> Result<()> {
-    // Per-source guard: even with a sane lane root, the destination
-    // directory could itself be a symlink swap. Reject symlinks at this
-    // layer before any `create_dir_all` / `git clone` / `std::fs::copy`
-    // call could follow them outside the workspace.
+    // Per-source guard: reject a symlinked destination before any `create_dir_all` / `git clone` /
+    // `std::fs::copy` could follow it outside the workspace.
     match std::fs::symlink_metadata(dest) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             Err(StackError::WorkspaceDestinationOutsideRoot {

@@ -39,9 +39,8 @@ fn response_with(models: &[&str], modes: &[&str]) -> NewSessionResponse {
     NewSessionResponse::new("test").config_options(options)
 }
 
-/// Effort rides codex-acp's real shape: id `reasoning_effort` under the
-/// reserved `thought_level` category, so the lane's category match (not the id
-/// fallback) is what these tests exercise.
+/// Effort rides codex-acp's real shape: id `reasoning_effort` under the reserved
+/// `thought_level` category, so these tests exercise the category match, not the id fallback.
 fn response_with_efforts(efforts: &[&str]) -> NewSessionResponse {
     let option: SessionConfigOption = serde_json::from_value(serde_json::json!({
         "id": "reasoning_effort",
@@ -118,8 +117,7 @@ fn explicit_mode_that_is_not_advertised_lists_the_advertised_modes() {
     assert!(config.agent.mode.is_none());
 }
 
-// Nothing to pick is not an error: the operator is told through the state
-// report, not by failing an init that had no explicit request.
+// Nothing to pick is not an error: the state report tells the operator instead.
 #[test]
 fn a_mode_picker_with_nothing_advertised_skips_without_writing() {
     let mut config = amp_config();
@@ -138,9 +136,7 @@ fn a_mode_picker_with_nothing_advertised_skips_without_writing() {
     assert!(config.agent.mode.is_none());
 }
 
-// Model twin of the mode picker skip: an agent that advertises no `model`
-// option (e.g. amp-acp older than v0.8.0) must skip the lane rather than
-// fail init when no `--model` was requested.
+// Model twin of the mode picker skip; amp-acp before v0.8.0 advertises no `model` option.
 #[test]
 fn a_model_picker_with_nothing_advertised_skips_without_writing() {
     let mut config = amp_config();
@@ -231,8 +227,7 @@ fn an_effort_picker_with_nothing_advertised_skips_without_writing() {
     assert!(config.agent.effort.is_none());
 }
 
-/// Answers every picker with its first option and keeps what was offered,
-/// so a test can assert on the option ids that reached the wire.
+/// Answers every picker with its first option and records what was offered.
 #[derive(Default)]
 struct FirstChoiceDriver {
     offered: std::sync::Mutex<Vec<Vec<String>>>,
@@ -282,9 +277,8 @@ impl prompt::HostedPromptDriver for FirstChoiceDriver {
     fn result(&self, _payload: serde_json::Value) {}
 }
 
-// Option ids are answerable over the wire and the shared prompt entry point
-// asserts they are unique, so a harness advertising the same mode twice
-// would take a debug build down with it.
+// The shared prompt entry point asserts option ids are unique, so a harness advertising the
+// same mode twice would take a debug build down with it.
 #[test]
 fn a_repeated_advertised_value_is_offered_once() {
     let mut config = amp_config();
@@ -336,8 +330,7 @@ fn deferred_mapped_credential_writes_explicit_model_without_discovery() {
     });
     let args = parse_init_args(&["--model", "some/model"]);
 
-    // Without the deferral declaration the pending credential still fails the
-    // explicit flag loudly.
+    // Without the deferral declaration the pending credential still fails the flag loudly.
     let plain = std::sync::Arc::new(prompt::RecordingPromptDriver::default());
     prompt::with_hosted_driver(plain, || {
         configure_model_and_mode_for_init(
@@ -380,10 +373,9 @@ fn deferred_mapped_credential_writes_explicit_model_without_discovery() {
 fn discovery_only_retracts_a_lane_the_registry_claimed() {
     let driver = std::sync::Arc::new(prompt::RecordingPromptDriver::default());
     prompt::with_hosted_driver(driver.clone(), || {
-        // Registry says both lanes exist; the harness advertises neither.
+        // Registry claims both lanes; the harness advertises neither.
         emit_discovery_applicability_corrections(&response_with(&[], &[]), true, true, false);
-        // Registry says neither; the harness advertises modes anyway. Init
-        // will not write a mode for such an agent, so nothing is claimed.
+        // Registry claims neither, so the harness advertising modes claims nothing.
         emit_discovery_applicability_corrections(
             &response_with(&[], &["plan"]),
             false,

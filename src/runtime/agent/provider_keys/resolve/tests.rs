@@ -231,8 +231,7 @@ fn secretless_resolution_skips_store_only_for_empty_or_native_auth_envs() {
     let resolved = resolve_agent_environment_without_secrets(&config).expect("native auth");
     assert_eq!(resolved.providers[0].provider_id, "amazon-bedrock");
 
-    // Codex reads `OPENAI_API_KEY` itself, so its OpenAI lane needs the store
-    // like any other keyed provider.
+    // Codex reads `OPENAI_API_KEY` itself, so its OpenAI lane needs the store.
     let mut config = resolver_config("codex");
     config.agent.provider = Some(mapped_provider("openai", None));
     assert!(resolve_agent_environment_without_secrets(&config).is_none());
@@ -269,10 +268,8 @@ fn native_auth_snapshot_reports_injected_profile_environment() {
 
 #[test]
 fn subagent_provider_structured_key_resolves_without_active_block() {
-    // Guards the subagent-discovery-auth fix: once the subagent provider is
-    // registered (which `configure_mapped_subagent` now does before model
-    // discovery), its structured credential resolves into the probe env
-    // even with no `[agent.providers]` active block.
+    // A registered subagent provider's structured credential must resolve into
+    // the probe env even with no `[agent.providers]` active block.
     use crate::config::AgentSubagentConfig;
     let mut config = resolver_config("opencode");
     config.agent.provider = Some(mapped_provider("openai", None));
@@ -343,9 +340,8 @@ fn custom_provider(provider_id: &str, api_key_ref: &str) -> AgentProviderConfig 
 
 #[test]
 fn satisfiability_predicate_mirrors_catalog_injection() {
-    // opencode emits CLOUDFLARE_API_TOKEN while the canonical catalog key
-    // is CLOUDFLARE_API_KEY; the emitted name must satisfy off the
-    // canonical value, exactly as resolve injects it.
+    // opencode emits CLOUDFLARE_API_TOKEN while the canonical catalog key is
+    // CLOUDFLARE_API_KEY, so the emitted name must satisfy off the canonical value.
     let mut config = resolver_config("opencode");
     config.agent.provider = Some(mapped_provider("cloudflare-ai-gateway", None));
     let (_home, store) = catalog_store(BTreeMap::from([(
@@ -361,7 +357,6 @@ fn satisfiability_predicate_mirrors_catalog_injection() {
         "cloudflare-ai-gateway",
         emitted
     ));
-    // Companion refs are keyed by their own names and absent here.
     assert!(!env_ref_is_satisfiable_for_config(
         &config,
         &store,
@@ -375,8 +370,8 @@ fn satisfiability_predicate_mirrors_catalog_injection() {
         "UNRELATED_KEY"
     ));
 
-    // A promoted set with no selected alias errors at resolve time, so it
-    // must not satisfy the gate.
+    // A promoted set with no selected alias errors at resolve time, so it must
+    // not satisfy the gate.
     let (_home, store) = catalog_store(BTreeMap::from([(
         "opencode-go".to_owned(),
         ProviderCredentialSet::promoted(BTreeMap::from([(
@@ -415,8 +410,8 @@ fn satisfiability_predicate_matches_custom_provider_api_key_ref_only() {
         "OTHER_KEY"
     ));
 
-    // Credential keyed by a name other than the configured ref does not
-    // satisfy — resolve would not inject it.
+    // A credential keyed by another name does not satisfy; resolve would not
+    // inject it.
     let (_home, store) = catalog_store(BTreeMap::from([(
         "my-custom".to_owned(),
         ProviderCredentialSet::aliasless(credential("OTHER_KEY", "custom-secret")),
@@ -453,8 +448,8 @@ fn custom_provider_resolves_catalog_credential_with_revision() {
 
 #[test]
 fn catalog_credential_shadows_bare_agent_env_ref() {
-    // Regression: a catalog-only credential with the ref still declared in
-    // `agent.env` (as init writes it) must not fail on the flat store.
+    // A catalog-only credential with the ref still declared in `agent.env` must
+    // not fail on the flat store.
     let mut config = resolver_config("opencode");
     config.agent.env = vec!["OPENCODE_API_KEY".to_owned()];
     config.agent.provider = Some(mapped_provider("opencode-go", None));
@@ -465,8 +460,7 @@ fn catalog_credential_shadows_bare_agent_env_ref() {
     let resolved = resolve_agent_environment(&config, &store).expect("resolve");
     assert_eq!(resolved.env["OPENCODE_API_KEY"], "catalog-key");
 
-    // Precedence: with a differing flat secret present, the catalog value
-    // wins and there is no owner conflict.
+    // With a differing flat secret present, the catalog value wins.
     let (_home, mut store) = catalog_store(BTreeMap::from([(
         "opencode-go".to_owned(),
         ProviderCredentialSet::aliasless(credential("OPENCODE_API_KEY", "rotated-key")),
@@ -489,8 +483,7 @@ fn templated_agent_env_keeps_flat_semantics_when_catalog_covers_var() {
     )]));
     store.set("RELAY_TOKEN", "tok-1").expect("flat");
     let resolved = resolve_agent_environment(&config, &store).expect("resolve");
-    // The template composed the same value; a differing template value
-    // would surface as an owner conflict, which is the intended guard.
+    // A differing template value would instead surface as an owner conflict.
     assert_eq!(resolved.env["OPENCODE_API_KEY"], "prefix-tok-1");
 }
 

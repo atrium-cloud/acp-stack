@@ -7,8 +7,7 @@ use tokio::process::{ChildStdin, ChildStdout};
 use super::*;
 
 /// Exit-reporting handles shared by the connection task and the child exit
-/// watcher: both publish an [`AcpBridgeExit`] on the same watch channel and
-/// need the same planned-shutdown flag and pid to describe it.
+/// watcher.
 #[derive(Clone)]
 struct ExitReporter {
     tx: watch::Sender<Option<AcpBridgeExit>>,
@@ -16,9 +15,7 @@ struct ExitReporter {
     pid: Option<u32>,
 }
 
-/// The connection task plus the endpoints the spawning path keeps: the
-/// handshake result travels back on `connection_rx`, and `shutdown_tx` asks
-/// the connect closure to return.
+/// The connection task plus the endpoints the spawning path keeps.
 struct ConnectionTask {
     task: JoinHandle<()>,
     connection_rx: oneshot::Receiver<InitializeOutcome>,
@@ -29,14 +26,8 @@ type InitializeOutcome = std::result::Result<(InitializeResponse, ConnectionTo<A
 
 impl AcpBridge {
     /// Spawn `[agent].command` and complete the ACP `initialize` handshake.
-    ///
-    /// `env` is the resolved secret-name -> value map for `[agent].env`. We
-    /// resolve the command path first, then `env_clear()` so only managed
-    /// runtime context and explicitly resolved secrets reach the child.
-    ///
-    /// `command_log` is the durable command-log target (state store plus live
-    /// event hub) for client terminals; `None` (discovery probes, most tests)
-    /// keeps terminals functional without `commands` rows or live events.
+    /// The command path resolves before `env_clear()`, so only managed runtime
+    /// context and explicitly resolved secrets ever reach the child.
     #[allow(clippy::too_many_arguments)]
     pub async fn spawn(
         agent: &AgentConfig,
@@ -65,8 +56,6 @@ impl AcpBridge {
         };
 
         let notification_drain = Arc::new(NotificationDrain::default());
-        // One shared handler context per bridge; each handler registration
-        // below gets its own Arc clone (closure-capture rule).
         let terminals = Arc::new(TerminalRegistry::default());
         let terminal_context = Arc::new(TerminalHandlerContext {
             registry: Arc::clone(&terminals),
@@ -157,14 +146,12 @@ fn build_agent_command(
         .current_dir(cwd)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        // stderr is the agent's log channel per
-        // docs/ref/acp/protocol/transports.md:28; inherit so it shows up
-        // alongside our daemon logs without an extra plumbing layer.
+        // stderr is the agent's ACP log channel, so inherit it into the daemon
+        // logs.
         .stderr(std::process::Stdio::inherit())
         .env_clear();
-    // Runtime context is intentionally narrow: managed PATH so adapters
-    // can find registry-installed harnesses, and HOME so agent wrappers
-    // can find their own config/cache directories.
+    // Runtime context is deliberately narrow: managed PATH for
+    // registry-installed harnesses, HOME for agent config/cache directories.
     if let Some(path) = agent_process_path() {
         command.env("PATH", path);
     }
@@ -179,8 +166,8 @@ fn build_agent_command(
         }
         command.env(name, value);
     }
-    // Fresh process group so a future SIGTERM-during-shutdown also
-    // reaches MCP/tool grandchildren the agent forks.
+    // Fresh process group so SIGTERM-during-shutdown also reaches MCP/tool
+    // grandchildren the agent forks.
     #[cfg(unix)]
     command.process_group(0);
     command.kill_on_drop(true);
@@ -194,7 +181,7 @@ fn spawn_agent_child(
     network_provider: Option<&crate::extensions::NetworkProviderExtension>,
 ) -> Result<(Child, ChildStdin, ChildStdout)> {
     // Network-isolated spawns get the daemon's stderr at the supervisor's
-    // diagnostic fd (a no-op wrapper-detection pass for every other mode).
+    // diagnostic fd; a no-op for every other mode.
     #[cfg(unix)]
     let diag_handle = crate::runtime::sandbox::wire_supervise_diag_fd(
         sandbox,
@@ -224,11 +211,6 @@ fn spawn_agent_child(
 }
 
 /// Register the client-side ACP handlers and drive the connection.
-///
-/// The SDK's `Client.builder().connect_with(...)` future drives the IO loop
-/// until the closure returns. We spawn it as a tokio task so the bridge handle
-/// can outlive the call site, and we use a oneshot shutdown signal to ask the
-/// closure to wrap up cleanly.
 fn spawn_connection_task(
     stdin: ChildStdin,
     stdout: ChildStdout,
@@ -242,19 +224,13 @@ fn spawn_connection_task(
     let (init_tx, connection_rx) = oneshot::channel::<InitializeOutcome>();
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
-    // Notifications get persisted to the durable event log keyed by
-    // session_id and then fanned out live through the event hub.
-    // Non-session notifications are still logged-and-dropped.
     let notification_queue = spawn_session_notification_queue(sink.clone());
     let permission_sink = sink;
-    // Each handler closure owns its own context clone (closure-capture rule).
     let create_context = Arc::clone(&terminal_context);
     let output_context = Arc::clone(&terminal_context);
     let wait_context = Arc::clone(&terminal_context);
     let kill_context = Arc::clone(&terminal_context);
     let release_context = Arc::clone(&terminal_context);
-    // The fs handlers reuse the same context: they need the workspace
-    // root, state, and sink but not the registry or sandbox.
     let fs_read_context = Arc::clone(&terminal_context);
     let fs_write_context = terminal_context;
 
@@ -285,11 +261,9 @@ fn spawn_connection_task(
                 },
                 agent_client_protocol::on_receive_request!(),
             )
-            // Terminal handlers offload to spawned tasks: they can park
-            // for a long time (wait_for_exit on a slow child, kill grace)
-            // and handler callbacks run on the connection's single event
-            // loop, which must keep processing concurrent terminal calls
-            // and session/update notifications meanwhile.
+            // Terminal handlers must offload to spawned tasks: they can park a
+            // long time and handler callbacks run on the connection's single
+            // event loop, which has to keep serving concurrent calls.
             .on_receive_request(
                 async move |request: CreateTerminalRequest, responder, cx| {
                     let context = Arc::clone(&create_context);
@@ -425,24 +399,18 @@ fn spawn_connection_task(
                     .map_err(|err| err.to_string());
                 match response {
                     Ok(response) => {
-                        // Send the connection handle out so the bridge
-                        // can dispatch session methods after this closure
-                        // parks. `cx` is Clone, so we keep the original
-                        // here for any future closure-internal use.
+                        // Hand the connection out so the bridge can dispatch
+                        // session methods after this closure parks.
                         let _ = init_tx.send(Ok((response, cx.clone())));
                     }
                     Err(reason) => {
                         let _ = init_tx.send(Err(reason));
-                        // Returning an error from the closure tears down
-                        // the connection. The caller has already seen
-                        // the initialize failure via the oneshot.
+                        // Returning an error tears the connection down; the
+                        // caller already saw the failure via the oneshot.
                         return Err(agent_client_protocol::Error::internal_error());
                     }
                 }
-                // Hold the connection open until shutdown is signaled.
-                // Errors here are non-fatal: a dropped shutdown sender
-                // (e.g. bridge dropped without explicit shutdown) means
-                // "tear down now."
+                // A dropped shutdown sender also means "tear down now".
                 let _ = shutdown_rx.await;
                 Ok(())
             })
@@ -485,8 +453,8 @@ fn spawn_connection_task(
 }
 
 /// Await the handshake result, validate the protocol version, and snapshot the
-/// agent's capabilities. Every failure path tears the spawned child down and
-/// consumes `connection_task`; the success path hands it back.
+/// agent's capabilities. Every failure path MUST tear the spawned child down
+/// and consume `connection_task`; only the success path hands it back.
 async fn complete_initialize(
     child: &mut Child,
     connection_task: JoinHandle<()>,
@@ -535,13 +503,9 @@ async fn complete_initialize(
     Ok((capabilities, connection, connection_task))
 }
 
-/// Capabilities advertised to every agent at initialize. Each flag flips only
-/// once its agent->client handlers exist: advertising ahead of the handlers
-/// would invite calls we cannot serve. `boolean` config options are
-/// advertised because `set_session_config_option_value` sends boolean
-/// payloads and the generic config-option surface projects boolean kinds;
-/// agents may reshape options accordingly (e.g. a boolean toggle instead of
-/// its two-value select fallback).
+/// Capabilities advertised to every agent at initialize. A flag flips only
+/// once its agent->client handlers exist, since advertising ahead of them
+/// invites calls we cannot serve.
 fn client_capabilities() -> ClientCapabilities {
     ClientCapabilities::new()
         .fs(FileSystemCapabilities::new()
@@ -590,10 +554,9 @@ fn spawn_child_exit_watcher(child: Arc<TokioMutex<Option<Child>>>, exit: ExitRep
     });
 }
 
-/// Spawn-error path cleanup: abort the SDK task, kill the entire process
-/// group, then reap the child. Without the pgroup kill, any grandchildren
-/// the agent forked between spawn and initialize-failure survive the
-/// failure, defeating the whole point of `process_group(0)`.
+/// Spawn-error cleanup: abort the SDK task, kill the whole process group, then
+/// reap. The pgroup kill is required — without it, grandchildren forked between
+/// spawn and initialize-failure survive.
 async fn fail_spawn(child: &mut Child, connection_task: JoinHandle<()>) {
     connection_task.abort();
     let _ = connection_task.await;
@@ -601,10 +564,7 @@ async fn fail_spawn(child: &mut Child, connection_task: JoinHandle<()>) {
     let _ = child.wait().await;
 }
 
-/// Resolve a configured command path the same way process spawning will:
-/// absolute paths as-is, relative paths with a slash against `cwd`, and bare
-/// names through the daemon's current PATH before the child environment is
-/// cleared.
+/// Resolve a configured command path the same way process spawning will.
 pub(crate) fn resolve_command_path(command: &str, cwd: &Path) -> Option<PathBuf> {
     if command.is_empty() {
         return None;

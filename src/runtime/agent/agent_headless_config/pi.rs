@@ -114,11 +114,10 @@ pub(super) fn cleanup_pi_config(
     Ok(cleaned)
 }
 
-/// Route a *mapped* pi provider at an override endpoint. Pi's models.json
-/// treats a providers entry that carries connection fields but no `models`
-/// array as an override of the built-in provider, keeping its model list — so
-/// a lone `baseUrl` is the whole write. Removing the entry when no override is
-/// in force is what restores the vendor endpoint.
+/// Route a mapped pi provider at an override endpoint. Pi treats a providers
+/// entry with connection fields but no `models` array as an override of the
+/// built-in provider, so a lone `baseUrl` is the whole write and removing the
+/// entry restores the vendor endpoint.
 fn write_pi_mapped_endpoint_override(
     path: &Path,
     native_provider: &str,
@@ -239,9 +238,6 @@ mod tests {
         config
     }
 
-    /// Pi treats a models.json provider entry that carries connection fields
-    /// but no `models` array as an override of the built-in provider, keeping
-    /// its model list — so a lone `baseUrl` is the whole write.
     #[test]
     fn pi_mapped_provider_endpoint_is_an_override_only_entry() {
         let tempdir = tempfile::tempdir().expect("tempdir");

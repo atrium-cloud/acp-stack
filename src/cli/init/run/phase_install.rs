@@ -37,12 +37,8 @@ pub(super) fn run_agent_install_step(flow: &mut InitFlow) -> Result<()> {
                     &config.workspace,
                 )?;
             }
-            // Snapshot the latest installer_runs row ids for this
-            // agent so the install closure can correlate the init
-            // step row to whichever installer attempts the install
-            // produced. Doing the lookup before AND after the
-            // install lets the payload list precisely the rows that
-            // belong to this attempt.
+            // Snapshot before and after so the payload lists exactly the installer rows this
+            // attempt produced.
             let prior_ids: std::collections::HashSet<String> = store
                 .query_installer_runs_filtered(Some(&config.agent.id), 1024)
                 .map(|rows| rows.into_iter().map(|r| r.id).collect())
@@ -96,8 +92,7 @@ pub(super) fn run_agent_install_step(flow: &mut InitFlow) -> Result<()> {
     Ok(())
 }
 
-/// Step: native_config_import — apply the reviewed native global config after
-/// installation and before the first discovery launch.
+/// Step: native_config_import — apply the reviewed native global config after installation.
 pub(super) fn run_native_config_import_step(flow: &mut InitFlow) -> Result<()> {
     let output_mode = flow.output_mode;
     let Some(record) = flow.init_native_config_record.as_mut() else {
@@ -159,8 +154,7 @@ pub(super) fn run_native_config_import_step(flow: &mut InitFlow) -> Result<()> {
     Ok(())
 }
 
-/// Step: agent_skills_install — install selected Agent Skills before first
-/// launch/testflight. Agent harnesses auto-detect the files.
+/// Step: agent_skills_install — install selected Agent Skills before the first launch.
 pub(super) fn run_agent_skills_install_step(flow: &mut InitFlow) -> Result<()> {
     let output_mode = flow.output_mode;
     let skill_step_needs_resume =

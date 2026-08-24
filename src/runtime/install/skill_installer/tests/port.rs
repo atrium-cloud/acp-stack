@@ -78,8 +78,7 @@ fn port_skill_directories_overwrites_valid_target_skill() {
 
 #[test]
 fn port_skill_directories_skips_target_skill_not_installed_by_acp_stack() {
-    // A same-named target folder without the managed marker is the user's own
-    // content: porting must leave it untouched instead of overwriting it.
+    // A same-named target without the managed marker is the user's own content.
     let home = tempfile::tempdir().expect("home");
     let home = canonical_temp_home(&home);
     let source = home.join(".agents/skills");

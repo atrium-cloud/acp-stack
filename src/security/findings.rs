@@ -1,8 +1,4 @@
 //! Finding types and the small helpers shared across rule modules.
-//!
-//! `SecurityFinding` is the wire/CLI shape; `PathInspectionIssue` carries a
-//! per-path inspection failure from `ownership::inspect`. The `shell_quote`
-//! helper is used by multiple rule modules to render remediation strings.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

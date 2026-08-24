@@ -1,18 +1,12 @@
-//! Filesystem primitives for skill installs and ports.
-//!
-//! Everything here is safety-critical: skill trees arrive from downloaded
-//! archives or another agent's home directory, so each traversal refuses
-//! symlinks and special files rather than following them, and directory
-//! swaps are staged in a sibling temporary directory so a failed install
-//! never leaves a half-written skill in place.
+//! Filesystem primitives for skill installs and ports. Skill trees arrive
+//! untrusted, so every traversal here refuses symlinks and special files rather
+//! than following them, and directory swaps stage in a sibling tempdir.
 
 use super::*;
 
-/// Marker proving a skill directory was installed by acp-stack. `remove` (and
-/// switch-port overwrite) refuse to touch directories without it, so skills a
-/// user placed in the install root by hand are never deleted by the runtime.
-/// The marker lives inside the skill dir so the proof cannot diverge from the
-/// files: delete or replace the folder and the proof goes with it.
+/// Marker proving a skill directory was installed by acp-stack; `remove` and
+/// overwrite refuse directories without it, so hand-placed skills are never
+/// deleted. It lives inside the skill dir so it cannot diverge from the files.
 pub(super) fn write_managed_marker(target_dir: &Path, source_id: &str) -> Result<()> {
     let marker = target_dir.join(MANAGED_SKILL_MARKER);
     std::fs::write(&marker, format!("{source_id}\n")).map_err(|source| {
@@ -30,9 +24,8 @@ pub(super) fn has_managed_marker(target_dir: &Path) -> bool {
         Ok(metadata) => metadata.is_file() && !metadata.file_type().is_symlink(),
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => false,
         Err(source) => {
-            // Treating an unreadable marker as unmanaged is the safe default
-            // (nothing gets deleted), but the operator must be able to see why
-            // a managed skill suddenly refuses removal or overwrite.
+            // Unreadable reads as unmanaged so nothing gets deleted, but the
+            // operator must see why removal suddenly refuses.
             tracing::warn!(
                 marker = %marker.display(),
                 %source,
@@ -43,9 +36,8 @@ pub(super) fn has_managed_marker(target_dir: &Path) -> bool {
     }
 }
 
-/// Source id recorded in the managed marker, or `None` for hand-placed
-/// (unmanaged) skills. Unreadable or empty markers degrade to `None` with a
-/// warning: listing must never fail on one bad marker.
+/// Source id recorded in the managed marker, or `None` for hand-placed skills;
+/// a bad marker degrades to `None` rather than failing the whole listing.
 pub(super) fn read_managed_marker_source(target_dir: &Path) -> Option<String> {
     if !has_managed_marker(target_dir) {
         return None;
@@ -152,11 +144,9 @@ pub(super) fn existing_target_state(target_dir: &Path) -> Result<ExistingTargetS
     Ok(ExistingTargetState::AlreadyInstalled)
 }
 
-/// Copy a skill tree into place via a sibling tempdir + rename.
-/// `managed_source`, when `Some`, records the installing source id in the
-/// managed marker *inside the staged tempdir* so a skill can never appear at
-/// the target without its marker: a failed marker write aborts before the
-/// rename and leaves nothing behind.
+/// Copy a skill tree into place via a sibling tempdir and rename. The managed
+/// marker is written INSIDE the staged tempdir, so a skill can never reach the
+/// target without it.
 pub(super) fn copy_skill_dir_atomically(
     source_dir: &Path,
     target_dir: &Path,

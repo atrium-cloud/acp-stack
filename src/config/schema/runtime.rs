@@ -25,11 +25,9 @@ pub struct PermissionsConfig {
     pub request_timeout: Option<String>,
     /// Action when a pending permission request expires. Absent leaves the
     /// `"deny"` default.
-    // A `String` on the wire, rejected at validate time like its sibling
-    // `mode`, so `/v1/config/validate`/`import` keep the actionable
-    // "must be one of deny, approve" message (a serde-level enum would fail
-    // inside TOML parsing, whose envelope message is deliberately generic).
-    // The published schema still gets the typed enum through `with`.
+    // Deliberately a `String` on the wire, rejected at validate time, so the
+    // actionable "must be one of deny, approve" message survives; a serde-level
+    // enum would fail inside TOML parsing behind a generic envelope message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(with = "Option<PermissionTimeoutAction>")]
     pub timeout_action: Option<String>,

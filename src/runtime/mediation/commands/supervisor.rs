@@ -1,17 +1,6 @@
-//! Long-running task that owns one submitted command end-to-end.
-//!
-//! Lifecycle:
-//!   1. If `[permissions].mode` required approval, wait on the permission
-//!      oneshot (concurrently with the cancel watch). Denial/cancel/expiry
-//!      finalize the row without ever spawning.
-//!   2. Spawn `workspace.default_shell -c <command>` under a fresh process
-//!      group with `kill_on_drop(true)`. Mark the row `running`.
-//!   3. Multiplex `cancel_rx`, the timeout deadline, `child.wait()`, and the
-//!      output mpsc — sending SIGTERM (then SIGKILL after `cancel_grace`)
-//!      on the cancel/timeout branches.
-//!   4. After the direct child exits, SIGKILL the process group by captured
-//!      pid to reap descendants holding the pipes open, drain the channel
-//!      under a hard budget, then finalize the row with the terminal status.
+//! Long-running task that owns one submitted command end-to-end: await any required permission,
+//! spawn the shell under a fresh process group, multiplex cancel/timeout/wait/output, then reap the
+//! group, drain output under a budget, and finalize the row.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -60,10 +49,8 @@ pub(super) struct SupervisorTask {
 
 impl SupervisorTask {
     pub(super) async fn run(mut self) {
-        // If a permission was required, wait for the decision (or a cancel)
-        // before spawning the child. The cancel watch is consulted alongside
-        // the permission receiver so an in-flight cancel resolves the
-        // permission row + the command row even if no operator decides.
+        // The cancel watch is selected alongside the permission receiver so an in-flight cancel
+        // settles both rows even when no operator ever decides.
         if let Some(rx) = self.permission_rx.take() {
             let outcome: PermissionOutcome = tokio::select! {
                 outcome = rx => match outcome {
@@ -131,10 +118,8 @@ impl SupervisorTask {
                 return;
             }
         };
-        // Capture the pid up front. `child.wait()` reaps the child and
-        // `child.id()` may return `None` afterwards — but a backgrounded
-        // descendant of the shell can still hold our stdout/stderr pipes
-        // open, and we need a pid for the post-wait process-group kill.
+        // Capture the pid up front: `child.wait()` reaps the child, after which `child.id()` may
+        // return `None` and the post-wait process-group kill would have no target.
         let pid = child.id().map(|id| id as i32);
 
         if let Err(error) = self
@@ -168,10 +153,8 @@ impl SupervisorTask {
         let stderr = child.stderr.take();
         let mut byte_counter = OutputCounter::new(self.max_output_bytes);
 
-        // Spawn one reader task per pipe. Readers send bounded chunks through
-        // the mpsc — never a full unbounded line — so a `yes`-style command
-        // cannot grow memory past `BOUNDED_READ_CHUNK_BYTES` per pending
-        // chunk. Channel capacity of 64 bounds the in-flight queue too.
+        // Readers send bounded chunks, never a full unbounded line, so a `yes`-style command cannot
+        // grow memory past `BOUNDED_READ_CHUNK_BYTES` per pending chunk.
         let (tx, mut rx) = tokio::sync::mpsc::channel::<OutputChunk>(64);
         let mut reader_handles = Vec::with_capacity(2);
         if let Some(pipe) = stdout {
@@ -180,8 +163,7 @@ impl SupervisorTask {
         if let Some(pipe) = stderr {
             reader_handles.push(tokio::spawn(read_stream(pipe, "stderr", tx.clone())));
         }
-        // Drop the supervisor's clone so once the readers exit the channel
-        // becomes closed and the drain loop below terminates deterministically.
+        // Drop the supervisor's clone or the drain loop below never sees the channel close.
         drop(tx);
 
         let deadline = started + self.timeout_duration;
@@ -230,28 +212,15 @@ impl SupervisorTask {
             }
         };
 
-        // The direct child has exited (or been killed). Reap any descendants
-        // that inherited its stdout/stderr — e.g. `sleep 999 & echo done`
-        // backgrounds `sleep`, whose pipe inheritance keeps the readers alive
-        // and would otherwise wedge the row in `running` forever. SIGKILL is
-        // sent to the whole process group; harmless if no descendant is left.
+        // Reap descendants that inherited the child's stdout/stderr: `sleep 999 & echo done` keeps
+        // the readers alive through pipe inheritance and would wedge the row in `running` forever.
         if let Some(pid) = pid {
             kill_process_group_pid(pid);
         }
 
-        // Drain the channel BEFORE awaiting reader join handles. The drain
-        // pumps until the readers have dropped their `tx` clones (which they
-        // do on EOF / pipe error), at which point `rx.recv()` returns `None`.
-        // Joining first would deadlock the supervisor: a reader can be
-        // blocked in `tx.send()` because the bounded mpsc is full, and the
-        // join handle does not resolve until the reader exits, which it
-        // cannot do while the channel stays full.
-        //
-        // Hard cap on the drain so a `setsid`/`nohup` detached descendant
-        // that escaped our process group (and therefore survived the kill
-        // above) cannot wedge the supervisor task forever. We abort the
-        // readers on timeout, which closes their handles to the pipes and
-        // lets the runtime move on.
+        // Drain BEFORE awaiting the reader join handles: joining first deadlocks, because a reader
+        // blocked in `tx.send()` on a full mpsc cannot exit until the channel is pumped. The hard
+        // cap keeps a detached descendant that escaped the kill above from wedging the task.
         let drain_deadline = Instant::now() + POST_WAIT_DRAIN_BUDGET;
         let mut drained_within_budget = true;
         loop {
@@ -372,14 +341,13 @@ impl SupervisorTask {
 
     async fn handle_chunk(&self, chunk: OutputChunk, counter: &mut OutputCounter) -> Result<bool> {
         if counter.exhausted {
-            // Already past the cap: drop without persisting; keep draining so
-            // the child does not block on a full pipe buffer.
+            // Past the cap: drop without persisting, but keep draining so the child does not block
+            // on a full pipe buffer.
             return Ok(false);
         }
         let remaining = counter.remaining();
         let bytes = chunk.data.as_bytes();
         if bytes.len() > remaining {
-            // First overflow boundary: record what fits, then truncate.
             let cutoff = floor_char_boundary(&chunk.data, remaining);
             let head = &chunk.data[..cutoff];
             let mut persisted_progress = false;
@@ -515,12 +483,9 @@ impl SupervisorTask {
         Ok(())
     }
 
-    /// Remove this command from the live registries and settle any dependent
-    /// permission that is still pending. Every exit path of `run()` funnels
-    /// through here, so a command can never reach a terminal status while its
-    /// permission row stays approvable. `permission_reason` names the cause
-    /// recorded in `permission_decisions.reason`; on the normal paths the row
-    /// was already decided and the cancel is a race-safe no-op.
+    /// Remove this command from the live registries and settle any still-pending permission. Every
+    /// exit path of `run()` MUST funnel through here, or a command could reach a terminal status
+    /// while its permission row stays approvable.
     async fn deregister(&self, permission_reason: &str) {
         {
             let mut running = self.running.lock().await;
@@ -560,9 +525,7 @@ impl SupervisorTask {
         }
     }
 
-    /// Settle a command row that never reached the spawn step. Sets the
-    /// terminal status (`failed` for denied/expired, `cancelled` for
-    /// caller-initiated cancel) and emits the corresponding event.
+    /// Settle a command row that never reached the spawn step.
     async fn finalize_without_spawn(
         &self,
         status: CommandStatus,
@@ -724,8 +687,7 @@ mod tests {
             .await
             .insert(command_id.clone(), record.id.clone());
 
-        // Hand the supervisor a receiver whose sender is already gone — the
-        // in-memory waiter vanished without a durable decision.
+        // A receiver whose sender is already gone: the in-memory waiter vanished undecided.
         let (tx, rx) = oneshot::channel::<PermissionOutcome>();
         drop(tx);
         let (_cancel_tx, mut task) = task(&fixture, &command_id, "sudo true");
@@ -795,9 +757,7 @@ mod tests {
         task.permission_rx = Some(rx);
         task.run().await;
 
-        // Teardown must not clobber the operator's decision: the map entry
-        // now lives until deregister, so this exercises the cancel_if_pending
-        // no-op on the normal path.
+        // Teardown must not clobber the operator's decision: `cancel_if_pending` is a no-op here.
         let permission = fixture.permissions.get(&record.id).await.expect("get");
         assert_eq!(permission.status, "approved");
         assert!(

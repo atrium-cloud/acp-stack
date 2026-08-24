@@ -145,9 +145,7 @@ pub(super) fn run_agent_install(args: AgentInstallArgs, output: OutputFormat) ->
         if !output.is_json() {
             println!("progress: running configured agent installer");
         }
-        // Operator escape-hatch shell recipe takes precedence over the
-        // embedded registry. Useful for private forks of an agent whose id
-        // happens to clash with a curated entry.
+        // Operator escape-hatch shell recipe takes precedence over the embedded registry.
         let env = resolve_agent_env_for_cli(&home, &config)?;
         let expected_sha256 = config.agent.expected_sha256.clone();
         run_installer(

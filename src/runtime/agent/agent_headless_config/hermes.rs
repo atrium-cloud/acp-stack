@@ -15,12 +15,7 @@ fn hermes_config_path(home: &Path) -> PathBuf {
     home.join(".hermes").join("config.yaml")
 }
 
-/// `model.default` carries the bare provider-native model id: Hermes composes
-/// its ACP `provider:model` ids itself, so a prefixed default would come back
-/// double-prefixed (`openrouter:openrouter:...`) in session model lists.
-/// Canonical config may hold the ACP-advertised `provider:model` form (model
-/// resolution mirrors advertised ids), so the provider prefix is stripped
-/// here.
+/// Strips the provider prefix: Hermes composes its own ACP `provider:model` ids, so a prefixed `model.default` comes back double-prefixed (`openrouter:openrouter:...`) in session model lists.
 fn hermes_native_model<'a>(provider_id: &str, model: &'a str) -> &'a str {
     model
         .strip_prefix(provider_id)
@@ -28,14 +23,8 @@ fn hermes_native_model<'a>(provider_id: &str, model: &'a str) -> &'a str {
         .unwrap_or(model)
 }
 
-/// Hermes' bare `custom` lane cannot carry a credential on a loopback
-/// endpoint (key resolution there falls through to `no-key-required`) and
-/// derives its api_mode from URL detection, so every endpoint-carrying
-/// configuration — a mapped provider with an override, or a custom provider —
-/// instead rides one managed named entry under `providers:`, referenced as
-/// `model.provider: custom:acps-managed`. The entry's `key_env` is read
-/// unconditionally and its `transport` states the wire shape explicitly.
-/// User-owned entries in the same map are preserved.
+/// Writes the single managed `providers:` entry, preserving user-owned entries.
+/// Every endpoint-carrying configuration rides this entry because Hermes' bare `custom` lane cannot carry a credential on a loopback endpoint (key resolution falls through to `no-key-required`) and derives its api_mode from URL detection.
 fn write_managed_provider_entry(
     root: &mut serde_norway::Mapping,
     name: &str,
@@ -70,9 +59,7 @@ fn write_managed_provider_entry(
     );
 }
 
-/// Removes the managed entry while preserving user-owned providers. An
-/// emptied `providers` map is dropped so restore and cleanup leave no managed
-/// residue. Returns whether the entry was present.
+/// Removes the managed entry, dropping an emptied `providers` map so cleanup leaves no residue.
 fn remove_managed_provider_entry(root: &mut serde_norway::Mapping) -> bool {
     let Some(YamlValue::Mapping(mut providers)) =
         root.remove(YamlValue::String(HERMES_PROVIDERS_KEY.to_owned()))
@@ -91,10 +78,7 @@ fn remove_managed_provider_entry(root: &mut serde_norway::Mapping) -> bool {
     removed
 }
 
-/// The wire transport the managed entry declares for this provider/model.
-/// OpenCode Zen/Go route different models over different wires and their
-/// `/v1/models` listings carry no wire metadata, so a per-model table
-/// (data/endpoints.toml) breaks the tie before the provider-level default.
+/// The wire transport the managed entry declares. OpenCode Zen/Go route different models over different wires and their `/v1/models` listings carry no wire metadata, so the per-model table in data/endpoints.toml breaks the tie before the provider-level default.
 fn hermes_managed_transport(
     path: &Path,
     provider_id: &str,
@@ -118,9 +102,6 @@ fn hermes_managed_transport(
         };
     }
     hermes_api_mode_for_provider_id(provider_id).ok_or_else(|| {
-        // Mapping validation requires the profile on every hermes-enabled
-        // provider, so this is defense-in-depth behind
-        // agent_provider_accepts_endpoint_override.
         StackError::AgentConfigProvision {
             path: path.to_path_buf(),
             reason: format!(
@@ -151,11 +132,9 @@ pub(super) fn provision_hermes_config(
         _ => serde_norway::Mapping::new(),
     };
 
-    // `model.base_url` is never written and always removed: upstream honors it
-    // unevenly across native lanes (the anthropic lane silently falls back to
-    // api.anthropic.com for endpoints outside its allowlist), and on the bare
-    // `custom` lane it cannot carry a credential. Every endpoint lives on the
-    // managed named entry instead.
+    // `model.base_url` is never written and always removed: upstream honors it unevenly across
+    // native lanes (the anthropic lane silently falls back to api.anthropic.com for endpoints
+    // outside its allowlist). Every endpoint lives on the managed named entry instead.
     model.remove(YamlValue::String(HERMES_MODEL_BASE_URL_KEY.to_owned()));
 
     if let Some(custom) = provider.custom.as_ref() {
@@ -176,8 +155,7 @@ pub(super) fn provision_hermes_config(
                 model.remove(YamlValue::String(HERMES_MODEL_DEFAULT_KEY.to_owned()));
             }
         }
-        // The override wins over the custom provider's own base URL, matching
-        // how it supersedes every other agent's configured endpoint.
+        // The override wins over the custom provider's own base URL.
         write_managed_provider_entry(
             &mut root,
             &custom.name,
@@ -236,9 +214,7 @@ pub(super) fn provision_hermes_config(
             HERMES_MANAGED_PROVIDER_REF
         }
         None => {
-            // Drop the managed entry left behind by a cleared override or a
-            // previous custom-provider configuration, so its endpoint cannot
-            // shadow the native one.
+            // Drop a managed entry left by a cleared override so its endpoint cannot shadow the native one.
             remove_managed_provider_entry(&mut root);
             agent_provider_id
         }
@@ -247,9 +223,7 @@ pub(super) fn provision_hermes_config(
         YamlValue::String(HERMES_MODEL_PROVIDER_KEY.to_owned()),
         YamlValue::String(written_provider_id.to_owned()),
     );
-    // Mirror the canonical config: if no provider model is configured, drop a
-    // stale `model.default` from a prior run so the launched Hermes process
-    // doesn't keep using it under the new provider.
+    // Drop a stale `model.default` so the launched Hermes process cannot keep using it under the new provider.
     match configured_provider_model(config) {
         Some(configured) => {
             model.insert(
@@ -355,7 +329,6 @@ mod tests {
             hermes_native_model("openrouter", "openrouter:deepseek/deepseek-v4-flash"),
             "deepseek/deepseek-v4-flash"
         );
-        // A model that merely starts with the provider id keeps its name.
         assert_eq!(
             hermes_native_model("openrouter", "openrouter-tuned/model"),
             "openrouter-tuned/model"
@@ -512,7 +485,6 @@ mod tests {
                 .is_some_and(|map| !map.contains_key(YamlValue::String("default".to_owned()))),
             "model.default must be removed when no provider model is configured",
         );
-        // User-owned keys survive, both inside and outside the model block.
         assert_eq!(value["model"]["context_length"], 128000);
         assert_eq!(value["skills_dir"], "keep");
     }
@@ -550,8 +522,6 @@ mod tests {
         provision_hermes_config(&config, tempdir.path(), Some(&endpoint("openrouter")))
             .expect("provision with override");
         let value = hermes_config_value(tempdir.path());
-        // The endpoint rides the managed named entry, never a mapped id plus
-        // model.base_url, whose per-lane upstream support is uneven.
         assert_eq!(value["model"]["provider"], "custom:acps-managed");
         assert!(
             value["model"]
@@ -559,8 +529,6 @@ mod tests {
                 .is_some_and(|map| !map.contains_key(YamlValue::String("base_url".to_owned()))),
             "{value:?}"
         );
-        // The model keeps the provider-native id, stripped of the advertised
-        // prefix by the mapped provider id rather than by `custom`.
         assert_eq!(value["model"]["default"], "deepseek/deepseek-v4-flash");
         let entry = &value["providers"]["acps-managed"];
         assert_eq!(entry["name"], "OpenRouter (managed endpoint)");
@@ -569,8 +537,7 @@ mod tests {
         assert_eq!(entry["transport"], "chat_completions");
         assert!(entry["default_model"].is_null(), "{entry:?}");
 
-        // Clearing the override restores the mapped lane, removes the managed
-        // entry, and drops the emptied providers map.
+        // Clearing the override restores the mapped lane and drops the emptied providers map.
         provision_hermes_config(&config, tempdir.path(), None).expect("provision without");
         let value = hermes_config_value(tempdir.path());
         assert_eq!(value["model"]["provider"], "openrouter");
@@ -643,8 +610,6 @@ mod tests {
     #[test]
     fn hermes_override_zen_anthropic_model_declares_anthropic_messages() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        // The advertised `provider:model` prefix is stripped before the
-        // per-model wire lookup, exactly like the written model.default.
         let config = hermes_opencode_config(Some("opencode:claude-opus-5"));
 
         provision_hermes_config(&config, tempdir.path(), Some(&endpoint("opencode")))
@@ -784,8 +749,6 @@ mod tests {
 
         let value = hermes_config_value(tempdir.path());
         assert_eq!(value["model"]["provider"], "custom:acps-managed");
-        // User-owned keys survive, inside and outside the model block, and a
-        // user-owned providers entry sits untouched beside the managed one.
         assert_eq!(value["model"]["context_length"], 128000);
         assert_eq!(value["skills_dir"], "keep");
         assert_eq!(value["providers"]["other"]["name"], "Other Provider");
@@ -827,7 +790,6 @@ mod tests {
         provision_hermes_config(&config, tempdir.path(), Some(&endpoint("anthropic")))
             .expect("provision");
 
-        // An override aimed elsewhere leaves the mapped lane entirely alone.
         let value = hermes_config_value(tempdir.path());
         assert_eq!(value["model"]["provider"], "openrouter");
         assert!(
@@ -903,7 +865,6 @@ mod tests {
                 .expect("hermes yaml parses");
         assert_eq!(value["keep_me"], "yes");
         assert_eq!(value["model"]["context_length"], 128000);
-        // The managed entry is removed while user-owned providers survive.
         assert!(value["providers"]["acps-managed"].is_null(), "{value:?}");
         assert_eq!(value["providers"]["other"]["name"], "Other Provider");
         for key in ["provider", "default"] {

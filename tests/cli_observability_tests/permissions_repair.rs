@@ -183,7 +183,7 @@ fn error_recording_path_repairs_permissive_state_file() {
         .expect("permissive perms should set");
     assert_eq!(mode(&state_path), 0o644);
 
-    // Corrupt the config so the next invocation fails through the error-recording path.
+    // Corrupt the config so the next invocation takes the error-recording path.
     let config_path = tempdir.path().join(".config/acp-stack/acps-config.toml");
     fs::write(
         &config_path,

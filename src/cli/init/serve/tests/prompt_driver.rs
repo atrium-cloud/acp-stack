@@ -75,9 +75,7 @@ fn hosted_driver_streams_testflight_confirmation() {
     assert_eq!(confirm, HostedPromptOutcome::Handled(true));
 }
 
-/// Answers a streamed testflight confirm with a raw client frame, so the answer
-/// goes through the same parser the websocket uses. `fields` is the frame body
-/// after `request_id`.
+/// Answers a streamed testflight confirm with a raw client frame, so it goes through the same parser the websocket uses.
 fn testflight_confirm_answer(session_id: &str, fields: &str) -> ConfirmAnswer {
     let session = test_session(session_id);
     let driver = SessionPromptDriver {
@@ -119,8 +117,7 @@ fn hosted_testflight_confirm_decodes_the_deferred_sibling() {
             deferred: false
         }
     );
-    // No flag is a decline, which is what every client that predates the field
-    // sends and what the operator-facing terminal path means.
+    // No flag is a decline, which is what every client predating the field sends.
     assert_eq!(
         testflight_confirm_answer("init_confirm_decline", r#""value":false"#),
         ConfirmAnswer {
@@ -135,7 +132,6 @@ fn hosted_testflight_confirm_decodes_the_deferred_sibling() {
             deferred: true
         }
     );
-    // Explicit `false` is a decline too, so a client can send the field always.
     assert_eq!(
         testflight_confirm_answer(
             "init_confirm_not_deferred",
@@ -230,10 +226,7 @@ fn hosted_driver_leaves_non_bootstrap_text_prompts_unhandled() {
     assert_eq!(outcome, HostedPromptOutcome::Unhandled);
 }
 
-/// The five prompt strings the update-policy flow emits. The Text entries
-/// are the custom-frequency input behind the select's Custom branch
-/// (prompts.rs renders them from the consumer's DurationLimits: stack =
-/// day/week min 1 day, agent = hour/day/week min 1 hour).
+/// The five prompt strings the update-policy flow emits.
 const UPDATE_POLICY_PROMPTS: [(HostedPromptKind, HostedPromptStyle, &str); 5] = [
     (
         HostedPromptKind::StackUpdatePolicy,
@@ -264,8 +257,7 @@ const UPDATE_POLICY_PROMPTS: [(HostedPromptKind, HostedPromptStyle, &str); 5] = 
 
 #[test]
 fn hosted_driver_never_streams_update_policy_prompts() {
-    // The api.md/init.md contract promises the stack- and agent-update
-    // prompts stay out of the streamed set — hosted clients supply these
+    // The api.md/init.md contract keeps these out of the streamed set: hosted clients supply them
     // up front via `stack_update`/`agent_update`.
     for (kind, style, text) in UPDATE_POLICY_PROMPTS {
         let request = hosted_test_request(kind, style, text, &[]);
@@ -278,9 +270,7 @@ fn hosted_driver_never_streams_update_policy_prompts() {
 
 #[test]
 fn hosted_prompt_allow_list_keys_off_kind_not_prompt_text() {
-    // The same wording under a hostable kind streams, which is what proves
-    // the decision moved off string matching: rewording a prompt can no
-    // longer change hostability, and only the kind can.
+    // The same wording under a hostable kind streams, proving rewording a prompt cannot change hostability.
     for (_, style, text) in UPDATE_POLICY_PROMPTS {
         let request = hosted_test_request(HostedPromptKind::Model, style, text, &[]);
         assert!(

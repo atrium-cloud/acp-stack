@@ -1,8 +1,5 @@
-//! Per-kind installer step execution.
-//!
-//! The orchestrator in the parent module picks a path from the fallback chain
-//! and hands it to [`run_install_step`]; this module owns the actual shell,
-//! npm, and github_release execution and the helpers that build their rows.
+//! Per-kind installer step execution: shell, npm, and github_release runs
+//! plus the helpers that build their persisted rows.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -24,25 +21,17 @@ use super::{
     verify_executable_header, verify_expected_sha256,
 };
 
-/// Whole-run budget for one install step when nothing declares its own. It
-/// covers the entire `/bin/sh -c <script>` (fetch, upstream installer, and any
-/// follow-up work), so a recipe whose upstream installer provisions a
-/// toolchain needs `install.shell.timeout_secs` rather than a bigger default.
+/// Whole-run budget for one install step when nothing declares its own.
 pub(super) const DEFAULT_INSTALLER_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const STDERR_TAIL_BYTES: usize = 2 * 1024;
-/// npm 12 skips lifecycle scripts that no `allowScripts` entry covers, and the
-/// skip is soft: npm still exits 0 and links the bin. Agents like `opencode-ai`
-/// download their real binary from a postinstall, so without an explicit
-/// allowance a stub lands on PATH and the install looks successful. Only the
-/// installed package itself is approved; transitive scripts keep npm's default
-/// skip-and-report behavior. Deliberately not `--strict-allow-scripts`: that
-/// would hard-fail the install over an unapproved script anywhere in the
-/// dependency tree, and npm-only agents have no fallback path to move on to.
+/// npm 12's lifecycle-script skip is soft (exit 0, bin linked), so agents that
+/// fetch their real binary from a postinstall silently land a stub without
+/// this. Not `--strict-allow-scripts`: that hard-fails on any unapproved
+/// script in the tree, and npm-only agents have no fallback path.
 const NPM_ALLOW_SCRIPTS_FLAG: &str = "--allow-scripts";
 
-/// Pick the install path to attempt for a given field. Honors a pinned
-/// version (github > npm) when supplied, otherwise walks the floating
-/// priority chain shell > npm > github_release.
+/// Pick the install path to attempt for a given field: a pinned version
+/// (github > npm) when supplied, otherwise shell > npm > github_release.
 pub(super) fn select_install_path(
     agent_id: &str,
     field: &str,
@@ -306,10 +295,8 @@ pub(super) fn shell_step_with_creates(
             })
             .and_then(|path| {
                 // A declared sha256 pin is only checked in `final_verification`,
-                // after all steps — executing the binary here would run it
-                // before its integrity is proven. The header check never
-                // executes the file, so it still rejects format-less stubs at
-                // the step level and lets the fallback chain advance.
+                // so spawning here would execute the binary before its
+                // integrity is proven. The header check never executes it.
                 if creates_check.pin_declared {
                     verify_executable_header(&path)
                 } else {
@@ -361,13 +348,11 @@ pub(super) fn github_release_step(
     let finished_at = current_timestamp();
     match result {
         Ok(outcome) => {
-            // A wrong-arch asset extracts fine and only fails at first spawn;
-            // gate here so the fallback chain can move on to another path.
-            // Asset checksum verification already ran inside the download, so
-            // executing the binary here does not precede integrity checks —
-            // unless the operator declared an `expected_sha256` pin, which
-            // only `final_verification` checks; then the probe must wait for
-            // it and this gate stays header-only.
+            // A wrong-arch asset extracts fine and only fails at first spawn,
+            // so gate here. Safe to spawn because asset checksums were already
+            // verified in the download — unless an `expected_sha256` pin is
+            // declared, which only `final_verification` checks, so that lane
+            // stays header-only.
             let gate = if pin_declared {
                 verify_executable_header(&binary_path)
             } else {
@@ -505,10 +490,7 @@ pub(super) struct CapturedOutput {
     pub(super) stdout: String,
     pub(super) stderr: String,
     pub(super) exit_status: Option<i32>,
-    /// Budget the run exceeded, when it was killed for hitting it. Carried on
-    /// the capture rather than folded into a bare typed error so the output
-    /// drained up to the kill survives into the persisted row — a timed-out
-    /// install is exactly the case where there is nothing else to read. The
+    /// Budget the run exceeded, when it was killed for hitting it. The
     /// accompanying `exit_status` is `None`, so a caller that ignores this
     /// field still treats the step as failed, never as success.
     pub(super) timed_out_after: Option<Duration>,
@@ -531,10 +513,9 @@ pub(super) fn run_shell_install(
     )
 }
 
-/// Serializes `npm install -g --prefix` runs. The harness and adapter
-/// installers run on parallel threads against the same managed prefix, and
-/// npm has no cross-process lock for global installs into one prefix, so two
-/// concurrent runs can corrupt the shared `node_modules` tree.
+/// Serializes `npm install -g --prefix` runs: npm has no cross-process lock
+/// for global installs into one prefix, and the harness and adapter installers
+/// run on parallel threads against the same managed prefix.
 static NPM_INSTALL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn run_npm_install(
@@ -612,8 +593,6 @@ fn resolve_npm_package_version(
             }
         }
         Ok(captured) => {
-            // A version lookup that hit the budget is a timeout, not an
-            // ordinary non-zero exit; it keeps its typed error and its output.
             if let Some(timeout) = captured.timed_out_after {
                 return Err(Box::new(StepResult {
                     outcome: Err(StackError::AgentInstallerTimeout),
@@ -666,10 +645,8 @@ fn resolve_npm_package_version(
     }
 }
 
-/// `npm view <pkg> version --json` prints a plain JSON string when the spec
-/// resolves to one version, but a JSON array of version strings when it
-/// matches several (observed on fresh hosts: `["1.18.7"]`). npm orders the
-/// array ascending, so the last element is the newest.
+/// `npm view <pkg> version --json` prints a bare string for one match but an
+/// ascending JSON array when several match, so the last element is newest.
 fn parse_npm_view_version(stdout: &str) -> std::result::Result<String, String> {
     let value: serde_json::Value = serde_json::from_str(stdout).map_err(|err| err.to_string())?;
     match value {
@@ -686,8 +663,6 @@ fn parse_npm_view_version(stdout: &str) -> std::result::Result<String, String> {
                     }
                 }
             }
-            // An empty array yields an empty version so the caller's existing
-            // empty-version failure path reports it.
             Ok(versions.pop().unwrap_or_default())
         }
         other => Err(format!(
@@ -726,12 +701,8 @@ fn npm_package_with_version(package: &str, version: &str) -> String {
     format!("{package}@{version}")
 }
 
-/// Row for a step killed for exceeding its budget. The drained stdout/stderr
-/// are kept and the marker is appended rather than substituted: the run that
-/// timed out is the one an operator most needs to read, and a bare marker
-/// makes a ten-minute install indistinguishable from one that printed
-/// nothing. The budget is in the marker because it is what turns "it stopped"
-/// into "it stopped because it was given N seconds".
+/// Row for a step killed for exceeding its budget; the drained output is kept
+/// and the marker appended rather than substituted.
 fn timed_out_row(
     step_label: &'static str,
     started_at: String,
@@ -783,9 +754,6 @@ fn run_program_install(
     command.args(args).current_dir(workspace_root).env_clear();
 
     // Minimal env so the installer is no wider a door than the agent itself.
-    // PATH is required so `creates` lookups resolve. HOME lets installers
-    // place dotfiles in the operator's home if they need to. LANG keeps
-    // tools that read locale from producing mojibake.
     let path_env = path_env_with_extra_dirs(extra_path_dirs);
     if let Some(path) = &path_env {
         command.env("PATH", path);
@@ -794,17 +762,14 @@ fn run_program_install(
     forward_host_env(&mut command, "LANG");
     apply_non_interactive_env(&mut command);
     // Point node-gyp at the interpreter binary rather than whatever wrapper
-    // `python3` happens to be on this host. Set before `[agent].env` so an
-    // entry that knows better can still override it, unlike the reserved names
-    // below.
+    // `python3` happens to be. Set before `[agent].env` so an entry that knows
+    // better can override it, unlike the reserved names below.
     if let Some(interpreter) = resolved_python_interpreter(path_env.as_ref()) {
         command.env("npm_config_python", interpreter);
     }
-    // Inject `[agent].env` values, but refuse to let them override
-    // PATH/HOME/LANG (the same security argument as in the bridge: the
-    // daemon's environment is the source of truth for where to find binaries
-    // and the operator's home) or the non-interactive hints (an agent entry
-    // must not be able to re-enable prompting in a headless install).
+    // `[agent].env` must not override PATH/HOME/LANG (the daemon owns where
+    // binaries and the operator's home live) or the non-interactive hints (an
+    // agent entry must not re-enable prompting in a headless install).
     for (name, value) in agent_env {
         if matches!(
             name.as_str(),
@@ -826,12 +791,10 @@ fn run_program_install(
         command.env(name, value);
     }
 
-    // `run_captured` detaches into a fresh session so the timeout-induced
-    // SIGKILL also reaches whatever grandchildren the shell forks, and so an
-    // installer probing /dev/tty cannot prompt-and-stop when prior state
-    // (e.g. ~/.pi) exists. It also owns the capped reader threads: without
-    // dedicated drainers, a chatty installer can fill the pipe buffer and
-    // wedge the shell once it tries to write more.
+    // `run_captured` detaches into a fresh session so the timeout SIGKILL
+    // reaches grandchildren and an installer probing /dev/tty cannot
+    // prompt-and-stop; it also owns the capped reader threads that keep a
+    // chatty installer from wedging on a full pipe buffer.
     let outcome = run_captured(&mut command, timeout, MAX_INSTALLER_STREAM_BYTES)
         .map_err(|source| StackError::AgentSpawnFailed { source })?;
 
@@ -852,10 +815,6 @@ fn run_program_install(
             stdout_reader,
             stderr_reader,
         } => {
-            // Timeout: kill the whole process group, then drain readers. A
-            // timeout still produces a persisted row, so the captured output
-            // is carried out rather than discarded — everything the installer
-            // printed before the kill is the only record of what it was doing.
             kill_process_group(&mut child);
             if let Err(error) = child.wait() {
                 tracing::debug!(%error, program, "timed-out installer child reap failed");

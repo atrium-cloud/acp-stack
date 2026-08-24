@@ -14,10 +14,9 @@ pub(super) fn run_agent_headless_config_step(flow: &mut InitFlow) -> Result<()> 
         5,
         step_kind::AGENT_HEADLESS_CONFIG,
         || {
-            // provision is idempotent (atomic_write_owner_only); cheap to
-            // re-run, so the verifier just always says no — every run we
-            // re-derive the canonical output. This is correct for resume
-            // because the operator's config may have changed since last run.
+            // Provision is idempotent and cheap, so the verifier always says
+            // no: a resume must re-derive output from a possibly-changed
+            // config.
             Ok(false)
         },
         || {

@@ -1,20 +1,4 @@
-//! Age-encrypted secret store.
-//!
-//! Layout on disk:
-//!
-//! - `~/.config/acp-stack/age.key` — the bech32-encoded x25519 identity
-//!   produced by `age::x25519::Identity::to_string()`. One identity per
-//!   instance. Owner-only (0600).
-//! - `~/.local/share/acp-stack/secrets.age` — the age-encrypted ciphertext.
-//!   Plaintext is TOML containing flat `[secrets]` and the structured mapped-
-//!   provider credential catalog.
-//!   The store is encrypted to its own public key (single-recipient).
-//!
-//! Inner format is TOML rather than JSON for consistency with the rest of
-//! the project; the existing `toml` dependency already handles round-trip.
-//!
-//! The store is rewritten in full on every mutation; concurrency is not a
-//! goal for 0.0.1 because `acps` runs as a single supervisor.
+//! Age-encrypted secret store (`age.key` + `secrets.age`), rewritten in full on every mutation.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -32,22 +16,17 @@ use crate::fs_util::{
     write_new_file_owner_only,
 };
 
-/// Kept as a no-op guard at mutation call sites. Auth keys are stored as
-/// non-recoverable state verifiers, so no secret-store name is reserved for auth.
+/// No-op guard at mutation call sites: auth keys live as state verifiers, so no secret-store name is reserved for auth.
 pub fn reject_auth_ref_mutation(_name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Runtime config directory: `~/.config/acp-stack/`. Parent of `age_key_path`
-/// and `default_config_path`. Owner-only (0700). Exposed here so callers
-/// (e.g. `acps security check`) reach for one helper instead of redoing the
-/// `home.join(".config").join("acp-stack")` dance.
+/// Runtime config directory: `~/.config/acp-stack/`. Owner-only (0700).
 pub fn config_dir(home: &Path) -> PathBuf {
     home.join(".config").join("acp-stack")
 }
 
-/// Runtime state directory: `~/.local/share/acp-stack/`. Parent of
-/// `secret_store_path` and `default_state_path`. Owner-only (0700).
+/// Runtime state directory: `~/.local/share/acp-stack/`. Owner-only (0700).
 pub fn state_dir(home: &Path) -> PathBuf {
     home.join(".local").join("share").join("acp-stack")
 }
@@ -60,11 +39,7 @@ pub fn secret_store_path(home: &Path) -> PathBuf {
     state_dir(home).join("secrets.age")
 }
 
-/// Resolve the stored provider endpoint override for `home`, treating a store
-/// that does not exist yet as "no override". Native-config provisioning runs at
-/// points in init where the store has not been created, and every provisioning
-/// call site must see the same override without threading it through fifteen
-/// signatures — so the lookup lives next to the store instead.
+/// Resolve the stored provider endpoint override for `home`, treating a store that does not exist yet as "no override".
 pub fn managed_provider_endpoint_override_for_home(
     home: &Path,
 ) -> Result<Option<ProviderEndpointOverride>> {
@@ -74,9 +49,7 @@ pub fn managed_provider_endpoint_override_for_home(
     SecretStore::open_read_only(home)?.managed_provider_endpoint_override()
 }
 
-/// Loaded, decrypted view of the secret store. Mutations are written through
-/// to disk via `atomic_write_owner_only`; the in-memory copy and the
-/// ciphertext on disk stay in sync per operation.
+/// Loaded, decrypted view of the secret store; every mutation writes through to disk atomically.
 pub struct SecretStore {
     identity: age::x25519::Identity,
     secrets: BTreeMap<String, String>,
@@ -87,8 +60,7 @@ pub struct SecretStore {
 
 impl fmt::Debug for SecretStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Never leak the identity or secret values via Debug. List only the
-        // names, which are already public (they appear in config refs).
+        // Never leak the identity or secret values via Debug; names alone are already public.
         f.debug_struct("SecretStore")
             .field("identity", &"<redacted>")
             .field("store_path", &self.store_path)
@@ -101,11 +73,7 @@ impl fmt::Debug for SecretStore {
     }
 }
 
-/// Provenance of a stored provider credential. `Operator` entries are written
-/// by the CLI/import flows; `External` entries are owned by the named
-/// managed-state extension namespace and applied through the admin apply
-/// endpoint. Overwrite protection across the two owners is enforced by the
-/// store itself, not by any one endpoint.
+/// Provenance of a stored provider credential; overwrite protection across the two owners is enforced by the store itself, not by any one endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CredentialSource {
@@ -129,13 +97,10 @@ pub struct ProviderCredential {
     pub source_refs: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub migrated: bool,
-    /// Absent on disk for operator entries, so pre-provenance stores load
-    /// unchanged and operator entries serialize byte-identically.
+    /// Absent on disk for operator entries, so pre-provenance stores load unchanged.
     #[serde(default, skip_serializing_if = "CredentialSource::is_operator")]
     pub source: CredentialSource,
-    /// Endpoint base this provider's traffic is routed to instead of the vendor
-    /// default. Only externally-sourced credentials carry one; absent on disk
-    /// for every other entry, so existing ciphertext loads unchanged.
+    /// Endpoint base replacing the vendor default; only externally-sourced credentials carry one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
 }
@@ -244,11 +209,7 @@ impl ProviderCredentialSet {
     }
 }
 
-/// Durable per-namespace record of the last applied managed-state registry.
-/// Written atomically together with the credential catalog so the applied
-/// revision survives restarts and idempotent replays can be recognized.
-/// `provider_id` is `None` after a clear so the revision watermark is retained
-/// even with no credential stored.
+/// Durable per-namespace record of the last applied managed-state registry, written atomically with the credential catalog.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedStateRecord {
@@ -259,9 +220,7 @@ pub struct ManagedStateRecord {
     pub kind: Option<String>,
 }
 
-/// The managed-state selection the store applies: env-keyed values (plus
-/// optional secret refs) for one provider, exactly the shape
-/// [`ProviderCredential`] already models.
+/// The managed-state selection the store applies: env-keyed values plus optional secret refs for one provider.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ManagedCredentialSelection {
     pub provider_id: String,
@@ -282,9 +241,7 @@ impl fmt::Debug for ManagedCredentialSelection {
     }
 }
 
-/// A resolved instruction to route one provider's traffic at `base_url`
-/// instead of its vendor default. Consumed by the native-config provisioners,
-/// each of which writes it into whatever field its agent reads.
+/// A resolved instruction to route one provider's traffic at `base_url` instead of its vendor default.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderEndpointOverride {
     pub provider_id: String,
@@ -337,10 +294,7 @@ impl StorePlaintext {
 }
 
 impl SecretStore {
-    /// Open an existing store, or create an empty one if neither the age key
-    /// nor the ciphertext exists yet. Either both files exist or neither
-    /// does; an asymmetric state is corruption and is rejected before any
-    /// generate/encrypt path runs.
+    /// Open an existing store, or create an empty one. Either both the age key and the ciphertext exist or neither does; an asymmetric state is corruption and is rejected before any generate/encrypt path runs.
     pub fn open_or_create(home: &Path) -> Result<Self> {
         ensure_dirs(home)?;
         let key_path = age_key_path(home);
@@ -371,9 +325,7 @@ impl SecretStore {
         }
 
         let identity = if key_path.exists() {
-            // Repair owner-only mode before reading. The age key decrypts every
-            // stored API key; tolerating a world-readable identity from an
-            // older binary or sloppy manual edit would expose all of them.
+            // Repair owner-only mode before reading: this key decrypts every stored API key.
             set_owner_only_file(key_path)?;
             load_identity(key_path)?
         } else {
@@ -399,17 +351,14 @@ impl SecretStore {
         })
     }
 
-    /// Open an existing store. Fails if the age key or the ciphertext is
-    /// missing. Use this when you expect a previously-initialized instance.
+    /// Open an existing store, failing if the age key or the ciphertext is missing.
     pub fn open(home: &Path) -> Result<Self> {
         let key_path = age_key_path(home);
         let store_path = secret_store_path(home);
         Self::open_at_paths(&key_path, &store_path)
     }
 
-    /// Open the existing store without repairing permissions. Native-config
-    /// import uses this before restart blockers clear so validation cannot
-    /// mutate any live runtime path.
+    /// Open the existing store without repairing permissions, so validation cannot mutate any live runtime path.
     pub fn open_read_only(home: &Path) -> Result<Self> {
         let key_path = age_key_path(home);
         let store_path = secret_store_path(home);
@@ -426,10 +375,7 @@ impl SecretStore {
         })
     }
 
-    /// Open an existing store from explicit runtime-managed paths. The daemon
-    /// uses this for health checks because tests and embedded runtimes can pass
-    /// non-default `RuntimePaths` while still keeping the standard `age.key` /
-    /// `secrets.age` filenames beside config and state.
+    /// Open an existing store from explicit runtime-managed paths.
     pub fn open_at_paths(key_path: &Path, store_path: &Path) -> Result<Self> {
         if key_path.exists() {
             set_owner_only_file(key_path)?;
@@ -478,12 +424,8 @@ impl SecretStore {
         self.provider_credentials.get(provider_id)
     }
 
-    /// The single externally-sourced credential that routes its provider away
-    /// from the vendor endpoint, if any. There is at most one because only a
-    /// managed-state namespace can set `base_url` and a namespace owns exactly
-    /// one provider entry; a second one would mean two orchestrators are
-    /// competing for the agent's native config, so it is a hard failure rather
-    /// than a silent first-wins pick.
+    /// The single externally-sourced credential that routes its provider away from the vendor endpoint.
+    /// A second one means two orchestrators are competing for the agent's native config, so it is a hard failure rather than a silent first-wins pick.
     pub fn managed_provider_endpoint_override(&self) -> Result<Option<ProviderEndpointOverride>> {
         let mut found: Option<ProviderEndpointOverride> = None;
         for (provider_id, set) in &self.provider_credentials {
@@ -551,17 +493,8 @@ impl SecretStore {
         Ok(())
     }
 
-    /// Operator-path mutations must not clobber externally-owned entries: an
-    /// external orchestrator applied them under its own revision watermark,
-    /// and a silent operator overwrite would diverge the watermark from the
-    /// stored credential. External entries can only change through
-    /// [`Self::apply_managed_state_credential`].
-    ///
-    /// Ownership checks here and in the apply path inspect `sole` only, which
-    /// is sound because an external credential is always stored aliasless and
-    /// this very guard blocks the one flow (alias promotion) that could
-    /// relocate it into `aliases`. Any future path that stores an External
-    /// credential under an alias would bypass ownership and must not exist.
+    /// Operator-path mutations must not clobber externally-owned entries; those change only through [`Self::apply_managed_state_credential`].
+    /// Ownership checks inspect `sole` only, which holds because an external credential is always stored aliasless and this guard blocks the one flow (alias promotion) that could relocate it into `aliases`.
     fn ensure_external_entries_untouched(
         &self,
         replacement: &BTreeMap<String, ProviderCredentialSet>,
@@ -593,11 +526,7 @@ impl SecretStore {
         &self.managed_state
     }
 
-    /// Apply one managed-state registry revision for `namespace`: idempotent
-    /// replay at the applied revision, stale-revision rejection, and an atomic
-    /// catalog-swap + watermark persist. `selection: None` clears the
-    /// namespace's credential while retaining the watermark. Ownership is
-    /// enforced here: the namespace may only create entries or replace its own.
+    /// Apply one managed-state registry revision for `namespace`; the namespace may only create entries or replace its own.
     pub fn apply_managed_state_credential(
         &mut self,
         namespace: &str,
@@ -695,9 +624,7 @@ impl SecretStore {
         Ok(outcome)
     }
 
-    /// A replay at the already-applied revision must be an exact no-op: the
-    /// orchestrator retries on any failure, so the retried body is expected to
-    /// be identical in meaning. Anything else at that revision is a conflict.
+    /// A replay at the already-applied revision must be an exact no-op; anything else at that revision is a conflict.
     fn ensure_identical_replay(
         &self,
         namespace: &str,
@@ -730,10 +657,8 @@ impl SecretStore {
                         "stored credential is not owned by this namespace".to_owned(),
                     ));
                 }
-                // `base_url` is compared alongside the values: without it, a
-                // replay at the applied revision carrying a different endpoint
-                // would no-op instead of conflicting, leaving the orchestrator
-                // believing it had rerouted the provider.
+                // `base_url` must be compared too, or a replay carrying a different endpoint would
+                // no-op instead of conflicting, leaving the orchestrator believing it had rerouted the provider.
                 if credential.values != selection.values
                     || credential.source_refs != selection.source_refs
                     || credential.base_url != selection.base_url
@@ -751,9 +676,7 @@ impl SecretStore {
         self.persist()
     }
 
-    /// Insert several name/value pairs and persist them together as a single
-    /// atomic write. Lets the caller avoid leaving the store in a partial
-    /// state if a later `set` would have failed.
+    /// Insert several name/value pairs and persist them together as a single atomic write.
     pub fn set_many<'a, I>(&mut self, pairs: I) -> Result<()>
     where
         I: IntoIterator<Item = (&'a str, &'a str)>,
@@ -787,9 +710,7 @@ impl SecretStore {
 
 fn generate_identity(path: &Path) -> Result<age::x25519::Identity> {
     if let Some(parent) = path.parent() {
-        // Caller is expected to have created the parent dir owner-only, but
-        // tests that drive the store directly may not have. Best-effort
-        // ensure it exists.
+        // Best-effort: tests that drive the store directly may not have created the parent dir.
         if !parent.exists() {
             std::fs::create_dir_all(parent).map_err(|source| StackError::DirectoryCreate {
                 path: parent.to_path_buf(),
@@ -885,9 +806,7 @@ fn encrypt_plaintext(
     Ok(ciphertext)
 }
 
-/// Ensure both the config dir and the state dir exist with owner-only mode
-/// before any secret store operation. Convenience helper for callers that
-/// only know the home dir.
+/// Ensure both the config dir and the state dir exist with owner-only mode before any secret store operation.
 pub fn ensure_dirs(home: &Path) -> Result<()> {
     use crate::fs_util::create_dir_owner_only;
     let key_parent = parent_dir(&age_key_path(home))?.to_path_buf();

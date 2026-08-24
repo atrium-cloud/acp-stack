@@ -1,8 +1,5 @@
-//! Shared filesystem helpers used by `cli`, `secrets`, and any future module
-//! that needs to land files under the runtime user's home with owner-only
-//! permissions. The pattern is owner-only (0700 / 0600) on Unix and a no-op
-//! on other platforms; the runtime is Linux-targeted but the no-op keeps
-//! tests on macOS dev machines honest.
+//! Shared filesystem helpers for landing files under the runtime user's home with owner-only
+//! permissions (0700 / 0600 on Unix, a no-op elsewhere).
 
 use crate::error::{Result, StackError};
 use std::fs::File;
@@ -14,10 +11,8 @@ use std::path::{Path, PathBuf};
 
 const AGENT_CONFIG_MUTATION_LOCK_FILE_NAME: &str = ".agent-config.lock";
 
-/// Process-wide advisory lock for read/modify/write operations that touch the
-/// canonical Agent config or a harness's generated global config. The lock
-/// file has a stable inode so atomic config replacements do not invalidate the
-/// lock held by another `acps` process.
+/// Process-wide advisory lock for read/modify/write of the Agent config. The lock file keeps a
+/// stable inode so atomic config replacements do not invalidate another `acps` process's lock.
 pub struct AgentConfigMutationFileLock {
     _file: File,
 }
@@ -88,10 +83,8 @@ pub fn parent_dir(path: &Path) -> Result<&Path> {
 
 pub fn create_dir_owner_only(path: &Path) -> Result<()> {
     if path.exists() {
-        // Use `symlink_metadata` so a symlink at this path is treated as a
-        // non-directory, rather than transparently followed. Allowing a
-        // symlink to substitute for the runtime's owned directories would
-        // route file creation outside the security-managed tree.
+        // `symlink_metadata` so a symlink here reads as a non-directory instead of being followed;
+        // a substituted symlink would route file creation outside the security-managed tree.
         let metadata =
             std::fs::symlink_metadata(path).map_err(|source| StackError::DirectoryCreate {
                 path: path.to_path_buf(),
@@ -156,9 +149,7 @@ pub fn write_new_file_owner_only(path: &Path, content: &[u8]) -> Result<()> {
     sync_parent_dir(path)
 }
 
-/// Atomically replace `path` with `content`, writing through a sibling temp
-/// file and renaming. Sets owner-only mode (0600) on both the temp and the
-/// final file on Unix. The directory containing `path` must already exist.
+/// Atomically replace `path` via a sibling temp file, owner-only on both. The parent must exist.
 pub fn atomic_write_owner_only(path: &Path, content: &[u8]) -> Result<()> {
     let parent = parent_dir(path)?;
     let mut temp =
@@ -188,10 +179,8 @@ pub fn atomic_write_owner_only(path: &Path, content: &[u8]) -> Result<()> {
     sync_parent_dir(path)
 }
 
-/// Validate and prepare an allowlisted file target below `home` without
-/// following symlinked path components. Existing targets must be regular,
-/// single-link files owned by the current user. Missing directories are
-/// created one component at a time with owner-only permissions.
+/// Validate and prepare a file target below `home` without following symlinked path components;
+/// an existing target must be a current-user-owned, single-link regular file.
 pub fn prepare_owner_managed_file_path(home: &Path, path: &Path) -> Result<()> {
     let relative = path
         .strip_prefix(home)
@@ -262,9 +251,7 @@ pub fn prepare_owner_managed_file_path(home: &Path, path: &Path) -> Result<()> {
     }
 }
 
-/// Validate an existing owner-only runtime file without changing its mode or
-/// following a symlink. Used by preflight paths that must remain read-only
-/// until a queued mutation is safe to apply.
+/// Validate an existing owner-only runtime file without changing its mode or following a symlink.
 pub fn validate_owner_only_regular_file(path: &Path) -> Result<()> {
     let metadata = std::fs::symlink_metadata(path).map_err(|source| StackError::FileCreate {
         path: path.to_path_buf(),
@@ -330,8 +317,8 @@ pub fn pre_create_owner_only(path: &Path) -> Result<()> {
     match opts.open(path) {
         Ok(_) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            // Repair the mode before any caller opens the file, so writes never land
-            // while the file is still group/world-readable from an older binary.
+            // Repair the mode BEFORE any caller opens the file, so writes never land while it is
+            // still group/world-readable from an older binary.
             set_owner_only_file(path)
         }
         Err(source) => Err(StackError::FileCreate {

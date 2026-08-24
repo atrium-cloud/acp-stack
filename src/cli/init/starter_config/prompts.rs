@@ -1,8 +1,6 @@
 use super::*;
 
-/// Interactive Daily/Weekly/Custom frequency picker shared by the stack and
-/// agent update prompts. A custom value is validated against `field` using the
-/// consumer's `limits` (stack and agent updaters declare their own).
+/// Interactive Daily/Weekly/Custom frequency picker shared by the stack and agent update prompts.
 fn prompt_update_frequency(field: &'static str, limits: &DurationLimits) -> Result<String> {
     #[derive(Clone, PartialEq, Eq)]
     enum FrequencyChoice {
@@ -45,7 +43,6 @@ fn prompt_update_frequency(field: &'static str, limits: &DurationLimits) -> Resu
             .unwrap_or_else(|| "1d".to_owned());
             normalize_duration(field, &raw, limits)
         }
-        // Daily, or a non-interactive/empty select, defaults to daily.
         _ => Ok("1d".to_owned()),
     }
 }
@@ -110,11 +107,8 @@ fn prompt_stack_update_policy() -> Result<StackUpdatePolicy> {
     .unwrap_or(StackUpdatePolicy::SecurityCritical))
 }
 
-/// Configure `[updates.acp_stack]` from `--stack-update`/`--stack-update-frequency`
-/// or, interactively, a policy + frequency prompt placed after model selection.
-/// `on` → Compatible, `security` → SecurityCritical, `off` → Manual. A frequency
-/// is only collected for non-Manual policies. Returns whether config changed; a
-/// non-interactive run with no flags leaves the schema defaults intact.
+/// Configure `[updates.acp_stack]` from flags or the interactive policy/frequency prompts,
+/// returning whether config changed.
 pub(crate) fn configure_stack_update_for_init(
     args: &InitArgs,
     config: &mut Config,
@@ -159,9 +153,7 @@ pub(crate) fn configure_stack_update_for_init(
     Ok(changed)
 }
 
-/// Rejection reason when `--agent-update on` targets a custom/escape-hatch agent
-/// the managed updater cannot drive. Same clauses `acps agent update set` uses
-/// (it prefixes the agent id) so the two surfaces read the same.
+/// Rejection reason when `--agent-update on` targets a custom agent; worded to match `acps agent update set`.
 const AGENT_UPDATE_UNMANAGED_REASON: &str = "this agent is not a managed registry agent; auto-update is unavailable for escape-hatch \
      installs";
 
@@ -182,10 +174,7 @@ pub(crate) fn validate_agent_update_args(args: &InitArgs) -> Result<()> {
         .as_deref()
         .map(parse_agent_update_choice)
         .transpose()?;
-    // A `--custom-agent-id` conflicts with `--agent` at the clap layer, so its
-    // presence means the run targets a custom agent. Reject `--agent-update on`
-    // here — before key generation and install — rather than only at the late
-    // configure step. Custom configs from `--from-file` are still caught there.
+    // Rejected here, before key generation and install, rather than only at the late configure step.
     if enabled == Some(true) && args.custom_agent_id.is_some() {
         return Err(StackError::InvalidParam {
             field: "--agent-update",
@@ -213,16 +202,9 @@ fn prompt_agent_update_enabled() -> Result<bool> {
     )
 }
 
-/// Configure `[agent.auto_update]` from `--agent-update`/`--agent-update-frequency`
-/// or, interactively, an enable + frequency prompt. `managed` is whether the
-/// resolved agent is a registry agent (source of truth is the registry, not block
-/// presence — a re-init or imported config may lack the block that
-/// `apply_registry_entry_to_config` normally seeds). For a managed agent the block
-/// is created when absent so the choice is always honored, mirroring
-/// `acps agent update set`. A custom/escape-hatch agent cannot be managed-updated:
-/// an explicit `--agent-update on` is rejected, `off` strips any stale
-/// hand-written block, and the interactive prompt is skipped. Returns whether
-/// config changed.
+/// Configure `[agent.auto_update]` from flags or the interactive prompts, returning whether config
+/// changed. `managed` comes from the registry, not block presence, since an imported config may lack
+/// the block entirely; an unmanaged agent can only be set to `off`.
 pub(crate) fn configure_agent_update_for_init(
     args: &InitArgs,
     config: &mut Config,
@@ -238,9 +220,8 @@ pub(crate) fn configure_agent_update_for_init(
         return Ok(false);
     };
     if !managed {
-        // Unmanaged agent: enabling is impossible. Disabling needs no block, so
-        // drop any stale hand-written one — left in place, the daemon would keep
-        // recording `agent.update.skipped` for it every cycle.
+        // A stale hand-written block left in place makes the daemon record `agent.update.skipped`
+        // every cycle, so drop it rather than disable in place.
         if enabled {
             return Err(StackError::InvalidParam {
                 field: "--agent-update",
@@ -345,10 +326,7 @@ pub(crate) fn prompt_environment_configuration_if_needed(
             ),
         ],
     )?;
-    // An interactive terminal always yields a choice (Esc aborts init upstream),
-    // so `None` only arises when a hosted driver leaves this out-of-v1-scope
-    // prompt unhandled; that skips environment configuration like a
-    // non-interactive run rather than failing.
+    // `None` only arises when a hosted driver leaves this prompt unhandled; skip rather than fail.
     match setup_path {
         Some(EnvironmentSetupPath::Standard) => {
             prompt_standard_setup(interactive, args, registry, skill_catalog)
@@ -358,9 +336,8 @@ pub(crate) fn prompt_environment_configuration_if_needed(
     }
 }
 
-// Standard Setup: up to four opinionated prompts. Declining every offered one is
-// the intended "set it up later" path, so there is deliberately no separate
-// skip option.
+// Standard Setup: opinionated prompts. Declining all of them is the intended "set it up later"
+// path, so there is deliberately no separate skip option.
 fn prompt_standard_setup(
     interactive: bool,
     args: &mut InitArgs,
@@ -412,11 +389,9 @@ fn prompt_standard_setup(
     Ok(())
 }
 
-// Advanced Setup: a clean slate of opt-in prompts. Each is gated on the
-// matching values not already arriving by flag, so flags suppress re-prompts.
-// MCP is deliberately absent here: MCP support is only knowable from the
-// installed agent's ACP advertisement, so those prompts run in the
-// post-install `mcp_configure` step instead.
+// Advanced Setup: opt-in prompts, each gated so a matching flag suppresses the re-prompt. MCP is
+// deliberately absent: support is only knowable from the installed agent's ACP advertisement, so
+// those prompts run in the post-install `mcp_configure` step.
 fn prompt_advanced_setup(
     interactive: bool,
     args: &mut InitArgs,
@@ -471,11 +446,8 @@ fn prompt_advanced_setup(
     Ok(())
 }
 
-// "Add MCP servers" spans both transports: the operator picks a transport,
-// adds rows for it, and repeats until choosing Done. Driven by the post-probe
-// `mcp_configure` step; `offer_http` reflects whether the agent advertised
-// `mcpCapabilities.http`, so the select never offers a transport that would
-// be skipped at session time.
+// `offer_http` reflects whether the agent advertised `mcpCapabilities.http`, so the select never
+// offers a transport that would be skipped at session time.
 pub(in crate::cli::init) fn prompt_mcp_servers(
     interactive: bool,
     args: &mut InitArgs,
@@ -846,21 +818,14 @@ fn prompt_setup_row_action(
 fn parse_secret_ref_prompt_values(field: &'static str, raw: &str) -> Result<Vec<String>> {
     let values = parse_comma_separated_prompt_values(raw);
     for value in &values {
-        // Screening runs first so a pasted credential is redacted rather
-        // than echoed by the name-shape errors below. Bare `NAME` keeps the
-        // fast-fail identifier check; `VAR=template` entries get the full
-        // template validation. Comma-splitting above means a template
-        // containing `,` is unrepresentable in the wizard; the flag and
-        // hosted forms carry those.
+        // Screening MUST run before the name-shape checks below, so a pasted credential is redacted
+        // rather than echoed back in an error.
         crate::config::screen_env_entry(field, value)?;
         if value.contains('=') {
             crate::config::parse_env_entry(field, value)?;
         } else if !is_valid_secret_ref_name(value) {
-            // The screen above only recognizes the credential shapes it knows;
-            // a dashed token walks past it, so the complaint describes the
-            // constraint instead of quoting the entry back. This error reaches
-            // the hosted client as an init failure reason and stays in
-            // replayable history.
+            // Describes the constraint instead of quoting the entry back; this reason reaches the
+            // hosted client and stays in replayable history.
             return Err(StackError::InvalidParam {
                 field,
                 reason: "secret ref name must use letters, digits, and underscore, and must not start with a digit".to_owned(),
@@ -891,9 +856,7 @@ fn parse_comma_separated_prompt_values(raw: &str) -> Vec<String> {
         .collect()
 }
 
-/// Interactive add-loop for dependency install actions. Each entry collects a
-/// name, an install shell command, and whether it needs system privilege, then
-/// stacks onto `--dep`/`--dep-system` so `deps_from_args` consumes it uniformly.
+/// Interactive add-loop for dependency install actions, stacking onto `--dep`/`--dep-system`.
 fn prompt_deps(interactive: bool, args: &mut InitArgs) -> Result<()> {
     loop {
         let Some(name) = prompt::text(

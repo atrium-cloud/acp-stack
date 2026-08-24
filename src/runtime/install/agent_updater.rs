@@ -125,10 +125,9 @@ pub fn run_managed_agent_update(
     let registry = crate::runtime::install::agent_registry::RegistryCatalog::load_with_override(
         &crate::runtime::install::operator_registry_override(&home),
     )?;
-    // A non-registry (escape-hatch) agent has nothing the updater can resolve.
-    // Skip rather than error so the loop does not record a failure every cycle.
-    // A placeholder id keeps its own error so its "select a real agent" signal
-    // is not masked by a generic skip.
+    // Skip rather than error so the auto-update loop does not record a failure
+    // every cycle. A placeholder id keeps its own error so its "select a real
+    // agent" signal is not masked by a generic skip.
     let entry = match registry.lookup_required(&config.agent.id) {
         Ok(entry) => entry,
         Err(StackError::AgentRegistryMissing { .. }) => {
@@ -183,10 +182,8 @@ pub fn update_agent_for_config(
     };
     let mut steps = Vec::new();
     for component in update_components(entry, &config.agent)? {
-        // A shell-only operator adapter override has no version to compare
-        // and no managed update path unless the operator opted into
-        // shell_rerun; without this skip the plan chooser would fall through
-        // to the native probe and record a failed adapter step every cycle.
+        // Without this skip the plan chooser falls through to the native probe
+        // and records a failed adapter step every cycle.
         if component.step == STEP_ADAPTER
             && config.agent.adapter_override.is_some()
             && component.install.npm.is_none()
@@ -259,12 +256,8 @@ fn update_component(
         });
     }
 
-    // Publish step-boundary progress (a `running` row per executed step,
-    // finalized in place) via a second short-lived connection; the updater's
-    // own store handle cannot cross the installer's scoped harness/adapter
-    // threads. Apt and native steps share the same sink so a minutes-long
-    // update is visible in the active-runs API while it executes instead of
-    // appearing only after completion.
+    // Progress needs a second short-lived connection: the updater's own store
+    // handle cannot cross the installer's scoped harness/adapter threads.
     let sink = ReconnectingInstallerSink::new(context.state.path().to_path_buf());
     let progress = InstallProgress {
         sink: &sink,
@@ -285,8 +278,8 @@ fn update_component(
                 &HashMap::new(),
                 context.workspace_root,
                 context.dest_dir,
-                // The update path has no `expected_sha256` verification step,
-                // so the step-level spawn probe must keep running here.
+                // The update path has no `expected_sha256` verification step, so
+                // the step-level spawn probe MUST keep running here.
                 false,
                 Some(&progress),
             );
@@ -356,8 +349,6 @@ fn persist_update_rows(
     state: &StateStore,
     log_base: Option<&Path>,
 ) -> Result<()> {
-    // Rows the progress sink already finalized (their `running` row updated
-    // in place) are skipped inside; the rest keep the end-of-run append.
     for row in rows.iter_mut() {
         persist_untracked_installer_row(
             state,
@@ -702,9 +693,8 @@ fn run_native_update_step(
     )
 }
 
-// Distinguishes "the command ran and its help lacks the token" from "the
-// probe never executed" (spawn error, timeout), so the report can avoid
-// asserting anything about a help listing that was never seen.
+// Distinguishes "the command ran and its help lacks the token" from "the probe
+// never executed", so the report cannot assert anything about an unseen listing.
 struct NativeProbeFailure {
     command_ran: bool,
     detail: String,
@@ -724,11 +714,9 @@ fn probe_native_update_subcommand(
     let mut failures = Vec::new();
     for args in [&["--help"][..], &["help"][..]] {
         let mut row = run_help_probe(path, args, &context);
-        // A spawn error or a timeout with no output means the child stalled
-        // between fork and exec (a known hazard of pre_exec-based spawns in a
-        // heavily threaded process) rather than the command lacking the
-        // subcommand. That stall is transient, so one fresh spawn is retried,
-        // and the retry's row replaces the stalled one for reporting.
+        // A spawn error or output-less timeout means the child stalled between
+        // fork and exec (a hazard of pre_exec spawns in a heavily threaded
+        // process), not that the command lacks the subcommand. Retry once.
         if advertised_subcommand(&row).is_none()
             && (row.status == "error" || row.status == "timeout")
         {
@@ -738,8 +726,7 @@ fn probe_native_update_subcommand(
         if let Some(subcommand) = advertised_subcommand(&row) {
             return Ok(subcommand);
         }
-        // "ran" and "failed" both mean the command itself executed; "error"
-        // and "timeout" mean the probe never got a real help listing.
+        // "ran" and "failed" both mean the command itself executed.
         command_ran |= row.status == "ran" || row.status == "failed";
         failures.push(probe_failure_detail(args[0], &row));
     }
@@ -774,10 +761,8 @@ fn advertised_subcommand(
         .map(|candidate| (*candidate).to_owned())
 }
 
-// A probe can fail because the command genuinely lacks an update subcommand or
-// because the probe itself could not run (spawn error, timeout). Keep the row's
-// status/exit/output in the detail so the two cases stay distinguishable in
-// the report.
+// Keep the row's status/exit/output in the detail so "lacks the subcommand" and
+// "the probe could not run" stay distinguishable in the report.
 fn probe_failure_detail(
     probe_arg: &str,
     row: &crate::runtime::install::agent_installer::InstallerRowDraft,
@@ -865,9 +850,8 @@ fn run_command_step_with_started_at(
         command.env("PATH", path);
     }
     apply_non_interactive_env(&mut command);
-    // `run_captured` detaches the child, so a native updater (e.g. `pi update`)
-    // probing the terminal cannot prompt-and-block the daemon's uncancellable
-    // update task.
+    // `run_captured` detaches the child, so a native updater probing the
+    // terminal cannot prompt-and-block the daemon's uncancellable update task.
     let outcome = match run_captured(&mut command, context.timeout, INSTALLER_OUTPUT_CAP_BYTES) {
         Ok(outcome) => outcome,
         Err(err) => {
@@ -898,8 +882,6 @@ fn run_command_step_with_started_at(
             stdout_reader,
             stderr_reader,
         } => {
-            // A timeout still produces a persisted row, so the captured output
-            // is drained rather than discarded.
             kill_process_group(&mut child);
             let stdout = stdout_reader
                 .and_then(join_reader_bounded)

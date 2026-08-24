@@ -1,27 +1,5 @@
-//! Pending-switch journal for convergent agent-primary switch retries.
-//!
-//! `POST /v1/agent/switch` is not atomic: the session-target DB rename and
-//! the canonical config write commit the switch, but the runtime re-apply
-//! (stop old agent, start new) happens after. A failure or process exit in
-//! that window used to leave the new primary on disk with its agent stopped,
-//! and a naive retry was rejected with "already configured". This journal is
-//! the durable record that lets a same-target retry converge instead:
-//!
-//! - The file lives beside the canonical config and `.agent-config.lock`, so
-//!   it is covered by the same agent-config mutation lock the switch handler
-//!   already holds for the whole read/plan/write sequence.
-//! - `phase` advances Planned -> Committed -> RuntimeApplied -> Completed.
-//!   The on-disk config is the real commit marker (the DB rename strictly
-//!   precedes the config write); the journal records *intent* and the
-//!   pre-commit `was_running` snapshot, which is unrecoverable after a
-//!   process restart.
-//! - A `Completed` journal is retained, not deleted: it is what makes a
-//!   same-target retry provably side-effect-free. The next different-target
-//!   switch overwrites it at Planned.
-//! - A journal whose switch failed before any durable mutation (e.g. the
-//!   session-rename collision check) is removed instead: nothing was
-//!   committed, so there is nothing to resume, and a stranded Planned entry
-//!   would 409 every later switch.
+//! Pending-switch journal (`Planned -> Committed -> RuntimeApplied -> Completed`) that lets a same-target `POST /v1/agent/switch` retry converge after a failure in the non-atomic commit window.
+//! It lives beside the canonical config, so the switch handler's agent-config mutation lock already covers it.
 
 use std::path::{Path, PathBuf};
 
@@ -34,22 +12,15 @@ pub const SWITCH_JOURNAL_FILE_NAME: &str = "agent-switch.json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SwitchJournal {
-    /// Primary target id before the switch. For the primary-switch path this
-    /// equals the old agent id; for the existing-array-target path it is the
-    /// previously selected target.
+    /// Primary target id before the switch.
     pub old_target_id: String,
     /// Target id the operator asked for (the `agent` request field).
     pub new_target_id: String,
-    /// Registry agent id the switch installs. Post-commit the on-disk primary
-    /// target id is rewritten to this, so retries may reference either id.
+    /// Registry agent id the switch installs; post-commit the on-disk primary target id is rewritten to this, so retries may reference either id.
     pub target_agent_id: String,
-    /// SHA-256 hex of the canonical candidate TOML. A same-target retry must
-    /// reproduce the same candidate; a mismatch means the operator edited
-    /// config mid-flight and the in-flight switch must not be resumed blindly.
+    /// SHA-256 hex of the canonical candidate TOML. A mismatch means the operator edited config mid-flight, so the in-flight switch must not be resumed blindly.
     pub candidate_fingerprint: String,
-    /// Whether the old target's agent was running when the switch committed.
-    /// Journaled because a retry after a process restart can no longer
-    /// observe whether the pre-switch runtime was up.
+    /// Whether the old target's agent was running when the switch committed, which a retry after a process restart can no longer observe.
     pub was_running: bool,
     pub phase: SwitchJournalPhase,
 }
@@ -75,15 +46,12 @@ impl SwitchJournalPhase {
 }
 
 impl SwitchJournal {
-    /// The request `agent` field addresses either the requested target id or,
-    /// after the commit rewrote the primary target id to the agent id, the
-    /// target agent id.
+    /// Whether the request `agent` field addresses this journal's requested target id or its target agent id.
     pub fn requested_target_matches(&self, requested: &str) -> bool {
         requested == self.new_target_id || requested == self.target_agent_id
     }
 
-    /// True while the switch did not finish: the runtime is in a partially
-    /// applied state that a same-target retry must drive to completion.
+    /// True while the runtime is in a partially applied state a same-target retry must drive to completion.
     pub fn is_incomplete(&self) -> bool {
         self.phase != SwitchJournalPhase::Completed
     }
@@ -93,10 +61,7 @@ pub fn switch_journal_path(config_path: &Path) -> Result<PathBuf> {
     Ok(crate::fs_util::parent_dir(config_path)?.join(SWITCH_JOURNAL_FILE_NAME))
 }
 
-/// Load the pending-switch journal, if any. A missing file is `None`; an
-/// unreadable or unparseable file is a hard error — corrupt local state must
-/// not be silently ignored, because the journal is the only record of whether
-/// a switch is half-applied.
+/// Load the pending-switch journal. A missing file is `None`; an unparseable one is a hard error, because the journal is the only record of whether a switch is half-applied.
 pub fn load_switch_journal(config_path: &Path) -> Result<Option<SwitchJournal>> {
     let path = switch_journal_path(config_path)?;
     let content = match std::fs::read(&path) {
@@ -113,8 +78,7 @@ pub fn load_switch_journal(config_path: &Path) -> Result<Option<SwitchJournal>> 
     Ok(Some(journal))
 }
 
-/// Persist a phase transition atomically so a crash between phases never
-/// leaves a half-written journal that would read as corrupt.
+/// Persist a phase transition atomically, so a crash between phases never leaves a half-written journal.
 pub fn persist_switch_journal(config_path: &Path, journal: &SwitchJournal) -> Result<()> {
     let path = switch_journal_path(config_path)?;
     let content =
@@ -125,9 +89,7 @@ pub fn persist_switch_journal(config_path: &Path, journal: &SwitchJournal) -> Re
     crate::fs_util::atomic_write_owner_only(&path, &content)
 }
 
-/// Remove the journal, tolerating a missing file. Only for a switch that
-/// failed before any durable mutation (nothing to resume): a journal past the
-/// commit boundary must be retained for the convergent retry.
+/// Remove the journal, tolerating a missing file. Only for a switch that failed before any durable mutation: a journal past the commit boundary MUST be retained for the convergent retry.
 pub fn remove_switch_journal(config_path: &Path) -> Result<()> {
     let path = switch_journal_path(config_path)?;
     match std::fs::remove_file(&path) {
@@ -137,8 +99,7 @@ pub fn remove_switch_journal(config_path: &Path) -> Result<()> {
     }
 }
 
-/// SHA-256 hex of the canonical candidate TOML. `sha2` matches the installer
-/// and supervisor hashing already used across the runtime.
+/// SHA-256 hex of the canonical candidate TOML.
 pub fn candidate_fingerprint(canonical_toml: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(canonical_toml.as_bytes());
@@ -199,7 +160,6 @@ mod tests {
             .expect("persist");
         remove_switch_journal(&config_path).expect("remove");
         assert_eq!(load_switch_journal(&config_path).expect("load"), None);
-        // Removing again (no journal on disk) is not an error.
         remove_switch_journal(&config_path).expect("remove absent");
     }
 

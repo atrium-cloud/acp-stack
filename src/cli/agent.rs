@@ -40,8 +40,7 @@ pub(super) const DEFAULT_AGENT_TEST_PROMPT: &str =
     "Reply with exactly this text and nothing else: acp-stack test ok";
 pub(super) const DEFAULT_AGENT_TEST_TIMEOUT: &str = "180s";
 /// Adapters emit no `session/update` before the first streamed token or tool
-/// event (verified against codex-acp and OpenCode), so this window budgets
-/// time-to-first-token: slow providers routinely exceed 30s cold.
+/// event, so this budgets time-to-first-token: slow providers exceed 30s cold.
 pub(super) const DEFAULT_AGENT_TEST_PROGRESS_TIMEOUT: &str = "90s";
 
 #[derive(Debug, Subcommand)]
@@ -416,8 +415,6 @@ mod tests {
 
     #[test]
     fn codex_openai_defaults_to_openai_api_key_ref() {
-        // Codex + openai is an ordinary keyed provider; only the endpoint-
-        // override lane treats the pair specially.
         assert_eq!(
             default_api_key_ref_for_agent_provider("codex", "openai"),
             Some("OPENAI_API_KEY".to_owned())
@@ -522,9 +519,6 @@ mod tests {
 
     #[test]
     fn build_agent_check_report_covers_adapter_override_steps() {
-        // A native entry with a designated adapter reports harness +
-        // adapter steps; the adapter tracks the override's npm package while
-        // the harness keeps its shell-recipe Unknown verdict.
         let entry = embedded_entry("goose");
         let mut agent = check_agent("goose");
         agent.adapter_override = Some(crate::config::AgentAdapterOverrideConfig {
@@ -621,9 +615,8 @@ mod tests {
 
     #[test]
     fn build_agent_check_report_returns_stale_for_codex_adapter() {
-        // Codex declares npm for both harness (`@openai/codex`) and adapter
-        // (`@agentclientprotocol/codex-acp`). The install-path resolver prefers npm
-        // when both are present, so the mock provides both.
+        // Codex declares npm for both harness and adapter, and the resolver
+        // prefers npm when both are present, so the mock provides both.
         let entry = embedded_entry("codex");
         let resolver = MockResolver::new()
             .with_npm("@openai/codex", "rust-v999.0.0")
@@ -634,12 +627,10 @@ mod tests {
         ];
         let report = build_agent_check_report(&entry, &check_agent("test-agent"), &rows, &resolver);
         assert_eq!(report.len(), 2);
-        // harness: npm version drift -> stale
         assert!(matches!(
             &report[0],
             (step, AgentCheckStatus::Stale { .. }) if step == "harness"
         ));
-        // adapter: npm version drift -> stale
         assert!(matches!(
             &report[1],
             (step, AgentCheckStatus::Stale { .. }) if step == "adapter"
@@ -686,8 +677,6 @@ mod tests {
     #[test]
     fn build_agent_check_report_marks_resolver_errors_as_unknown() {
         let entry = embedded_entry("codex");
-        // No mock entries -> resolver errors -> report should mark each step
-        // as Unknown rather than crash the whole report.
         let resolver = MockResolver::new();
         let rows = vec![installer_row("adapter", Some("0.1.0"))];
         let report = build_agent_check_report(&entry, &check_agent("test-agent"), &rows, &resolver);

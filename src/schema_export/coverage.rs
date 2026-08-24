@@ -1,24 +1,10 @@
-//! Measures how completely the published schema covers the real `/v1` HTTP
-//! surface. The umbrellas in `super::{requests, responses}` are hand-maintained,
-//! so a new endpoint can be added with no schema entry; this check catches that
-//! by re-deriving the wire-type set *independently* — from the axum handler
-//! signatures in the route sources — and diffing it against the generated
-//! `$defs`.
+//! Measures how completely the published schema covers the `/v1` HTTP surface
+//! by re-deriving the wire-type set independently from the axum handler
+//! signatures and diffing it against the generated `$defs`.
 //!
-//! Ground truth: every `Json<T>` / `Query<T>` extractor is a request type, and
-//! every `ApiSuccess<T>` / `ApiResult<T>` return is a response type. A type used
-//! by a handler but absent from `$defs` is an uncovered gap. Types that bypass
-//! the envelope (raw byte/`Response` handlers, WebSocket frames) never appear in
-//! these patterns, so they are excluded from the denominator by construction —
-//! matching the documented gaps, not silently missed.
-//!
-//! The bootstrap init API (`src/cli/init/serve`) is scanned too, so a new init
-//! request body added without a `schema_umbrella` entry fails coverage. Its
-//! handlers return `-> Response` and build bodies via `ApiSuccess::new(value)`
-//! rather than a typed `ApiSuccess<T>` return, so init *response* types are not
-//! textually discoverable here; those stay guarded only by the hand-maintained
-//! `InitResponseTypes` umbrella. A constructor-pattern scanner would be the only
-//! way to close that, and it is not worth the fragility.
+//! Init responses are a known blind spot: those handlers return `-> Response`
+//! and build bodies via `ApiSuccess::new(value)`, so they are not textually
+//! discoverable and stay guarded only by the `InitResponseTypes` umbrella.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -27,21 +13,18 @@ use serde_json::Value;
 
 // CONSTANTS
 /// Handler source roots scanned for wire-type usage, relative to the manifest.
-/// Includes the bootstrap init API so its request DTOs are covered too (see the
-/// module doc for why init responses are not discoverable here).
 const HANDLER_ROOTS: &[&str] = &["src/api/routes", "src/cli/init/serve"];
 /// Individual handler source files scanned (not whole directories).
 const HANDLER_FILES: &[&str] = &["src/api/ws.rs"];
 /// Extractor/return markers and the namespace each contributes to.
 const REQUEST_MARKERS: &[&str] = &["Json<", "Query<"];
 const RESPONSE_MARKERS: &[&str] = &["ApiSuccess<", "ApiResult<"];
-/// Payload type names that are intentionally not part of the typed contract:
-/// `Value` is the untyped `config_import` response; `Bytes`/`Body`/`Response`
-/// are the envelope-bypassing raw handlers.
+/// Payload type names intentionally outside the typed contract: the untyped
+/// `config_import` response and the envelope-bypassing raw handlers.
 const UNTYPED_PAYLOADS: &[&str] = &["Value", "Bytes", "Body", "Response", "String"];
 
-/// A namespace's coverage: how many distinct handler wire types were found and
-/// which of them are missing from the generated schema.
+/// A namespace's coverage: the handler wire types found and which are missing
+/// from the generated schema.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamespaceCoverage {
     pub namespace: &'static str,
@@ -54,8 +37,7 @@ impl NamespaceCoverage {
         self.used.len() - self.uncovered.len()
     }
 
-    /// Fraction in `[0, 1]`; a namespace with no discovered types is fully
-    /// covered by definition.
+    /// Fraction in `[0, 1]`; no discovered types counts as fully covered.
     pub fn ratio(&self) -> f64 {
         if self.used.is_empty() {
             return 1.0;
@@ -118,7 +100,7 @@ fn defs_keys(schema: &Value, namespace: &str) -> BTreeSet<String> {
         .unwrap_or_default()
 }
 
-/// Read every handler source once (directory roots recursively + single files).
+/// Read every handler source once.
 fn handler_sources(manifest: &Path) -> Vec<String> {
     let mut files = Vec::new();
     for root in HANDLER_ROOTS {
@@ -147,8 +129,7 @@ fn collect_rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Pull the simple type name out of every `MARKER<...>` occurrence across all
-/// sources, dropping untyped payloads and generic noise.
+/// Pull the simple type name out of every `MARKER<...>` occurrence.
 fn extract_payloads(sources: &[String], markers: &[&str]) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
     for source in sources {
@@ -167,10 +148,8 @@ fn extract_payloads(sources: &[String], markers: &[&str]) -> BTreeSet<String> {
     found
 }
 
-/// Read the type name that begins `text` (immediately after a `<`), resolving
-/// `a::b::Type` to its last segment and stopping at the first non-path
-/// character. Returns `None` for a nested generic opener (`Vec<...>`, `&...`)
-/// that is not itself a named payload.
+/// Read the type name beginning `text`, resolving `a::b::Type` to its last
+/// segment; `None` for a nested generic opener that is not a named payload.
 fn leading_type_name(text: &str) -> Option<String> {
     let end = text
         .find(|c: char| !c.is_alphanumeric() && c != '_' && c != ':')

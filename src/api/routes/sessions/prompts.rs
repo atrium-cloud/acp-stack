@@ -36,9 +36,7 @@ pub(crate) async fn sessions_prompt_handler(
         .model_catalog
         .ensure_prompt_supported(selected_agent_model(&agent_for_prompt), &blocks)
         .await?;
-    // Canonical JSON of the parsed blocks is durable storage; the original
-    // request body shape is what the agent sees, so we serialize the typed
-    // ACP value (consistent with how we read it back).
+    // Durable storage holds the canonical parsed blocks, matching how they are read back.
     let prompt_json = serde_json::to_string(&blocks).map_err(|err| {
         StackError::PromptBodyInvalid(format!("failed to canonicalize prompt: {err}"))
     })?;

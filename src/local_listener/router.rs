@@ -53,10 +53,9 @@ use crate::api::{self, AppState};
 use crate::auth::KeyKind;
 use crate::config::LocalSessionAuth;
 
-/// Build the Axum router that the internal local socket serves. Low-risk
-/// observability routes are always keyless. Session-tier HTTP routes are
-/// mounted but return 404 unless `[local].session_auth = "keyless"` is active.
-/// Admin routes and WebSocket upgrades are never mounted here.
+/// Build the Axum router the internal local socket serves. Low-risk
+/// observability routes are always keyless; session-tier routes 404 unless
+/// `[local].session_auth = "keyless"`. Admin routes are NEVER mounted here.
 pub fn build_local_router(state: AppState) -> Router {
     let limit = state.max_request_bytes;
 
@@ -89,8 +88,8 @@ pub fn build_local_router(state: AppState) -> Router {
         .route("/v1/logs/security", get(logs_security_handler))
         .route("/v1/logs/sessions", get(logs_sessions_handler))
         .route("/v1/metrics/summary", get(metrics_summary_handler))
-        // Same observability class as logs/metrics: mounted for keyless-mode
-        // session readers, but not on the always-keyless allowlist.
+        // Mounted for keyless-mode session readers, but deliberately off the
+        // always-keyless allowlist.
         .route("/v1/installer/runs", get(installer_runs_handler))
         .route(
             "/v1/sessions",
@@ -159,10 +158,9 @@ pub fn build_local_router(state: AppState) -> Router {
             enforce_local_session_access,
         ));
 
-    // Layer ordering matters here. In axum, each `.layer` call wraps further
-    // out: the LAST layer added sees requests first and responses last. We want
-    // `tag_local` outermost so the `KeyKind::Local` extension is on the request
-    // before `ensure_envelope` or `log_api_request` inspect it.
+    // LAYER ORDER MATTERS: the LAST `.layer` added sees requests first, so
+    // `tag_local` must stay outermost or `KeyKind::Local` is missing when
+    // `ensure_envelope` and `log_api_request` inspect the request.
     Router::new()
         .merge(routes)
         .layer(middleware::from_fn_with_state(
@@ -342,8 +340,7 @@ mod tests {
             (Method::GET, "/v1/permissions/pending"),
             (Method::GET, "/v1/agent/skills"),
             (Method::GET, "/v1/agent/skills/catalog"),
-            // An unresolvable source fails fast (400) before any GitHub fetch, so
-            // this asserts the route is mounted without a live network download.
+            // An unresolvable source fails fast (400) before any GitHub fetch.
             (Method::GET, "/v1/agent/skills/source?source=nonsense"),
             (Method::POST, "/v1/sessions"),
         ] {

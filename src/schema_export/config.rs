@@ -1,6 +1,5 @@
-//! The Deserialize-contract umbrella for the `acps-config.toml` schema. `Config`
-//! transitively references every section struct, so registering the root here
-//! pulls the whole config model into `#/$defs/config/*`.
+//! The Deserialize-contract umbrella for the `acps-config.toml` schema:
+//! registering the `Config` root pulls every section into `#/$defs/config/*`.
 
 use crate::config::Config;
 

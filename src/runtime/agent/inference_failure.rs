@@ -1,25 +1,15 @@
 //! Inference-failure classifier for ACP agent JSON-RPC errors.
 //!
-//! When the agent's `session/prompt` (or any ACP method) fails because the
-//! underlying inference provider returned an HTTP error, the SDK surfaces it
-//! as an `agent_client_protocol::Error` whose `Display` output embeds the
-//! upstream status text. The supervisor needs to distinguish that case from
-//! generic ACP-protocol failures so dashboards can separate inference incidents
-//! from agent bugs.
-//!
-//! Sanitization invariant: the returned [`Classified`] carries only an enum,
-//! an `Option<u16>`, and a `&'static str`. URLs, headers, request/response
-//! bodies, and any secret text embedded in `err.to_string()` cannot flow
-//! through this type. Callers persist only the static-str category, so the raw
-//! upstream string never reaches SQLite or events.
+//! Sanitization invariant: [`Classified`] carries only an enum, an
+//! `Option<u16>`, and a `&'static str`, so no secret text embedded in
+//! `err.to_string()` can reach SQLite or events through this type.
 
 use agent_client_protocol::Error as AcpError;
 
 use crate::state::FailureClass;
 
-/// Static reason category attached to a [`Classified`]. Returned as a
-/// `&'static str` (rather than the raw upstream message) so the classifier is
-/// the only place that needs to vet text for safety.
+/// Static reason categories, kept `&'static str` rather than raw upstream text
+/// so the classifier is the only place that must vet text for safety.
 pub mod reason {
     pub const RATE_LIMIT: &str = "rate_limit";
     pub const INTERNAL_SERVER_ERROR: &str = "internal_server_error";
@@ -31,8 +21,8 @@ pub mod reason {
     pub const UNKNOWN: &str = "unknown";
 }
 
-/// Classifier output. Contains only `'static` / primitive fields so no portion
-/// of the original error text can be transitively persisted by callers.
+/// Classifier output. Only `'static`/primitive fields, so no part of the
+/// original error text can be transitively persisted by callers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Classified {
     /// Bucket for `prompts.failure_class` persistence.
@@ -53,10 +43,8 @@ impl Classified {
     }
 }
 
-/// Inspect an ACP error and decide whether it represents an upstream-inference
-/// HTTP failure. Returns a `Classified` whose `class` is one of
-/// `Inference5xx` / `Inference4xx` (when an HTTP status was parsed out of the
-/// message) or `AgentRequest` for everything else.
+/// Classify an ACP error as an upstream-inference HTTP failure
+/// (`Inference5xx`/`Inference4xx`) or `AgentRequest` for everything else.
 pub fn classify(err: &AcpError) -> Classified {
     let rendered = err.to_string();
     match extract_status_code(&rendered) {
@@ -96,25 +84,12 @@ fn reason_for(status_code: u16) -> &'static str {
     }
 }
 
-/// Scan a string for an HTTP status code embedded in a recognizable pattern.
-/// Patterns matched (case-insensitive on the prefix word):
-///   - `status: NNN`
-///   - `status code: NNN`
-///   - `status code NNN`
-///   - `HTTP NNN`
-///   - `HTTP/x.y NNN`
-///   - `NNN <reason phrase>` (e.g. `503 Service Unavailable`)
-///
-/// Returns the first plausible 3-digit code (>= 400, < 600) it finds. Numbers
-/// inside unrelated contexts (timestamps, ids, free-form prose) are filtered
-/// because we require the recognizable prefix word OR the canonical reason
-/// phrase right after the number.
+/// First plausible 3-digit status code (400..600) preceded by a recognizable
+/// prefix word or followed by a canonical reason phrase; the required context
+/// is what keeps timestamps and ids from matching.
 fn extract_status_code(rendered: &str) -> Option<u16> {
     let lower = rendered.to_ascii_lowercase();
 
-    // Prefix-based patterns: look for the keyword, then parse the next 3-digit
-    // number. The lowercase-search-then-original-bytes split avoids ASCII case
-    // sensitivity without copying every substring.
     const PREFIX_PATTERNS: &[&str] = &[
         "status code:",
         "status code ",
@@ -138,9 +113,7 @@ fn extract_status_code(rendered: &str) -> Option<u16> {
         }
     }
 
-    // Reason-phrase patterns: e.g. "503 Service Unavailable", "429 Too Many
-    // Requests". These are the bodies most providers ship verbatim in their
-    // JSON `error.message` field.
+    // Most providers ship these phrases verbatim in `error.message`.
     const REASON_PHRASES: &[(&str, u16)] = &[
         ("too many requests", 429),
         ("internal server error", 500),
@@ -150,9 +123,8 @@ fn extract_status_code(rendered: &str) -> Option<u16> {
     ];
     for (phrase, default_code) in REASON_PHRASES {
         if let Some(found) = lower.find(phrase) {
-            // Look 6 bytes back for a leading 3-digit code separated by space.
-            // If found, prefer the parsed code; otherwise fall back to the
-            // canonical mapping for the phrase.
+            // Prefer a 3-digit code immediately before the phrase; otherwise
+            // fall back to the phrase's canonical mapping.
             let window_start = found.saturating_sub(6);
             let window = &rendered[window_start..found];
             if let Some(code) = trailing_status_code(window) {
@@ -165,10 +137,8 @@ fn extract_status_code(rendered: &str) -> Option<u16> {
     None
 }
 
-/// Parse a 3-digit number from a slice, skipping ASCII whitespace. The run of
-/// digits must be exactly 3 long: `5031` is not status 503. Only returns codes
-/// in the HTTP-error ranges this classifier cares about (400..600) to avoid
-/// matching unrelated numbers like ports or counts.
+/// Parse a 3-digit code (400..600) from the head of a slice. The digit run
+/// must be exactly 3 long: `5031` is not status 503.
 fn parse_status_at(slice: &str) -> Option<u16> {
     let trimmed = slice.trim_start();
     let digits: String = trimmed
@@ -186,9 +156,7 @@ fn parse_status_at(slice: &str) -> Option<u16> {
     }
 }
 
-/// Look for a 3-digit status code at the end of a short window of text,
-/// allowing trailing whitespace. Returns `None` if the window doesn't end
-/// with a recognizable code.
+/// Parse a 3-digit code (400..600) from the tail of a short text window.
 fn trailing_status_code(window: &str) -> Option<u16> {
     let trimmed = window.trim_end();
     let digits: String = trimmed
@@ -294,15 +262,12 @@ mod tests {
 
     #[test]
     fn does_not_leak_url_or_secret_into_reason_category() {
-        // The crucial sanitization invariant: even when the SDK error embeds a
-        // URL with a query-string secret, the classifier surfaces only the
-        // vetted `'static` reason label.
+        // Sanitization invariant: even when the SDK error embeds a URL with a
+        // query-string secret, only the vetted `'static` label surfaces.
         let message = "upstream call to https://api.openai.com/v1/chat?key=sk-secret returned status: 503 Service Unavailable";
         let result = classify(&make_error(message));
         assert_eq!(result.class, FailureClass::Inference5xx);
         assert_eq!(result.status_code, Some(503));
-        // `'static` strings can only point to the constants in `reason::*`.
-        // Iterate the full set to prove the classifier never invents one.
         let allowed: &[&str] = &[
             reason::RATE_LIMIT,
             reason::INTERNAL_SERVER_ERROR,
@@ -317,15 +282,12 @@ mod tests {
             allowed.contains(&result.reason_category),
             "reason_category must be one of the allowed static labels"
         );
-        // Also confirm no portion of the URL appears in the returned struct.
         assert!(!result.reason_category.contains("openai"));
         assert!(!result.reason_category.contains("sk-secret"));
     }
 
     #[test]
     fn handles_status_with_long_digit_runs_safely() {
-        // `status: 5031` must not be parsed as `503`. The boundary check
-        // rejects trailing digits to avoid misclassifying unrelated numbers.
         let result = classify(&make_error("status: 5031"));
         assert_eq!(result.class, FailureClass::AgentRequest);
         assert_eq!(result.status_code, None);

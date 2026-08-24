@@ -13,13 +13,9 @@ pub fn default_socket_path() -> Result<PathBuf> {
     Ok(home.join(".local/share/acp-stack/acps-local.sock"))
 }
 
-/// Unlinks the socket file on drop — but only if the inode at the path still
-/// matches the one we bound. Without that check, a second daemon that
-/// concurrently took over the same socket path could have its live socket
-/// unlinked when the first daemon's guard runs. Inode identity is the cheap
-/// invariant we own: `UnixListener::bind` created the inode at this path; a
-/// subsequent bind by another process creates a *new* inode at the same
-/// path. We refuse to unlink unless they match.
+/// Unlinks the socket file on drop, but only when the inode at the path still
+/// matches the bound one — otherwise a second daemon that took over the path
+/// would have its live socket unlinked.
 pub struct SocketGuard {
     path: PathBuf,
     inode: Option<u64>,
@@ -33,8 +29,6 @@ impl SocketGuard {
 
 impl Drop for SocketGuard {
     fn drop(&mut self) {
-        // ENOENT here just means another process already unlinked it (e.g. a
-        // manual cleanup); not worth surfacing.
         let current_inode = match current_inode(&self.path) {
             Ok(inode) => inode,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
@@ -60,35 +54,25 @@ impl Drop for SocketGuard {
     }
 }
 
-/// Bound listener with its cleanup guard. Returned from `bind_local` so the
-/// caller can confirm bind success synchronously (before reporting startup),
-/// then hand the pair to `serve_local` for the accept loop.
+/// Bound listener with its cleanup guard.
 pub struct BoundLocalListener {
     listener: UnixListener,
     guard: SocketGuard,
 }
 
 /// Whether the listener may chmod (`0o700`) an already-existing socket parent
-/// directory. The default path under `~/.local/share/acp-stack/` is
-/// daemon-managed, so repair is safe; an operator-configured `socket_path`
-/// pointing into a shared directory must not have its perms silently changed.
+/// directory.
 pub enum ParentPolicy {
     /// Daemon-managed parent: create if missing, chmod to `0o700` if existing.
     RepairOwnerOnly,
-    /// Operator-configured parent: create if missing (always `0o700` for
-    /// fresh dirs); existing parents are validated as owner-only but not
-    /// chmodded — fail startup if they are group- or world-writable so a
-    /// misconfigured `socket_path` cannot park the socket inside a shared
-    /// directory where another local user could unlink or spoof it.
+    /// Operator-configured parent: created `0o700`, but an existing one is only
+    /// validated — startup fails rather than silently widening a shared dir.
     ValidateOwnerOnly,
 }
 
-/// Prepare the parent directory, refuse to bind if a live daemon already owns
-/// the socket, remove a stale socket inode if one is present, bind a
-/// `UnixListener`, and chmod the socket file to `0o600`. Returns the bound
-/// listener + a `SocketGuard` so `cli::run_serve` fails fast if the daemon
-/// cannot listen locally, instead of discovering the failure only after the
-/// TCP server exits.
+/// Prepare the parent directory, clear a stale socket inode, bind a
+/// `UnixListener`, and chmod it to `0o600`; refuses to bind when a live daemon
+/// already owns the socket.
 pub async fn bind_local(
     socket_path: &Path,
     parent_policy: ParentPolicy,
@@ -107,11 +91,9 @@ pub async fn bind_local(
     Ok(BoundLocalListener { listener, guard })
 }
 
-/// Run the accept loop until shutdown. Consumes the `SocketGuard` so the
-/// socket file is unlinked on exit (graceful or task abort).
+/// Run the accept loop until shutdown, consuming the `SocketGuard` so the
+/// socket file is unlinked on exit or task abort.
 pub async fn serve_local(state: AppState, bound: BoundLocalListener) -> Result<()> {
-    // Take ownership of the guard so its `Drop::drop` runs when this future
-    // is cancelled or completes.
     let BoundLocalListener { listener, guard } = bound;
     let _guard = guard;
     let app = build_local_router(state);
@@ -123,8 +105,8 @@ pub async fn serve_local(state: AppState, bound: BoundLocalListener) -> Result<(
 
 fn prepare_parent_dir(parent: &Path, policy: ParentPolicy) -> Result<()> {
     if !parent.exists() {
-        // Fresh creation is always 0o700 regardless of policy: nobody owns
-        // the path yet, so there is no operator-managed mode to preserve.
+        // Fresh creation is 0o700 regardless of policy: there is no
+        // operator-managed mode to preserve yet.
         return create_dir_owner_only(parent);
     }
     match policy {
@@ -162,9 +144,8 @@ fn validate_parent_dir_owner_only(parent: &Path) -> Result<()> {
         });
     }
     let mode = metadata.permissions().mode();
-    // Group- or world-accessible (any non-owner permission bits set) is a
-    // hard reject — even read access lets other local users discover the
-    // socket inode and enumerate clients.
+    // Any non-owner permission bit is a hard reject: even read access lets
+    // other local users discover the socket inode and enumerate clients.
     if mode & 0o077 != 0 {
         return Err(StackError::ServeIo {
             source: std::io::Error::new(
@@ -200,12 +181,9 @@ fn validate_parent_dir_owner_only(_parent: &Path) -> Result<()> {
 }
 
 /// Detect whether an existing socket at `path` is live (refuse to bind) or
-/// stale (unlink and continue). The probe is a single `UnixStream::connect`:
-/// if it succeeds, a daemon is accepting on this socket and we must not
-/// touch it; if it returns `ConnectionRefused`, the inode is orphaned and
-/// safe to clean. Other inode types (regular file, directory, symlink) are
-/// always rejected — a misconfigured `socket_path` must never destroy user
-/// data at the configured location.
+/// stale (unlink and continue), probing with a single `UnixStream::connect`.
+/// Non-socket inodes are always rejected: a misconfigured `socket_path` must
+/// never destroy user data at the configured location.
 async fn handle_existing_socket(path: &Path) -> Result<()> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(meta) => meta,
@@ -244,10 +222,8 @@ async fn handle_existing_socket(path: &Path) -> Result<()> {
                 std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
             ) =>
         {
-            // Re-stat before unlinking. If another startup raced us and
-            // bound a fresh socket between our probe and this unlink, the
-            // inode will have changed — refusing to unlink leaves their
-            // socket intact and surfaces a clean bind error to us.
+            // Re-stat before unlinking: a startup that raced us between the
+            // probe and here changed the inode, and their socket must survive.
             let live_inode = match current_inode(path) {
                 Ok(inode) => Some(inode),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,

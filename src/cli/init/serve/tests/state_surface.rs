@@ -1,8 +1,5 @@
-//! Session state surface: the `signal` stream, the replay carried in hello and
-//! the REST status, and — through the reference fold — the category view a
-//! client derives from them. The instance emits raw signals; every view-shaped
-//! assertion runs `state_fold` over what the session emitted, so these tests
-//! pin both the wire stream and the derivation a client must reproduce.
+//! Session state surface: the `signal` stream, the hello/REST replay, and the category view
+//! a client derives from them via `state_fold`.
 
 use super::super::*;
 use super::support::*;
@@ -36,8 +33,6 @@ async fn folded_view_rides_hello_and_rest_status() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    // WebSocket and REST clients fold the same input: the replay they carry is
-    // byte-for-byte the same signal stream.
     assert_eq!(body["data"]["signals"], hello["signals"]);
     assert_eq!(body["data"]["last_seq"], hello["last_seq"]);
 }
@@ -72,8 +67,7 @@ fn each_signal_emits_exactly_one_event() {
         seqs.windows(2).all(|pair| pair[1] > pair[0]),
         "seq must stay strictly monotonic across interleaved frames: {seqs:?}"
     );
-    // Three signals in, three `signal` events out: no dedup, no fold on the
-    // instance, one event per fact.
+    // Three signals in, three events out: the instance does not dedup or fold.
     assert_eq!(signal_events(&session).len(), 3);
 }
 
@@ -92,8 +86,7 @@ fn a_pending_prompt_makes_its_category_await_in_the_fold() {
     let handle = std::thread::spawn(move || driver.select(request));
     let pending = wait_for_pending_input(&session);
 
-    // No state frame trails the prompt: `awaiting_input` is the client's fold of
-    // `pending_input`, not a frame the instance sends.
+    // `awaiting_input` is the client's fold of `pending_input`, not a frame the instance sends.
     let events = session.events_after(0);
     assert!(
         events
@@ -111,7 +104,6 @@ fn a_pending_prompt_makes_its_category_await_in_the_fold() {
         .submit_input(&pending.request_id, json!(0))
         .expect("submit input");
     handle.join().expect("driver thread").expect("selection");
-    // The prompt is gone, so nothing awaits; the answer itself settles nothing.
     assert!(awaiting_ids(&folded_state(&session)).is_empty());
 }
 
@@ -141,8 +133,7 @@ fn at_most_one_category_awaits_input_across_the_whole_surface() {
             .expect("submit input");
         handle.join().expect("driver thread").expect("selection");
     }
-    // There is one pending-input slot and one wizard thread, so no fold of the
-    // stream can ever show two categories awaiting.
+    // One pending-input slot and one wizard thread, so two categories can never await at once.
     assert!(awaiting_ids(&folded_state(&session)).len() <= 1);
 }
 
@@ -168,9 +159,7 @@ fn secret_answers_never_reach_the_state_surface() {
         .submit_input(&pending.request_id, json!(SECRET))
         .expect("submit password");
     handle.join().expect("driver thread").expect("password");
-    // Settlement names the provider that was written, never the answer: the
-    // signal is emitted at the config-write site, which carries the provider id
-    // it just wrote.
+    // Settlement names the provider that was written, never the answer.
     session.apply_state_signal(InitStateSignal::CategorySettled {
         category: InitCategory::Provider,
         value: Some("openrouter".to_owned()),
@@ -184,8 +173,7 @@ fn secret_answers_never_reach_the_state_surface() {
     for surface in [&history, &hello, &status] {
         assert!(!surface.contains(SECRET), "secret leaked into {surface}");
     }
-    // The prompt named the ref, so history keeps it; the settled signal that
-    // hello and status carry names the provider, not the ref.
+    // The prompt named the ref, so history keeps it; hello and status name the provider.
     assert!(history.contains("OPENROUTER_API_KEY"));
     assert!(hello.contains("openrouter"));
     assert!(status.contains("openrouter"));
@@ -218,8 +206,6 @@ fn replay_after_seq_returns_signal_events_in_order() {
         .map(|event| event["seq"].as_u64().unwrap_or_default())
         .collect::<Vec<_>>();
     assert!(seqs.windows(2).all(|pair| pair[1] > pair[0]), "{seqs:?}");
-    // Exactly the two signals after the cut, in order, each carrying its own
-    // settled value verbatim.
     let settled = replayed
         .iter()
         .filter(|event| event["type"] == json!("signal"))
@@ -243,8 +229,7 @@ fn probe_verdict_flips_mcp_and_outranks_the_registry() {
     });
     let ready = folded_state(&session);
     assert_eq!(category(&ready, "mcp")["status"], json!("ready"));
-    // A lane that is still live explains nothing: `reason` says why a category
-    // is hidden, so it rides only with `not_applicable`.
+    // `reason` says why a category is hidden, so it rides only with `not_applicable`.
     assert_eq!(category(&ready, "mcp")["reason"], Value::Null);
 
     session.apply_state_signal(InitStateSignal::CategoryApplicability {
@@ -264,8 +249,7 @@ fn probe_verdict_flips_mcp_and_outranks_the_registry() {
         "a hidden lane must say what hid it"
     );
 
-    // The installed harness is the authority: a registry claim arriving
-    // afterwards is still forwarded, but the fold refuses it.
+    // The installed harness is the authority: a later registry claim is forwarded but refused.
     session.apply_state_signal(InitStateSignal::CategoryApplicability {
         category: InitCategory::Mcp,
         applicable: true,
@@ -274,21 +258,15 @@ fn probe_verdict_flips_mcp_and_outranks_the_registry() {
     });
     let latest = folded_state(&session);
     assert_eq!(category(&latest, "mcp")["status"], json!("not_applicable"));
-    // The outranked verdict is refused as one write group: had the reason been
-    // cleared while the verdict stood, the lane would still hide but could no
-    // longer say what hid it.
+    // The outranked verdict is refused as one write group, so the reason survives with it.
     assert_eq!(
         category(&latest, "mcp")["reason"],
         json!("agent does not advertise MCP support")
     );
 }
 
-// Applicability is a claim about whether init will drive a lane, and it can
-// arrive after the lane already ran: the Kimi model pin writes its model before
-// `session/new` reports which values the harness advertises, and that discovery
-// pass retracts a lane it finds nothing for. A lane that wrote a value
-// demonstrably applied, so the retraction is refused rather than erasing what
-// landed in config.
+// The Kimi model pin writes before `session/new` discovery reports advertised values, so a
+// retraction can arrive after a lane already wrote; a lane that wrote demonstrably applied.
 #[test]
 fn a_late_inapplicable_verdict_cannot_retract_a_settled_lane() {
     let session = test_session("init_state_late_retraction");
@@ -310,13 +288,10 @@ fn a_late_inapplicable_verdict_cannot_retract_a_settled_lane() {
         category(&latest, "model")["value"],
         json!("kimi-k2-thinking")
     );
-    // The refused verdict must leave no trace: a `reason` on a settled lane
-    // would tell the client a lane it can see was ruled out.
     assert_eq!(category(&latest, "model")["reason"], Value::Null);
 }
 
-// The mirror case: a retraction that arrives before the lane breaks is real
-// when it lands, but the failure that follows is the last word.
+// A retraction is real when it lands, but a failure that follows is the last word.
 #[test]
 fn a_failure_after_an_inapplicable_verdict_still_displays_failed() {
     let session = test_session("init_state_failure_after_retraction");
@@ -344,9 +319,7 @@ fn a_failure_after_an_inapplicable_verdict_still_displays_failed() {
     );
 }
 
-// A step that fails without parking the session badges its lane from the
-// `step_finished` signal alone, and only once: the failure and the step ending
-// are one signal.
+// A step that fails without parking the session badges its lane from `step_finished` alone.
 #[test]
 fn a_failed_step_badges_its_category_once_on_a_live_session() {
     let session = test_session("init_state_step_failure");
@@ -371,15 +344,11 @@ fn a_failed_step_badges_its_category_once_on_a_live_session() {
     assert!(session.is_active());
 }
 
-// `provider_configure` owns three lanes, and the model and mode lanes badge
-// themselves before the error leaves the step. The step then reports the same
-// error on its way out, and must not read as a second, provider-shaped failure
-// on top of the blame that was already assigned.
+// `provider_configure` owns three lanes; a lane that already badged itself keeps the blame
+// when the step echoes the same error on its way out.
 #[test]
 fn a_step_failure_leaves_a_lane_that_already_took_the_blame_alone() {
     let session = test_session("init_state_step_failure_attributed");
-    // The provider lane settles at its own write site, inside the step and
-    // ahead of the model lane that goes on to break.
     session.apply_state_signal(InitStateSignal::CategorySettled {
         category: InitCategory::Provider,
         value: Some("openrouter".to_owned()),
@@ -408,9 +377,7 @@ fn a_step_failure_leaves_a_lane_that_already_took_the_blame_alone() {
     assert_eq!(category(&latest, "provider")["value"], json!("openrouter"));
 }
 
-// `failed` outranks `not_applicable`, so a step badging a lane this run does not
-// have would invent a broken lane. The terminal error frame and `current_step`
-// are what carry such a failure.
+// `failed` outranks `not_applicable`, so a step badging an absent lane would invent one.
 #[test]
 fn a_step_failure_never_badges_a_lane_this_run_does_not_have() {
     let session = test_session("init_state_step_failure_absent_lane");
@@ -440,8 +407,7 @@ fn a_step_failure_never_badges_a_lane_this_run_does_not_have() {
         json!("agent does not take a provider")
     );
 
-    // The same holds for the mode-only lane shape, where the blame was assigned
-    // explicitly and the step is echoing it.
+    // Same for the mode-only lane shape, where blame was assigned and the step echoes it.
     session.apply_state_signal(InitStateSignal::CategoryFailed {
         category: InitCategory::Mode,
         code: "init.mode_write_failed".to_owned(),
@@ -459,9 +425,7 @@ fn a_step_failure_never_badges_a_lane_this_run_does_not_have() {
     assert_eq!(category(&latest, "mode")["status"], json!("failed"));
 }
 
-// The other direction: nothing claimed the failure, so the step's own lane is
-// the only thing that can carry it — settled or not. The MCP lane settles at
-// the probe, well before the write that can still break.
+// Nothing claimed the failure, so the step's own lane carries it, settled or not.
 #[test]
 fn an_unclaimed_step_failure_badges_its_lane_over_a_settlement() {
     let session = test_session("init_state_step_failure_over_settlement");
@@ -487,10 +451,8 @@ fn an_unclaimed_step_failure_badges_its_lane_over_a_settlement() {
     );
 }
 
-// The mirror of the retraction guard: a settlement read off the config that was
-// already on disk is a report, not evidence the lane exists. When the installed
-// agent has since dropped the lane, the live discovery pass is what knows, and
-// the stale value goes with the withdrawn lane.
+// A settlement read off on-disk config is a report, not evidence the lane exists, so live
+// discovery outranks it and the stale value goes with the withdrawn lane.
 #[test]
 fn discovery_withdraws_a_settlement_carried_over_from_existing_config() {
     let session = test_session("init_state_provisional_retraction");
@@ -522,10 +484,7 @@ fn discovery_withdraws_a_settlement_carried_over_from_existing_config() {
     );
 }
 
-// A provisional settlement rests on the config, and a check that never ran is no
-// evidence against it. The mode-only discovery lane swallows a harness that will
-// not open a provisional session, and that skip must not report a mode the
-// config genuinely holds as a lane the agent does not have.
+// A discovery check that never ran is no evidence against a provisional settlement.
 #[test]
 fn an_unavailable_discovery_check_withdraws_nothing_the_config_holds() {
     let session = test_session("init_state_discovery_unavailable");
@@ -547,9 +506,7 @@ fn an_unavailable_discovery_check_withdraws_nothing_the_config_holds() {
     assert_eq!(category(&latest, "mode")["reason"], Value::Null);
 }
 
-// With nothing on the lane, the same verdict is the whole story: the run will
-// not discover a mode and none is configured, so the lane must read as absent
-// with the skip reason rather than staying open forever.
+// With nothing on the lane, the same verdict closes it rather than leaving it open forever.
 #[test]
 fn an_unavailable_discovery_check_still_closes_a_lane_with_no_outcome() {
     let session = test_session("init_state_discovery_unavailable_open_lane");
@@ -567,8 +524,7 @@ fn an_unavailable_discovery_check_still_closes_a_lane_with_no_outcome() {
         json!("mode discovery skipped: agent exited")
     );
 
-    // And the registry does not get to claim the lane back afterwards: the
-    // harness is what failed to produce it.
+    // The registry does not get to claim the lane back: the harness failed to produce it.
     session.apply_state_signal(InitStateSignal::CategoryApplicability {
         category: InitCategory::Mode,
         applicable: true,
@@ -581,9 +537,7 @@ fn an_unavailable_discovery_check_still_closes_a_lane_with_no_outcome() {
     );
 }
 
-// A lane that is really driven re-settles at its write site, which is what makes
-// the carried-over report final: from there it is this run's own evidence and no
-// verdict takes it back.
+// Re-settling at the write site makes a carried-over report this run's own evidence.
 #[test]
 fn a_write_site_settlement_promotes_a_carried_over_one() {
     let session = test_session("init_state_provisional_promotion");
@@ -612,9 +566,7 @@ fn a_write_site_settlement_promotes_a_carried_over_one() {
     assert_eq!(category(&latest, "model")["reason"], Value::Null);
 }
 
-// The terminal sweep means "init finished and nothing is left to drive", so a
-// failed final step must leave the lanes it never reached alone rather than
-// reporting them as settled with nothing behind them.
+// A failed final step must leave lanes it never reached alone rather than settling them.
 #[test]
 fn a_failed_init_complete_runs_no_terminal_sweep() {
     let session = test_session("init_state_failed_complete");
@@ -652,23 +604,19 @@ fn failure_badges_its_category_before_the_terminal_error_frame() {
 
     let events = session.events_after(0);
     let tail = &events[events.len() - 2..];
-    // Parking a running step finishes it with the error, directly ahead of the
-    // terminal `error` frame — the same `step_finished` shape a normally-failing
-    // step takes, so the fold badges the lane through its guarded step path.
+    // Parking a running step finishes it with the error, directly ahead of the terminal frame.
     assert_eq!(tail[0]["type"], json!("signal"));
     assert_eq!(tail[0]["signal"], json!("step_finished"));
     assert_eq!(tail[0]["step"], json!("mcp_configure"));
     assert_eq!(tail[0]["error_code"], json!("init.mcp_write_failed"));
     assert_eq!(tail[1]["type"], json!("error"));
-    // The fold badges the step's lane failed from that signal.
     let folded = folded_state(&session);
     assert_eq!(category(&folded, "mcp")["status"], json!("failed"));
     assert_eq!(
         category(&folded, "mcp")["code"],
         json!("init.mcp_write_failed")
     );
-    // A parked failure is still live: the backend has to be able to replay and
-    // acknowledge it.
+    // A parked failure is still live so the backend can replay and acknowledge it.
     assert_eq!(session.status(), "errored");
     assert!(session.is_active());
 }
@@ -685,9 +633,8 @@ fn a_failure_between_steps_leaves_the_settled_category_alone() {
         error_code: None,
     });
     let settled = signal_events(&session).len();
-    // `current_step` still names `mcp_configure`, but the step is over: a
-    // failure surfacing between steps belongs to no lane, so it emits no
-    // `category_failed` signal.
+    // `current_step` still names `mcp_configure`, but the step is over, so this failure
+    // belongs to no lane and emits no `category_failed`.
     session.set_error(
         "init.config_reload_failed",
         "config reload failed".to_owned(),

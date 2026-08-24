@@ -32,9 +32,7 @@ use super::core::{
 
 const ARRAY_STATUS_DAEMON_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// The four per-target daemon mutation verbs. Typed so the route segment and
-/// the Array-off policy gate are keyed off the same value and cannot drift via
-/// a stray string literal.
+/// The four per-target daemon mutation verbs.
 #[derive(Clone, Copy)]
 enum ArrayDaemonAction {
     Install,
@@ -53,10 +51,8 @@ impl ArrayDaemonAction {
         }
     }
 
-    /// Whether this action starts (or keeps) an agent process and therefore
-    /// must be gated to the primary target while Array mode is off. `install`
-    /// and `stop` are unrestricted: install is idempotent and stop on a
-    /// non-running target is a daemon no-op.
+    /// Whether this action starts an agent process and so must be gated to
+    /// the primary target while Array mode is off.
     fn gated_to_primary_when_array_off(self) -> bool {
         matches!(self, Self::Start | Self::Restart)
     }
@@ -496,7 +492,7 @@ fn agent_config_from_registry_entry(config: &Config, entry: &RegistryEntry) -> R
     agent.harness_version = None;
     agent.adapter = adapter_from_registry_entry(entry);
     // The clone above would otherwise inherit the primary's designated
-    // adapter; array targets require distinct agents, so it never applies.
+    // adapter, which never applies to a different agent.
     agent.adapter_override = None;
     agent.provider = None;
     agent.providers = None;
@@ -532,9 +528,6 @@ fn run_array_set(args: ArraySetArgs, output: OutputFormat) -> Result<()> {
     if !args.custom_provider {
         reject_custom_provider_args(&args)?;
     }
-    // Reject the --mode/--effort + --custom-provider conflicts up front,
-    // alongside the other argument-shape checks, so an invalid invocation
-    // fails before any provider validation or in-memory mutation runs.
     if args.custom_provider && args.mode.is_some() {
         return Err(StackError::InvalidParam {
             field: "mode",
@@ -863,11 +856,8 @@ fn run_array_daemon_with_auto(
         .build()
         .map_err(|source| StackError::ServeIo { source })?;
     let action = action.as_str();
-    // Fan-out over all configured targets when --target is omitted. A failing
-    // target must NOT abort the batch: every target is attempted, each outcome
-    // is recorded and reported, and a single aggregated error is returned at
-    // the end. Using `?` here would short-circuit on the first failure, leave a
-    // partially-mutated fleet, and discard the per-target report entirely.
+    // A failing target must NOT abort the batch: `?` here would leave a
+    // partially-mutated fleet and discard the per-target report.
     let total = targets.len();
     let mut results = Vec::with_capacity(total);
     let mut failures: Vec<String> = Vec::new();
@@ -1031,8 +1021,6 @@ mod tests {
         }
     }
 
-    // The target agent is cloned from the primary's block; without the clear,
-    // it would inherit the primary's designated adapter onto a different agent.
     #[test]
     fn array_target_does_not_inherit_primary_adapter_override() {
         let mut config = valid_config();

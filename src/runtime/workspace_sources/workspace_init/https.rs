@@ -1,7 +1,5 @@
-//! Data lane: HTTPS download + archive extraction (with a sane file-copy
-//! fallback for non-archive payloads). The sha256 pin in `expected_sha256`
-//! is honored on every rerun; a diverging pin forces a re-fetch rather than
-//! trusting a sentinel-skip.
+//! Data lane: HTTPS download plus archive extraction, with a file-copy fallback
+//! for non-archive payloads.
 
 use std::path::Path;
 
@@ -43,12 +41,9 @@ pub(super) fn materialize_https(
         } = &existing.body
         && existing_url == url
     {
-        // Honor `expected_sha256` on every rerun: if the operator now pins
-        // a hash, the stored sentinel must already match it. A diverging
-        // pin forces a re-download (rather than silently trusting whatever
-        // we fetched last time) — sentinel-skip must never weaken the
-        // integrity guarantee that `expected_sha256` provides on a fresh
-        // fetch.
+        // `expected_sha256` MUST hold on every rerun: a sentinel-skip must
+        // never weaken the integrity guarantee a fresh fetch provides, so a
+        // diverging pin forces a re-download.
         let pin_matches = source
             .expected_sha256
             .as_deref()
@@ -64,9 +59,7 @@ pub(super) fn materialize_https(
         existing_sentinel_diverged = true;
     }
     if existing_sentinel_diverged {
-        // We trusted the sentinel enough to skip last time but the pin no
-        // longer matches; wipe the old contents and re-fetch. The sentinel
-        // was self-stamped, so removing the directory is safe.
+        // The sentinel was self-stamped, so wiping the directory is safe.
         std::fs::remove_dir_all(dest).map_err(|source_err| {
             StackError::WorkspaceMaterializeFailed {
                 reason: format!(

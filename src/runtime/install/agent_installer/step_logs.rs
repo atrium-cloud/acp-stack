@@ -1,10 +1,4 @@
 //! On-disk persistence of installer step stdout/stderr for the audit trail.
-//!
-//! The state-store row keeps only a truncated capture; the full output is
-//! written to a per-step directory under `log_base/<agent_id>/<sanitized
-//! started_at>/<step>/` and the path is stamped onto the row. Persistence is
-//! fail-fast: callers should not append a history row claiming a completed
-//! run when the audit copy was lost.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -13,12 +7,10 @@ use crate::error::{Result, StackError};
 
 use super::InstallerRowDraft;
 
-/// Write the unbounded stdout/stderr for a single installer step to a
-/// per-step directory under `log_base/<agent_id>/<sanitized started_at>/<step>/`
-/// and stamp the path onto the row. Skipped step rows have empty streams,
-/// so we don't bother creating a directory in that case. Persistence is
-/// fail-fast because the full logs are the audit copy; the caller should not
-/// append a history row claiming a completed run when that copy was lost.
+/// Write a step's full stdout/stderr under
+/// `log_base/<agent_id>/<started_at>/<step>/` and stamp the path onto the row.
+/// Fail-fast: no history row may claim a completed run once the audit copy is
+/// lost.
 pub fn persist_step_logs_to_disk(
     row: &mut InstallerRowDraft,
     agent_id: &str,
@@ -125,11 +117,8 @@ fn sync_directory(path: &Path) -> Result<()> {
         })
 }
 
-/// Convert an arbitrary string into a path-safe single segment. Replaces
-/// `/`, `\`, and ASCII control chars with `_`. The `agent_id` and `step`
-/// values are already safe (alphanumeric and `-`), so this is defense in
-/// depth; `started_at` carries `:` which is fine on POSIX but worth keeping
-/// readable.
+/// Convert an arbitrary string into a path-safe single segment, replacing `/`,
+/// `\`, and ASCII control chars with `_`.
 fn sanitize_for_path(value: &str) -> String {
     value
         .chars()

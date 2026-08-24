@@ -1,8 +1,6 @@
 use super::*;
 
-/// The untracked preflight's result: everything resolved before the config is
-/// loaded for the tracked steps. Consumed by [`stage::stage_init_config`],
-/// which turns it into the [`InitSetup`] the recorded steps run against.
+/// The untracked preflight's result, consumed by [`stage::stage_init_config`].
 pub(super) struct InitBase {
     pub(super) home: PathBuf,
     pub(super) config_path: PathBuf,
@@ -24,9 +22,8 @@ pub(super) struct InitBase {
     pub(super) mutation: crate::fs_util::AgentConfigMutationFileLock,
 }
 
-/// Preflight through run selection: validate the flags, settle the agent, write
-/// or validate the config on disk, open the state store, and pick the run row
-/// every tracked step below records into.
+/// Preflight through run selection: validate flags, settle the agent, write or validate the config,
+/// open the state store, and pick the run row every tracked step records into.
 pub(super) fn prepare_init_base(
     args: &mut InitArgs,
     mode: InitMode,
@@ -61,10 +58,8 @@ pub(super) fn prepare_init_base(
     let imported_config = import_config_for_init(args, &config_path, output_mode)?;
     let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
 
-    // Preflight (untracked): new configs must start with a real registry
-    // agent. This runs before writing the starter config so a declined or
-    // missing first-run selection never leaves `agent.id = "placeholder"` on
-    // disk.
+    // Runs before writing the starter config so a declined or missing first-run selection never
+    // leaves `agent.id = "placeholder"` on disk.
     let creating_config = !config_path.exists();
     if creating_config && !args.resume {
         apply_supabase_env_defaults(args)?;
@@ -74,9 +69,7 @@ pub(super) fn prepare_init_base(
         reject_deps_args_for_existing_config(args)?;
         reject_data_source_args_for_existing_config(args)?;
     }
-    // A custom agent declared via `--custom-agent-*` is resolved up front; it
-    // satisfies the "real agent" requirement without an `--agent` registry id
-    // and threads through both config apply sites below.
+    // A `--custom-agent-*` spec satisfies the real-agent requirement without an `--agent` registry id.
     let mut custom_agent_spec: Option<CustomAgentSpec> = resolve_custom_agent_spec(args)?;
     if let Some(spec) = &custom_agent_spec {
         reject_registry_id_for_custom_agent(&spec.id, &registry)?;
@@ -100,23 +93,16 @@ pub(super) fn prepare_init_base(
     if creating_config && !args.resume {
         prompt_environment_configuration_if_needed(args, &registry, &skill_catalog)?;
     }
-    // Operator agent env refs (flags + interactive add-loop). On a fresh run the
-    // interactive loop also collects masked values; on resume only the replayed
-    // `--agent-env-ref` names are re-collected below (interactive values cannot
-    // be replayed). Names are appended to `config.agent.env` only after the store
-    // verifies them (below), so a failed run never persists an unresolved ref.
+    // Names reach `config.agent.env` only after the store verifies them below, so a failed run
+    // never persists an unresolved ref.
     let mut agent_env_collection = if creating_config && !args.resume {
         collect_agent_env_refs_for_init(args, prompts_enabled(args))?
     } else {
         AgentEnvCollection::default()
     };
 
-    // `--resume` skips the real-agent preflight above, so with no config on
-    // disk the starter-config branch below would persist `agent.id =
-    // "placeholder"` before `resolve_init_run` gets a chance to reject a
-    // resume with nothing to resume. Resolving the run first keeps the
-    // preflight invariant; a legitimate resume after a manually deleted
-    // config still proceeds and repairs the config from the recorded run.
+    // `--resume` skips the real-agent preflight, so the run MUST be resolved before the
+    // starter-config branch below could persist `agent.id = "placeholder"`.
     if args.resume && !config_path.exists() {
         pre_create_owner_only(&state_path)?;
         let store = StateStore::open(&state_path)?;
@@ -128,8 +114,7 @@ pub(super) fn prepare_init_base(
     let mut legacy_auth = None;
     let mut native_config_provider_preapplied = false;
     let config_status = if config_path.exists() {
-        // Repair perms before validation so a failure to parse the file does not
-        // leave a permissive config on disk; matches the behavior of `acps status`.
+        // Repair perms before validation so a parse failure cannot leave a permissive config on disk.
         set_owner_only_file(&config_path)?;
         let loaded_config = Config::load_from_path_with_legacy(&config_path)?;
         legacy_auth = loaded_config.legacy_auth;
@@ -144,9 +129,8 @@ pub(super) fn prepare_init_base(
     } else {
         let starter_config = starter_config(args)?;
         let mut new_config = config::load_config_from_str(&starter_config)?;
-        // The secret store can predate this init (an orchestrator applied an
-        // override before the first config existed), so even a fresh config
-        // must prove the override survives the agent being written.
+        // The secret store can predate this init, so even a fresh config must prove an existing
+        // endpoint override survives the agent being written.
         if let Some(spec) = &custom_agent_spec {
             crate::runtime::agent::switch::ensure_endpoint_override_survives_target(
                 &spec.id, false, None,
@@ -161,17 +145,13 @@ pub(super) fn prepare_init_base(
                 None,
             )?;
             apply_registry_entry_to_config(&mut new_config, entry);
-            // After the registry apply: a fresh config starts on the starter
-            // placeholder, so the agent-change clear would wipe a designation
-            // applied any earlier.
+            // MUST follow the registry apply: applied earlier, the agent-change clear wipes it.
             apply_adapter_override_action(&mut new_config, &resolve_adapter_override_action(args)?);
             apply_agent_launch_command(&mut new_config, entry);
         } else if matches!(
             resolve_adapter_override_action(args)?,
             Some(AdapterOverrideAction::Set(_))
         ) {
-            // A fresh config starts on the placeholder agent; a designated
-            // adapter only makes sense for a selected registry agent.
             return Err(StackError::MissingField { field: "--agent" });
         }
         push_args_deps_to_config(&mut new_config, args)?;
@@ -196,10 +176,6 @@ pub(super) fn prepare_init_base(
     let store = StateStore::open(&state_path)?;
     store.migrate()?;
     set_owner_only_file(&state_path)?;
-    // Pick the run row: either resume an existing one (explicit `--resume` or
-    // auto-detected non-terminal latest) or start fresh. Recording every
-    // tracked phase as a step lets `acps init resume` continue from the first
-    // unsettled step on the next invocation.
     let init_run = resolve_init_run(args, &store)?;
     let prior_init_steps = store.query_init_steps(&init_run.id)?;
     let resumed = args.resume;
@@ -215,9 +191,8 @@ pub(super) fn prepare_init_base(
         None
     };
     replay_recorded_args(args, &init_run, resumed, recorded_args.as_ref())?;
-    // On resume, re-collect the replayed `--agent-env-ref` names (flags only) so
-    // they are re-verified against the now-open store rather than silently
-    // dropped. Interactive values from the original run cannot be replayed.
+    // Re-collect replayed `--agent-env-ref` names so they are re-verified against the now-open
+    // store; interactive values from the original run cannot be replayed.
     if resumed {
         agent_env_collection = collect_agent_env_refs_for_init(args, false)?;
     }
@@ -267,8 +242,7 @@ fn replay_recorded_args(
     if resumed && let Some(recorded) = recorded_args {
         args.skip_workspace_init = args.skip_workspace_init || recorded.skip_workspace_init;
     }
-    // Replay a recorded rotation request so a bare `--resume` cannot silently
-    // downgrade a rotating run into a preserving one.
+    // A bare `--resume` must not silently downgrade a rotating run into a preserving one.
     if resumed && let Some(recorded) = recorded_args {
         args.rotate_keys = args.rotate_keys || recorded.rotate_keys;
     }
@@ -333,9 +307,6 @@ fn replay_recorded_args(
             args.supabase_api_key_ref = recorded.supabase_api_key_ref.clone();
         }
     }
-    // Replay deps-apply, stack-update, and agent-env-ref intents so a bare
-    // `--resume` still honors them (their effects run in late steps / are
-    // verified after a failure point).
     if resumed && let Some(recorded) = recorded_args {
         if args.agent_env_ref.is_empty() {
             args.agent_env_ref = recorded.agent_env_ref.clone();
@@ -368,9 +339,8 @@ fn replay_recorded_args(
     Ok(())
 }
 
-/// The provider/model/mode half of the replay. The credential-shaped flags ride
-/// on the provider matching, so a resume that changed provider keeps none of
-/// the recorded provider detail.
+/// The provider/model/mode half of the replay. Credential-shaped flags replay only when the
+/// provider still matches, so a resume that changed provider keeps none of the recorded detail.
 fn replay_recorded_provider_args(
     args: &mut InitArgs,
     resumed: bool,

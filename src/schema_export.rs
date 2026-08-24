@@ -1,34 +1,7 @@
-//! Machine-readable JSON Schema for the `/v1` HTTP contract and the config
-//! file. Dev-tools only: the `generate-api-schema` bin is the sole caller, and
-//! nothing in the shipped binary references this module.
-//!
-//! # Why three generator passes
-//!
-//! schemars keys its definition cache by (type, [`Contract`]), and serde's
-//! `#[serde(default)]` / `skip_serializing_if` attributes put a field in
-//! `required` under one contract but not the other. Request bodies are what a
-//! client *sends* (deserialize contract); response bodies are what the server
-//! *emits* (serialize contract). Generating both under one contract would
-//! publish a wrong `required` list for one side. So `acps_schema` runs three
-//! passes into disjoint `$defs` namespaces and merges them:
-//!
-//! - requests  → `#/$defs/request/*`   (deserialize)
-//! - responses → `#/$defs/response/*`  (serialize)
-//! - config    → `#/$defs/config/*`    (deserialize)
-//!
-//! A type that appears on both sides (e.g. `Config`, which is both imported and
-//! exported) gets one correct entry per namespace; the entries do not collide.
-//!
-//! # Regenerating
-//!
-//! ```sh
-//! cargo run --features dev-tools --bin generate-api-schema
-//! ```
-//!
-//! The checked-in files are byte-pinned by the drift test below and by the
-//! `--all-features` test run in CI and the release gate, so a DTO change that
-//! is not regenerated fails the build. A schemars minor upgrade may legitimately
-//! reshuffle key order and trip the same test; the fix is to regenerate.
+//! Machine-readable JSON Schema for the `/v1` HTTP contract and the config file
+//! (dev-tools only). Runs three generator passes into disjoint `request`/`response`/
+//! `config` `$defs` namespaces, because serde's `default` and `skip_serializing_if`
+//! shift `required` between the serialize and deserialize contracts.
 
 use schemars::generate::{Contract, SchemaGenerator, SchemaSettings};
 use schemars::transform::ReplaceBoolSchemas;
@@ -87,11 +60,8 @@ fn generator(contract: Contract) -> SchemaGenerator {
     let mut settings = SchemaSettings::draft2020_12();
     settings.contract = contract;
     settings.untagged_enum_variant_titles = true;
-    // `serde_json::Value` / `Map` fields render as the bare boolean schema
-    // `true`; normalize those to `{}`, which every client generator accepts,
-    // while leaving `additionalProperties: false` (from `deny_unknown_fields`)
-    // as-is. `ReplaceBoolSchemas` is `#[non_exhaustive]`: build with
-    // `default()`, then set the field.
+    // `serde_json::Value` fields render as the bare boolean schema `true`; normalize
+    // to `{}` while leaving `deny_unknown_fields`' `additionalProperties: false` as-is.
     let mut replace_bool_schemas = ReplaceBoolSchemas::default();
     replace_bool_schemas.skip_additional_properties = true;
     settings

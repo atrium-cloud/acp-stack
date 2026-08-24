@@ -1,7 +1,5 @@
 //! Catalog of reviewed Agent Skill sources and exact installable skill paths.
-//!
-//! Loading the embedded catalog is side-effect free. Network refresh and source
-//! discovery are handled by the `sync-skills-catalog` development command.
+//! Loading the embedded catalog is side-effect free.
 
 use std::collections::HashSet;
 use std::path::{Component, Path};

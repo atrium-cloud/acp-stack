@@ -51,29 +51,24 @@ pub(crate) async fn ensure_agent_started(state: &AppState, target_id: &str) -> R
         AgentStartReadiness::NeedsStart => {}
         AgentStartReadiness::Unavailable => return Err(StackError::AgentNotRunning),
     }
-    // The live cache, not a fresh disk read: this is the per-request hot path,
-    // and the policy that matters is the one this daemon is running under.
+    // The live cache, not a disk read: this is the per-request hot path, and the policy that
+    // matters is the one this daemon is running under.
     if target.live_agent_config.lock().await.restart == AGENT_RESTART_NEVER {
         return Err(StackError::AgentNotRunning);
     }
     let _mutation = state.lock_agent_config_mutation().await?;
-    // Re-check under the config-mutation lock: an explicit start or restart
-    // may have won the race while we waited for it.
+    // Re-check under the lock: an explicit start or restart may have won the race.
     if target.supervisor.is_running().await {
         return Ok(());
     }
     match start_agent_target_locked(state, target_id).await {
         Ok(_) => Ok(()),
-        // Lost the Stopped -> Starting race to a spawn that does not take
-        // the config-mutation lock — the crash-exit monitor's restart. A live
-        // bridge is not guaranteed yet: returning Ok here would let the
-        // caller's next `bridge()` call 409 while the winner is still mid-
-        // initialize. Wait that spawn out; only `Running` means success.
+        // Lost the Stopped -> Starting race to the crash-exit monitor's restart, which does not
+        // take the config-mutation lock. Returning Ok now would 409 the caller's next
+        // `bridge()` mid-initialize, so wait the winner out; only `Running` means success.
         Err(StackError::AgentAlreadyRunning) => {
             match target.supervisor.await_start_readiness().await {
                 AgentStartReadiness::Running => Ok(()),
-                // The winning spawn failed (state rolled back to Stopped) or
-                // never settled; the next request can try again.
                 AgentStartReadiness::NeedsStart | AgentStartReadiness::Unavailable => {
                     Err(StackError::AgentNotRunning)
                 }
@@ -89,10 +84,8 @@ async fn start_agent_target_locked(
     state: &AppState,
     target_id: &str,
 ) -> std::result::Result<ApiSuccess<AgentStartResponse>, StackError> {
-    // Re-read disk config and resolve env BEFORE invoking the supervisor so
-    // `acps agent set` changes made while the daemon is running are honored
-    // by the next start. open_agent_env enforces the same allowlist semantics
-    // (security.md:49) regardless of caller.
+    // Disk config and env resolve BEFORE the supervisor runs, so `acps agent set` changes
+    // made while the daemon is up are honored by the next start.
     let (config, target) = load_fresh_config_for_target(state, target_id).await?;
     ensure_array_process_start_allowed(&config, target_id)?;
     let environment = open_agent_environment(&config)?;
@@ -349,20 +342,14 @@ async fn restart_agent_target(
     require_idle: bool,
 ) -> std::result::Result<ApiSuccess<AgentRestartResultResponse>, StackError> {
     let _mutation = state.lock_agent_config_mutation().await?;
-    // Load + validate the fresh on-disk config AND resolve env BEFORE
-    // stopping the currently running agent. A malformed config or a
-    // missing required secret should fail this call cleanly and leave
-    // the running agent alone, rather than taking it down and
-    // returning an error with no agent running at all.
+    // Validate config and resolve env BEFORE stopping the running agent, so a malformed config
+    // or missing secret fails cleanly instead of taking the agent down with nothing to restart.
     let (fresh_config, target) = load_fresh_config_for_target(state, target_id).await?;
     ensure_array_process_start_allowed(&fresh_config, target_id)?;
     let environment = open_agent_environment(&fresh_config)?;
 
-    // Now safe to stop the prior process. `stop` returns
-    // `Result<Option<i32>, _>`: outer `Err(AgentNotRunning)` means
-    // there was nothing to stop (acceptable — a "restart" against a
-    // stopped agent degenerates into a plain start); inner
-    // `Option<i32>` is the optional exit status of the prior process.
+    // `Err(AgentNotRunning)` from `stop` is acceptable: a restart against a stopped agent
+    // degenerates into a plain start.
     let prior_exit_status = if require_idle {
         match target
             .supervisor
@@ -403,13 +390,8 @@ async fn restart_agent_target(
     };
     let stopped_at = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
 
-    // Update the live agent-config cache so post-restart session
-    // creation (which reads `state.live_agent_config` for
-    // `agent.mode`/`agent.model`/`agent.provider`) sees the new
-    // values too. Without this, the supervised process would be on
-    // the new binary/command but `/v1/sessions` would still apply
-    // the stale model — silently giving operators the wrong agent
-    // behavior after a `acps agent set`.
+    // Refresh the live cache too: otherwise the process runs the new command while
+    // `/v1/sessions` keeps applying the stale mode/model/provider.
     {
         let mut live = target.live_agent_config.lock().await;
         *live = fresh_config.agent.clone();

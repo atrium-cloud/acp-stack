@@ -24,15 +24,13 @@ fn discover_source_skills_reads_frontmatter_for_user_source() {
 
 #[test]
 fn discover_source_skills_degrades_on_malformed_descriptor() {
-    // `add` (via `find_skill_dir`) installs a skill whose SKILL.md is any
-    // regular file, so `source get` must still surface a sibling with malformed
-    // frontmatter (degraded to the leaf name), not omit it or fail the listing.
+    // `add` installs a skill whose SKILL.md is any regular file, so `source get` must surface
+    // malformed-frontmatter siblings degraded to the leaf name rather than omitting them.
     let catalog = SkillCatalog::load_embedded().expect("catalog");
     let sources = vec![user_source("my-org", "my-org/skills", "main")];
     let source = resolve_source_ref("my-org", &sources, &catalog).expect("resolve");
     let archive = tempfile::tempdir().expect("archive");
     write_catalog_skill(archive.path(), "skills/good", "good");
-    // `write_skill` writes a descriptor with no YAML frontmatter.
     write_skill(archive.path(), "skills", "broken");
 
     let skills = discover_source_skills(&source, archive.path()).expect("discover");
@@ -68,16 +66,14 @@ fn discover_source_skills_reads_descriptions_for_catalog_source() {
 
 #[test]
 fn discover_source_skills_skips_catalog_skills_add_cannot_install() {
-    // Catalog `add` (via `find_skill_dir`) requires a parseable descriptor
-    // whose frontmatter name matches the index, so `source get` must skip
-    // indexed skills that fail either check rather than listing them.
+    // Catalog `add` requires a parseable descriptor whose frontmatter name matches the index,
+    // so `source get` must skip indexed skills failing either check.
     let archive = tempfile::tempdir().expect("archive");
     write_catalog_skill(
         archive.path(),
         "plugins/zoom/skills/general",
         "zoom-general",
     );
-    // `write_skill` writes a descriptor with no YAML frontmatter.
     write_skill(archive.path(), "plugins/zoom/skills", "broken");
     write_catalog_skill(archive.path(), "plugins/zoom/skills/renamed", "other-name");
     let source = catalog_source(vec![

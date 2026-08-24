@@ -92,10 +92,8 @@ pub(super) fn redirection_operator_end(word: &str, operator_prefix: bool) -> Opt
     Some(start + operator_len)
 }
 
-/// Minimal shell-style glob matcher. Supports `*` (greedy, any chars including
-/// none) and `?` (exactly one char). Everything else matches literally. This
-/// is sufficient for the `deny = ["rm *", "shutdown"]`-style patterns the
-/// spec calls out; it is NOT a full POSIX-glob implementation.
+/// Minimal shell-style glob matcher supporting `*` and `?` only — NOT a full
+/// POSIX-glob implementation.
 pub(super) fn glob_match(pattern: &str, input: &str) -> bool {
     let pattern_bytes = pattern.as_bytes();
     let input_bytes = input.as_bytes();

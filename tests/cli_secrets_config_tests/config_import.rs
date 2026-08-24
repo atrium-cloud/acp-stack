@@ -40,7 +40,6 @@ fn config_import_with_force_replaces_existing_config() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let (_, admin_key) = run_init_with_home(tempdir.path());
 
-    // Build an alternate config with a recognizable bind addr.
     let modified =
         VALID_PLACEBO_CONFIG.replace(r#"bind = "127.0.0.1:7700""#, r#"bind = "127.0.0.1:7777""#);
     let import_path = tempdir.path().join("alt.toml");
@@ -346,8 +345,8 @@ aarch64 = "aarch64"
 "#;
 
 fn placebo_config_with_adapter_override() -> String {
-    // The launch command doubles as the adapter identity, so [agent]
-    // command/args must match the override block (which declares no args).
+    // The launch command doubles as the adapter identity, so [agent] command/args must
+    // match the override block.
     let base = VALID_PLACEBO_CONFIG
         .replace(r#"command = "placebo-agent""#, r#"command = "placebo-acp""#)
         .replace(r#"args = ["acp"]"#, r#"args = []"#);
@@ -574,10 +573,8 @@ fn config_import_dry_run_with_path() {
 
 #[test]
 fn config_import_kilo_seeds_key_declaration_and_records_empty_placeholder() {
-    // An imported kilo config that authenticates through OpenRouter and does
-    // not declare KILO_API_KEY: the import seeds the declaration (the harness
-    // requires the variable present even with a non-Kilo provider) and
-    // records the empty placeholder, so no separate `secrets set` is needed.
+    // Kilo requires KILO_API_KEY present even with a non-Kilo provider, so the import
+    // seeds the declaration and records the empty placeholder.
     let tempdir = tempfile::tempdir().expect("tempdir");
     let (_, admin_key) = run_init_with_home(tempdir.path());
     let mut store = SecretStore::open(tempdir.path()).expect("secret store should open");

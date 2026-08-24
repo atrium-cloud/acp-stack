@@ -1,37 +1,5 @@
-//! Agent installer.
-//!
-//! Two install paths share this module:
-//!
-//! - **Registry-resolved** (the default): the operator declares `[agent].id`
-//!   matching an entry in the embedded `data/agents.toml`. Native entries
-//!   produce one install step; adapter-backed entries produce two (harness
-//!   first, adapter second).
-//! - **Operator escape hatch**: `[agent.install] type = "shell"` runs a free-
-//!   form shell recipe with a `creates` precheck/postcheck. Intended for
-//!   private forks and unreleased agents that aren't in the curated catalog.
-//!
-//! Hardening (see `docs/specs/security.md`) applies to every shell-based step
-//! (shell escape hatch, npx, uvx):
-//!
-//! - Timeout (`DEFAULT_INSTALLER_TIMEOUT`, or the registry entry's
-//!   `install.shell.timeout_secs` when it declares one) so a runaway script
-//!   cannot wedge the install RPC indefinitely.
-//! - Per-stream output cap (`MAX_INSTALLER_STREAM_BYTES`) so a chatty
-//!   installer cannot bloat `installer_runs`. The state repo also
-//!   re-truncates at INSERT time as defense-in-depth.
-//! - Scrubbed environment: registry-resolved installer steps receive only
-//!   `PATH`, `HOME`, and `LANG`. The operator escape-hatch installer also
-//!   receives the explicitly resolved env passed to it by the caller.
-//! - Fresh process group so the timeout-induced SIGKILL reaches grandchildren
-//!   the shell forked.
-//!
-//! The `github_release` driver does not spawn a shell; it downloads,
-//! optionally checksum-verifies, and extracts in-process. The HTTP timeout in
-//! `github_release` and the in-process extraction APIs bound its worst case.
-//!
-//! `creates` is resolved against `PATH` using `std::env::split_paths`, which
-//! mirrors the `which` semantics required by `docs/specs/runtime.md` without
-//! a dependency on the `which` crate.
+//! Agent installer: registry-resolved install steps plus the
+//! `[agent.install] type = "shell"` operator escape hatch.
 
 mod execute;
 mod step_logs;
@@ -64,9 +32,7 @@ use self::step_runners::{
 
 pub const MAX_INSTALLER_STREAM_BYTES: usize = INSTALLER_OUTPUT_CAP_BYTES;
 
-// Step labels persisted to `installer_runs.step`. Centralized here so the
-// state-side filter that the future operator UI will use stays consistent
-// with what the installer writes.
+// Step labels persisted to `installer_runs.step`.
 pub(crate) const STEP_INSTALL: &str = "install";
 pub(crate) const STEP_HARNESS: &str = "harness";
 pub(crate) const STEP_ADAPTER: &str = "adapter";
@@ -106,9 +72,8 @@ impl InstallerOutcome {
     }
 }
 
-/// One persisted row's worth of installer state. Owned so the HTTP path can
-/// drop the state-store lock during the shell/HTTP work and write the row
-/// briefly afterward.
+/// One persisted row's worth of installer state, owned so the caller can write
+/// it without holding the state-store lock across the install work.
 #[derive(Debug, Clone)]
 pub struct InstallerRowDraft {
     pub started_at: String,
@@ -119,18 +84,13 @@ pub struct InstallerRowDraft {
     pub exit_status: Option<i32>,
     pub step: String,
     pub method: Option<String>,
-    /// Resolved version the installer wrote. Populated for github_release
-    /// (release tag) and npm installs. Shell-recipe installs leave this `None`;
-    /// `acps agent check` then reports `unknown, manual check required`.
+    /// Resolved version the installer wrote; `None` for shell-recipe installs.
     pub version: Option<String>,
-    /// On-disk directory the surrounding wrappers populated with the full
-    /// stdout/stderr capture. The `*_capture` functions leave this `None`;
-    /// the persisting wrappers (`run_installer`, `install_resolved`, and
-    /// the HTTP route equivalents) set it after they write the files.
+    /// Directory holding the full stdout/stderr capture, set by the persisting
+    /// wrappers after they write the files.
     pub log_dir: Option<String>,
-    /// `installer_runs` id when the progress sink already persisted this step
-    /// (its `running` row was finalized in place). Persisting wrappers skip
-    /// re-appending such rows; `None` rows still need the end-of-run append.
+    /// `installer_runs` id when the progress sink already finalized this step's
+    /// row in place; `None` rows still need the end-of-run append.
     pub persisted_run_id: Option<String>,
 }
 
@@ -171,27 +131,18 @@ impl InstallerRowDraft {
 // =================================================================
 // Step-boundary progress (in-flight visibility in `installer_runs`)
 // =================================================================
-//
-// The `*_capture` functions hold no store handle, so the HTTP path never
-// holds the state lock across a (potentially 10-minute) shell/HTTP step.
-// Callers that want live progress instead pass an [`InstallProgress`] sink:
-// the execution layer inserts a `running` row as each step starts and
-// finalizes that same row when the step finishes, locking the store only
-// for the duration of one statement.
 
 /// Store access for step-boundary writes. `Sync` because adapter-backed
-/// installs run harness and adapter steps on parallel scoped threads that
-/// share one sink.
+/// installs share one sink across parallel scoped threads.
 pub trait InstallerRunSink: Sync {
-    /// Run `f` against a state store. Implementations serialize the call
-    /// however their store handle requires; `f` must do one brief write and
-    /// never outlive the call.
+    /// Run `f` against a state store; `f` must do one brief write and never
+    /// outlive the call.
     fn with_store(&self, f: &mut dyn FnMut(&StateStore) -> Result<()>) -> Result<()>;
 }
 
 /// Sink over the daemon's shared store handle. Uses `blocking_lock`, so it is
-/// only legal off the async executor — every install path that uses it runs
-/// its steps inside `spawn_blocking` (same pattern as the deps-apply route).
+/// only legal off the async executor — callers must run steps in
+/// `spawn_blocking`.
 pub struct SharedInstallerSink {
     state: std::sync::Arc<tokio::sync::Mutex<StateStore>>,
 }
@@ -211,9 +162,7 @@ impl InstallerRunSink for SharedInstallerSink {
 
 /// Sink that opens a short-lived second connection per boundary write, for
 /// callers whose `&StateStore` cannot cross the installer's scoped threads
-/// (a rusqlite connection is `!Sync`). WAL plus the store busy-timeout make
-/// the brief insert/update safe alongside the primary connection — the agent
-/// updater already runs on a second connection for the same reason.
+/// (a rusqlite connection is `!Sync`).
 pub struct ReconnectingInstallerSink {
     state_path: PathBuf,
 }
@@ -231,8 +180,7 @@ impl InstallerRunSink for ReconnectingInstallerSink {
     }
 }
 
-/// Everything the execution layer needs to publish step-boundary progress:
-/// the sink plus the provenance stamped onto the `running` row.
+/// Sink plus the provenance stamped onto each step-boundary `running` row.
 pub struct InstallProgress<'a> {
     pub sink: &'a dyn InstallerRunSink,
     pub agent_id: &'a str,
@@ -240,9 +188,8 @@ pub struct InstallProgress<'a> {
     pub log_base: Option<&'a Path>,
 }
 
-/// Insert the `running` row for a step that is about to execute; returns the
-/// row id to finalize with. A store failure is warn-logged and the step runs
-/// untracked — progress visibility must never abort the install itself.
+/// Insert the `running` row for a step about to execute; a store failure is
+/// warn-logged and the step runs untracked rather than aborting the install.
 pub(crate) fn begin_tracked_step(
     progress: &InstallProgress<'_>,
     step_label: &'static str,
@@ -278,15 +225,10 @@ pub(crate) fn begin_tracked_step(
     }
 }
 
-/// Finalize a step's `running` row with the finished draft. The full log
-/// capture is written to disk first so the same update can record `log_dir`.
-/// On success the draft is stamped with `persisted_run_id` so the caller's
-/// end-of-run persistence skips it; on failure (warn-logged) the draft stays
-/// unstamped so the caller's legacy append still records the audit row. A
-/// failed finalize additionally marks the row `error` (best-effort): the step
-/// is over, so it must not keep reading as in-flight — and an `error` row
-/// makes no completion claim, preserving the rule that a run without its
-/// audit log copy never records success.
+/// Finalize a step's `running` row with the finished draft. Logs are written to
+/// disk before the row is updated, so a run without its audit log copy never
+/// records success; a failed finalize marks the row `error` rather than leaving
+/// it in-flight.
 pub(crate) fn finalize_tracked_step(
     progress: &InstallProgress<'_>,
     run_id: Option<String>,
@@ -341,9 +283,8 @@ pub(crate) fn finalize_tracked_step(
     }
 }
 
-/// Persist a row the progress sink did not finalize (skipped/config_error
-/// placeholders, or steps whose sink writes failed). The full log capture
-/// goes to disk first; the state row is the index into it.
+/// Persist a row the progress sink did not finalize, writing its log capture to
+/// disk first.
 pub fn persist_untracked_installer_row(
     state: &StateStore,
     row: &mut InstallerRowDraft,
@@ -373,17 +314,13 @@ pub fn persist_untracked_installer_row(
     Ok(())
 }
 
-/// Operator escape-hatch single-step result. Returned by
-/// [`run_installer_capture`] so the caller can persist the row under a brief
-/// state-store lock instead of holding it for the entire installer run.
+/// Operator escape-hatch single-step result.
 pub struct InstallerResult {
     pub outcome: Result<InstallerOutcome>,
     pub row: InstallerRowDraft,
 }
 
-/// Registry-resolved sequence result. May carry 1 row (native or escape hatch)
-/// or 2 rows (adapter-backed). The caller persists rows in order before
-/// reporting the outcome.
+/// Registry-resolved sequence result; rows must be persisted in order.
 pub struct InstallerSequenceResult {
     pub outcome: Result<InstallerOutcome>,
     pub rows: Vec<InstallerRowDraft>,
@@ -393,17 +330,8 @@ pub struct InstallerSequenceResult {
 // Operator escape-hatch (`[agent.install] type = "shell"`)
 // =================================================================
 
-/// Convenience wrapper used by call sites that already hold the state store
-/// briefly: runs the escape-hatch installer and persists the row. When
-/// `log_base` is `Some`, the wrapper writes the full stdout/stderr capture
-/// to a per-step subdirectory and records the path on the row; pass
-/// `state::default_installer_log_base(&home)` to land logs under the
-/// canonical `~/.local/share/acp-stack/installer-logs/` tree.
-///
-/// Progress is published through a [`ReconnectingInstallerSink`] (the
-/// borrowed store cannot cross the installer's scoped threads): the step's
-/// `running` row lands when the shell starts and is finalized in place when
-/// it exits, so a concurrent reader sees the in-flight step.
+/// Run the escape-hatch installer and persist its row, publishing progress
+/// through a [`ReconnectingInstallerSink`].
 pub fn run_installer(
     agent_id: &str,
     install: &AgentInstallConfig,
@@ -437,11 +365,8 @@ pub fn run_installer(
     result.outcome
 }
 
-/// Run the escape-hatch installer WITHOUT holding the state store across the
-/// shell run. Returns the outcome alongside the row draft the caller should
-/// persist. When `progress` is provided, the executed step's row is inserted
-/// as `running` at start and finalized in place at finish; the returned
-/// draft's `persisted_run_id` then tells the caller the row is already stored.
+/// Run the escape-hatch installer without holding the state store across the
+/// shell run, returning the row draft for the caller to persist.
 pub fn run_installer_capture(
     install: &AgentInstallConfig,
     expected_sha256: Option<&str>,
@@ -466,10 +391,9 @@ pub fn run_installer_capture(
     };
     let started_at = current_timestamp();
 
-    // A present binary that fails the spawn gate is treated as absent so the
-    // recipe re-runs and can replace it, instead of skipping past a file
-    // nothing can execute. Integrity first: the gate executes the file, and a
-    // binary failing the operator's sha256 pin must never run.
+    // Integrity first: the spawn gate executes the file, and a binary failing
+    // the operator's sha256 pin must never run. A present binary that fails the
+    // gate reads as absent so the recipe re-runs and replaces it.
     if let Some(path) = resolve_creates(&install.creates, workspace_root, &[]) {
         let integrity = (|| {
             let sha256 = sha256_of_file(&path)?;
@@ -503,7 +427,6 @@ pub fn run_installer_capture(
     let run_id = progress.and_then(|progress| {
         begin_tracked_step(progress, STEP_INSTALL, Some(INSTALL_METHOD_SHELL))
     });
-    // The escape hatch declares no budget of its own, so it keeps the default.
     let run_result = run_shell_install(
         shell,
         &agent_env,
@@ -529,13 +452,8 @@ pub fn run_installer_capture(
 // Registry-resolved path (one step for native, two for adapter-backed)
 // =================================================================
 
-/// Run the resolved-registry installer and persist every row. Steps publish
-/// `running` rows at their boundaries through a [`ReconnectingInstallerSink`]
-/// (the borrowed store cannot cross the scoped harness/adapter threads);
-/// rows the sink did not finalize are appended at the end as before. Used by
-/// the CLI which already holds the state store. The HTTP path uses
-/// [`install_resolved_capture`] with its own sink so it can drop the state
-/// lock during each shell/HTTP step.
+/// Run the resolved-registry installer and persist every row; the HTTP path
+/// uses [`install_resolved_capture`] with its own sink instead.
 pub fn install_resolved(
     agent: &AgentConfig,
     entry: &RegistryEntry,
@@ -578,9 +496,6 @@ pub(super) fn final_verification(
     dest_dir: &Path,
     rows: Vec<InstallerRowDraft>,
 ) -> InstallerSequenceResult {
-    // The operator's declared `[agent].command` must now resolve on PATH (or in
-    // workspace, per `resolve_creates` semantics). Hash the resulting binary so
-    // the existing `expected_sha256` integrity gate still runs.
     let outcome = (|| {
         let path =
             resolve_creates(&agent.command, workspace_root, &[dest_dir]).ok_or_else(|| {
@@ -608,24 +523,15 @@ pub(super) enum ResolvedInstallSpec {
         script: String,
         creates: String,
         required_tools: Vec<String>,
-        /// Whole-run budget for this recipe: the registry entry's
-        /// `install.shell.timeout_secs` when it declares one, otherwise
-        /// `DEFAULT_INSTALLER_TIMEOUT`.
         timeout: Duration,
     },
     Npm {
         package: String,
-        /// Package name as declared in the install spec, passed to npm's
-        /// `--allow-scripts`. Captured separately because `package` may carry
-        /// a resolved `@version` suffix and scoped names make stripping it
-        /// back off ambiguous. May itself carry a version when the spec
-        /// declares one; npm's `allowScripts` accepts pinned `pkg@version`
-        /// entries, so either form matches.
+        /// Name passed to npm's `--allow-scripts`; kept separate because
+        /// `package` may carry a resolved `@version` suffix that scoped names
+        /// make ambiguous to strip back off.
         name: String,
         creates: String,
-        /// Pinned version when the registry/`acps init` resolved one.
-        /// Unpinned npm installs resolve their version with `npm view` before
-        /// running `npm install`.
         version: Option<String>,
     },
     GithubRelease {
@@ -639,18 +545,9 @@ pub(super) enum ResolvedInstallSpec {
     },
 }
 
-/// Public verifier used by `acps init --resume` for `agent_install`.
-/// It intentionally delegates to the same resolver used by the installer:
-/// absolute paths are checked directly, slash-containing paths are resolved
-/// under `workspace_root`, and bare names are checked in the managed local
-/// bin directory before falling back to the process PATH. A resolved binary
-/// that fails the spawn gate reads as absent so the resumed run re-installs
-/// instead of skipping past a file nothing can execute.
-///
-/// Integrity keeps its usual priority over the probe: when
-/// `expected_sha256` is declared, a binary that fails the pin (or cannot be
-/// hashed) also reads as absent — never executed — and the resumed install's
-/// final verification is where a still-mismatching pin surfaces as an error.
+/// Verifier used by `acps init --resume` for `agent_install`. The integrity pin
+/// is checked before the spawn probe, so a binary failing `expected_sha256` is
+/// never executed and simply reads as absent.
 pub fn resolve_creates_for_init_resume(
     name: &str,
     workspace_root: &Path,
@@ -673,29 +570,9 @@ pub fn resolve_creates_for_init_resume(
     Some(path)
 }
 
-/// Spawn gate for installed binaries: `creates` resolving to an executable
-/// file is not proof the file can run. A package manager that blocks
-/// postinstall scripts leaves a shebang-less stub behind, and a wrong-arch
-/// download is a valid file too; both otherwise surface only as ENOEXEC at
-/// the first real agent spawn.
-///
-/// Two layers, both cheap: a header check that rejects files with no
-/// executable format at all (the deployment target is Linux, whose exec has
-/// no shell fallback for shebang-less text — macOS dev hosts do fall back,
-/// so a spawn probe alone would pass the stub there), then a spawn probe
-/// that catches host-specific failures like a wrong-arch ELF or a missing
-/// interpreter. Only spawnability is judged — the child is killed
-/// immediately, so a binary that ignores `--version` or hangs still passes.
-///
-/// Callers must run integrity checks (`expected_sha256`) BEFORE this gate:
-/// the probe executes the file, and a binary that fails the operator's pin
-/// must never run. Step-level gates therefore run only
-/// [`verify_executable_header`] (which never executes the file) when a pin is
-/// declared, and `final_verification` owns the pin check followed by this
-/// probe. The probe gets the same scrubbed environment as installer
-/// steps (no provider keys, non-interactive hints) and a PATH built from
-/// `extra_path_dirs` so a `#!/usr/bin/env`-style interpreter in the managed
-/// bin dir resolves the way the real agent spawn would resolve it.
+/// Spawn gate for installed binaries. Callers MUST run integrity checks
+/// (`expected_sha256`) before this gate — the probe executes the file, so a
+/// binary that fails the operator's pin must never reach it.
 pub(crate) fn verify_binary_spawns(
     path: &Path,
     workspace_root: &Path,
@@ -706,9 +583,8 @@ pub(crate) fn verify_binary_spawns(
         path_env_with_extra_dirs,
     };
     verify_executable_header(path)?;
-    // `resolve_creates` judges with cwd-relative `is_file()` semantics, but
-    // the probe changes cwd to `workspace_root`, so a relative `path` would
-    // resolve differently between the check and the spawn.
+    // The probe changes cwd to `workspace_root`, so a relative `path` would
+    // resolve differently here than it did in `resolve_creates`.
     let exec_path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
     let mut command = std::process::Command::new(&exec_path);
     command
@@ -729,8 +605,6 @@ pub(crate) fn verify_binary_spawns(
     detach_into_new_session(&mut command);
     match command.spawn() {
         Ok(mut child) => {
-            // The probe proved spawnability; the group kill reaches whatever
-            // the binary already forked, and the wait reaps the leader.
             kill_process_group(&mut child);
             if let Err(error) = child.wait() {
                 tracing::debug!(%error, path = %path.display(), "spawn-gate child reap failed");
@@ -744,8 +618,8 @@ pub(crate) fn verify_binary_spawns(
     }
 }
 
-/// Executable formats the runtime can actually spawn: shebang scripts, ELF
-/// (Linux deployment), and Mach-O incl. fat binaries (macOS dev hosts).
+/// Executable formats the runtime can spawn: shebang scripts, ELF, and Mach-O
+/// including fat binaries.
 const EXECUTABLE_MAGICS: &[&[u8]] = &[
     b"#!",
     b"\x7fELF",
@@ -755,16 +629,14 @@ const EXECUTABLE_MAGICS: &[&[u8]] = &[
     &[0xcf, 0xfa, 0xed, 0xfe],
     &[0xca, 0xfe, 0xba, 0xbe],
     &[0xbe, 0xba, 0xfe, 0xca],
-    // 64-bit fat (universal) Mach-O variants of the two magics above.
     &[0xca, 0xfe, 0xba, 0xbf],
     &[0xbf, 0xba, 0xfe, 0xca],
 ];
 
 pub(crate) fn verify_executable_header(path: &Path) -> Result<()> {
     use std::io::Read;
-    // An unreadable file (exec-only mode, transient IO error) is not evidence
-    // of a bad format — let the spawn probe be the judge instead of hard-
-    // failing a binary the kernel might exec fine without read access here.
+    // An unreadable file (exec-only mode, transient IO error) is not evidence of
+    // a bad format, so defer to the spawn probe rather than hard-failing.
     let mut header = [0u8; 4];
     let mut read_total = 0;
     match std::fs::File::open(path) {
@@ -801,11 +673,8 @@ pub(crate) fn verify_executable_header(path: &Path) -> Result<()> {
     })
 }
 
-/// Resolve `[agent.install].creates` to a real path. Matches the documented
-/// behavior in `docs/specs/runtime.md`: absolute paths used as-is; paths
-/// containing `/` resolved relative to `workspace_root` so an installer can
-/// declare `creates = "bin/agent"` without depending on operator cwd; bare
-/// names looked up in caller-provided extra directories and then `PATH`.
+/// Resolve `[agent.install].creates` to a real path, per the lookup order in
+/// `docs/specs/runtime.md`.
 pub(crate) fn resolve_creates(
     name: &str,
     workspace_root: &Path,

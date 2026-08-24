@@ -6,14 +6,8 @@ use tempfile::TempDir;
 
 #[test]
 fn install_records_every_fallback_attempt_when_first_path_fails() {
-    // The first declared path is a shell recipe that exits 1
-    // without producing `creates`. The second is an npm package that
-    // npm/npx can't actually fetch in the test sandbox. The
-    // important guarantee being asserted: BOTH attempts get recorded
-    // as `installer_runs` rows (not just the first one). This proves
-    // `install_one_with_fallback` walked past the failed shell path
-    // and tried npm, rather than the pre-audit behavior of bailing
-    // on the first failure.
+    // Both attempts must land as `installer_runs` rows, proving the walk continued past the
+    // failed shell path rather than bailing on the first failure.
     let tempdir = TempDir::new().expect("tempdir");
     write_fake_npm(
         tempdir.path(),
@@ -56,9 +50,6 @@ exit 9
         None,
     );
 
-    // The chain exhausted both paths, so the overall outcome is Err.
-    // But the rows must include BOTH attempts — proof that the
-    // fallback walk actually happened.
     match result
         .outcome
         .expect_err("every declared path is unreachable")
@@ -80,8 +71,6 @@ exit 9
             .map(|r| (r.status.as_str(), r.exit_status))
             .collect::<Vec<_>>(),
     );
-    // Both rows must record the failure outcome — proves the runner
-    // didn't skip the second attempt after the first failed.
     for (i, row) in result.rows.iter().enumerate() {
         assert_eq!(
             row.status, "failed",
@@ -93,10 +82,8 @@ exit 9
 
 #[test]
 fn github_backed_shell_failure_falls_back_to_npm_and_records_both_attempts() {
-    // opencode's upstream installer resolves its release through the GitHub
-    // API, so unauthenticated hosts start failing it once the hourly quota is
-    // gone. The npm path must then take over, and both attempts must land in
-    // `installer_runs` under distinct methods so the fallback is visible.
+    // opencode's upstream installer resolves its release through the GitHub API, so an
+    // unauthenticated host fails it once the hourly quota is gone and npm must take over.
     let tempdir = TempDir::new().expect("tempdir");
     let dest_dir = tempdir.path().join("bin");
     std::fs::create_dir(&dest_dir).expect("create bin dir");

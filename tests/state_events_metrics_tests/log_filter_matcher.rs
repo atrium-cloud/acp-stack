@@ -2,8 +2,6 @@ use acp_stack::state::{EventFilter, LogOrder, SecurityCategory, StateStore};
 
 use crate::common::state::{fake_event, fake_event_at, fake_session_event};
 
-// === LogFilter::matches coverage ===
-
 #[test]
 fn log_filter_matches_level_kind_and_kind_prefix() {
     let event = fake_event("command.started", "info", "command", "{}");
@@ -58,9 +56,6 @@ fn log_filter_matches_source_filter() {
 
 #[test]
 fn log_filter_matches_session_id_via_column_with_payload_fallback() {
-    // Modern path: typed `session_id` column populated by
-    // `append_session_event_with_source`. Matcher must hit on the column
-    // even when the payload is empty.
     let column_event =
         fake_session_event("acp.session_update", "info", "acp", "{}", Some("sess_abc"));
     let session_hit = EventFilter {
@@ -76,8 +71,6 @@ fn log_filter_matches_session_id_via_column_with_payload_fallback() {
     assert!(!session_miss.matches(&column_event));
 
     // Legacy fallback: the column is None but the payload embeds session_id.
-    // This keeps pre-Phase-5 events queryable while the SQL still requires the
-    // column directly.
     let legacy_event = fake_event(
         "acp.session_update",
         "info",
@@ -145,7 +138,6 @@ fn log_filter_matches_command_id_payload_field() {
 
 #[test]
 fn log_filter_matches_permission_id_with_legacy_id_fallback() {
-    // Modern publisher path: `$.permission_id` populated.
     let modern = fake_event(
         "permission.created",
         "info",
@@ -158,8 +150,7 @@ fn log_filter_matches_permission_id_with_legacy_id_fallback() {
     };
     assert!(modern_filter.matches(&modern));
 
-    // Legacy / timeout path: only `$.id` is populated, on a permission-shaped
-    // row (kind starts with `permission.`).
+    // Legacy / timeout path: only `$.id` is populated, on a permission-shaped row.
     let legacy = fake_event(
         "permission.timeout",
         "info",
@@ -172,7 +163,6 @@ fn log_filter_matches_permission_id_with_legacy_id_fallback() {
     };
     assert!(legacy_filter.matches(&legacy));
 
-    // Same `$.id` payload but on a non-permission-shaped row must not match.
     let unrelated = fake_event("command.exited", "info", "command", r#"{"id":"perm_2"}"#);
     assert!(!legacy_filter.matches(&unrelated));
 }
@@ -238,8 +228,6 @@ fn log_filter_order_asc_returns_oldest_first_and_cursor_advances_forward() {
     assert_eq!(second_page[1].message, "row-3");
 }
 
-// === Concurrent-write pagination stability ===
-
 #[test]
 fn cursor_pagination_stable_under_concurrent_writes() {
     use std::sync::Arc;
@@ -248,12 +236,8 @@ fn cursor_pagination_stable_under_concurrent_writes() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let path = tempdir.path().join("state.sqlite");
 
-    // `StateStore::open` enables WAL and a busy timeout on every connection, so
-    // a background writer can append while the foreground reader paginates
-    // without `SQLITE_BUSY`. This exercises that guarantee: two independent
-    // StateStore handles (separate connections, no shared mutex) write and read
-    // the same file concurrently. The tighter per-handle timeout below keeps
-    // rare file-header contention well under the test harness's budget.
+    // Exercises the WAL + busy-timeout guarantee: two independent StateStore handles write and read
+    // the same file concurrently without `SQLITE_BUSY`.
     let reader = StateStore::open(&path).expect("reader open");
     reader.migrate().expect("migration should pass");
     reader
@@ -266,9 +250,6 @@ fn cursor_pagination_stable_under_concurrent_writes() {
             .expect("seed");
     }
 
-    // Second, independent StateStore — its own rusqlite::Connection against
-    // the same path. No shared Mutex; both handles commit independently and
-    // SQLite serializes the writes at the file layer under WAL.
     let writer_store = StateStore::open(&path).expect("writer open");
     writer_store
         .set_busy_timeout_for_test(std::time::Duration::from_secs(2))
@@ -287,8 +268,6 @@ fn cursor_pagination_stable_under_concurrent_writes() {
         }
     });
 
-    // DESC walk: must collect all 200 seeded rows exactly once in strictly
-    // monotone-decreasing id order, even while background writes commit.
     let mut collected_desc: Vec<String> = Vec::new();
     let mut cursor: Option<String> = None;
     loop {
@@ -305,9 +284,7 @@ fn cursor_pagination_stable_under_concurrent_writes() {
         if page.is_empty() {
             break;
         }
-        // Interleave a tiny sleep between pages so the background writer
-        // actually gets to commit between our reads. Without this, the reader
-        // might race through all 200 rows before any concurrent writes land.
+        // Sleep between pages so the background writer actually commits between reads.
         std::thread::sleep(std::time::Duration::from_millis(2));
         for event in &page {
             collected_desc.push(event.id.clone());
@@ -334,9 +311,7 @@ fn cursor_pagination_stable_under_concurrent_writes() {
         );
     }
 
-    // ASC walk: the 200 pre-existing ids must all appear in strictly
-    // increasing order. Newer rows appended mid-walk may also land in the
-    // page; we accept that and just check the seeded subset.
+    // Rows appended mid-walk may also land in a page, so only the seeded subset is checked.
     let seeded_subset: std::collections::BTreeSet<_> = collected_desc.iter().cloned().collect();
     let mut collected_asc: Vec<String> = Vec::new();
     let mut cursor: Option<String> = None;

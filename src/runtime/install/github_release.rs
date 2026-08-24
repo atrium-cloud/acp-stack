@@ -1,18 +1,6 @@
-//! GitHub Release-driven installer for agent harnesses and adapter binaries.
-//!
-//! Used by [`agent_installer`] when a registry entry's install spec is
-//! `InstallSpec::GithubRelease`. Fetches release metadata via the public
-//! GitHub API, matches the asset name against a glob pattern with `{arch}`
-//! substituted from the runtime architecture, downloads + optionally
-//! checksum-verifies + extracts, then drops the binary into `dest_dir` with
-//! `chmod +x`. The caller runs the `creates` resolution and spawn gate on
-//! the dropped binary afterwards.
-//!
-//! No shell is spawned for this install type; everything happens in-process.
-//! That keeps the timeout/output-cap/process-group hardening from
-//! `run_program_install` out of scope here — the failure modes for a stuck
-//! HTTP request or a malformed archive are bounded by reqwest's timeout and
-//! the in-process extraction APIs respectively.
+//! GitHub Release-driven installer for agent harnesses and adapter binaries: resolve the release,
+//! glob-match the asset, download, optionally checksum-verify, extract, and `chmod +x` into
+//! `dest_dir`. No shell is spawned, so reqwest's timeout bounds the whole install.
 
 use std::collections::HashMap;
 use std::fs;
@@ -42,10 +30,8 @@ fn github_api_base() -> String {
     GITHUB_API_BASE.to_owned()
 }
 
-/// True when the resolved base URL is the canonical `api.github.com`.
-/// Used to decide whether to forward `GITHUB_TOKEN` on outgoing
-/// requests — a redirected base (test mock or, in the worst case, a
-/// misconfigured override) must never receive the operator's PAT.
+/// True when the resolved base is canonical `api.github.com`. `GITHUB_TOKEN` MUST only be
+/// forwarded when this holds: a redirected base must never receive the operator's PAT.
 fn base_is_upstream(base: &str) -> bool {
     base.trim_end_matches('/')
         .eq_ignore_ascii_case(GITHUB_API_BASE)
@@ -61,9 +47,8 @@ pub struct GithubReleaseInstall<'a> {
     pub checksums_asset: Option<&'a str>,
 }
 
-/// Outcome of a single github_release install. The log is shaped as
-/// newline-separated stdout-like lines so the surrounding installer
-/// machinery can persist it directly into `installer_runs.stdout`.
+/// Outcome of one github_release install; `log` is newline-separated so it persists directly into
+/// `installer_runs.stdout`.
 #[derive(Debug, Clone)]
 pub struct GithubReleaseOutcome {
     pub binary_path: PathBuf,
@@ -72,25 +57,15 @@ pub struct GithubReleaseOutcome {
     pub release_tag: String,
 }
 
-/// Resolve the tag of the latest published release for a GitHub repo. Used
-/// by `acps agent check` to compare an installed adapter/harness against
-/// upstream without downloading the asset. Returns the raw release tag (e.g.
-/// `v0.11.1`) so callers can do a stringly compare against
-/// `installer_runs.version`.
+/// The raw tag of the latest published release, for comparing an install against upstream.
 pub fn latest_release_tag(repo: &str) -> Result<String> {
     let client = build_client("")?;
-    // Resolve the base ONCE and reuse it. Reading the env twice (once
-    // for the token decision, once inside `fetch_release` to build the
-    // URL) would let a concurrent env mutation flip the security
-    // decision between those reads, which would defeat the
-    // "redirected base must never receive GITHUB_TOKEN" invariant.
+    // Resolve the base ONCE: reading the env twice would let a concurrent mutation flip the token
+    // decision between the read that authorizes it and the read that builds the URL.
     let base = github_api_base();
     let token = if base_is_upstream(&base) {
         resolve_token()
     } else {
-        // The base has been redirected (test mock, mis-set override).
-        // Forwarding GITHUB_TOKEN to a non-upstream endpoint would
-        // hand a PAT to an attacker-controlled host, so we drop it.
         None
     };
     let release = fetch_release(&client, &base, repo, None, token.as_deref())?;
@@ -105,8 +80,7 @@ pub fn install(
 ) -> Result<GithubReleaseOutcome> {
     let mut log = LogBuf::new();
     let client = build_client("")?;
-    // Resolve the base ONCE and reuse it (see `latest_release_tag` —
-    // the token decision and the URL target must read the same value).
+    // Resolve the base ONCE: the token decision and the URL target must read the same value.
     let base = github_api_base();
     let token = if base_is_upstream(&base) {
         resolve_token()
@@ -212,9 +186,8 @@ pub fn install(
     })
 }
 
-/// Shared blocking-HTTP client factory for every GitHub Releases caller in the
-/// runtime, including the self-updater. `repo` only labels the construction
-/// failure; callers with no single repository in scope pass `""`.
+/// Shared blocking-HTTP client factory for every GitHub Releases caller; `repo` only labels the
+/// construction failure.
 pub(crate) fn build_client(repo: &str) -> Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
         .timeout(REQUEST_TIMEOUT)
@@ -272,10 +245,8 @@ fn fetch_release(
         })
 }
 
-/// Pace requests to quota-bearing domains before they leave the process.
-/// Unparseable URLs pass through — they will fail at `send()` with the
-/// caller's typed error, which is more specific than anything we could
-/// report here.
+/// Pace requests to quota-bearing domains before they leave the process; unparseable URLs pass
+/// through and fail at `send()` with the caller's typed error.
 fn acquire_for_url(url: &str) -> Result<()> {
     match reqwest::Url::parse(url)
         .ok()
@@ -287,8 +258,7 @@ fn acquire_for_url(url: &str) -> Result<()> {
     }
 }
 
-/// Feed rate-limit responses to the per-domain circuit before the caller
-/// turns them into errors.
+/// Feed rate-limit responses to the per-domain circuit before the caller turns them into errors.
 fn observe_rate_limit(response: &reqwest::blocking::Response) {
     let status = response.status();
     let headers = response.headers();
@@ -305,11 +275,9 @@ fn observe_rate_limit(response: &reqwest::blocking::Response) {
     net_rate_limit::report_rate_limited(host, rate_limit_retry_after(headers, now_epoch));
 }
 
-/// GitHub signals rate limiting three ways: 429; 403 with the primary
-/// quota exhausted (`x-ratelimit-remaining: 0`); and secondary/abuse
-/// limits as 403 with a `Retry-After` header while the primary quota
-/// still has budget. A plain 403 (private repo, bad token) matches none
-/// of these and must not open the circuit.
+/// GitHub signals rate limiting three ways: 429; 403 with `x-ratelimit-remaining: 0`; and
+/// secondary limits as 403 with `Retry-After` while quota remains. A plain 403 (private repo, bad
+/// token) matches none of these and must not open the circuit.
 fn is_rate_limit_response(
     status: reqwest::StatusCode,
     headers: &reqwest::header::HeaderMap,
@@ -331,8 +299,7 @@ fn rate_limit_retry_after(
     if let Some(secs) = header_u64(headers, HEADER_RETRY_AFTER) {
         return Some(Duration::from_secs(secs));
     }
-    // `x-ratelimit-reset` is a unix timestamp of when the quota window
-    // reopens.
+    // `x-ratelimit-reset` is a unix timestamp, not a relative wait.
     let reset_epoch = header_u64(headers, HEADER_RATELIMIT_RESET)?;
     Some(Duration::from_secs(reset_epoch.saturating_sub(now_epoch?)))
 }
@@ -397,9 +364,8 @@ fn pick_asset(assets: &[ReleaseAsset], pattern: &str, repo: &str) -> Result<Rele
     }
 }
 
-/// Map `std::env::consts::ARCH` to the GitHub-Release naming token. We only
-/// support headless Linux deployment targets; anything else fails fast rather
-/// than silently downloading a wrong-arch binary.
+/// Map `std::env::consts::ARCH` to the GitHub-Release naming token, failing fast rather than
+/// silently downloading a wrong-arch binary.
 fn host_arch_token() -> Result<&'static str> {
     match std::env::consts::ARCH {
         "x86_64" => Ok("x86_64"),
@@ -410,9 +376,7 @@ fn host_arch_token() -> Result<&'static str> {
     }
 }
 
-/// `consts::ARCH` is already `&'static str`, but Rust can't see that through
-/// the match. Re-anchor as the documented constant so the error variant
-/// stays `&'static str`.
+/// `consts::ARCH` is already `&'static str`, but Rust cannot see that through the match.
 fn leak_arch(_arch: &str) -> &'static str {
     std::env::consts::ARCH
 }
@@ -434,8 +398,7 @@ fn verify_checksum(
         }
     })?;
 
-    // Standard `checksums.txt` shape: `<sha256>  <filename>` per line, with
-    // optional `*` before filename for "binary mode". Tolerate both.
+    // `<sha256>  <filename>` per line, with an optional `*` before the filename for binary mode.
     let expected = body
         .lines()
         .find_map(|line| parse_checksum_line(line, asset_name))
@@ -619,10 +582,7 @@ fn set_executable(_path: &Path, _repo: &str) -> Result<()> {
     Ok(())
 }
 
-/// Simple glob: `*` matches any (possibly empty) byte sequence; everything
-/// else is a literal byte match. Sufficient for asset_pattern matching, which
-/// only ever needs `*` (no character classes or `?`). Operates on bytes so a
-/// pattern containing `*` works regardless of UTF-8 boundaries in the input.
+/// Byte-wise glob where `*` matches any possibly-empty sequence and everything else is literal.
 fn glob_match(pattern: &str, target: &str) -> bool {
     let pattern = pattern.as_bytes();
     let target = target.as_bytes();

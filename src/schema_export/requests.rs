@@ -1,12 +1,6 @@
-//! The Deserialize-contract umbrella: every top-level body/query the `/v1` API
-//! accepts. Registered here so `acps_schema` pulls them (and their transitive
-//! field types) into `#/$defs/request/*`. The init API's requests are
-//! contributed separately (see `crate::cli::init_request_defs`).
-//!
-//! This is a hand-maintained registration point: a new request body or query
-//! must be added here. The `schema_covers_every_handler_wire_type` coverage
-//! test (see `super::coverage`) guards against a handler payload with no schema
-//! entry.
+//! Hand-maintained registration point for every top-level `/v1` body/query, so
+//! `acps_schema` pulls them into `#/$defs/request/*`. A NEW REQUEST TYPE MUST BE
+//! ADDED HERE; `schema_covers_every_handler_wire_type` guards the omission.
 
 /// Umbrella over every request payload and query. Never deserialized itself —
 /// only its derived `JsonSchema` matters, which forces each variant's type into

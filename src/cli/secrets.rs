@@ -63,9 +63,8 @@ pub(super) fn run_secrets_command(command: SecretsCommand, output: OutputFormat)
             validate_local_admin_key(&admin_key)?;
             reject_auth_ref_mutation(&name)?;
             let value = resolve_secret_value(args.value, &name, stdin_is_terminal)?;
-            // The store is a whole-file read-modify-write; serialize with the
-            // daemon and other acps processes so concurrent writers cannot
-            // silently drop each other's entries.
+            // The store is a whole-file read-modify-write, so concurrent writers must serialize or
+            // they silently drop each other's entries.
             let _mutation =
                 acquire_agent_config_mutation_file_lock(&crate::config::default_config_path()?)?;
             let mut store = SecretStore::open(&home)?;
@@ -125,8 +124,7 @@ fn read_secret_value(name: &str, stdin_is_terminal: bool) -> Result<String> {
             .map_err(|source| StackError::ServeIo { source });
     }
 
-    // Read a single line from stdin; trailing CR/LF stripped. Values are
-    // single-line text by spec, and script callers keep the existing pipe API.
+    // Secret values are single-line text by spec, so one line with trailing CR/LF stripped.
     let mut buffer = String::new();
     std::io::stdin()
         .lock()

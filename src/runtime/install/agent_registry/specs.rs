@@ -1,10 +1,6 @@
-//! Install and update specs carried by a registry entry.
-//!
-//! These types mirror the `[agents.harness]` / `[agents.adapter]` blocks of
-//! `data/agents.toml` and own their own validation, so a malformed catalog is
-//! rejected at parse time rather than at install time. The catalog in the
-//! parent module drives this by calling into [`HarnessSpec::validate`] and
-//! [`AdapterSpec::validate`].
+//! Install and update specs mirroring the `[agents.harness]` /
+//! `[agents.adapter]` blocks of `data/agents.toml`, validated at parse time so a
+//! malformed catalog is rejected before any install runs.
 
 use super::*;
 
@@ -13,8 +9,6 @@ use super::*;
 pub struct HarnessSpec {
     pub id: String,
     /// Arguments appended to the harness command to enter ACP stdio mode.
-    /// Most harnesses expose an `acp` subcommand; the field exists for the
-    /// ones that enter ACP mode via a flag instead of a subcommand.
     #[serde(default = "default_acp_args")]
     pub acp_args: Vec<String>,
     pub install: InstallSet,
@@ -22,9 +16,7 @@ pub struct HarnessSpec {
     pub update: UpdateSet,
 }
 
-/// The conventional ACP entry point: an `acp` subcommand. Shared by the
-/// serde default and by test/fixture `HarnessSpec` literals so the
-/// convention lives in exactly one place.
+/// The conventional ACP entry point: an `acp` subcommand.
 pub fn default_acp_args() -> Vec<String> {
     vec!["acp".to_owned()]
 }
@@ -118,12 +110,8 @@ pub enum InstallProvidedBy {
 pub struct UpdateSet {
     #[serde(default)]
     pub apt: Option<AptUpdate>,
-    /// Update by re-running the shell install recipe. For shell-installed
-    /// harnesses with no npm/github path and no native update subcommand
-    /// (e.g. a prebuilt archive resolved from an upstream index at install
-    /// time), re-running install is the only update path; without this flag
-    /// the updater probes the installed binary for an `update`/`upgrade`
-    /// subcommand instead.
+    /// Update by re-running the shell install recipe, for harnesses with no
+    /// npm/github path and no native update subcommand.
     #[serde(default)]
     pub shell_rerun: bool,
 }
@@ -220,12 +208,8 @@ pub struct ShellInstall {
     pub creates: String,
     #[serde(default)]
     pub required_tools: Vec<String>,
-    /// Whole-run budget for this recipe, overriding the installer default.
-    /// Recipes are not comparable: one is a download plus a symlink, another
-    /// drives an upstream installer that provisions a language toolchain and
-    /// a source checkout. Raising the shared default to fit the slowest one
-    /// would make every genuinely hung install wait just as long, so the
-    /// recipe that needs the room declares it.
+    /// Whole-run budget for this recipe, overriding the installer default so a
+    /// slow recipe does not force every hung install to wait as long.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
 }
@@ -237,8 +221,8 @@ impl ShellInstall {
         for tool in &self.required_tools {
             validate_required_tool(agent_id, &format!("{field}.required_tools"), tool)?;
         }
-        // A zero budget would kill the recipe the instant it spawns, which
-        // reads as a mysterious install failure rather than a bad catalog.
+        // A zero budget would kill the recipe the instant it spawns, reading as
+        // an install failure rather than a bad catalog.
         if self.timeout_secs == Some(0) {
             return Err(StackError::RegistryLoad {
                 reason: format!(

@@ -1,10 +1,7 @@
 use super::*;
 
-/// Everything between "the run row exists" and "the first tracked step runs":
-/// settle the agent in the config, report what the registry and the flags make
-/// of the categories, stage the native config import, and resolve the plans the
-/// steps below execute. Failures here still finalize the run — the row is
-/// already recorded, and a pending row would be adopted by a later `--resume`.
+/// Everything between "the run row exists" and "the first tracked step runs".
+/// Every failure here MUST still finalize the run, or the pending row is adopted by a later `--resume`.
 pub(super) fn stage_init_config(
     mut args: InitArgs,
     base: InitBase,
@@ -33,13 +30,8 @@ pub(super) fn stage_init_config(
 
     let mut config = Config::load_from_path(&config_path)
         .or_else(|error| finalize_failure(&store, &init_run, error))?;
-    // Skip the registry re-apply when it cannot or should not run: a custom
-    // (non-registry) agent is already fully applied at creation time (and a
-    // `lookup_required` on its id would fail), and an imported config without an
-    // explicit `--agent` keeps the agent it was imported with.
-    // Explicit `--custom-agent-*` flags override the skip so an operator can
-    // re-point an existing custom agent. Explicit `--agent` also overrides an
-    // existing custom config and switches back to the supported registry flow.
+    // Skip the registry re-apply for a custom agent (a `lookup_required` on its id would fail) or
+    // an imported config with no explicit `--agent`; explicit flags override the skip.
     let custom_agent_flags_present = resolve_custom_agent_spec(&args)
         .or_else(|error| finalize_failure(&store, &init_run, error))?
         .is_some();
@@ -58,16 +50,11 @@ pub(super) fn stage_init_config(
     };
     let agent_applied = match &selected_agent {
         Some(AgentSelection::Registry(entry)) => {
-            // Fail fast on agents the runtime cannot drive headlessly (browser
-            // OAuth, terminal-only adapters, etc.). Without this check init would
-            // happily install the binary and only fail at first session spawn,
-            // wasting bandwidth and operator time.
+            // Fail fast on agents the runtime cannot drive headlessly, rather than at first session spawn.
             entry
                 .ensure_supported()
                 .or_else(|error| finalize_failure(&store, &init_run, error))?;
-            // Re-confirming the same agent keeps its configured provider; an
-            // agent change clears it, so only the re-confirm path can land on
-            // the overridden provider.
+            // Re-confirming the same agent keeps its configured provider; an agent change clears it.
             let kept_provider_id = if entry.id == config.agent.id {
                 config
                     .agent
@@ -84,16 +71,13 @@ pub(super) fn stage_init_config(
             )
             .or_else(|error| finalize_failure(&store, &init_run, error))?;
             apply_registry_entry_to_config(&mut config, entry);
-            // Applied after the registry re-apply so an explicit
-            // `--adapter-override-*` designation survives an agent change
-            // (the re-apply clears a stored override on change).
+            // Must follow the registry re-apply, which clears a stored override on an agent change.
             apply_adapter_override_action(&mut config, &adapter_override_action);
             apply_agent_launch_command(&mut config, entry);
             true
         }
         Some(AgentSelection::Custom(spec)) => {
-            // A custom agent has no registry-managed native config surface, so
-            // there is nowhere an endpoint override could be written into.
+            // A custom agent has no registry-managed native config surface for an endpoint override.
             crate::runtime::agent::switch::ensure_endpoint_override_survives_target(
                 &spec.id, false, None,
             )
@@ -102,11 +86,8 @@ pub(super) fn stage_init_config(
             true
         }
         None => {
-            // No agent re-selection this run. Explicit `--adapter-override-*`
-            // flags still apply to the configured agent.
             match &adapter_override_action {
                 Some(AdapterOverrideAction::Set(_)) => {
-                    // A designation only means something for a registry agent.
                     let entry = registry
                         .lookup(&config.agent.id)
                         .ok_or_else(|| StackError::InvalidParam {
@@ -125,13 +106,9 @@ pub(super) fn stage_init_config(
                 Some(AdapterOverrideAction::Clear) => {
                     let changed =
                         apply_adapter_override_action(&mut config, &adapter_override_action);
-                    // Clearing must stay available after the agent leaves the
-                    // registry — that is precisely when a stale designation
-                    // needs removing. The curated launch command can only be
-                    // restored while the entry still exists; without it there
-                    // is nothing to derive the harness command from, so the
-                    // launch command is left as-is for the operator's next
-                    // `--agent` selection to rewrite.
+                    // Clearing must stay available after the agent leaves the registry, which is
+                    // precisely when a stale designation needs removing; the curated launch command
+                    // can only be restored while the entry still exists.
                     if let Some(entry) = registry.lookup(&config.agent.id) {
                         apply_agent_launch_command(&mut config, entry);
                     }
@@ -141,9 +118,8 @@ pub(super) fn stage_init_config(
             }
         }
     };
-    // A stored designation on a non-registry agent cannot drive any install
-    // or launch lane; fail fast instead of letting it silently misconfigure
-    // (reachable via imported configs, which skip the registry re-apply).
+    // A stored designation on a non-registry agent drives no install or launch lane; reachable via
+    // imported configs, which skip the registry re-apply.
     if config.agent.adapter_override.is_some() && registry.lookup(&config.agent.id).is_none() {
         return finalize_failure(
             &store,
@@ -157,7 +133,6 @@ pub(super) fn stage_init_config(
             },
         );
     }
-    // The selection borrows the registry; only the fact of it outlives staging.
     let agent_selected = selected_agent.is_some();
     if agent_applied {
         let rewrite = (|| -> Result<()> {
@@ -169,10 +144,8 @@ pub(super) fn stage_init_config(
             return finalize_failure(&store, &init_run, error);
         }
     }
-    // The agent is now final on every path into this point — fresh, existing,
-    // imported, resumed, or custom — which is what makes the registry-derived
-    // verdicts below trustworthy. `pending_init_native_config` still holds the
-    // uploaded config; `args.native_config_revision` covers the resumed form.
+    // The agent is final on every path into this point, which is what makes the registry-derived
+    // verdicts below trustworthy.
     let native_config_pending =
         pending_init_native_config.is_some() || args.native_config_revision.is_some();
     prompt::emit_state_signals(|| {
@@ -298,9 +271,8 @@ pub(super) fn stage_init_config(
             .provider
             .as_ref()
             .map(|provider| provider.id.clone());
-        // A failed provider_configure step that owned only model (no
-        // provider was ever set) can legitimately resume without `--provider`.
-        // Only error when we know provider is required AND absent.
+        // A failed provider_configure step that owned only model can legitimately resume without
+        // `--provider`, so error only when the provider is known to be required and absent.
         let resume_recorded_provider = recorded_args.as_ref().and_then(|r| r.provider.clone());
         if args.provider.is_none() && resume_recorded_provider.is_some() {
             return finalize_failure(
@@ -332,10 +304,7 @@ pub(super) fn stage_init_config(
         return finalize_failure(&store, &init_run, error);
     }
 
-    // An unsatisfiable skills declaration (e.g. essential skills for an agent
-    // without an install dir) is a hard error — a declaration silently
-    // skipped would be worse — but it must finalize the run like every other
-    // failure here, or the pending row would be adopted by a later --resume.
+    // An unsatisfiable skills declaration is a hard error rather than a silent skip.
     let skill_install_plan =
         match resolve_skill_install_plan(&args, &home, &config, &registry, &skill_catalog) {
             Ok(plan) => plan,

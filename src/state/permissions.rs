@@ -95,8 +95,7 @@ fn status_str(value: PermissionStatus) -> &'static str {
 }
 
 impl StateStore {
-    /// Insert a `permission_requests` row in the `pending` state. Returns the
-    /// fully-populated record so callers can publish it without re-reading.
+    /// Insert a `permission_requests` row in the `pending` state, returning the populated record.
     pub fn append_permission_request(
         &self,
         input: NewPermissionRequest<'_>,
@@ -144,8 +143,7 @@ impl StateStore {
         Ok(record)
     }
 
-    /// Transition a permission request to a terminal status. Returns the
-    /// pre-update status so the caller can validate the transition.
+    /// Transition a permission request to a terminal status, returning the pre-update status.
     pub fn transition_permission_status(
         &self,
         id: &str,
@@ -162,11 +160,7 @@ impl StateStore {
         let current = row.ok_or_else(|| StackError::PermissionNotFound { id: id.to_owned() })?;
         let current_status = parse_permission_status(&current);
 
-        // Reject any decision attempt once the row is terminal. Two competing
-        // session-key holders trying to approve the same request — or a client
-        // retrying after the first approve quietly landed — must see a clear
-        // "already decided" error rather than a silent success that re-fires
-        // the waiter (which has already been consumed).
+        // Reject decisions on a terminal row: a silent success would re-fire an already-consumed waiter.
         if current_status.is_terminal() {
             return Err(StackError::InvalidPermissionTransition {
                 id: id.to_owned(),
@@ -193,11 +187,7 @@ impl StateStore {
         Ok(current_status)
     }
 
-    /// Atomically transition the request to a terminal status AND insert the
-    /// matching `permission_decisions` row. Used by `PermissionService` so a
-    /// partial failure between the two writes cannot leave the audit trail
-    /// inconsistent (terminal row with no decision row). Returns the inserted
-    /// decision.
+    /// Atomically transition the request to a terminal status AND insert the matching `permission_decisions` row, so no partial write can leave a terminal row with no decision row.
     pub fn decide_permission(
         &self,
         id: &str,
@@ -344,26 +334,16 @@ impl StateStore {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// On daemon startup, mark every `pending` permission row as terminal so
-    /// clients polling the row see it settle. ACP-source rows become
-    /// `cancelled` (the ACP request channel is gone after restart). Command-
-    /// source rows become `expired` so the caller's understanding (the
-    /// command never executed) is preserved. Returns `(canceled, expired)`.
+    /// On daemon startup, settle every `pending` permission row: ACP-source rows become `cancelled`, command-source rows `expired`. Returns `(canceled, expired)`.
     pub fn reconcile_orphaned_permissions(&self) -> Result<(usize, usize)> {
-        // Wrap the row transitions and the matching decision inserts in one
-        // transaction so the audit-trail invariant — every terminal request
-        // row has a corresponding `permission_decisions` row — holds even
-        // across a crash mid-reconcile. Without the decision-row inserts the
-        // bulk UPDATEs would re-introduce the very inconsistency that the
-        // atomic `decide_permission` helper exists to prevent.
+        // One transaction for the transitions and their decision inserts, so the audit-trail
+        // invariant (every terminal request row has a decision row) holds across a mid-reconcile crash.
         let transaction =
             Transaction::new_unchecked(self.connection(), TransactionBehavior::Immediate)?;
         let now = current_timestamp();
 
         let external = self.external_logging_enabled();
 
-        // ACP-source pending rows become `cancelled` — the request channel is
-        // gone after restart.
         let acp_ids: Vec<String> = {
             let mut statement = transaction.prepare(
                 "SELECT id FROM permission_requests WHERE status = 'pending' AND source = 'acp'",
@@ -397,9 +377,8 @@ impl StateStore {
             }
         }
 
-        // Command-source pending rows become `expired` — the command never
-        // executed, so an expired decision (rather than canceled) preserves
-        // the caller's understanding that the policy timer ran out.
+        // `expired` rather than `cancelled`: the command never executed, so the caller's
+        // understanding that the policy timer ran out is preserved.
         let cmd_ids: Vec<String> = {
             let mut statement = transaction.prepare(
                 "SELECT id FROM permission_requests WHERE status = 'pending' AND source = 'command'",

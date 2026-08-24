@@ -15,10 +15,9 @@ pub(crate) fn download_archive(
     url: &str,
     destination: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // GitHub codeload has repeatedly stalled in the rustls-backed client used
-    // by the development hook, while curl succeeds against the same endpoint.
-    // Prefer the already-required curl path and retain the safe downloader as
-    // a bounded fallback for environments without a working curl transport.
+    // GitHub codeload repeatedly stalls in the rustls-backed client while curl
+    // succeeds against the same endpoint, so curl leads and the safe
+    // downloader is the fallback.
     let curl_error = match curl_archive(url, destination) {
         Ok(()) => return Ok(()),
         Err(error) => error,

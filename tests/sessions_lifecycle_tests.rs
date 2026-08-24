@@ -1,11 +1,7 @@
 #![cfg(feature = "test-fixtures")]
 
-//! Session lifecycle coverage: create/fork/load/resume/close, the cwd
-//! containment rules those routes enforce, and the full create → list → get →
-//! prompt → poll → close round trip.
-//!
-//! The placebo ACP fixture stands in for a real ACP agent;
-//! `tests/acp_bridge_tests.rs` exercises the lower-level bridge layer.
+//! Session lifecycle coverage: create/fork/load/resume/close, cwd containment,
+//! and the full create → list → get → prompt → poll → close round trip.
 
 mod common;
 
@@ -96,7 +92,6 @@ async fn full_lifecycle_create_list_get_prompt_poll_close() {
 
     let session_id = create_session(&harness).await;
 
-    // List returns the just-created session at the top.
     let list: Value = client
         .get(format!("{}/v1/sessions", harness.base_url))
         .header("Authorization", session_bearer())
@@ -114,7 +109,6 @@ async fn full_lifecycle_create_list_get_prompt_poll_close() {
         .collect();
     assert!(ids.contains(&session_id.as_str()), "list = {ids:?}");
 
-    // GET by id returns full session row.
     let got: Value = client
         .get(format!("{}/v1/sessions/{}", harness.base_url, session_id))
         .header("Authorization", session_bearer())
@@ -127,7 +121,6 @@ async fn full_lifecycle_create_list_get_prompt_poll_close() {
     assert_eq!(got["data"]["id"], session_id);
     assert_eq!(got["data"]["status"], "active");
 
-    // Submit a prompt. Fire-and-forget returns a prompt id.
     let submit: Value = client
         .post(format!(
             "{}/v1/sessions/{}/prompt",
@@ -150,8 +143,6 @@ async fn full_lifecycle_create_list_get_prompt_poll_close() {
         .expect("prompt message id")
         .to_owned();
 
-    // Poll until terminal. Bounded so a hung agent fails the test instead
-    // of hanging CI forever.
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     let final_status = loop {
         if std::time::Instant::now() > deadline {
@@ -181,8 +172,6 @@ async fn full_lifecycle_create_list_get_prompt_poll_close() {
     assert_eq!(final_status["message_id_acknowledged"], true);
 
     // The fake agent emits two `session/update` notifications per prompt.
-    // The bridge persists them keyed by session_id, so the events endpoint
-    // returns at least those two plus our lifecycle rows.
     let events: Value = client
         .get(format!(
             "{}/v1/sessions/{}/events",
@@ -207,7 +196,6 @@ async fn full_lifecycle_create_list_get_prompt_poll_close() {
     );
     assert!(kinds.contains(&"session.created"), "kinds = {kinds:?}");
 
-    // Close transitions the row to closed.
     let close = client
         .delete(format!("{}/v1/sessions/{}", harness.base_url, session_id))
         .header("Authorization", session_bearer())
@@ -384,9 +372,8 @@ async fn fork_session_forwards_message_breakpoint_to_placebo() {
 
 #[tokio::test]
 async fn create_session_lazily_starts_a_never_started_agent() {
-    // Regression: after `acps init` the process manager owns `acps serve` only,
-    // so nothing had ever spawned the agent and every session call answered
-    // `agent.not_running`.
+    // Regression: after `acps init` nothing had ever spawned the agent, so
+    // every session call answered `agent.not_running`.
     let harness = Harness::spawn_without_agent_start(|_| {}).await;
     assert_eq!(harness.agent_process_state().await, "stopped");
 
@@ -424,9 +411,8 @@ async fn prompt_lazily_restarts_an_agent_that_went_away() {
     harness.stop_agent().await;
     assert_eq!(harness.agent_process_state().await, "stopped");
 
-    // The prior agent's session id is gone with the process, so the prompt
-    // itself may fail; what this asserts is that the request brought the agent
-    // back instead of short-circuiting on `agent.not_running`.
+    // The prompt itself may fail (the prior session id died with the process);
+    // what matters is that the request brought the agent back.
     let response = http()
         .post(format!(
             "{}/v1/sessions/{}/prompt",
@@ -474,10 +460,8 @@ async fn load_and_resume_reject_closed_sessions() {
 
 #[tokio::test]
 async fn close_session_on_secondary_target_survives_array_off() {
-    // Regression: a session opened against a non-primary target while Array was
-    // ON must stay closable after `acps array off`. Terminal wind-down ops
-    // (close/cancel) bypass the Array-enabled gate so toggling Array off never
-    // strands a session with a live agent and no way to wind it down.
+    // Regression: close/cancel bypass the Array-enabled gate, so `acps array
+    // off` never strands a live session on a non-primary target.
     let harness = Harness::spawn_with(|config| {
         config.array.enabled = true;
         let mut secondary = config.agent.clone();
@@ -491,7 +475,6 @@ async fn close_session_on_secondary_target_survives_array_off() {
     .await;
     let client = http();
 
-    // Start the secondary target and open a session against it while Array is on.
     let start = client
         .post(format!("{}/v1/array/targets/codex/start", harness.base_url))
         .header("Authorization", admin_bearer())
@@ -523,8 +506,6 @@ async fn close_session_on_secondary_target_survives_array_off() {
     )
     .expect("rewrite config");
 
-    // Close must still succeed even though `codex` is no longer the active
-    // default target; cancel shares the same wind-down resolver.
     let close = client
         .delete(format!("{}/v1/sessions/{}", harness.base_url, session_id))
         .header("Authorization", session_bearer())
@@ -713,9 +694,7 @@ fn declared_mcp_servers() -> Vec<McpServerConfig> {
 
 #[tokio::test]
 async fn no_mcp_advertisement_skips_every_server_including_stdio() {
-    // By default the placebo advertises no MCP capability, so nothing is
-    // attached — no `mcp.session_attached` event fires and both servers,
-    // stdio included, land in `mcp.session_skipped`.
+    // With no MCP capability advertised, even the stdio server is skipped.
     let home = tempfile::tempdir().expect("home tempdir");
     let _home_guard = HomeEnvGuard::set(home.path());
     SecretStore::open_or_create(home.path()).expect("secret store initializes");
@@ -754,8 +733,7 @@ async fn no_mcp_advertisement_skips_every_server_including_stdio() {
 #[tokio::test]
 async fn attached_mcp_event_lists_servers_for_an_mcp_capable_agent() {
     // With `mcpCapabilities.http` advertised, both the stdio baseline and the
-    // HTTP server are sent, and the durable `mcp.session_attached` event
-    // lists exactly what reached the agent.
+    // HTTP server are sent.
     let home = tempfile::tempdir().expect("home tempdir");
     let _home_guard = HomeEnvGuard::set(home.path());
     SecretStore::open_or_create(home.path()).expect("secret store initializes");
@@ -795,11 +773,8 @@ async fn attached_mcp_event_lists_servers_for_an_mcp_capable_agent() {
 
 #[tokio::test]
 async fn unadvertised_mode_model_and_effort_are_ignored_not_fatal() {
-    // The placebo advertises neither a `mode`, `model`, nor effort config
-    // option unless told to, so a config-declared value used to make every
-    // session create fail with `agent.config_provision`. The session must
-    // instead proceed on the agent's defaults, report what was ignored in
-    // the response, and record a `session.capability_ignored` event.
+    // A config-declared value the agent never advertises must degrade to an
+    // ignored record, not fail session create with `agent.config_provision`.
     let harness = Harness::spawn_with(|config| {
         config.agent.mode = Some("plan".to_owned());
         config.agent.model = Some("deepseek/deepseek-v4-flash".to_owned());
@@ -849,7 +824,6 @@ async fn unadvertised_mode_model_and_effort_are_ignored_not_fatal() {
         "{events:?}"
     );
 
-    // The session is usable, not just created.
     let prompt = http()
         .post(format!(
             "{}/v1/sessions/{}/prompt",
@@ -865,10 +839,8 @@ async fn unadvertised_mode_model_and_effort_are_ignored_not_fatal() {
 
 #[tokio::test]
 async fn config_options_are_applied_snapshotted_and_settable() {
-    // The placebo advertises one select (`persona`) and one boolean
-    // (`fast`, category model_config). The configured map applies both,
-    // the unadvertised `ghost` entry degrades to an ignored record, and
-    // the per-session snapshot + set route reflect the applied state.
+    // The placebo advertises one select (`persona`) and one boolean (`fast`);
+    // the unadvertised `ghost` entry must degrade to an ignored record.
     let harness = Harness::spawn_with(|config| {
         config.agent.args.extend([
             "--config-option-select".to_owned(),
@@ -907,7 +879,6 @@ async fn config_options_are_applied_snapshotted_and_settable() {
     assert_eq!(ignored[0]["value"], "anything");
     let session_id = body["data"]["id"].as_str().expect("session id").to_owned();
 
-    // The stored snapshot reflects the applied values.
     let response = http()
         .get(format!(
             "{}/v1/sessions/{}/config-options",
@@ -938,7 +909,6 @@ async fn config_options_are_applied_snapshotted_and_settable() {
     assert!(persona.get("category").is_none(), "{body}");
     assert!(body["data"]["updated_at"].is_string());
 
-    // Live set: the refreshed list reflects the new value.
     let response = http()
         .post(format!(
             "{}/v1/sessions/{}/config-options",
@@ -960,7 +930,6 @@ async fn config_options_are_applied_snapshotted_and_settable() {
         .expect("persona option");
     assert_eq!(persona["current_value"], "default", "{body}");
 
-    // Off-list requests are retryable 400s, not agent round-trips.
     let response = http()
         .post(format!(
             "{}/v1/sessions/{}/config-options",
@@ -973,7 +942,6 @@ async fn config_options_are_applied_snapshotted_and_settable() {
         .expect("set unknown option");
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-    // A kind mismatch (string for a boolean option) is also a 400.
     let response = http()
         .post(format!(
             "{}/v1/sessions/{}/config-options",
@@ -986,7 +954,6 @@ async fn config_options_are_applied_snapshotted_and_settable() {
         .expect("set mismatched kind");
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-    // A boolean set round-trips natively.
     let response = http()
         .post(format!(
             "{}/v1/sessions/{}/config-options",
@@ -1011,10 +978,9 @@ async fn config_options_are_applied_snapshotted_and_settable() {
 
 #[tokio::test]
 async fn config_option_notifications_refresh_the_stored_snapshot() {
-    // Strict-lax split: the placebo answers `session/set_config_option` with
-    // an empty list and carries the refreshed state only in a
-    // `config_option_update` notification, so the value observed by the GET
-    // can only have arrived through the notification projection.
+    // The placebo answers `session/set_config_option` with an empty list and
+    // carries the refreshed state only in a `config_option_update`
+    // notification, so the GET can only see it via notification projection.
     let harness = Harness::spawn_with(|config| {
         config.agent.args.extend([
             "--config-option-select".to_owned(),
@@ -1047,9 +1013,7 @@ async fn config_option_notifications_refresh_the_stored_snapshot() {
         .await
         .expect("set config option");
     assert_eq!(response.status(), StatusCode::OK);
-    // The agent answered with an empty list, so the response must fall back
-    // to the stored snapshot rather than claiming the session advertises
-    // nothing.
+    // An empty agent answer must fall back to the stored snapshot.
     let body: Value = response.json().await.expect("json");
     assert!(
         !body["data"]["config_options"]
@@ -1092,8 +1056,7 @@ async fn config_option_notifications_refresh_the_stored_snapshot() {
 
 #[tokio::test]
 async fn advertised_model_is_still_applied_without_ignore_records() {
-    // Regression guard for the softening: when the agent does advertise the
-    // configured model, the set is issued and nothing is reported ignored.
+    // When the agent does advertise the configured model, nothing is ignored.
     let harness = Harness::spawn_with(|config| {
         config.agent.args.extend([
             "--model-config-option".to_owned(),

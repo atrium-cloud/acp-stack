@@ -5,16 +5,12 @@ use super::support::*;
 
 #[test]
 fn start_init_request_maps_sandbox_into_args() {
-    // `deny_unknown_fields` means the platform payload is rejected outright
-    // unless `sandbox` is a known field; this also covers the arg mapping.
     let request: StartInitRequest =
         serde_json::from_str(r#"{"agent":"placebo","sandbox":"unshare"}"#)
             .expect("sandbox must be an accepted request field");
     let args = request.into_init_args().expect("valid request");
     assert_eq!(args.sandbox.as_deref(), Some("unshare"));
-    // The wire spells the repeatable custom-agent argument list in the
-    // plural; the CLI's singular `--custom-agent-arg` is not a field name,
-    // and `deny_unknown_fields` has to keep saying so.
+    // The wire spells the repeatable list in the plural; the CLI's singular flag is not a field name.
     assert!(
         serde_json::from_str::<StartInitRequest>(r#"{"custom_agent_args":["--stdio"]}"#).is_ok(),
         "custom_agent_args must be an accepted request field"
@@ -55,7 +51,6 @@ fn start_init_request_maps_custom_agent_declaration_into_args() {
         Some("/usr/local/bin/housebot-acp")
     );
     assert!(args.agent.is_none());
-    // The spec assembles through the same resolver the CLI flags use.
     let spec = super::super::super::registry_apply::resolve_custom_agent_spec(&args)
         .expect("spec must resolve")
         .expect("a declared custom agent must produce a spec");
@@ -91,7 +86,6 @@ fn start_init_request_rejects_custom_agent_fields_without_id() {
                 ref reason,
             } => {
                 assert_eq!(rejected, field);
-                // The rejection names fields, never the submitted spec.
                 for value in ["House Bot", "housebot-acp", "--stdio", "npm install"] {
                     assert!(!reason.contains(value), "{reason} echoed a submitted value");
                 }

@@ -17,7 +17,6 @@ fn strip_ansi_passes_plain_text_unchanged() {
 
 #[test]
 fn strip_ansi_preserves_other_control_characters() {
-    // Tabs, newlines, and other control chars survive: serde_json escapes them downstream.
     assert_eq!(strip_ansi("a\tb\nc"), "a\tb\nc");
 }
 

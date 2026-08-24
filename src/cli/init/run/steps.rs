@@ -1,8 +1,6 @@
 use super::*;
 
-/// [`finalize_with_error`] where a value would otherwise be returned. It never
-/// yields one: it returns the error it was handed, or the store failure that
-/// preempted it.
+/// [`finalize_with_error`] in a value position; always returns an error, never a value.
 pub(super) fn finalize_failure<T>(
     store: &StateStore,
     run: &crate::state::InitRunRecord,
@@ -30,8 +28,7 @@ fn signal_step_started(kind: &'static str) {
 fn signal_step_finished(kind: &'static str, result: &Result<StepDisposition>) {
     prompt::emit_state_signal(|| InitStateSignal::StepFinished {
         kind,
-        // A failed step has no disposition of its own; the error_code is what
-        // distinguishes it, so the executed/skipped axis reports the body ran.
+        // A failed step has no disposition of its own; `error_code` is what distinguishes it.
         disposition: result
             .as_ref()
             .copied()
@@ -43,10 +40,8 @@ fn signal_step_finished(kind: &'static str, result: &Result<StepDisposition>) {
     });
 }
 
-/// `init_runner::record_step` bracketed with state signals. The runtime
-/// recorder stays ignorant of hosted concepts, so the bracketing lives here,
-/// on the driver side; the call order below is the authority on step sequence,
-/// never the ordinals.
+/// `init_runner::record_step` bracketed with state signals. Call order, not the ordinals, is the
+/// authority on step sequence.
 pub(super) fn record_init_step(
     store: &StateStore,
     run: &crate::state::InitRunRecord,

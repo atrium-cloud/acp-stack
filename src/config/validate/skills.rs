@@ -1,7 +1,5 @@
 //! Agent Skills source validation: alias syntax/uniqueness and `owner/repo`
-//! shape for user-declared `[[skills.sources]]`. Whether an alias shadows a
-//! curated catalog alias is checked at add time, where the catalog is loaded;
-//! keeping the catalog out of this layer preserves the config/runtime split.
+//! shape for user-declared `[[skills.sources]]`.
 
 use std::collections::HashSet;
 
@@ -22,8 +20,7 @@ pub(crate) fn validate_skills(skills: &SkillsConfig) -> Result<()> {
 }
 
 /// Startup/reload counterpart to [`validate_skills`]: an individually invalid
-/// source declaration must not fail startup, so drop-and-report each bad entry
-/// (same contract as MCP's `partition_valid_servers`) and keep the rest.
+/// source must not fail startup, so drop-and-report it and keep the rest.
 pub(crate) fn partition_valid_sources(
     sources: Vec<UserSkillSource>,
 ) -> (Vec<UserSkillSource>, Vec<(String, String)>) {
@@ -68,10 +65,9 @@ fn duplicate_alias_error(alias: &str) -> StackError {
     }
 }
 
-/// A branch/ref is interpolated raw into the archive URL
-/// (`{repo}/archive/{branch}.tar.gz`), so restrict it to a git-ref-safe charset.
-/// Characters like `?`/`#` would truncate the URL path and `..` segments would
-/// redirect the fetch to a different resource than the one displayed.
+/// A branch/ref is interpolated raw into the archive URL, so it MUST stay
+/// git-ref-safe: `?`/`#` would truncate the path and `..` would redirect the
+/// fetch to a different resource than the one displayed.
 fn validate_git_ref(alias: &str, branch: &str) -> Result<()> {
     let valid = !branch.is_empty()
         && branch.len() <= 255
@@ -95,8 +91,7 @@ fn validate_git_ref(alias: &str, branch: &str) -> Result<()> {
 }
 
 /// Alias syntax mirrors the catalog's: lowercase alphanumerics and single
-/// interior dashes, so a user alias is interchangeable with a catalog alias in
-/// `acps skills add <source> ...`.
+/// interior dashes.
 fn validate_source_alias(alias: &str) -> Result<()> {
     let valid = !alias.is_empty()
         && alias.len() <= 64
@@ -119,10 +114,9 @@ fn validate_source_alias(alias: &str) -> Result<()> {
     }
 }
 
-/// GitHub account names are ASCII alphanumerics and single-char-safe dashes,
-/// at most 39 characters. The installer's fetch path enforces exactly this
-/// shape, so config must not accept anything looser: a permissive owner here
-/// would persist a source every later `add`/`source get` rejects.
+/// GitHub account names: ASCII alphanumerics and single dashes, max 39 chars.
+/// MUST match the installer's fetch path exactly, or config persists a source
+/// every later `add`/`source get` rejects.
 pub(crate) fn is_valid_github_owner(owner: &str) -> bool {
     !owner.is_empty()
         && owner.len() <= 39

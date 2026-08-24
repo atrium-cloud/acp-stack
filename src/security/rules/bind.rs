@@ -1,6 +1,5 @@
-//! `api.public_bind` rule. Flags binds on unspecified IPs (`0.0.0.0`/`[::]`)
-//! unless the daemon is running on Railway's managed runtime, where the
-//! platform terminates traffic at its edge.
+//! `api.public_bind` rule: flags unspecified-IP binds, except on Railway's
+//! managed runtime where the platform terminates traffic at its edge.
 
 use crate::security::SecurityCheckInputs;
 use crate::security::findings::{SecurityFinding, bind_is_public};

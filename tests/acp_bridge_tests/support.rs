@@ -73,9 +73,8 @@ pub(crate) fn fake_env() -> HashMap<String, String> {
 pub(crate) const RESOURCE_NOT_FOUND_CODE: i64 = -32002;
 pub(crate) const INVALID_PARAMS_CODE: i64 = -32602;
 
-/// Run a prompt against a placebo configured with `terminal_flags` and return
-/// (report, bridge, sink). The bridge is still running so callers can assert
-/// shutdown behavior; most tests just shut it down.
+/// Run a prompt against a placebo configured with `terminal_flags`. The returned
+/// bridge is still running, so callers can assert shutdown behavior.
 pub(crate) async fn run_terminal_probe(
     terminal_flags: &[&str],
     command_log: Option<acp_stack::runtime::agent::acp_bridge::TerminalCommandLog>,
@@ -109,8 +108,8 @@ pub(crate) async fn run_terminal_probe(
     );
     bridge.prompt_session(prompt).await.expect("session/prompt");
 
-    // Notification persistence goes through a spawned task inside the sink;
-    // poll briefly for the report chunk instead of assuming ordering.
+    // Notification persistence goes through a spawned task, so poll rather than
+    // assume ordering.
     let mut report = None;
     for _ in 0..100 {
         {
@@ -118,8 +117,7 @@ pub(crate) async fn run_terminal_probe(
             for event in events.iter() {
                 if let Some(index) = event.payload.find("terminal-report:") {
                     let tail = &event.payload[index + "terminal-report:".len()..];
-                    // The report JSON is embedded inside a JSON string field;
-                    // decode by re-parsing the payload and extracting the text.
+                    // The report JSON is embedded inside a JSON string field.
                     let payload: serde_json::Value =
                         serde_json::from_str(&event.payload).expect("payload parses");
                     let text = find_terminal_report_text(&payload)

@@ -1,7 +1,6 @@
 use super::*;
 
-/// Step: init_complete — record the durable "initialized" event.
-/// Resume verifier: the event is already present in the unified log.
+/// Step: init_complete, recording the durable "initialized" event.
 pub(super) fn run_init_complete_step(flow: &mut InitFlow) -> Result<()> {
     let verify_run_id = flow.init_run.id.clone();
     let store = &flow.store;
@@ -120,10 +119,9 @@ pub(super) fn print_init_summary(flow: &InitFlow) {
         }
     }
 
-    // Ignored-feature notices are text-lane only, deliberately bypassing
-    // `init_println!`: hosted progress frames reach end users, who must not
-    // see them — the platform reads `ignored_features` from the handoff
-    // payload instead.
+    // Text-lane only, deliberately bypassing `init_println!`: hosted progress
+    // frames reach end users, who must not see these; the platform reads
+    // `ignored_features` from the handoff payload instead.
     if output_mode.is_text() {
         for ignored in &flow.ignored_features {
             let label = match ignored.feature {
@@ -138,8 +136,7 @@ pub(super) fn print_init_summary(flow: &InitFlow) {
     }
 }
 
-/// Step: testflight — optional real-prompt test. Decision uses the resolver
-/// above; only `Run` actually executes the agent.
+/// Step: testflight, an optional real-prompt run of the agent.
 pub(super) fn run_testflight_step(flow: &mut InitFlow) -> Result<()> {
     let output_mode = flow.output_mode;
     let Some(decision) =
@@ -182,11 +179,8 @@ pub(super) fn run_testflight_step(flow: &mut InitFlow) -> Result<()> {
     Ok(())
 }
 
-/// Resume-aware finalization. If a prior step in this run is still `pending`,
-/// `running`, or `failed` (because the current invocation's flags skipped over
-/// it), the aggregate run status must NOT settle to `succeeded`. We mark it
-/// `failed` instead and surface a clear error so the operator knows to re-run
-/// with the original flags.
+/// Resume-aware finalization: if any prior step is still non-terminal or
+/// failed, the aggregate run MUST NOT settle to `succeeded`.
 pub(super) fn finalize_init_run(flow: &mut InitFlow) -> Result<()> {
     let prior_steps = flow.store.query_init_steps(&flow.init_run.id)?;
     let unsettled: Vec<&str> = prior_steps
@@ -223,9 +217,8 @@ pub(super) fn finalize_init_run(flow: &mut InitFlow) -> Result<()> {
                 .emit_handoff_payload("initialized", &flow.handoff_context);
         }
     } else {
-        // Finalize before printing so a state-store failure here surfaces as a
-        // failed run (keys still reach the operator via the Drop guard) instead
-        // of a success handover followed by a nonzero exit.
+        // Finalize BEFORE printing so a state-store failure surfaces as a failed
+        // run rather than a success handover followed by a nonzero exit.
         crate::runtime::init_runner::finalize_run(
             &flow.store,
             &flow.init_run.id,

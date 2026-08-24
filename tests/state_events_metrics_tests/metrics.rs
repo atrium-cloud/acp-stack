@@ -9,7 +9,6 @@ use crate::common::state::fresh_state;
 fn metrics_summary_aggregates_within_window() {
     use acp_stack::state::{MetricsWindow, NewCommandRecord};
     let (_dir, store) = fresh_state("metrics.sqlite");
-    // Seed API request events plus one command and one auth_failure inside the window.
     store
         .append_event_with_source(
             "info",
@@ -318,9 +317,8 @@ fn metrics_summary_returns_zero_when_window_misses_all_rows() {
         })
         .unwrap();
     assert_eq!(summary.counts.events, 0);
-    // Usage remains optional because agents may never emit it. API request
-    // instrumentation is part of the running binary, so a quiet window reports
-    // an explicit zero.
+    // Usage is optional since agents may never emit it, but API request
+    // instrumentation is in-binary, so a quiet window reports explicit zero.
     assert!(summary.usage.tokens_input.is_none());
     assert_eq!(summary.api_connections.request_count, 0);
     assert_eq!(summary.prompt_failures.total, 0);

@@ -9,8 +9,7 @@ use crate::support::write_workspace_init_config;
 
 #[test]
 fn init_rejects_mode_flag_for_agents_without_set_mode() {
-    // pi/hermes declare set_mode=false; `--mode` must fail fast as a
-    // capability check rather than being silently dropped.
+    // pi/hermes declare set_mode=false, so `--mode` must fail fast rather than be dropped.
     for agent in ["pi", "hermes"] {
         let tempdir = tempfile::tempdir().expect("tempdir");
 
@@ -177,8 +176,7 @@ fn init_rejects_mode_not_advertised_by_the_agent() {
 
 #[test]
 fn init_mode_lane_runs_for_an_agent_without_an_explicit_model() {
-    // amp passes no `--model` here: the mode lane must be reachable even
-    // though the model lane returns before any discovery.
+    // amp passes no `--model`, so the model lane returns before any discovery.
     let tempdir = tempfile::tempdir().expect("tempdir");
     write_workspace_init_config(tempdir.path());
     seed_init_secrets(tempdir.path(), &[("AMP_API_KEY", "test-amp-key")]);
@@ -201,16 +199,13 @@ fn init_mode_lane_runs_for_an_agent_without_an_explicit_model() {
 
 #[test]
 fn init_resume_reapplies_a_recorded_mode_instead_of_replaying_provider_configure_as_skipped() {
-    // amp has no provider lane and passes no `--model`, so `--mode` is the
-    // only explicit flag the `provider_configure` verifier can see: without
-    // its `args.mode.is_none()` term the prior succeeded row would replay as
-    // skipped and the recorded mode would never be re-applied.
+    // `--mode` is the only explicit flag the `provider_configure` verifier can see here; without
+    // its `args.mode.is_none()` term the prior row replays as skipped and the mode is lost.
     let tempdir = tempfile::tempdir().expect("tempdir");
     write_workspace_init_config(tempdir.path());
     seed_init_secrets(tempdir.path(), &[("AMP_API_KEY", "test-amp-key")]);
     let options_path = write_acp_config_options(tempdir.path(), &[], &["default", "bypass"]);
-    // Fail the run after `provider_configure`: the edge step cannot create its
-    // artifact directory while a file sits at that path.
+    // Fail the run after `provider_configure`: a file at this path blocks the edge step's mkdir.
     let cloudflared_dir = tempdir.path().join(".config/acp-stack/cloudflared");
     fs::write(&cloudflared_dir, "not a directory").expect("edge path collision");
 
@@ -267,8 +262,7 @@ fn init_resume_reapplies_a_recorded_mode_instead_of_replaying_provider_configure
 
 #[test]
 fn init_codex_openrouter_writes_both_explicit_model_and_mode() {
-    // codex+openrouter takes `--model` verbatim without consulting the
-    // advertised list; the mode lane must still reach the shared session.
+    // codex+openrouter takes `--model` verbatim without consulting the advertised list.
     let tempdir = tempfile::tempdir().expect("tempdir");
     write_workspace_init_config(tempdir.path());
     seed_init_secrets(
@@ -313,8 +307,7 @@ fn init_codex_openrouter_writes_both_explicit_model_and_mode() {
 
 #[test]
 fn init_kimi_pins_its_model_once_and_still_reaches_the_mode_lane() {
-    // Kimi's model is pinned without discovery; the pin must happen exactly
-    // once and must not suppress the mode lane that follows it.
+    // Kimi's model is pinned without discovery, exactly once.
     let tempdir = tempfile::tempdir().expect("tempdir");
     write_workspace_init_config(tempdir.path());
     seed_init_secrets(tempdir.path(), &[("KIMI_API_KEY", "test-kimi-key")]);
@@ -352,9 +345,7 @@ fn init_kimi_pins_its_model_once_and_still_reaches_the_mode_lane() {
 
 #[test]
 fn init_without_mode_flag_never_enters_the_mode_lane() {
-    // An unattended run for a mode-capable agent with an unspawnable binary
-    // must not attempt discovery on the mode lane's behalf: no failure, no
-    // mode written, and the step payload records the skip.
+    // An unattended run with an unspawnable binary must not attempt discovery for the mode lane.
     let tempdir = tempfile::tempdir().expect("tempdir");
     write_workspace_init_config(tempdir.path());
     seed_init_secrets(tempdir.path(), &[("AMP_API_KEY", "test-amp-key")]);

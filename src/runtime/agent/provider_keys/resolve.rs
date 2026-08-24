@@ -1,10 +1,5 @@
-//! Provider resolution and application.
-//!
-//! Resolution turns the active provider set into the concrete environment the
-//! agent process is launched with, reading structured credentials from the
-//! secret store and falling back to legacy `[agent].env` refs. Application is
-//! the inverse direction: writing a chosen provider back into canonical
-//! `[agent]` config.
+//! Resolving the active provider set into the agent's launch environment, and the
+//! inverse: writing a chosen provider back into canonical `[agent]` config.
 
 use super::*;
 
@@ -67,30 +62,20 @@ fn selected_alias_for<'a>(config: &'a Config, provider_id: &str) -> Option<&'a s
         .map(String::as_str)
 }
 
-/// Which slot of a provider's managed credential set an env ref maps to. Single
-/// source of truth for the runtime coverage check ([`catalog_covers_env_ref`])
-/// and the init deferral check ([`push_delivers_env_ref_for_config`]) so the two
-/// cannot drift: both dispatch on this classification instead of re-deriving the
-/// ref shape.
+/// Which slot of a provider's managed credential set an env ref maps to. Shared by
+/// [`catalog_covers_env_ref`] and [`push_delivers_env_ref_for_config`] so the two
+/// cannot drift.
 enum ProviderEnvRefSlot {
-    /// A custom (BYOK) provider's configured api-key ref, delivered under its
-    /// own name.
     CustomApiKey,
-    /// A mapped provider's primary api-key env var, delivered by the push under
-    /// the canonical store name `canonical_primary`.
-    MappedPrimary { canonical_primary: &'static str },
-    /// A mapped provider's companion or optional env var, delivered under its
-    /// own name.
+    /// Delivered by the push under the canonical store name `canonical_primary`.
+    MappedPrimary {
+        canonical_primary: &'static str,
+    },
     MappedCompanion,
-    /// A ref the managed credential set never carries for this provider: a
-    /// noncanonical api-key alias, a `VAR=template` inner ref, a native-auth
-    /// provider (which takes no key), or an unknown id with no custom config.
     Undeliverable,
 }
 
-/// Classify `env_ref` against `provider_id`'s managed credential set. The
-/// ordering mirrors the historical `catalog_covers_env_ref` body so both call
-/// sites resolve a ref to the same slot.
+/// Classify `env_ref` against `provider_id`'s managed credential set.
 fn classify_provider_env_ref(
     agent_id: &str,
     provider_id: &str,
@@ -125,10 +110,9 @@ fn classify_provider_env_ref(
 }
 
 /// True when the credential catalog will inject `env_ref` for `provider_id` at
-/// spawn time. This is the exact mirror of the injection logic in
-/// [`resolve_agent_environment`]; the init secret gate relies on it so that a
-/// passing gate always implies a resolvable spawn environment. Changing the slot
-/// classification without the injection logic breaks that lockstep.
+/// spawn time. Must stay an exact mirror of the injection logic in
+/// [`resolve_agent_environment`]: the init secret gate relies on a passing gate
+/// implying a resolvable spawn environment.
 pub fn catalog_covers_env_ref(
     secrets: &SecretStore,
     agent_id: &str,
@@ -156,15 +140,9 @@ pub fn catalog_covers_env_ref(
     }
 }
 
-/// Whether a canonical managed-state credential push for `provider_id` would
-/// place `env_ref` into the agent's spawn environment. The init deferral gate
-/// consults this per ref: a caller that declared `defer_provider_credentials`
-/// may soft-pass a missing ref only when the promised push can actually deliver
-/// it. A noncanonical api-key alias or a `VAR=template` inner ref is never
-/// carried by the push, so deferring it would report init success on a config
-/// the agent can never resolve. The exact mirror of [`catalog_covers_env_ref`]
-/// with the credential assumed present, via the shared
-/// [`classify_provider_env_ref`].
+/// Whether a managed-state credential push for `provider_id` would place `env_ref`
+/// into the agent's spawn environment. Init may soft-pass a missing ref only when
+/// this holds, or it would report success on a config the agent can never resolve.
 pub fn push_delivers_env_ref_for_config(config: &Config, provider_id: &str, env_ref: &str) -> bool {
     matches!(
         classify_provider_env_ref(
@@ -200,12 +178,9 @@ pub fn env_ref_is_satisfiable(
         )
 }
 
-/// Config-derived wrapper over [`env_ref_is_satisfiable`], deriving the agent
-/// id, the selected credential alias, and the configured custom-provider
-/// api-key ref from `config`. The custom lookup is agent-local (primary agent
-/// and its subagent), matching what the injection below will actually use — a
-/// custom provider declared only on another array target must not satisfy
-/// here.
+/// Config-derived wrapper over [`env_ref_is_satisfiable`]. The custom lookup stays
+/// agent-local: a custom provider declared only on another array target must not
+/// satisfy here, because the injection below would not use it.
 pub fn env_ref_is_satisfiable_for_config(
     config: &Config,
     secrets: &SecretStore,
@@ -229,10 +204,8 @@ fn agent_custom_provider_api_key_ref<'a>(
     custom_provider_config(agent, provider_id).and_then(|provider| provider.api_key_ref.as_deref())
 }
 
-/// The api-key ref of a custom provider configured anywhere in the config:
-/// the primary agent, its subagent, or any array target (and their
-/// subagents). Managed-state apply uses this as the env contract for
-/// provider ids outside the registry mapping.
+/// The api-key ref of a custom provider configured anywhere in the config, used by
+/// managed-state apply as the env contract for ids outside the registry mapping.
 pub fn configured_custom_provider_api_key_ref<'a>(
     config: &'a Config,
     provider_id: &str,
@@ -245,10 +218,8 @@ pub fn configured_custom_provider_api_key_ref<'a>(
         })
 }
 
-/// Env vars the credential catalog will inject at spawn for the active
-/// provider set. Bare `[agent].env` refs for these vars are skipped during
-/// resolution: the catalog is the authoritative rotation channel, so it wins
-/// over a flat secret of the same name.
+/// Env vars the credential catalog will inject at spawn for the active provider
+/// set; these win over a bare `[agent].env` ref of the same name.
 fn catalog_owned_env_vars(config: &Config, secrets: &SecretStore) -> BTreeSet<String> {
     let mut owned = BTreeSet::new();
     for provider_id in effective_active_provider_ids(&config.agent) {
@@ -315,9 +286,8 @@ pub fn resolve_agent_environment_without_secrets(
     })
 }
 
-/// Snapshot entries are compared by value by callers and are emitted in a
-/// stable shape, so env-name ordering is normalized in one place rather than at
-/// every construction site.
+/// Callers compare snapshots by value, so env-name ordering is normalized here
+/// rather than at every construction site.
 fn provider_snapshot(
     provider_id: String,
     alias: Option<&str>,
@@ -334,9 +304,8 @@ fn provider_snapshot(
     }
 }
 
-/// Both credential branches reject a missing selected alias identically; only
-/// the promoted-set hint differs, because the catalog CLI's `credential select`
-/// remediation refuses to run for non-mapped provider ids.
+/// Both credential branches reject a missing selected alias identically; only the
+/// promoted-set hint differs, since `credential select` refuses non-mapped ids.
 fn missing_selected_alias_error(provider_id: &str, promoted_hint: Option<String>) -> StackError {
     let reason = promoted_hint.unwrap_or_else(|| {
         format!("selected credential alias for provider `{provider_id}` does not exist")
@@ -355,11 +324,8 @@ pub fn resolve_agent_environment(
     let mut owners: HashMap<String, Vec<String>> = HashMap::new();
     let catalog_owned = catalog_owned_env_vars(config, secrets);
     for entry in &config.agent.env {
-        // A bare ref whose var the catalog injects is skipped: the catalog is
-        // the managed rotation channel and wins over a flat secret of the same
-        // name (a differing flat value would otherwise be a hard owner
-        // conflict, not a precedence choice). Templated `VAR=...` entries are
-        // explicit operator compositions and keep flat-store semantics.
+        // A bare ref the catalog injects is skipped so the managed rotation channel
+        // wins; templated `VAR=...` entries keep flat-store semantics.
         if crate::config::env_entry_var_name(entry) == entry.as_str()
             && catalog_owned.contains(entry.as_str())
         {
@@ -373,10 +339,8 @@ pub fn resolve_agent_environment(
     let mut snapshots = Vec::new();
     for provider_id in effective_active_provider_ids(&config.agent) {
         if !provider_id_is_known(&provider_id) {
-            // Custom (BYOK) providers inject their configured api-key ref from
-            // the credential catalog when a managed credential exists, else
-            // from the flat store via the `[agent].env` loop above. Genuinely
-            // unknown ids are left out of the snapshot.
+            // Custom (BYOK) providers take their api-key ref from the catalog when a
+            // managed credential exists, else from the `[agent].env` loop above.
             if let Some(provider) = custom_provider_config(&config.agent, &provider_id) {
                 let api_key_ref = provider.api_key_ref.as_deref();
                 if let (Some(api_key_ref), Some(credentials)) =
@@ -591,11 +555,8 @@ fn custom_provider_config<'a>(
         })
 }
 
-/// A hosted init soft-passes a provider's api-key ref (custom or mapped under
-/// `defer_provider_credentials`) expecting a managed-state credential push
-/// after init; if the agent spawns before that push lands, the raw
-/// `SecretNotFound` from the env loop would name the ref but not the
-/// remediation. Name both.
+/// Restate a raw `SecretNotFound` for a provider ref that hosted init soft-passed,
+/// so the spawn failure names the pending managed-credential push as remediation.
 fn remap_pending_provider_credential(
     config: &Config,
     entry: &str,
@@ -660,9 +621,7 @@ fn insert_resolved_env(
     Ok(())
 }
 
-/// Apply one mapped provider to canonical Agent config. Init and native-config
-/// import share this legacy-ref mutation; provider catalog commands use the
-/// structured credential path above.
+/// Apply one mapped provider to canonical Agent config via legacy `[agent].env` refs.
 pub fn apply_mapped_agent_provider(
     config: &mut Config,
     provider_id: &str,
@@ -729,13 +688,9 @@ pub fn apply_mapped_agent_provider(
     Ok(required_env_refs)
 }
 
-/// Kimi's credential declarations are provider-scoped: the launch env
-/// resolves every `[agent].env` entry, so a declaration left over from the
-/// previously selected Kimi lane (e.g. `KIMI_API_KEY` after switching to the
-/// Moonshot platform) fails the launch on a secret the active lane never
-/// uses. Drop the kimi-lane refs the active provider does not require and
-/// ensure the active one is declared; refs outside the kimi lanes are
-/// operator-owned and left alone.
+/// Drop kimi-lane env refs the active provider does not require: the launch env
+/// resolves every `[agent].env` entry, so a leftover ref from a previously selected
+/// Kimi lane fails the launch on a secret the active lane never uses.
 pub fn reconcile_kimi_lane_env_declarations(agent: &mut AgentConfig) {
     if agent.id != crate::runtime::agent::acp_bridge::KIMI_CODE_AGENT_ID {
         return;

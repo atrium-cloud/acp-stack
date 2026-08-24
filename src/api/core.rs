@@ -1,24 +1,6 @@
-//! HTTP API surface.
-//!
-//! The router exposes `/v1/*` routes behind a two-stage auth chain:
-//!
-//! 1. `authenticate` reads the Bearer token, validates it against the cached
-//!    session/admin verifiers, tags the request with the resolved
-//!    `KeyKind`, and 401s on any failure (with a structured `auth_failures`
-//!    row written through `record_auth_failure`).
-//! 2. A per-route `require_tier` middleware reads the tag and rejects any
-//!    request whose key tier does not match the route's required tier. Admin
-//!    keys are NOT accepted on session-tier routes — strict tiering (see
-//!    `docs/specs/security.md`).
-//!
-//! Body-size limits come from `min(api.max_request_bytes,
-//! security.http.max_request_bytes)` and are enforced by tower-http before
-//! any handler runs.
-//!
-//! Handlers return `Result<ApiSuccess<T>, StackError>`. `IntoResponse` on
-//! `StackError` (see `envelope.rs`) maps each variant to its HTTP status and
-//! a sanitized `ApiError` payload via `public_message()`, so local paths and
-//! secret-store internals never leak to remote callers.
+//! HTTP API surface: `/v1/*` routes behind `authenticate` plus a per-route
+//! `require_tier` gate. Tiering is strict — admin keys are NOT accepted on
+//! session-tier routes (see `docs/specs/security.md`).
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -120,11 +102,7 @@ use crate::state::StateStore;
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
-    /// Mutable agent-block cache. Initialized from `config.agent` at
-    /// startup and updated by agent restart/switch flows after they read
-    /// or write the on-disk config. Handlers that operate on the active
-    /// agent read from this so daemon restart is not required after an
-    /// agent config migration.
+    /// Mutable agent-block cache, so an agent config migration needs no daemon restart.
     pub live_agent_config: Arc<TokioMutex<crate::config::AgentConfig>>,
     pub effective_bind: Arc<String>,
     pub runtime_paths: Arc<RuntimePaths>,
@@ -141,10 +119,8 @@ pub struct AppState {
     pub(crate) native_config_imports:
         Arc<TokioMutex<crate::runtime::agent::native_config_import::NativeConfigImportState>>,
     pub(crate) native_config_mutation_lock: Arc<TokioMutex<()>>,
-    /// Serializes `/v1/deps/apply` against itself. The apply runs operator
-    /// install snippets that can take minutes, so it must not hold the shared
-    /// `state` mutex — this lock carries the "back-to-back applies queue, not
-    /// interleave" guarantee on its own, without parking unrelated handlers.
+    /// Serializes `/v1/deps/apply` against itself without holding the shared `state`
+    /// mutex, which a minutes-long apply must not park.
     pub(crate) deps_apply_lock: Arc<TokioMutex<()>>,
     pub(crate) session_changes: SessionChangesHandle,
     pub event_hub: EventHub,
@@ -291,10 +267,8 @@ impl AppState {
         })
     }
 
-    /// Resolve the `events.source` label for a request based on the tier tag
-    /// the auth pipeline (or the local UDS listener) attached to the request.
-    /// `KeyKind::Local` is the only writer of `EVENT_SOURCE_LOCAL`; everything
-    /// else is attributed to the public HTTP API.
+    /// Resolve the `events.source` label from the request's tier tag; `KeyKind::Local`
+    /// is the only writer of `EVENT_SOURCE_LOCAL`.
     pub fn event_source_for(kind: Option<KeyKind>) -> &'static str {
         match kind {
             Some(KeyKind::Local) => crate::state::EVENT_SOURCE_LOCAL,
@@ -354,14 +328,9 @@ impl AppState {
         self.agent_target(resolved)
     }
 
-    /// Resolve a session's stored target for a terminal wind-down op
-    /// (cancel/close) regardless of whether Array mode is currently enabled.
-    /// Toggling Array off must never strand an existing session: an operator
-    /// has to be able to close or cancel a session that was opened against a
-    /// non-primary target before `acps array off`. Unlike
-    /// `session_agent_target`, this skips the Array-enabled gate; the driving
-    /// ops (prompt/load/resume/fork) keep using the gated path so a disabled
-    /// fleet stays read/terminal-only for its secondary targets.
+    /// Resolve a session's stored target for a terminal wind-down op (cancel/close),
+    /// skipping the Array-enabled gate so `acps array off` cannot strand a session
+    /// opened against a secondary target. Driving ops keep using the gated path.
     pub(crate) async fn existing_session_target(
         &self,
         target_id: &str,
@@ -373,16 +342,13 @@ impl AppState {
 
 impl AppState {
     /// Build app state from already-resolved config + state + auth secrets.
-    /// `max_request_bytes` is the tighter of the two config caps; see the
-    /// module-level doc.
     pub fn new(config: Config, state: StateStore, session_key: String, admin_key: String) -> Self {
         let effective_bind = config.api.bind.clone();
         Self::with_effective_bind(config, state, session_key, admin_key, effective_bind)
     }
 
-    /// Build app state with the actual listener address. `acps serve --bind`
-    /// can override config for one run; security checks must inspect the
-    /// effective listener, while config export still returns the stored config.
+    /// Build app state with the actual listener address, which `acps serve --bind` can
+    /// override for one run; security checks must inspect the effective listener.
     pub fn with_effective_bind(
         config: Config,
         state: StateStore,
@@ -429,12 +395,8 @@ impl AppState {
         if let Some(primary) = config.array.primary_target_mut() {
             primary.agent = config.agent.clone();
         }
-        // Adapter metadata is runtime-populated from the active registry.
-        // We resolve once at AppState construction so every handler that
-        // reads `config.agent.adapter` (status, capabilities, etc.) sees
-        // the same value. Failures here are non-fatal: an agent whose id is
-        // unknown to the registry simply has no adapter metadata, which is
-        // the correct outcome for native agents and operator escape hatches.
+        // Resolved once here so every handler reading `config.agent.adapter` agrees.
+        // Non-fatal: an agent unknown to the registry simply has no adapter metadata.
         if let Ok(registry) = load_active_registry() {
             populate_agent_adapter_from_registry(&mut config, &registry);
         }
@@ -442,12 +404,9 @@ impl AppState {
         let security_cap = config.security.http.max_request_bytes;
         let cap = api_cap.min(security_cap);
         let event_hub = EventHub::new();
-        // Wire the hub into the store now so that every `append_event` write
-        // also fans out on the `logs` topic. CLI tools that open the store
-        // outside the daemon leave it unattached.
+        // Attached here so every `append_event` write also fans out on the `logs`
+        // topic; CLI tools that open the store outside the daemon leave it unattached.
         state.attach_event_hub(event_hub.clone());
-        // SQLite is local and `usize::MAX` covers any byte count we'd allow on
-        // a HTTP request. Saturating cast keeps 32-bit targets safe.
         let max_request_bytes = usize::try_from(cap).unwrap_or(usize::MAX);
         let config_arc = Arc::new(config);
         let state_arc = Arc::new(TokioMutex::new(state));
@@ -542,10 +501,8 @@ fn populate_agent_adapter(agent: &mut AgentConfig, registry: &RegistryCatalog) {
     let Some(entry) = registry.lookup(&agent.id) else {
         return;
     };
-    // An operator `[agent.adapter_override]` turns the effective entry
-    // adapter-kind, so overridden native agents surface adapter metadata too.
-    // Population is documented as non-fatal; an invalid override is logged and
-    // leaves the metadata empty rather than failing AppState construction.
+    // An operator `[agent.adapter_override]` turns the effective entry adapter-kind,
+    // so overridden native agents surface adapter metadata too.
     let entry =
         match crate::runtime::install::agent_registry::effective_registry_entry(entry, agent) {
             Ok(entry) => entry,
@@ -575,27 +532,16 @@ fn populate_agent_adapter(agent: &mut AgentConfig, registry: &RegistryCatalog) {
     }
 }
 
-/// Build the application router. Layers, outermost first as requests arrive:
-/// `RequestBodyLimitLayer` (rejects oversize bodies before handlers see them)
-/// → `TraceLayer` (tracing span per request) → `authenticate` (sets the
-/// resolved `KeyKind` on the request) → per-route `require_tier`.
+/// Build the application router.
 pub fn build_router(state: AppState) -> Router {
     let limit = state.max_request_bytes;
 
-    // Session-tier sub-router. The layer stack inside this router runs as:
-    //   require_session  (outermost — checks KeyKind == Session)
-    //     body_limit     (next — checks Content-Length once tier is OK)
-    //       handler
-    // So a wrong-tier (admin) key on a session route is rejected — and
-    // `auth.wrong_kind` is logged — BEFORE the body limit sees the request,
-    // even when the body is oversized. The tier gate is the gatekeeper for
-    // both the durable auth-failure trail and the body limit.
+    // `require_session` sits outside the body limit, so a wrong-tier key is rejected
+    // (and `auth.wrong_kind` logged) before an oversized body is ever inspected.
     let session_routes = Router::new()
         .route("/v1/status", get(status_handler))
         .route("/v1/status/agent", get(status_agent_handler))
-        // Alias for `docs/specs/api/api.md` which documents the same handler
-        // under both the Status API (`/v1/status/agent`) and the Agent API
-        // (`/v1/agent/status`).
+        // Documented under both the Status API and the Agent API.
         .route("/v1/agent/status", get(status_agent_handler))
         .route("/v1/status/connections", get(status_connections_handler))
         .route("/v1/health/live", get(health_live_handler))
@@ -622,8 +568,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/logs/security", get(logs_security_handler))
         .route("/v1/logs/sessions", get(logs_sessions_handler))
         .route("/v1/metrics/summary", get(metrics_summary_handler))
-        // Session-tier read, same as the other observability surfaces
-        // (logs/*, metrics/summary): step metadata only, never log contents.
+        // Session-tier read like the other observability surfaces: step metadata
+        // only, never log contents.
         .route("/v1/installer/runs", get(installer_runs_handler))
         .route("/v1/ws", get(ws_handler))
         .route("/v1/ws/connections", get(ws_connections_handler))
@@ -687,9 +633,6 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/deps/apply/runs/{apply_run_id}",
             get(deps_apply_run_get_handler),
         )
-        // `/v1/providers` is pure embedded-mapping lookup. `/v1/models`
-        // spawns a bounded provisional ACP session for picker data; both
-        // are session-tier discovery surfaces.
         .route("/v1/providers", get(providers_handler))
         .route("/v1/models", get(models_handler))
         .route("/v1/permissions/pending", get(permissions_pending_handler))
@@ -700,9 +643,8 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/v1/permissions/{id}/deny", post(permissions_deny_handler))
         .layer(RequestBodyLimitLayer::new(limit))
-        // Axum's per-extractor default body limit (2 MiB) would silently cap
-        // String/Json/etc handlers below the configured runtime limit. Disable
-        // it so `RequestBodyLimitLayer` is the sole gatekeeper for body size.
+        // Axum's per-extractor default (2 MiB) would silently cap handlers below the
+        // configured limit; disabled so `RequestBodyLimitLayer` is the sole gatekeeper.
         .layer(DefaultBodyLimit::disable())
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -808,17 +750,11 @@ pub fn build_router(state: AppState) -> Router {
     let mut router = Router::new()
         .merge(session_routes)
         .merge(admin_routes)
-        // `log_api_request` sits INSIDE `authenticate` so it can read the
-        // resolved `KeyKind` extension on the request. It records one
-        // durable `api.request` event per completed request — see metrics
-        // §api_connection_metrics.
+        // Sits INSIDE `authenticate` so it can read the resolved `KeyKind` extension.
         .layer(middleware::from_fn_with_state(
             state.clone(),
             log_api_request,
         ))
-        // Authenticate runs OUTSIDE the tier gate. It sets the resolved
-        // KeyKind on the request extensions; require_session then matches
-        // against the tier required by this router.
         .layer(middleware::from_fn_with_state(state.clone(), authenticate));
     if let Some(cors) = cors_layer {
         router = router.layer(cors).layer(middleware::from_fn_with_state(
@@ -832,10 +768,8 @@ pub fn build_router(state: AppState) -> Router {
             state.clone(),
             track_active_requests,
         ))
-        // Outermost. Catches framework-generated rejections (oversize body
-        // 413, axum's malformed-query 400, malformed-body 400, fallback 404)
-        // and rewraps them in the standard envelope so every error response
-        // the client sees has the documented `{ok:false, error:{...}}` shape.
+        // Outermost: rewraps framework-generated rejections (413/400/404) so every
+        // error response carries the documented envelope shape.
         .layer(middleware::from_fn_with_state(
             state.clone(),
             ensure_envelope,
@@ -843,12 +777,7 @@ pub fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Drive the HTTP server on an already-bound listener. Returns when the
-/// graceful shutdown signal arrives (SIGTERM or SIGINT) or when axum's
-/// internal IO loop errors.
-///
-/// Factored out from the CLI entry so integration tests can drive it on a
-/// `127.0.0.1:0` listener.
+/// Drive the HTTP server on an already-bound listener until graceful shutdown.
 pub async fn serve(state: AppState, listener: TcpListener) -> Result<()> {
     let app = build_router(state);
     axum::serve(
@@ -864,9 +793,8 @@ pub async fn serve(state: AppState, listener: TcpListener) -> Result<()> {
 pub(crate) async fn shutdown_signal() {
     use tokio::signal::unix::{SignalKind, signal};
     let ctrl_c = async {
-        // Installing the handler can fail on unusual hosts (e.g. PID 1
-        // without a controlling terminal). Treat that as "no Ctrl-C signal
-        // available" rather than crashing the server.
+        // Install can fail on unusual hosts (PID 1 with no controlling terminal);
+        // treat that as "no Ctrl-C available" rather than crashing the server.
         if let Err(err) = tokio::signal::ctrl_c().await {
             tracing::warn!(error = %err, "ctrl-c handler install failed; relying on SIGTERM only");
             std::future::pending::<()>().await;
@@ -970,7 +898,6 @@ creates = "private-opencode"
             },
             update: Default::default(),
         });
-        // The array mirror carries the agent block populate reads.
         if let Some(primary) = config.array.primary_target_mut() {
             primary.agent = config.agent.clone();
         }

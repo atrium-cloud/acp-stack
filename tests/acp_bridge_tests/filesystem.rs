@@ -1,7 +1,4 @@
-//! fs/* round-trips.
-//!
-//! The probe workspace root is std::env::temp_dir() (the bridge spawn cwd), so
-//! per-test tempdirs created under it are inside the workspace.
+//! fs/* round-trips. The probe workspace root is `std::env::temp_dir()`, so per-test tempdirs created under it are inside the workspace.
 
 use crate::support::{
     INVALID_PARAMS_CODE, RESOURCE_NOT_FOUND_CODE, open_test_state, run_terminal_probe,
@@ -100,9 +97,8 @@ async fn fs_write_rejects_symlink_target() {
     bridge.shutdown().await.expect("shutdown ok");
 }
 
-// The strict placebo only touches fs/* when the client advertised both
-// fs.readTextFile and fs.writeTextFile, so a non-skipped write-then-read
-// round-trip proves the capability is on the wire.
+// The strict placebo only touches fs/* when the client advertised both fs.readTextFile and
+// fs.writeTextFile, so a non-skipped round-trip proves the capability is on the wire.
 #[tokio::test]
 async fn fs_round_trip_under_advertised_capability() {
     let dir = tempfile::tempdir().expect("tempdir");

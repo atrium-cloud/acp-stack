@@ -15,11 +15,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex as TokioMutex;
 
-// The supervisor's create_session softens exactly the
-// `AgentConfigProvision` variant from these lookups into an
-// ignored-feature record. If a future change makes them construct any
-// other variant, that error would become a session-creation hard failure
-// again — these tests exist to make that change loud.
+// `create_session` softens exactly the `AgentConfigProvision` variant from
+// these lookups into an ignored-feature record; any other variant would become
+// a session-creation hard failure.
 #[test]
 fn mode_lookup_only_constructs_agent_config_provision() {
     let missing = session_config_id_for_value(None, AgentSessionConfigCategory::Mode, "plan");
@@ -254,7 +252,7 @@ async fn approve_passthrough_returns_selected_option() {
         resolve_acp_permission(&service_for_task, &sink, request, None).await
     });
 
-    // Drain the new permission row + approve it.
+    // Drain the new permission row, then approve it.
     let mut id = None;
     for _ in 0..50 {
         let pending = service.pending(10).await.expect("pending");
@@ -367,8 +365,7 @@ fn session_config_helpers_validate_select_values_by_category() {
 
 #[test]
 fn effort_values_match_by_thought_level_category_and_by_id_fallback() {
-    // codex-acp's shape: id `reasoning_effort` under the reserved
-    // `thought_level` category — the category match must find it.
+    // codex-acp's shape: id `reasoning_effort` under `thought_level`.
     let by_category: Vec<SessionConfigOption> = serde_json::from_str(
         r#"[
                 {
@@ -401,8 +398,7 @@ fn effort_values_match_by_thought_level_category_and_by_id_fallback() {
         "reasoning_effort"
     );
 
-    // A category-less option is still found through the known effort ids
-    // (`effort` is claude-code-acp's spelling).
+    // `effort` is claude-code-acp's spelling, and it carries no category.
     let by_id: Vec<SessionConfigOption> = serde_json::from_str(
         r#"[
                 {
@@ -427,9 +423,8 @@ fn effort_values_match_by_thought_level_category_and_by_id_fallback() {
 
 #[test]
 fn typed_lane_matching_skips_boolean_options() {
-    // With the boolean client capability advertised, an agent may ship a
-    // boolean option under a typed category; the typed lanes only speak
-    // select values, so the match must fall through to the select twin.
+    // An agent may ship a boolean option under a typed category, but the typed
+    // lanes only speak select values, so the match falls through to the twin.
     let options: Vec<SessionConfigOption> = serde_json::from_str(
         r#"[
                 {
@@ -467,9 +462,8 @@ fn typed_lane_matching_skips_boolean_options() {
 
 #[test]
 fn session_model_helpers_reject_removed_legacy_model_state() {
-    // ACP v1 dropped the pre-1.0 `models` session state; an agent that
-    // only advertises the legacy shape gets a clear provisioning error
-    // instead of silent acceptance.
+    // ACP v1 dropped the pre-1.0 `models` session state, so an agent stuck on
+    // the legacy shape must get a provisioning error, not silent acceptance.
     let response: NewSessionResponse = serde_json::from_str(
         r#"{
                 "sessionId": "sess_legacy",

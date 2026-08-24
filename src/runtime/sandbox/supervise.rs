@@ -1,27 +1,8 @@
-//! Supervisor for network-isolated sandbox spawns (`acps __sandbox-supervise`).
-//!
-//! With a `network-provider` extension declared (`[extensions.<name>]`), each
-//! wrapped spawn gets a fresh network namespace. The supervisor sits between
-//! the daemon and the `unshare --net` chain and owns the namespace lifecycle:
-//!
-//! 1. Spawn the chain with a private sync socketpair; [`super::run_exec`] inside
-//!    the namespaces signals readiness and then pauses before privilege drop.
-//! 2. Hold `/proc/<unshare-pid>/ns/net` open — the fd keeps the namespace alive
-//!    without bind mounts and gives the provider a `setns`/`nsenter`-able path
-//!    that stays valid through teardown, even after the workload dies.
-//! 3. Run the operator provider's `setup` under a liveness-monitored process
-//!    group; release the workload only on exit 0. Failure or timeout is
-//!    fail-closed: the workload never execs.
-//! 4. Wait for the workload (stdio passes through untouched — for the agent
-//!    harness stdin/stdout are the ACP transport), run `teardown` while the
-//!    namespace fd is still open, then mirror the workload's exit or signal.
-//!
-//! The provider runs with the supervisor's privileges and a cleared environment
-//! (only the `ACPS_SANDBOX_NETWORK_*` contract variables): agent env and secrets
-//! never reach it. A private liveness socket makes supervisor death kill its
-//! complete in-contract process group. Its stdout is discarded so it cannot
-//! corrupt the ACP transport; its stderr goes to the daemon-stderr diagnostic
-//! fd or to null, per `provider_stderr`.
+//! Supervisor for network-isolated sandbox spawns (`acps __sandbox-supervise`): it
+//! owns the per-spawn network namespace and runs the operator provider's
+//! `setup`/`teardown` around the workload. Setup failure is fail-closed (the
+//! workload never execs), and the provider runs with a cleared environment so agent
+//! env and secrets never reach it.
 
 use crate::error::{Result, StackError};
 
@@ -37,23 +18,17 @@ pub const ENV_NETWORK_PID: &str = "ACPS_SANDBOX_NETWORK_PID";
 /// Supervisor exit code when provider `setup` failed or timed out (the workload
 /// was never executed).
 pub const SETUP_FAILED_EXIT: i32 = 120;
-/// Supervisor exit code when the workload succeeded but provider `teardown`
-/// failed; a workload failure is preserved instead, with the teardown error
-/// reported on the diagnostic fd.
+/// Supervisor exit code when the workload succeeded but provider `teardown` failed.
 pub const TEARDOWN_FAILED_EXIT: i32 = 121;
 
-/// Sync handshake bytes: the in-namespace helper sends `READY` once masking is
-/// done (proving the namespaces exist), the supervisor sends `RELEASE` once
-/// provider setup succeeded.
+/// Sync handshake bytes: the in-namespace helper sends `READY` once masking is done,
+/// the supervisor sends `RELEASE` once provider setup succeeded.
 const READY_BYTE: u8 = b'R';
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const RELEASE_BYTE: u8 = b'G';
 
-/// Called by [`super::run_exec`] when the wrapper carries `--sync-fd`: signal
-/// readiness to the supervisor, then block until it releases the workload.
-/// EOF means the supervisor died or provider setup failed — fail closed and
-/// never exec. On release the fd is marked close-on-exec so the workload does
-/// not inherit the sync channel.
+/// Signal readiness to the supervisor, then block until it releases the workload.
+/// EOF means the supervisor died or provider setup failed: fail closed, never exec.
 pub fn wait_for_release(fd: i32) -> Result<()> {
     write_byte(fd, READY_BYTE)?;
     match read_byte(fd)? {
@@ -120,10 +95,9 @@ fn set_cloexec(fd: i32) -> Result<()> {
     Ok(())
 }
 
-/// Entry point for `acps __sandbox-supervise`. Terminates the process itself
-/// (mirroring the workload's exit or signal status) on every path after the
-/// child chain is spawned; an `Err` return means the supervisor could not even
-/// start (bad argv, socketpair/spawn failure).
+/// Entry point for `acps __sandbox-supervise`. Terminates the process itself,
+/// mirroring the workload's exit or signal, on every path after the chain spawns;
+/// an `Err` means the supervisor could not start at all.
 #[cfg(target_os = "linux")]
 pub fn run_supervise(raw_args: Vec<String>) -> Result<()> {
     linux::run(raw_args)
@@ -136,9 +110,8 @@ pub fn run_supervise(_raw_args: Vec<String>) -> Result<()> {
     })
 }
 
-/// Entry point for the provider process-group monitor. The main sandbox
-/// supervisor owns the peer of its liveness fd; EOF means that supervisor died
-/// and the entire provider process group must be killed immediately.
+/// Entry point for the provider process-group monitor: EOF on the liveness fd means
+/// the sandbox supervisor died and the whole provider group must be killed at once.
 #[cfg(target_os = "linux")]
 pub fn run_provider_supervise(raw_args: Vec<String>) -> Result<()> {
     linux::run_provider_supervise(raw_args)

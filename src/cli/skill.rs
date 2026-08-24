@@ -1,9 +1,4 @@
 //! `acps skills` — day-2 Agent Skills management for the active agent.
-//!
-//! Reads (`list`, `catalog`) go over the session tier — a session key when one
-//! is available, otherwise the local UDS socket when keyless access is enabled.
-//! Mutations (`add`, `remove`) hit the admin-tier daemon routes. All four are
-//! daemon-routed so remote orchestrators and the CLI share one code path.
 
 use std::io::{self, IsTerminal};
 
@@ -130,9 +125,8 @@ pub struct SkillRemoveArgs {
 }
 
 pub(super) fn run_skill_command(command: SkillCommand, output: OutputFormat) -> Result<()> {
-    // Lenient load: `acps skills source remove` is the repair path for a
-    // hand-edited invalid `[[skills.sources]]` entry, so it must not refuse to
-    // start because of one.
+    // Lenient: `skills source remove` is the repair path for an invalid
+    // hand-edited `[[skills.sources]]` entry, so it must still start.
     let config = Config::load_lenient_from_default_path()?;
     let base_url = daemon_base_url(config.api.public_url.as_deref(), &config.api.bind)?;
     let runtime = tokio::runtime::Builder::new_current_thread()

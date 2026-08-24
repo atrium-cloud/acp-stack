@@ -1,13 +1,6 @@
-//! Background task that flips in-flight prompts to terminal `Stalled`
-//! state when no ACP `session/update` notification has touched the row
-//! within the configured threshold.
-//!
-//! Without this sweep, an agent that crashes mid-stream (or one whose
-//! upstream inference hangs without surfacing an error) would leave the
-//! prompt row stuck in `running` forever — clients polling the row would
-//! never see it settle. The sweeper is the supervisor-side guarantee
-//! that every `prompts` row eventually reaches a terminal status, even
-//! when the agent stops cooperating.
+//! Supervisor-side guarantee that every `prompts` row reaches a terminal
+//! status: flips in-flight prompts to `Stalled` when no ACP `session/update`
+//! has touched the row within the configured threshold.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,26 +12,18 @@ use tokio_util::sync::CancellationToken;
 use crate::state::{EVENT_KIND_PROMPT_STALLED, EVENT_SOURCE_SYSTEM, StateStore};
 
 /// `error_message` written onto every `Stalled` prompt by the sweeper.
-/// The constant lives at module scope so tests can match against it
-/// without re-hardcoding the literal string.
 pub const SWEEPER_STALL_REASON: &str = "no agent updates within threshold";
 
-/// Background task that periodically scans the `prompts` table and
-/// flips rows with no recent activity to `Stalled`. Constructed via
-/// [`StalePromptSweeper::spawn`]; the returned handle owns the
-/// background `tokio::task` and the cancellation token. Dropping the
-/// handle cancels the task (defense in depth so a forgotten shutdown
-/// path does not leave the sweeper orphaned).
+/// Handle owning the background sweep task and its cancellation token;
+/// dropping it cancels the task.
 pub struct StalePromptSweeper {
     handle: Option<JoinHandle<()>>,
     cancel: CancellationToken,
 }
 
 impl StalePromptSweeper {
-    /// Start a sweeper bound to `state`. The first sweep happens after
-    /// `sweep_interval` has elapsed (not immediately at boot) so that
-    /// startup reconcile + initial prompt insertion settle before the
-    /// first scan, and the cadence is steady from then on.
+    /// Start a sweeper bound to `state`. The first sweep waits one full
+    /// `sweep_interval` so startup reconcile settles before any scan.
     pub fn spawn(
         state: Arc<TokioMutex<StateStore>>,
         threshold: Duration,
@@ -100,10 +85,7 @@ impl StalePromptSweeper {
         }
     }
 
-    /// Trigger cancellation and await the background task. Idempotent —
-    /// callers may invoke it explicitly during graceful shutdown; the
-    /// `Drop` impl falls back to the same cancellation if `shutdown` was
-    /// not called.
+    /// Trigger cancellation and await the background task; idempotent.
     pub async fn shutdown(mut self) {
         self.cancel.cancel();
         if let Some(handle) = self.handle.take()
@@ -116,10 +98,8 @@ impl StalePromptSweeper {
 
 impl Drop for StalePromptSweeper {
     fn drop(&mut self) {
-        // The task may already be cancelled (via explicit `shutdown`) or
-        // joined; cancelling again is a no-op. We don't await the handle
-        // here because `Drop` is sync — explicit shutdown is preferred,
-        // and this is defense in depth for forgotten paths.
+        // `Drop` is sync so the handle cannot be awaited here; explicit
+        // `shutdown` is preferred and this only covers forgotten paths.
         self.cancel.cancel();
         if let Some(handle) = self.handle.take() {
             handle.abort();
