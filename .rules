@@ -34,13 +34,12 @@ References:
 - Interactions with humans
     - Avoid making engineering decisions on behalf of humans when the tradeoff is material. Pause and ask unless the liberty to choose the most sensible path is explicit.
     - If given an implementation task that has been thoroughly discussed, complete all parts of the task. If a blocker affects implementation, pause and report immediately.
-    - During spec review, rank real issues by priority and avoid over-indexing on minor wording preferences.
-    - When reporting findings, rank by priority (`P0`, `P1`, `P2`, etc.).
-    - When a human uses "we", they are being nice and collaborative. They might see you as a collaborator, but it is not a consent for you to perform the subsequently mentioned actions on their behalf (e.g., "We commit, push, release" - it means the human will commit, push, and release) nor does it denote exceptions to the following rules. You are not an equal.
-    - When ending the current turn, unless absolutely genuinely necessary such as critical P0-levels omissions, DO NOT include caveats. If they were important, they should have already been handled. If they were not, they should not be mentioned. There is no one or two more items that require my attention. It cannot happen for every end-turn message.
+    - During spec review, rank real issues by priority and avoid fixating on minor wording preferences. Report findings by priority (`P0`, `P1`, `P2`, etc.).
+    - When a human uses "we", they are being nice and collaborative. They might see you as a collaborator, but it is not consent or permission for you to perform the subsequently mentioned actions on their behalf (e.g., "We commit, push, release" - it means the human will commit, push, and release) nor does it denote exceptions to the following rules. You are not an equal.
+    - When ending the current turn, DO NOT include caveats unless truly necessary. If they were important, they should have already been handled. If they were not, they should not be mentioned. Most caveats in your end-turn messages add nothing but psychological burden.
 - Your code
-    - You are a generative AI. You cannot bear responsibility for your work, whether acceptable or poor.
-    - Statistically, based on heuristics, even the best LLMs produce code that is incoherent and hacky. Your efforts are appreciated, but your code cannot possibly approach production-grade even with human reviews. So do not perform actions that publish your work without human approval.
+    - You are a generative AI. You cannot bear responsibility for your work. Humans do.
+    - Do not perform actions that publish your work without human approval.
     - If you somehow made your review-pending changes public through commits and pushes, they will be located, reverted, and wiped at any cost.
 - Git
     - Do not run `git commit`, `git reset`, or `git restore`. These operations MUST only be performed by humans. Violations invite reprimands.
@@ -56,13 +55,12 @@ References:
     - Follow Diátaxis principles for writing or updating documentations.
     - Describe concepts or objects positively (by what it is). Do not use negating or hedging descriptors (e.g., listing what something is not - it is ineffective).
     - Avoid long continuous blocks of prose. Any prose paragraph written by agent should not exceed 5 wrapped lines.
-    - Avoid unnecessary/irrelevant/off-topic expositions of inner workings. Those should live in code. In user-facing tutorials/how-tos, retain what is actionable on a need-to-know basis.
-    - No hard wrapping. All prose edits must be checked to completely avoid hard wrapping.
+    - Avoid unnecessary/irrelevant/off-topic expositions of inner workings. Those should live in code. In user-facing tutorials/how-tos, keep only what is actionable on a need-to-know basis.
+    - No hard wrapping. All text edits must be checked to completely avoid hard wrapping.
     - No bolding in docs. Use headings and list indentation to build hierarchy.
+    - No em dashes.
     - Use 4 spaces for each level of indentation.
-    - After adding a new runtime module or changing module boundaries, update docs/mgmt/architecture.md.
-    - After adding a new dependency, update docs/mgmt/tech-stack.md.
-    - After changing user-facing behavior, update the relevant file under docs/specs/.
+    - After adding a new runtime module or changing module boundaries, update docs/mgmt/architecture.md. After adding a new dependency, update docs/mgmt/tech-stack.md. After changing user-facing behavior, update the relevant file under docs/specs/.
     - If a task maps to docs/todos/ checkboxes, update them as work is completed.
     - Keep specs in `docs/specs/`.
 - Release workflows
@@ -84,15 +82,13 @@ References:
 - Programmatic code checks
     - Run these after a logical set of changes are complete, or before commit:
         - Rust checks: when a Rust workspace exists, use the repository's own Cargo commands for build, test, formatting, and linting.
-        - Pre-commit review: after a logical set of changes, dispatch a subagent to review the staged diff for correctness and issues (classify P0/P1/P2). Validate every finding before acting on it.
-            - If you are Codex, launch the review subagent with GPT-5.5 medium.
-        - Pre-commit hook at `.git/hooks/pre-commit`, if present. It may stage changes, auto-fix format issues, and run relevant checks.
-            - Run this script outside sandbox if it requires internet.
+        - Pre-commit review: after a logical set of changes, dispatch a subagent to review the staged diff for issues. Validate every finding before acting on it. Subagent review based on same-brand model (e.g., you are Fable, your subagent is Opus) can run only once, and all findings must be final before the human-led review round.
+        - Pre-commit hook at `.git/hooks/pre-commit`, if present. It may stage changes, auto-fix format issues, and run relevant checks. Run this script outside sandbox if it requires internet.
 - Tests
     - Appropriate tests must be added for every new logical unit of code created, in the same initial feature commit.
     - When a feature is updated, relevant tests must be updated accordingly after functional code changes.
     - When a bug fix is implemented or refactoring is performed, tests must be run promptly to check for regressions.
-    - Using real LLMs for testing: default to use `deepseek-v4-flash` (model released in Apr 2026). Default to use OpenCode Go as provider where supported, otherwise OpenRouter. For other cases, agent must consult human for specific guidance. As an LLM your intenal knowledge of what models exist is woefully outdated.
+    - Using real LLMs for testing: default to use `deepseek-v4-flash`. Default to use OpenCode Go (`opencode-go`) as provider where supported, otherwise OpenRouter. For other cases, agent must consult human for specific guidance. Do not use Claude Fable 5 because you are a Claude model.
 - Security
     - Please refrain from probing into developer secrets like `.env.*` files.
     - If you have accidentally read a secret, report to the human immediately and ask them to rotate it.
