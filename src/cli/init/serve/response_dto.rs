@@ -19,6 +19,14 @@ pub(super) struct SimpleSessionResponse {
     pub(super) status: String,
 }
 
+/// REST twin of the `input_accepted` server event: the socket carries the ack
+/// as an event frame, `POST /v1/init/sessions/{id}/input` returns it as the
+/// success data.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(super) struct InputAcceptedResponse {
+    pub(super) request_id: String,
+}
+
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub(super) struct InitEventsResponse {
     pub(super) session_id: String,

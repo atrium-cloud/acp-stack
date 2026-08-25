@@ -20,6 +20,23 @@ impl WireGuard {
     }
 }
 
+/// REST twin of the WebSocket `input` client frame (see `ClientFrame` in
+/// routes.rs): same fields, defaults, and answer semantics. Unknown fields are
+/// ignored to match the frame's forward-compat handling, so a client may POST a
+/// socket frame verbatim (including its `type` discriminator) or carry fields a
+/// newer backend adds, rather than hitting a 422 the socket would not.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub(super) struct SessionInputRequest {
+    pub(super) request_id: String,
+    /// Missing means JSON null, matching the frame's `value.unwrap_or(Null)`.
+    #[serde(default)]
+    pub(super) value: Value,
+    /// Sibling of `value`, meaningful only to the testflight confirm; see
+    /// `ClientFrame::deferred`.
+    #[serde(default)]
+    pub(super) deferred: bool,
+}
+
 #[derive(Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct StartInitRequest {

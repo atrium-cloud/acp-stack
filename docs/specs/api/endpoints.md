@@ -28,7 +28,7 @@ Session-tier HTTP routes are also mounted on the local socket and serve only whi
 
 ## Bootstrap Init
 
-`acps init serve` exposes only the routes in this section; this mode omits the normal session/admin `/v1` routes. Calls use exactly one `Authorization: Bearer <bootstrap-token>` header; the token comes from process input alone.
+`acps init serve` exposes the routes in this section plus the session-tier `GET /v1/models` (below), served here on the `bootstrap` tier; this mode omits the other normal session/admin `/v1` routes. Calls use exactly one `Authorization: Bearer <bootstrap-token>` header; the token comes from process input alone.
 
 ### `POST /v1/init/sessions`
 
@@ -95,6 +95,16 @@ Session-tier HTTP routes are also mounted on the local socket and serve only whi
 - Request: `after_seq` query parameter.
 - Response: replays non-secret progress, signal, and input lifecycle events. Entries are the same seq-bearing frames a live client receives. Bounded to recent history and may not reach the oldest signals; the authoritative full replay is the `signals` field of the status body and `hello`.
 - Errors: none route-specific.
+
+### `POST /v1/init/sessions/{id}/input`
+
+- Tier: `bootstrap`
+- Request: `{ "request_id": "...", "value": <any>, "deferred": false }`. The REST twin of the WebSocket `input` frame, with the same fields, defaults, and answer semantics, parsed by the same prompt-driver logic. Unknown fields are ignored, matching the frame, so a client may post a socket frame verbatim (including its `type`).
+- Response: `{ "request_id": "..." }` in the standard success envelope. The `input_accepted` event still reaches subscribed sockets.
+- Errors:
+    - `404 init.session_not_found` — no such init session.
+    - `409 init.input_rejected` — no pending input, or a stale `request_id`. The HTTP equivalent of the socket's `init.input_rejected` error frame.
+- Notes: a backend that polls over REST answers prompts here instead of holding a socket open; the two transports are interchangeable.
 
 ### `GET /v1/init/sessions/{id}/ws`
 
@@ -524,8 +534,8 @@ All skill routes load config leniently, dropping individually invalid `[[skills.
 
 ### `GET /v1/models`
 
-- Tier: `session`
-- Request: none.
+- Tier: `session` (also mounted on the `bootstrap` tier of `acps init serve`, where the bootstrap bearer token replaces the session key, so a hosted backend renders pickers while init is still running).
+- Request: optional `?target_id=<id>` (alias `?target=`) query param selecting a non-default Array target.
 - Response: `{ "agent_id", "source", "models": [{ "value", "display_name"? }], "modes": [...], "efforts": [...], "catalog_error"? }`.
     - `efforts` carries the agent's ACP-advertised reasoning-effort values (the `thought_level` session config option) and is empty when the agent exposes no such option.
     - `source` is `"provider_catalog"` when models come from the provider's live model listing (`models_url` in the embedded provider metadata, fetched with the stored API key and cached at `~/.config/acp-stack/provider-models.json`) and `"acp_advertised"` when they come from the agent's ACP `session/new` config options.
@@ -534,6 +544,8 @@ All skill routes load config leniently, dropping individually invalid `[[skills.
     - Lists model and mode choices from the provider catalog or ACP discovery.
     - The catalog serves only mapped providers of agents whose harness takes the model verbatim from on-disk config (Claude Code profiled providers, Codex with OpenRouter, Hermes Agent). Custom providers have no listing endpoint, and agents with real ACP discovery keep their advertised list.
     - On the catalog path an ACP discovery failure degrades to `modes: []` and `efforts: []` instead of failing the request.
+    - `?target_id=<id>` (alias `?target=`) discovers against that Array target instead of the default (primary) target. The id is validated the way other agent-target inputs are, so with Array mode off any non-primary id (and an unknown id generally) is a `400 request.invalid_param`, never a silent fallback to the default.
+    - On the bootstrap tier the picker reads the on-disk config, which a fresh init writes early in the run (before agent install). A call made before init has staged the config returns `409 init.config_not_ready`; retry once setup has progressed past config staging.
 
 ## Array
 

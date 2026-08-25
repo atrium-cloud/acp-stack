@@ -31,6 +31,7 @@ pub(super) enum AcpsRequestTypes {
     LogsSecurityParams(crate::api::routes::logs::LogsSecurityParams),
     LogsSessionsParams(crate::api::routes::logs::LogsSessionsParams),
     MetricsSummaryParams(crate::api::routes::metrics::MetricsSummaryParams),
+    ModelsParams(crate::api::routes::providers::ModelsParams),
     NativeConfigImportRequest(
         crate::runtime::agent::native_config_import::NativeConfigImportRequest,
     ),

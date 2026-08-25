@@ -742,6 +742,19 @@
           }
         }
       },
+      "ModelsParams": {
+        "type": "object",
+        "properties": {
+          "target_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Array target id to discover against instead of the default\n(primary) target.",
+            "default": null
+          }
+        }
+      },
       "NativeConfigImportRequest": {
         "type": "object",
         "required": [
@@ -1826,6 +1839,27 @@
         "required": [
           "type"
         ]
+      },
+      "SessionInputRequest": {
+        "type": "object",
+        "properties": {
+          "request_id": {
+            "type": "string"
+          },
+          "value": {
+            "description": "Missing means JSON null, matching the frame's `value.unwrap_or(Null)`.",
+            "default": null
+          },
+          "deferred": {
+            "type": "boolean",
+            "description": "Sibling of `value`, meaningful only to the testflight confirm; see\n`ClientFrame::deferred`.",
+            "default": false
+          }
+        },
+        "required": [
+          "request_id"
+        ],
+        "description": "REST twin of the WebSocket `input` client frame (see `ClientFrame` in\nroutes.rs): same fields, defaults, and answer semantics. Unknown fields are\nignored to match the frame's forward-compat handling, so a client may POST a\nsocket frame verbatim (including its `type` discriminator) or carry fields a\nnewer backend adds, rather than hitting a 422 the socket would not."
       }
     },
     "response": {
@@ -7353,6 +7387,18 @@
           "code",
           "message"
         ]
+      },
+      "InputAcceptedResponse": {
+        "type": "object",
+        "properties": {
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id"
+        ],
+        "description": "REST twin of the `input_accepted` server event: the socket carries the ack\nas an event frame, `POST /v1/init/sessions/{id}/input` returns it as the\nsuccess data."
       }
     },
     "config": {

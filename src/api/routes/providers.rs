@@ -1,10 +1,11 @@
 //! Provider and ACP-advertised model discovery for the unified API.
 
-use axum::extract::State;
-use serde::Serialize;
+use axum::extract::{Query, State};
+use serde::{Deserialize, Serialize};
 
+use crate::config::Config;
 use crate::envelope::ApiSuccess;
-use crate::error::StackError;
+use crate::error::{Result, StackError};
 use crate::fs_util::home_dir;
 use crate::runtime::agent::acp_bridge::AgentSessionConfigCategory;
 use crate::runtime::agent::model_discovery::{
@@ -102,11 +103,63 @@ pub(crate) struct ModelJson {
 const MODELS_SOURCE_PROVIDER_CATALOG: &str = "provider_catalog";
 const MODELS_SOURCE_ACP_ADVERTISED: &str = "acp_advertised";
 
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub(crate) struct ModelsParams {
+    /// Array target id to discover against instead of the default
+    /// (primary) target.
+    #[serde(default, alias = "target")]
+    pub(crate) target_id: Option<String>,
+}
+
+/// Pick the target configuration a models request discovers against. Absent
+/// `target_id` keeps the primary target's agent, which the disk load already
+/// mirrored into `config.agent`. A present value is an Array target id and
+/// follows the same rules as `session_agent_target`: with Array mode off only
+/// the primary target is active, and an unknown id is a 400, never a silent
+/// fallback to the default.
+pub(crate) fn resolve_models_target_config(
+    mut config: Config,
+    target_id: Option<&str>,
+) -> Result<Config> {
+    let Some(target_id) = target_id else {
+        return Ok(config);
+    };
+    if !config.array.enabled && target_id != config.array.primary_target {
+        return Err(StackError::InvalidParam {
+            field: "target_id",
+            reason: format!(
+                "Array mode is off; only default target `{}` is active",
+                config.array.primary_target
+            ),
+        });
+    }
+    let Some(target) = config.array.target(target_id) else {
+        return Err(StackError::InvalidParam {
+            field: "target_id",
+            reason: format!("unknown Array target `{target_id}`"),
+        });
+    };
+    config.agent = target.agent.clone();
+    Ok(config)
+}
+
 pub(crate) async fn models_handler(
     State(state): State<AppState>,
-) -> std::result::Result<ApiSuccess<ModelsResponse>, StackError> {
-    // Resolve from disk so config edits are visible without a daemon restart.
-    let (config, _) = state.default_agent_target().await?;
+    Query(query): Query<ModelsParams>,
+) -> Result<ApiSuccess<ModelsResponse>> {
+    // Resolve the target from disk so `acps agent default set`
+    // and Array config edits are visible without a daemon restart.
+    let config = state.refresh_array_runtime_from_disk().await?;
+    let config = resolve_models_target_config(config, query.target_id.as_deref())?;
+    models_response_for_config(&config)
+        .await
+        .map(ApiSuccess::new)
+}
+
+/// Discovery behind `GET /v1/models`, shared by the session-tier handler and
+/// the bootstrap-tier handler in `cli::init::serve`, which resolves the same
+/// fresh config from disk without an `AppState`.
+pub(crate) async fn models_response_for_config(config: &Config) -> Result<ModelsResponse> {
     let agent_id = config.agent.id.clone();
     let home = home_dir()?;
 
@@ -126,7 +179,7 @@ pub(crate) async fn models_handler(
         .is_some_and(|id| models_url_for_provider_id(id).is_some());
     let mut catalog_error = None;
     let catalog = if provider_declares_catalog {
-        match refresh_provider_models(&home, &config).await {
+        match refresh_provider_models(&home, config).await {
             Ok(models) => models,
             Err(error) => {
                 let reason = error.to_string();
@@ -147,7 +200,7 @@ pub(crate) async fn models_handler(
         // serve on its own.
         let (modes, efforts) = match fetch_session_config_with_timeout(
             &home,
-            &config,
+            config,
             DEFAULT_MODELS_DISCOVERY_TIMEOUT,
         )
         .await
@@ -163,7 +216,7 @@ pub(crate) async fn models_handler(
                 (Vec::new(), Vec::new())
             }
         };
-        return Ok(ApiSuccess::new(ModelsResponse {
+        return Ok(ModelsResponse {
             agent_id,
             source: MODELS_SOURCE_PROVIDER_CATALOG,
             models: models
@@ -176,11 +229,11 @@ pub(crate) async fn models_handler(
             modes,
             efforts,
             catalog_error: None,
-        }));
+        });
     }
 
     let response =
-        fetch_session_config_with_timeout(&home, &config, DEFAULT_MODELS_DISCOVERY_TIMEOUT).await?;
+        fetch_session_config_with_timeout(&home, config, DEFAULT_MODELS_DISCOVERY_TIMEOUT).await?;
     // A missing `model` advertisement is an error for discovery-backed agents,
     // so the operator learns discovery failed instead of seeing an empty picker.
     let models = match advertised_values_for_category(&response, AgentSessionConfigCategory::Model)
@@ -198,7 +251,7 @@ pub(crate) async fn models_handler(
     let efforts = advertised_values_for_category(&response, AgentSessionConfigCategory::Effort)
         .unwrap_or_default();
 
-    Ok(ApiSuccess::new(ModelsResponse {
+    Ok(ModelsResponse {
         agent_id,
         source: MODELS_SOURCE_ACP_ADVERTISED,
         models: models
@@ -211,5 +264,121 @@ pub(crate) async fn models_handler(
         modes,
         efforts,
         catalog_error,
-    }))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ArrayTargetConfig;
+
+    const BASE_TOML: &str = r#"
+[api]
+bind = "127.0.0.1:7700"
+max_request_bytes = 1048576
+
+[security.http]
+max_request_bytes = 1048576
+rate_limit_per_minute = 120
+burst = 30
+auth_failures_per_minute = 5
+auth_block_duration = "15m"
+allowed_origins = []
+trust_proxy_headers = false
+
+[workspace]
+root = "/workspace"
+uploads = "/workspace/uploads"
+default_shell = "/bin/bash"
+runtime_user = "acp"
+max_file_bytes = 8388608
+
+[logging]
+level = "info"
+local_retention_days = 30
+
+[logging.supabase]
+enabled = false
+url = "https://example.supabase.co"
+api_key_ref = "SUPABASE_SECRET_KEY"
+schema = "acp_stack"
+
+[agent]
+id = "opencode"
+name = "OpenCode"
+command = "opencode"
+args = ["acp"]
+cwd = "/workspace"
+env = []
+restart = "on-crash"
+"#;
+
+    fn base_config() -> Config {
+        crate::config::load_config_from_str(BASE_TOML).expect("base config parses")
+    }
+
+    fn two_target_config() -> Config {
+        let mut config = base_config();
+        config.array.enabled = true;
+        let mut secondary = config.agent.clone();
+        secondary.id = "codex".to_owned();
+        secondary.name = "Codex".to_owned();
+        config.array.targets.push(ArrayTargetConfig {
+            id: "codex".to_owned(),
+            agent: secondary,
+        });
+        config
+    }
+
+    #[test]
+    fn absent_agent_keeps_primary_target() {
+        let resolved = resolve_models_target_config(base_config(), None).expect("resolution");
+        assert_eq!(resolved.agent.id, "opencode");
+    }
+
+    #[test]
+    fn primary_target_id_resolves_without_array() {
+        let resolved =
+            resolve_models_target_config(base_config(), Some("opencode")).expect("resolution");
+        assert_eq!(resolved.agent.id, "opencode");
+    }
+
+    #[test]
+    fn array_enabled_secondary_target_resolves() {
+        let resolved =
+            resolve_models_target_config(two_target_config(), Some("codex")).expect("resolution");
+        assert_eq!(resolved.agent.id, "codex");
+        // The resolution swaps only the active agent; the rest of the
+        // discovery context (workspace, provider metadata) stays intact.
+        assert_eq!(resolved.array.primary_target, "opencode");
+    }
+
+    #[test]
+    fn array_off_rejects_non_primary_target() {
+        let error = resolve_models_target_config(base_config(), Some("codex"))
+            .expect_err("non-primary target must be gated when Array mode is off");
+        match error {
+            StackError::InvalidParam { field, reason } => {
+                assert_eq!(field, "target_id");
+                assert!(reason.contains("Array mode is off"), "reason: {reason}");
+            }
+            other => panic!("expected InvalidParam, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_target_is_invalid_param() {
+        let error = resolve_models_target_config(two_target_config(), Some("no-such-target"))
+            .expect_err("unknown target must fail");
+        match error {
+            StackError::InvalidParam { field, reason } => {
+                assert_eq!(field, "target_id");
+                assert!(
+                    reason.contains("unknown Array target `no-such-target`"),
+                    "reason: {reason}"
+                );
+            }
+            other => panic!("expected InvalidParam, got {other:?}"),
+        }
+    }
 }

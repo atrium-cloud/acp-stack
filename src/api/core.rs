@@ -285,10 +285,7 @@ impl AppState {
     }
 
     pub(crate) async fn refresh_array_runtime_from_disk(&self) -> Result<Config> {
-        let mut config = crate::config::load_for_runtime_reload(&self.runtime_paths.config_path)?;
-        if let Ok(registry) = load_active_registry() {
-            populate_agent_adapter_from_registry(&mut config, &registry);
-        }
+        let config = load_runtime_config_from_disk(&self.runtime_paths.config_path)?;
         self.agent_targets.sync_targets_from_config(&config);
         self.array_enabled
             .store(config.array.enabled, Ordering::Relaxed);
@@ -473,6 +470,17 @@ pub(crate) fn load_active_registry() -> Result<RegistryCatalog> {
         Some(path) => RegistryCatalog::load_with_override(&path),
         None => RegistryCatalog::load_embedded(),
     }
+}
+
+/// Fresh config read from disk with registry-derived adapter metadata filled
+/// in — the read half of `refresh_array_runtime_from_disk`, shared with the
+/// bootstrap init server, which serves `GET /v1/models` without an `AppState`.
+pub(crate) fn load_runtime_config_from_disk(config_path: &Path) -> Result<Config> {
+    let mut config = crate::config::load_for_runtime_reload(config_path)?;
+    if let Ok(registry) = load_active_registry() {
+        populate_agent_adapter_from_registry(&mut config, &registry);
+    }
+    Ok(config)
 }
 
 fn operator_registry_override_path() -> Option<PathBuf> {

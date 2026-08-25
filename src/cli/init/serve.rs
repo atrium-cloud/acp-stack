@@ -18,6 +18,10 @@ use tokio::sync::{Mutex as TokioMutex, Notify, broadcast};
 use tower_http::limit::RequestBodyLimitLayer;
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::api::core::load_runtime_config_from_disk;
+use crate::api::routes::providers::{
+    ModelsParams, models_response_for_config, resolve_models_target_config,
+};
 use crate::auth::constant_time_eq;
 use crate::config;
 use crate::envelope::{ApiError, ApiSuccess};

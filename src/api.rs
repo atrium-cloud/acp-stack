@@ -1,4 +1,4 @@
-mod core;
+pub(crate) mod core;
 
 pub(crate) mod auth;
 pub(crate) mod routes;

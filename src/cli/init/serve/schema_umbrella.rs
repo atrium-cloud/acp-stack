@@ -15,6 +15,7 @@ enum InitRequestTypes {
     EventsQuery(EventsQuery),
     NativeConfigCancelRequest(NativeConfigCancelRequest),
     ClientFrame(ClientFrame),
+    SessionInputRequest(SessionInputRequest),
 }
 
 /// Every top-level body the bootstrap init API emits (serialize contract).
@@ -25,6 +26,7 @@ enum InitResponseTypes {
     SimpleSessionResponse(SimpleSessionResponse),
     InitEventsResponse(InitEventsResponse),
     InitStatusResponse(InitStatusResponse),
+    InputAcceptedResponse(InputAcceptedResponse),
 }
 
 /// The init request DTOs' definitions, re-keyed under the `request` namespace.

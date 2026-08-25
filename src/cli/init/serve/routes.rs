@@ -10,6 +10,7 @@ pub(super) fn build_bootstrap_router(state: BootstrapState, max_request_bytes: u
         )
         .route("/v1/init/sessions/{id}", get(session_status_handler))
         .route("/v1/init/sessions/{id}/events", get(session_events_handler))
+        .route("/v1/init/sessions/{id}/input", post(session_input_handler))
         .route(
             "/v1/init/sessions/{id}/cancel",
             post(session_cancel_handler),
@@ -19,6 +20,10 @@ pub(super) fn build_bootstrap_router(state: BootstrapState, max_request_bytes: u
             post(session_native_config_cancel_handler),
         )
         .route("/v1/init/sessions/{id}/ws", get(session_ws_handler))
+        // Same picker data as the session-tier `/v1/models` (shared handler
+        // logic in `api::routes::providers`), served here so a hosted backend
+        // can render model/mode choices while init is still running.
+        .route("/v1/models", get(bootstrap_models_handler))
         .layer(RequestBodyLimitLayer::new(max_request_bytes as usize))
         .layer(axum::extract::DefaultBodyLimit::disable())
         .route_layer(middleware::from_fn_with_state(
@@ -220,6 +225,70 @@ async fn session_cancel_handler(
             "init.session_not_found",
             "init session not found",
         ),
+    }
+}
+
+/// REST twin of the WebSocket `input` client frame: both land in
+/// `submit_answer`, so the wizard thread parses the answer through the same
+/// prompt-driver logic regardless of transport. The socket reports a
+/// rejection as an `init.input_rejected` protocol-error frame; here it is a
+/// 409 with the same code, matching the router's other state conflicts.
+async fn session_input_handler(
+    State(state): State<BootstrapState>,
+    AxumPath(id): AxumPath<String>,
+    Json(request): Json<SessionInputRequest>,
+) -> Response {
+    let Some(session) = state.manager.session(&id) else {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "init.session_not_found",
+            "init session not found",
+        );
+    };
+    session.touch();
+    let answer = HostedAnswer {
+        value: request.value,
+        deferred: request.deferred,
+    };
+    match session.submit_answer(&request.request_id, answer) {
+        Ok(()) => ApiSuccess::new(InputAcceptedResponse {
+            request_id: request.request_id,
+        })
+        .into_response(),
+        Err(message) => api_error(StatusCode::CONFLICT, "init.input_rejected", message),
+    }
+}
+
+/// Bootstrap-tier `GET /v1/models`: the session-tier discovery with the same
+/// fresh-from-disk config read, resolved without an `AppState` (the bootstrap
+/// server has none). `?target_id=` (alias `target`) picks the Array target
+/// exactly as on the session tier.
+async fn bootstrap_models_handler(Query(query): Query<ModelsParams>) -> Response {
+    let config_path = match config::default_config_path() {
+        Ok(path) => path,
+        Err(error) => return error.into_response(),
+    };
+    // Fresh init writes the runtime config early in the run; a picker call
+    // before that stage would read a missing file. Report it as a retryable
+    // not-ready state instead of an opaque 500.
+    if !config_path.exists() {
+        return api_error(
+            StatusCode::CONFLICT,
+            "init.config_not_ready",
+            "init has not written the runtime config yet; retry once setup progresses past config staging",
+        );
+    }
+    let config = match load_runtime_config_from_disk(&config_path) {
+        Ok(config) => config,
+        Err(error) => return error.into_response(),
+    };
+    let config = match resolve_models_target_config(config, query.target_id.as_deref()) {
+        Ok(config) => config,
+        Err(error) => return error.into_response(),
+    };
+    match models_response_for_config(&config).await {
+        Ok(models) => ApiSuccess::new(models).into_response(),
+        Err(error) => error.into_response(),
     }
 }
 

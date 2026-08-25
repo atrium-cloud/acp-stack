@@ -249,6 +249,7 @@ The hosted flow follows the same init steps as interactive `acps init`, but stre
 - Normal `acps init` keeps its existing terminal behavior; hosted prompts outside the streamed set use the same skip/default behavior as non-interactive init unless supplied through initial args.
 - The post-install MCP configuration step streams its prompts only when the start request declared no MCP server. Declaring servers up front still wins and skips the wizard outright.
 - MCP declarations the installed agent's capabilities do not cover are reported only through the result frame's `ignored_features`, never through progress frames.
+- Prompt answers arrive over the WebSocket `input` frame or the REST twin `POST /v1/init/sessions/{id}/input`, interchangeably. The bootstrap server also mounts `GET /v1/models` (with `?target_id=` target selection) so a backend renders pickers while the session runs.
 
 ### Signals
 

@@ -24,7 +24,7 @@ flowchart LR
 - API — HTTP routes, WebSocket subscriptions, and client-facing contracts.
 - Auth — API key validation, auth tiers, and request envelopes.
 - Local listener — owner-only Unix-socket surface for keyless local `acps` routes.
-- Bootstrap init — hosted init session API before normal keys exist. A typed server-frame surface (`src/cli/init/serve/frames.rs`) forwards raw init-flow signals as `signal` events; the client folds them, and the instance keeps a bounded signal log for hello/status replay.
+- Bootstrap init — hosted init session API before normal keys exist. A typed server-frame surface (`src/cli/init/serve/frames.rs`) forwards raw init-flow signals as `signal` events; the client folds them, and the instance keeps a bounded signal log for hello/status replay. Prompt answers arrive over the WebSocket or the REST twin `POST /v1/init/sessions/{id}/input`, and a bootstrap-tier `GET /v1/models` shares the session-tier discovery (`src/api/routes/providers.rs`) through the fresh-from-disk config read in `src/api/core.rs`.
 
 ### Config, state, and secrets
 
@@ -97,7 +97,7 @@ flowchart LR
 
 ### Surfaces and deployment
 
-- `acps init serve` exposes only bootstrap init routes and exits after result acknowledgement.
+- `acps init serve` exposes bootstrap init routes plus a bootstrap-tier `GET /v1/models`, and exits after result acknowledgement.
 - The local socket is allowlisted for low-risk observability plus admin-enabled session-tier HTTP access; public admin APIs stay off it.
 - Deployment profiles change only process and edge shape, never runtime behavior.
 
