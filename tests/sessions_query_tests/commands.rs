@@ -1,7 +1,36 @@
+use std::time::Duration;
+
 use crate::common::sessions::{Harness, admin_bearer, create_session, http, session_bearer};
 use acp_stack::state::SessionAvailableCommand;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
+
+/// A session drives one turn at a time, so a command run has to settle before
+/// the next one is submitted.
+async fn await_prompt_settled(harness: &Harness, prompt_id: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = {
+            let store = harness.state.lock().await;
+            store
+                .get_prompt(prompt_id)
+                .expect("prompt lookup")
+                .expect("prompt exists")
+                .status
+        };
+        if matches!(
+            status.as_str(),
+            "completed" | "errored" | "cancelled" | "stalled"
+        ) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "prompt `{prompt_id}` never settled"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
 
 fn advertised_fixture() -> Vec<SessionAvailableCommand> {
     vec![
@@ -89,8 +118,12 @@ async fn sessions_commands_run_submits_prompt_with_advisory_flag() {
         .json()
         .await
         .expect("run json");
-    assert!(body["data"]["prompt_id"].is_string());
+    let first_prompt_id = body["data"]["prompt_id"]
+        .as_str()
+        .expect("prompt id")
+        .to_owned();
     assert!(body["data"].get("advertised").is_none());
+    await_prompt_settled(&harness, &first_prompt_id).await;
 
     {
         let store = harness.state.lock().await;
@@ -114,16 +147,20 @@ async fn sessions_commands_run_submits_prompt_with_advisory_flag() {
         .await
         .expect("run json");
     assert_eq!(body["data"]["advertised"], true);
-    let prompt_id = body["data"]["prompt_id"].as_str().expect("prompt id");
+    let prompt_id = body["data"]["prompt_id"]
+        .as_str()
+        .expect("prompt id")
+        .to_owned();
     {
         let store = harness.state.lock().await;
         let prompt = store
-            .get_prompt(prompt_id)
+            .get_prompt(&prompt_id)
             .expect("prompt lookup")
             .expect("prompt exists");
         let blocks: Value = serde_json::from_str(&prompt.prompt_json).expect("prompt json");
         assert_eq!(blocks[0]["text"], "/compact keep decisions");
     }
+    await_prompt_settled(&harness, &prompt_id).await;
 
     // Unadvertised commands still submit, flagged advisory-false.
     let body: Value = client

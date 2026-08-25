@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -54,6 +54,9 @@ const LISTED_UPDATED_AT: &str = "2026-05-25T00:00:00Z";
 const LISTED_PAGE_2_UPDATED_AT: &str = "2026-05-25T00:00:01Z";
 const CREATED_UPDATED_AT: &str = "2026-05-25T00:00:02Z";
 const STALL_SLEEP: Duration = Duration::from_secs(3600);
+/// Cadence for the off-loop wait on a `session/cancel` notification, which
+/// `handle_cancel` records under the same lock this poll reads.
+const CANCEL_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 #[tokio::main]
 async fn main() {

@@ -275,9 +275,11 @@ pub(crate) async fn handle_cancel(
     _connection: ConnectionTo<Client>,
 ) -> agent_client_protocol::Result<()> {
     let mut state = state.lock().await;
-    state
-        .cancelled_sessions
-        .insert(notification.session_id.0.to_string());
+    let session_id = notification.session_id.0.to_string();
+    // Both cancel signals: the set feeds the inline finish path, the count feeds the
+    // off-loop settle fixture. Only one is ever read in a given process.
+    state.cancelled_sessions.insert(session_id.clone());
+    *state.session_cancels.entry(session_id).or_default() += 1;
     Ok(())
 }
 

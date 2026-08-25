@@ -6,9 +6,15 @@ pub(crate) async fn handle_prompt(
     responder: Responder<PromptResponse>,
     connection: ConnectionTo<Client>,
 ) -> agent_client_protocol::Result<()> {
-    let args = {
+    // Captured before any await that could observe a cancel: a `session/cancel` counts
+    // against this turn only if it arrives after this point, which is what lets a later
+    // turn on the same session shrug off a cancel aimed at an earlier one.
+    let (args, start_cancels) = {
         let state = state.lock().await;
-        state.args.clone()
+        (
+            state.args.clone(),
+            state.cancel_count(request.session_id.0.as_ref()),
+        )
     };
     if args.prompt_error {
         return responder.respond_with_error(Error::new(-32000, "fake prompt failure"));
@@ -71,6 +77,39 @@ pub(crate) async fn handle_prompt(
                 ))),
             ))?;
         }
+    }
+    // The two off-loop branches below keep the dispatch loop free, so the
+    // client's `session/cancel` is processed while the turn is still open.
+    // An inline await (as `--prompt-stall-after-update` does) would park the
+    // loop instead and the notification would never be read.
+    if args.prompt_never_settle {
+        return connection.spawn(async move {
+            let _responder_held_open = responder;
+            loop {
+                tokio::time::sleep(STALL_SLEEP).await;
+            }
+        });
+    }
+    if let Some(delay_ms) = args.prompt_settle_cancel_after_ms {
+        let state_for_task = Arc::clone(&state);
+        return connection.spawn(async move {
+            // Wait for a cancel aimed at this turn: one that arrives after it started,
+            // lifting the session's count past the value captured at start. The check
+            // is non-consuming and epoch-gated, so every turn parked at cancel time
+            // settles while a turn that starts later does not inherit that cancel.
+            loop {
+                let cancelled = {
+                    let state = state_for_task.lock().await;
+                    state.cancelled_since(request.session_id.0.as_ref(), start_cancels)
+                };
+                if cancelled {
+                    break;
+                }
+                tokio::time::sleep(CANCEL_WAIT_POLL_INTERVAL).await;
+            }
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            respond_to_prompt(request, responder, StopReason::Cancelled)
+        });
     }
     if args.prompt_stall_after_update {
         loop {
@@ -140,6 +179,10 @@ async fn finish_prompt(
     request: PromptRequest,
     responder: Responder<PromptResponse>,
 ) -> agent_client_protocol::Result<()> {
+    // The inline path consumes a pending cancel: a cancel with no live turn is claimed
+    // by the next turn to complete and removed, so it settles this turn as cancelled
+    // without leaking onto the one after. The off-loop settle fixture uses the epoch
+    // count instead; the two modes never run in the same process.
     let stop_reason = {
         let mut state = state.lock().await;
         if state
@@ -151,6 +194,14 @@ async fn finish_prompt(
             StopReason::EndTurn
         }
     };
+    respond_to_prompt(request, responder, stop_reason)
+}
+
+fn respond_to_prompt(
+    request: PromptRequest,
+    responder: Responder<PromptResponse>,
+    stop_reason: StopReason,
+) -> agent_client_protocol::Result<()> {
     // Echo the local message-id extension: acp-stack treats `_meta.acpStack.messageId` on the
     // response as the acknowledgment of the one it stamped on `session/prompt`.
     let mut response = PromptResponse::new(stop_reason);

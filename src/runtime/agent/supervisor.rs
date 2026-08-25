@@ -19,6 +19,19 @@ use std::time::{Duration, Instant};
 /// next attempted ACP send.
 const PROMPT_DRAIN_BUDGET: Duration = Duration::from_secs(5);
 
+/// Maximum wall time `cancel_session` waits for a live prompt to actually
+/// settle after ACP `session/cancel` went out. An adapter that accepts the
+/// notification without ending the turn must be reported as a failed cancel,
+/// not a successful one, so the wait is bounded rather than optimistic. Kept
+/// below the 30s per-request deadline a supervising client typically applies,
+/// leaving margin for the response to travel back.
+const PROMPT_CANCEL_SETTLE_BUDGET: Duration = Duration::from_secs(20);
+
+/// Poll cadence for the durable prompt row while waiting out a cancel. The
+/// prompt task writes the terminal status from its own task, so the row is the
+/// only place the settle becomes observable.
+const PROMPT_CANCEL_SETTLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
 /// Small fixed delay before an `on-crash` restart. This keeps a fast-crashing
 /// harness from tight-looping while preserving the current single-retry
 /// restart-policy shape (`never` vs `on-crash`).

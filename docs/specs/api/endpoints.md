@@ -659,9 +659,12 @@ Session creation proceeds when a configured `agent.mode`, model, `agent.effort`,
     - A bare string becomes one text block.
     - `null`, an empty array, and any other JSON type are rejected.
 - Response: a prompt id.
-- Errors: `400 prompt.unsupported_modality` — media-bearing prompt with confidently unsupported image, audio, or video input for the selected target model.
+- Errors:
+    - `400 prompt.unsupported_modality` — media-bearing prompt with confidently unsupported image, audio, or video input for the selected target model.
+    - `409 session.prompt_in_flight` — the session already has a prompt the runtime is still driving. Retryable once that turn settles or is cancelled.
 - Notes:
     - Clients can poll the prompt status endpoint or subscribe to `sessions.{id}` over WebSocket.
+    - One session carries one turn at a time. A submission that arrives while the previous prompt is live is refused without creating a row, and never dispatched to the agent.
     - Before a prompt row is created, media-bearing prompts are checked against the selected target model's known input modalities from `models.dev`. Unknown models, unavailable catalog data, PDFs, and generic files are allowed through.
 
 #### Prompt-Path Error Codes
@@ -692,6 +695,7 @@ The `agent.inference_*` codes carry a sanitized public message of the form `"inf
 - Response: the prompt-submit shape plus an advisory `advertised` boolean.
     - `false` means the command was absent from the stored list (the agent may ignore it).
     - The field is omitted when no list was ever advertised.
+- Errors: `409 session.prompt_in_flight` — the session already has a live prompt, as on the prompt route.
 - Notes: runs an agent slash command as a prompt. Submits the composed `/name args` text through the normal prompt pipeline. The submission is never blocked on the list, which can be stale and does not bound what the agent accepts.
 
 ### `GET /v1/sessions/{id}/config-options`
@@ -721,7 +725,13 @@ The `agent.inference_*` codes carry a sanitized public message of the form `"inf
 - Tier: `session`
 - Request: none.
 - Response: standard envelope.
-- Notes: cancels an in-flight prompt.
+- Errors: `502 agent.request_failed` — the live prompt did not settle as `cancelled`.
+- Notes:
+    - Cancels an in-flight prompt. ACP `session/cancel` goes out first, then the runtime waits up to 20 seconds for the live prompt row to reach a terminal status.
+    - Success means the prompt row is already `cancelled` when the response returns.
+    - A prompt that instead reaches `completed` or `errored` means the agent ended the turn on its own terms, and the call fails. The prompt row keeps whatever status the agent produced.
+    - A prompt still running when the wait expires also fails the call, and the turn stays live: the row stays non-terminal, a new prompt for that session is refused with `409 session.prompt_in_flight`, and cancel can be retried.
+    - Idempotent when the session has no live prompt: the notification goes out and the call succeeds.
 
 ### `DELETE /v1/sessions/{id}`
 

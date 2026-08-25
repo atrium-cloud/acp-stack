@@ -12,7 +12,14 @@ pub(crate) struct PlaceboState {
     pub(crate) title: String,
     pub(crate) next_session: u64,
     pub(crate) created_sessions: Vec<CreatedSession>,
+    /// Two cancel signals for two fixture modes that never run in one process. The set
+    /// is a consumable pending-cancel for the inline finish path: a cancel with no live
+    /// turn is claimed by the next turn to complete. The count is epoch state for the
+    /// off-loop settle fixture (`--prompt-settle-cancel-after-ms`): a turn captures it at
+    /// start and settles cancelled once it climbs, so every turn parked at cancel time
+    /// observes one cancel and turns that start later do not inherit it.
     pub(crate) cancelled_sessions: HashSet<String>,
+    pub(crate) session_cancels: HashMap<String, u64>,
     pub(crate) model_configured: bool,
     pub(crate) client_capabilities: Option<ClientCapabilities>,
     /// Values applied via `session/set_config_option`, keyed by `(session_id, config_id)` so a set
@@ -29,10 +36,25 @@ impl PlaceboState {
             next_session: 0,
             created_sessions: Vec::new(),
             cancelled_sessions: HashSet::new(),
+            session_cancels: HashMap::new(),
             model_configured: false,
             client_capabilities: None,
             config_option_values: BTreeMap::new(),
         }
+    }
+
+    /// The session's current `session/cancel` count, captured by a turn when it
+    /// starts so it can tell an earlier cancel from one aimed at it.
+    pub(crate) fn cancel_count(&self, session_id: &str) -> u64 {
+        self.session_cancels.get(session_id).copied().unwrap_or(0)
+    }
+
+    /// True once a `session/cancel` for this session has arrived since `start` — the
+    /// count captured when the turn began. Non-consuming, so concurrently parked
+    /// turns each see the same cancel and a later turn starting at a higher `start`
+    /// does not inherit it.
+    pub(crate) fn cancelled_since(&self, session_id: &str, start: u64) -> bool {
+        self.cancel_count(session_id) > start
     }
 
     pub(crate) fn client_advertised_config_options(&self) -> bool {

@@ -36,6 +36,20 @@ impl AgentSupervisor {
             }
             session.agent_session_id
         };
+        // One ACP session drives one turn at a time: a second prompt would
+        // race the live one on the same agent session, and its `session/cancel`
+        // would be ambiguous. Reap first so a finished-but-unreaped task does
+        // not read as live.
+        self.reap_finished().await;
+        if !self
+            .live_prompts_for_session(session_id, state)
+            .await?
+            .is_empty()
+        {
+            return Err(StackError::PromptInFlight {
+                session_id: session_id.to_owned(),
+            });
+        }
         let prompt_id = next_prompt_id();
         let message_id = next_prompt_message_id();
         let record = {
@@ -162,14 +176,23 @@ impl AgentSupervisor {
         Ok(record)
     }
 
-    /// `POST /v1/sessions/{id}/cancel`. ACP `session/cancel` goes out FIRST;
-    /// local cancellation tokens fire only on its success, so a failed bridge
-    /// call cannot leave rows `cancelled` while the agent keeps running.
+    /// `POST /v1/sessions/{id}/cancel`. ACP `session/cancel` goes out, then the
+    /// live prompt must actually settle as `cancelled` within
+    /// [`PROMPT_CANCEL_SETTLE_BUDGET`] for this to succeed. The agent owns the
+    /// turn: firing our own cancellation token here would write `cancelled`
+    /// rows for an agent that ignored the notification and is still working.
     pub async fn cancel_session(
         &self,
         session_id: &str,
         state: &Arc<TokioMutex<StateStore>>,
     ) -> Result<()> {
+        // Held only across collect-and-send: a prompt submitted concurrently either
+        // lands before the ids are collected or is rejected as in-flight. It is
+        // dropped before the settle wait below so a turn that ignores cancellation
+        // cannot block prompts, stops, or restarts on the agent's other sessions for
+        // the whole settle budget. A submit racing the wait still sees this turn's row
+        // as non-terminal and is refused by the in-flight guard, not by this gate.
+        let dispatch_guard = self.dispatch_gate.lock().await;
         let bridge = self.bridge().await?;
         let agent_session_id = {
             let guard = state.lock().await;
@@ -181,10 +204,32 @@ impl AgentSupervisor {
                     })?;
             record.agent_session_id
         };
+        let live_prompts = self.live_prompts_for_session(session_id, state).await?;
         bridge
             .cancel_session(AcpSessionId::new(agent_session_id.clone()))
             .await?;
-        self.cancel_prompts_for_session(session_id).await;
+        drop(dispatch_guard);
+
+        let observed = self.await_prompt_settle(&live_prompts, state).await?;
+        let verdict = cancel_settle_verdict(&observed);
+        if verdict != CancelSettleVerdict::Cancelled {
+            tracing::warn!(
+                session_id,
+                verdict = verdict.as_str(),
+                prompts = live_prompts.len(),
+                "agent did not settle the turn as cancelled"
+            );
+            // Nothing is torn down on failure: a turn that never settled keeps
+            // its handle and its unfired token so a retry can cancel it again,
+            // and one that settled on its own terms is already terminal, so
+            // later liveness checks skip its handle anyway.
+            return Err(StackError::AgentRequestFailed {
+                method: "session/cancel",
+                message: format!("prompt did not settle as cancelled ({})", verdict.as_str()),
+            });
+        }
+        self.forget_prompts(&live_prompts).await;
+
         let guard = state.lock().await;
         guard.append_session_event(
             session_id,
@@ -194,6 +239,94 @@ impl AgentSupervisor {
             &json!({ "agent_session_id": agent_session_id }).to_string(),
         )?;
         Ok(())
+    }
+
+    /// Prompts for `session_id` this process is still driving: their task has
+    /// not finished AND their durable row is not terminal. Both halves matter.
+    /// Without the registry check a row orphaned by an earlier crash would look
+    /// live forever; without the row check a task parked on an ACP future the
+    /// stale-prompt sweeper already wrote off as `stalled` would block every
+    /// later submission and cancel on that session until the agent restarts.
+    async fn live_prompts_for_session(
+        &self,
+        session_id: &str,
+        state: &Arc<TokioMutex<StateStore>>,
+    ) -> Result<Vec<String>> {
+        let registered = self.registered_prompts_for_session(session_id).await;
+        if registered.is_empty() {
+            return Ok(Vec::new());
+        }
+        let guard = state.lock().await;
+        let mut live = Vec::with_capacity(registered.len());
+        for prompt_id in registered {
+            // A row deleted underneath us belongs to a session teardown, not to
+            // a turn anything still has to wait for.
+            let Some(record) = guard.get_prompt(&prompt_id)? else {
+                continue;
+            };
+            if !record.status.parse::<PromptStatus>()?.terminal() {
+                live.push(prompt_id);
+            }
+        }
+        Ok(live)
+    }
+
+    /// Prompt ids for `session_id` whose background task has not finished.
+    async fn registered_prompts_for_session(&self, session_id: &str) -> Vec<String> {
+        let prompts = self.prompts.lock().await;
+        prompts
+            .iter()
+            .filter(|(_, handle)| handle.session_id == session_id && !handle.join.is_finished())
+            .map(|(prompt_id, _)| prompt_id.clone())
+            .collect()
+    }
+
+    /// Poll each prompt row until it is terminal or the budget expires. `None`
+    /// marks a prompt that never settled. The state mutex is taken per pass and
+    /// released across the sleep so the prompt task can write its own terminal
+    /// row while we wait for it.
+    async fn await_prompt_settle(
+        &self,
+        prompt_ids: &[String],
+        state: &Arc<TokioMutex<StateStore>>,
+    ) -> Result<Vec<Option<PromptStatus>>> {
+        let deadline = tokio::time::Instant::now() + PROMPT_CANCEL_SETTLE_BUDGET;
+        let mut observed: Vec<Option<PromptStatus>> = vec![None; prompt_ids.len()];
+        loop {
+            {
+                let guard = state.lock().await;
+                for (slot, prompt_id) in observed.iter_mut().zip(prompt_ids) {
+                    if slot.is_some() {
+                        continue;
+                    }
+                    let record =
+                        guard
+                            .get_prompt(prompt_id)?
+                            .ok_or_else(|| StackError::PromptNotFound {
+                                id: prompt_id.clone(),
+                            })?;
+                    let status: PromptStatus = record.status.parse()?;
+                    if status.terminal() {
+                        *slot = Some(status);
+                    }
+                }
+            }
+            if observed.iter().all(Option::is_some) || tokio::time::Instant::now() >= deadline {
+                return Ok(observed);
+            }
+            tokio::time::sleep(PROMPT_CANCEL_SETTLE_POLL_INTERVAL).await;
+        }
+    }
+
+    /// Drop settled prompts from the registry. Their terminal row and its
+    /// companion session event are already durable (both are written under one
+    /// state guard, which we had to take to observe the status), so detaching
+    /// the task by dropping its `JoinHandle` loses nothing.
+    async fn forget_prompts(&self, prompt_ids: &[String]) {
+        let mut prompts = self.prompts.lock().await;
+        for prompt_id in prompt_ids {
+            prompts.remove(prompt_id);
+        }
     }
 
     pub(super) async fn cancel_prompts_for_session(&self, session_id: &str) {
@@ -238,5 +371,88 @@ impl AgentSupervisor {
     async fn reap_finished(&self) {
         let mut prompts = self.prompts.lock().await;
         prompts.retain(|_, handle| !handle.join.is_finished());
+    }
+}
+
+/// What the prompt rows observed after `session/cancel` say about the agent's
+/// response to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CancelSettleVerdict {
+    /// Every live prompt ended as `cancelled`: the agent honored the request.
+    Cancelled,
+    /// A prompt reached a terminal status that is not `cancelled`, so the turn
+    /// ended on the agent's own terms rather than because of the cancel.
+    SettledOtherwise,
+    /// A prompt was still running when the budget expired.
+    TimedOut,
+}
+
+impl CancelSettleVerdict {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Cancelled => "cancelled",
+            Self::SettledOtherwise => "settled_otherwise",
+            Self::TimedOut => "timed_out",
+        }
+    }
+}
+
+/// Decide a cancel from the statuses observed for its live prompts, where
+/// `None` is a prompt that never reached a terminal status. No live prompts
+/// means the notification had nothing to interrupt, which is a success: the
+/// route is idempotent.
+fn cancel_settle_verdict(observed: &[Option<PromptStatus>]) -> CancelSettleVerdict {
+    if observed.iter().any(Option::is_none) {
+        return CancelSettleVerdict::TimedOut;
+    }
+    if observed
+        .iter()
+        .all(|status| *status == Some(PromptStatus::Cancelled))
+    {
+        CancelSettleVerdict::Cancelled
+    } else {
+        CancelSettleVerdict::SettledOtherwise
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_cancel_with_no_live_prompt_succeeds() {
+        assert_eq!(cancel_settle_verdict(&[]), CancelSettleVerdict::Cancelled);
+    }
+
+    #[test]
+    fn every_live_prompt_must_end_cancelled() {
+        assert_eq!(
+            cancel_settle_verdict(&[Some(PromptStatus::Cancelled), Some(PromptStatus::Cancelled)]),
+            CancelSettleVerdict::Cancelled
+        );
+    }
+
+    #[test]
+    fn a_turn_the_agent_finished_on_its_own_terms_is_not_a_cancel() {
+        for status in [
+            PromptStatus::Completed,
+            PromptStatus::Errored,
+            PromptStatus::Stalled,
+        ] {
+            assert_eq!(
+                cancel_settle_verdict(&[Some(status)]),
+                CancelSettleVerdict::SettledOtherwise,
+                "{} must not read as a cancel",
+                status.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn a_prompt_that_never_settled_outranks_its_cancelled_siblings() {
+        assert_eq!(
+            cancel_settle_verdict(&[Some(PromptStatus::Cancelled), None]),
+            CancelSettleVerdict::TimedOut
+        );
     }
 }

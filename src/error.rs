@@ -693,6 +693,9 @@ pub enum StackError {
     #[error("session `{id}` is {status} and must be loaded or resumed before prompting")]
     SessionNotActive { id: String, status: String },
 
+    #[error("session `{session_id}` already has a prompt in flight")]
+    PromptInFlight { session_id: String },
+
     #[error("prompt `{id}` was not found")]
     PromptNotFound { id: String },
 

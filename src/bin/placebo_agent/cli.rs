@@ -102,6 +102,16 @@ pub(crate) struct AcpArgs {
     pub(crate) prompt_response_delay_ms: Option<u64>,
     #[arg(long)]
     pub(crate) prompt_stall_after_update: bool,
+    /// Settle the turn as cancelled once a `session/cancel` issued after the turn
+    /// started arrives, after this extra delay. The wait runs off the dispatch loop,
+    /// so the notification is still processed while the turn is open.
+    #[arg(long)]
+    pub(crate) prompt_settle_cancel_after_ms: Option<u64>,
+    /// Hold the turn open forever while still processing incoming messages:
+    /// `session/cancel` is accepted and acknowledged, and the prompt response
+    /// never comes.
+    #[arg(long)]
+    pub(crate) prompt_never_settle: bool,
     #[arg(long)]
     pub(crate) request_permission_then_cancel: bool,
     #[arg(long)]
