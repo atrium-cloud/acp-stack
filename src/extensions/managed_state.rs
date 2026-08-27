@@ -176,6 +176,49 @@ pub fn apply(
     })
 }
 
+/// Deposit flat secrets and apply a managed-state credential selection in one transaction. Mirrors
+/// [`apply`], but the deposited secrets and the catalog swap commit together — a validation failure
+/// (stale revision, ownership conflict, invalid selection) leaves the store untouched rather than
+/// orphaning the secrets a bare `set_many` would already have written. `source_refs` still resolve
+/// against the flat store, so a selection may reference a secret this same body deposits.
+pub fn deposit_and_apply<'a, I>(
+    store: &mut SecretStore,
+    config: &Config,
+    namespace: &str,
+    secrets: I,
+    request: ApplyRequest,
+) -> Result<ApplyResponse>
+where
+    I: IntoIterator<Item = (&'a str, &'a str)>,
+{
+    if request.schema_version != MANAGED_STATE_SCHEMA_VERSION {
+        return Err(StackError::InvalidParam {
+            field: "schema_version",
+            reason: format!(
+                "unsupported schema version {}; expected {MANAGED_STATE_SCHEMA_VERSION}",
+                request.schema_version
+            ),
+        });
+    }
+    let revision = request.revision;
+    let DesiredState::ProviderCredential { selection } = request.desired;
+    let outcome = store.deposit_and_apply_managed_credential(
+        secrets,
+        namespace,
+        KIND_PROVIDER_CREDENTIAL,
+        revision,
+        |store| {
+            selection
+                .map(|selection| resolve_selection(store, config, selection))
+                .transpose()
+        },
+    )?;
+    Ok(ApplyResponse {
+        applied_revision: revision,
+        outcome: outcome.as_str(),
+    })
+}
+
 /// Bound-check the selection, resolve `source_refs` against the flat secret
 /// store, and validate the merged env-keyed values against the provider's
 /// env-var contract: the canonical mapping for registry providers, or the

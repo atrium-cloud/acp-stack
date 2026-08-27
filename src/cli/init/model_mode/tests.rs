@@ -315,7 +315,9 @@ fn a_repeated_advertised_value_is_offered_once() {
 #[test]
 fn deferred_mapped_credential_writes_explicit_model_without_discovery() {
     let home = tempfile::tempdir().expect("tempdir");
-    let secrets = crate::secrets::SecretStore::open_or_create(home.path()).expect("secret store");
+    let secrets = crate::secrets::new_shared_secret_store(
+        crate::secrets::SecretStore::open_or_create(home.path()).expect("secret store"),
+    );
     let registry = RegistryCatalog::load_embedded().expect("registry");
     let mut config = crate::config::load_config_from_str(include_str!(
         "../../../../tests/fixtures/valid-opencode-stack.toml"

@@ -49,6 +49,43 @@ pub fn managed_provider_endpoint_override_for_home(
     SecretStore::open_read_only(home)?.managed_provider_endpoint_override()
 }
 
+/// The one writer-visible handle a long-running process shares across threads.
+/// The store rewrites its whole ciphertext on every mutation, so a second
+/// decrypted snapshot's later persist would silently clobber the first
+/// handle's writes; every writer must go through this handle instead.
+pub type SharedSecretStore = std::sync::Arc<std::sync::Mutex<SecretStore>>;
+
+pub fn new_shared_secret_store(store: SecretStore) -> SharedSecretStore {
+    std::sync::Arc::new(std::sync::Mutex::new(store))
+}
+
+/// Lock the shared handle, recovering from poisoning. Recovery is deliberate: a panicking writer
+/// is rare, and forcing every later writer to fail would be worse than proceeding from the
+/// recovered state. The single-op mutators (`set`, `set_many`, `delete`) mutate memory before
+/// persisting, so a persist error can leave memory one step ahead of disk; the deposit transaction
+/// restores its snapshot on both error AND panic (see `deposit_and_apply_managed_credential`), so a
+/// failed deposit cannot leave an orphaned secret behind a recovered lock.
+pub fn lock_shared_secret_store(
+    handle: &SharedSecretStore,
+) -> std::sync::MutexGuard<'_, SecretStore> {
+    handle
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The outcome of staging a managed-state credential apply without writing it: either the applied
+/// revision matches what is already installed (`Noop`) or it produces a new candidate catalog and
+/// namespace record to persist. Separating staging from the write lets a deposit fold the flat
+/// secret write and the catalog swap into one atomic transaction.
+enum StagedManagedCredential {
+    Noop,
+    Changed {
+        provider_credentials: BTreeMap<String, ProviderCredentialSet>,
+        managed_state: BTreeMap<String, ManagedStateRecord>,
+        outcome: ManagedApplyOutcome,
+    },
+}
+
 /// Loaded, decrypted view of the secret store; every mutation writes through to disk atomically.
 pub struct SecretStore {
     identity: age::x25519::Identity,
@@ -534,6 +571,120 @@ impl SecretStore {
         revision: i64,
         selection: Option<ManagedCredentialSelection>,
     ) -> Result<ManagedApplyOutcome> {
+        match self.stage_managed_state_credential(namespace, kind, revision, selection)? {
+            StagedManagedCredential::Noop => Ok(ManagedApplyOutcome::Noop),
+            StagedManagedCredential::Changed {
+                provider_credentials,
+                managed_state,
+                outcome,
+            } => {
+                let plaintext = StorePlaintext {
+                    secrets: self.secrets.clone(),
+                    provider_credentials: provider_credentials.clone(),
+                    managed_state: managed_state.clone(),
+                };
+                plaintext.validate()?;
+                let ciphertext = encrypt_plaintext(&self.identity.to_public(), &plaintext)?;
+                atomic_write_owner_only(&self.store_path, &ciphertext)?;
+                self.provider_credentials = provider_credentials;
+                self.managed_state = managed_state;
+                Ok(outcome)
+            }
+        }
+    }
+
+    /// Deposit flat secrets and apply a managed-state credential selection as ONE transaction. The
+    /// deposited secrets are made visible to `resolve` first — a `source_refs` entry may name a
+    /// secret this same call deposits — but nothing is written to disk or committed in memory
+    /// unless the whole operation succeeds. A stale revision, ownership conflict, or invalid
+    /// selection restores the store exactly as it was, on disk and in memory, rather than leaving
+    /// the deposited secrets behind (which `set_many` followed by a failing apply would do).
+    ///
+    /// Persists once even when the managed apply is a no-op, as long as there are secrets to write;
+    /// an empty deposit whose apply no-ops writes nothing, matching a bare `apply`.
+    pub fn deposit_and_apply_managed_credential<'a, I, F>(
+        &mut self,
+        secrets: I,
+        namespace: &str,
+        kind: &str,
+        revision: i64,
+        resolve: F,
+    ) -> Result<ManagedApplyOutcome>
+    where
+        I: IntoIterator<Item = (&'a str, &'a str)>,
+        F: FnOnce(&Self) -> Result<Option<ManagedCredentialSelection>>,
+    {
+        let secrets_snapshot = self.secrets.clone();
+        // `catch_unwind` so a panic inside the transaction (in `resolve`, or the staging it drives)
+        // restores the snapshot too, not only an `Err`. Without it a panic would leave the deposit
+        // in memory, poison the mutex, and — because the lock is recovered rather than refused —
+        // let the next successful write persist the orphaned secret. `AssertUnwindSafe` is required
+        // only because `&mut self` is not `UnwindSafe`; the snapshot restore below re-establishes a
+        // consistent state before the unwind resumes.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut deposited_any = false;
+            for (name, value) in secrets {
+                self.secrets.insert(name.to_owned(), value.to_owned());
+                deposited_any = true;
+            }
+            let selection = resolve(self)?;
+            let staged =
+                self.stage_managed_state_credential(namespace, kind, revision, selection)?;
+            let (provider_credentials, managed_state, outcome) = match staged {
+                StagedManagedCredential::Noop => {
+                    if !deposited_any {
+                        // Nothing to write: the deposit carried no secrets and the apply no-ops.
+                        return Ok(ManagedApplyOutcome::Noop);
+                    }
+                    (
+                        self.provider_credentials.clone(),
+                        self.managed_state.clone(),
+                        ManagedApplyOutcome::Noop,
+                    )
+                }
+                StagedManagedCredential::Changed {
+                    provider_credentials,
+                    managed_state,
+                    outcome,
+                } => (provider_credentials, managed_state, outcome),
+            };
+            let plaintext = StorePlaintext {
+                secrets: self.secrets.clone(),
+                provider_credentials: provider_credentials.clone(),
+                managed_state: managed_state.clone(),
+            };
+            plaintext.validate()?;
+            let ciphertext = encrypt_plaintext(&self.identity.to_public(), &plaintext)?;
+            atomic_write_owner_only(&self.store_path, &ciphertext)?;
+            self.provider_credentials = provider_credentials;
+            self.managed_state = managed_state;
+            Ok(outcome)
+        }));
+        match result {
+            Ok(Ok(outcome)) => Ok(outcome),
+            Ok(Err(error)) => {
+                // Roll back the in-memory deposit so a failed apply cannot leave the store's memory
+                // holding secrets that never reached disk.
+                self.secrets = secrets_snapshot;
+                Err(error)
+            }
+            Err(panic) => {
+                self.secrets = secrets_snapshot;
+                std::panic::resume_unwind(panic);
+            }
+        }
+    }
+
+    /// Pure validation + candidate construction for a managed-state credential apply: no mutation,
+    /// no disk write. `apply_managed_state_credential` persists and commits the result;
+    /// `deposit_and_apply_managed_credential` folds it into a larger transaction.
+    fn stage_managed_state_credential(
+        &self,
+        namespace: &str,
+        kind: &str,
+        revision: i64,
+        selection: Option<ManagedCredentialSelection>,
+    ) -> Result<StagedManagedCredential> {
         if revision <= 0 {
             return Err(StackError::InvalidParam {
                 field: "revision",
@@ -544,7 +695,7 @@ impl SecretStore {
         match record {
             Some(record) if revision == record.revision => {
                 self.ensure_identical_replay(namespace, kind, record, selection.as_ref())?;
-                return Ok(ManagedApplyOutcome::Noop);
+                return Ok(StagedManagedCredential::Noop);
             }
             Some(record) if revision < record.revision => {
                 return Err(StackError::ExtensionRevisionConflict {
@@ -611,17 +762,11 @@ impl SecretStore {
 
         let mut managed_state = self.managed_state.clone();
         managed_state.insert(namespace.to_owned(), new_record);
-        let plaintext = StorePlaintext {
-            secrets: self.secrets.clone(),
-            provider_credentials: catalog.clone(),
-            managed_state: managed_state.clone(),
-        };
-        plaintext.validate()?;
-        let ciphertext = encrypt_plaintext(&self.identity.to_public(), &plaintext)?;
-        atomic_write_owner_only(&self.store_path, &ciphertext)?;
-        self.provider_credentials = catalog;
-        self.managed_state = managed_state;
-        Ok(outcome)
+        Ok(StagedManagedCredential::Changed {
+            provider_credentials: catalog,
+            managed_state,
+            outcome,
+        })
     }
 
     /// A replay at the already-applied revision must be an exact no-op; anything else at that revision is a conflict.

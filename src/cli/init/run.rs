@@ -44,11 +44,15 @@ pub(in crate::cli) fn run_init(args: InitArgs, mode: InitMode) -> Result<()> {
     } else {
         InitOutputMode::Text
     };
-    run_init_with_output(args, mode, output_mode)
+    run_init_with_output(args, mode, output_mode, None)
 }
 
-pub(super) fn run_hosted_init(args: InitArgs, mode: InitMode) -> Result<()> {
-    run_init_with_output(args, mode, InitOutputMode::Hosted)
+pub(super) fn run_hosted_init(
+    args: InitArgs,
+    mode: InitMode,
+    secret_store: SharedSecretStore,
+) -> Result<()> {
+    run_init_with_output(args, mode, InitOutputMode::Hosted, Some(secret_store))
 }
 
 pub(in crate::cli) fn run_init_command(command: InitCommand, mode: InitMode) -> Result<()> {
@@ -65,6 +69,7 @@ fn run_init_with_output(
     mut args: InitArgs,
     mode: InitMode,
     output_mode: InitOutputMode,
+    shared_secret_store: Option<SharedSecretStore>,
 ) -> Result<()> {
     // Hosted init always rotates, since plaintext keys travel only in the
     // result frame. Folded in BEFORE the run record is written so a later
@@ -72,7 +77,7 @@ fn run_init_with_output(
     args.rotate_keys = args.rotate_keys || matches!(output_mode, InitOutputMode::Hosted);
 
     let base = prepare_init_base(&mut args, mode, output_mode)?;
-    let setup = stage_init_config(args, base, output_mode)?;
+    let setup = stage_init_config(args, base, output_mode, shared_secret_store)?;
 
     let mut flow = InitFlow::begin(setup)?;
     run_secrets_phase(&mut flow)?;

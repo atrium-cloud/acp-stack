@@ -9,7 +9,7 @@ pub(crate) fn ensure_configured_provider_refs_for_init(
     registry: &RegistryCatalog,
     config: &mut Config,
     config_path: &Path,
-    secret_store: &mut SecretStore,
+    secret_store: &SharedSecretStore,
 ) -> Result<bool> {
     let Some(provider) = config.agent.provider.as_mut() else {
         return Ok(false);

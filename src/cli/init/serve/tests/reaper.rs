@@ -21,7 +21,7 @@ fn parse_optional_duration_accepts_suffixes_and_zero_disables() {
 }
 
 fn reaper_test_manager(session_id: &str) -> (Arc<HostedInitManager>, Arc<HostedInitSession>) {
-    let manager = HostedInitManager::new();
+    let manager = HostedInitManager::new(test_shared_secret_store().0);
     let session = HostedInitSession::new(session_id.to_owned(), manager.shutdown.clone(), false);
     *lock_unpoisoned(&manager.active) = Some(session.clone());
     (manager, session)
@@ -70,7 +70,7 @@ async fn idle_reaper_skips_sessions_with_connected_websocket() {
 #[tokio::test(start_paused = true)]
 async fn idle_reaper_respects_route_lookup_activity() {
     let (manager, session) = reaper_test_manager("init_idle_poll");
-    let app = app_with_manager(manager.clone());
+    let (app, _store_dir) = app_with_manager(manager.clone());
     tokio::spawn(reap_idle_session(
         manager.clone(),
         Some(std::time::Duration::from_secs(10)),
@@ -99,7 +99,7 @@ async fn idle_reaper_respects_route_lookup_activity() {
 #[tokio::test(start_paused = true)]
 async fn status_reports_idle_age_before_counting_itself() {
     let (manager, _session) = reaper_test_manager("init_age");
-    let app = app_with_manager(manager);
+    let (app, _store_dir) = app_with_manager(manager);
     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
     let (status, body) = request_json(
         app.clone(),
@@ -126,8 +126,8 @@ async fn status_reports_idle_age_before_counting_itself() {
 
 #[tokio::test(start_paused = true)]
 async fn idle_reaper_respects_pre_session_api_activity() {
-    let manager = HostedInitManager::new();
-    let app = app_with_manager(manager.clone());
+    let manager = HostedInitManager::new(test_shared_secret_store().0);
+    let (app, _store_dir) = app_with_manager(manager.clone());
     tokio::spawn(reap_idle_session(
         manager.clone(),
         Some(std::time::Duration::from_secs(10)),
@@ -167,13 +167,13 @@ async fn idle_reaper_respects_pre_session_api_activity() {
 
 #[tokio::test]
 async fn shutdown_if_no_session_is_atomic_with_session_creation() {
-    let manager = HostedInitManager::new();
+    let manager = HostedInitManager::new(test_shared_secret_store().0);
     let session = HostedInitSession::new("init_atomic".to_owned(), manager.shutdown.clone(), false);
     *lock_unpoisoned(&manager.active) = Some(session);
     assert!(!manager.shutdown_if_no_session("idle_timeout"));
     assert!(manager.terminal_result().is_ok());
 
-    let empty = HostedInitManager::new();
+    let empty = HostedInitManager::new(test_shared_secret_store().0);
     assert!(empty.shutdown_if_no_session("idle_timeout"));
     tokio::time::timeout(std::time::Duration::from_secs(1), empty.wait_for_terminal())
         .await
@@ -186,7 +186,7 @@ async fn websocket_closes_when_session_turns_terminal() {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
     let (manager, session) = reaper_test_manager("init_ws_terminal");
-    let app = app_with_manager(manager);
+    let (app, _store_dir) = app_with_manager(manager);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -269,7 +269,7 @@ async fn idle_reaper_respects_activity_touch() {
 
 #[tokio::test(start_paused = true)]
 async fn idle_reaper_expires_server_without_session() {
-    let manager = HostedInitManager::new();
+    let manager = HostedInitManager::new(test_shared_secret_store().0);
     tokio::spawn(reap_idle_session(
         manager.clone(),
         Some(std::time::Duration::from_secs(10)),
@@ -304,7 +304,7 @@ async fn max_lifetime_enforcer_expires_active_session() {
 
 #[tokio::test(start_paused = true)]
 async fn max_lifetime_enforcer_shuts_down_server_without_session() {
-    let manager = HostedInitManager::new();
+    let manager = HostedInitManager::new(test_shared_secret_store().0);
     tokio::spawn(enforce_max_lifetime(
         manager.clone(),
         std::time::Duration::from_secs(5),

@@ -305,6 +305,243 @@ fn managed_apply_replay_is_noop_and_divergent_replay_conflicts() {
 }
 
 #[test]
+fn deposit_and_apply_rolls_back_secrets_when_the_apply_conflicts() {
+    let home = fresh_home();
+    let mut store = SecretStore::open_or_create(home.path()).expect("open or create");
+    store.set("EXISTING", "old").expect("seed secret");
+    store
+        .apply_managed_state_credential(
+            "platform-state",
+            "provider-credential",
+            7,
+            Some(selection("openai", "OPENAI_API_KEY", "sk-managed")),
+        )
+        .expect("establish the revision-7 watermark");
+
+    // A deposit at a stale revision conflicts only after the flat secrets would have been written
+    // by the old `set_many`-first path. The transaction must undo the overwrite and the new key.
+    let error = store
+        .deposit_and_apply_managed_credential(
+            [("EXISTING", "new"), ("FRESH", "value")],
+            "platform-state",
+            "provider-credential",
+            6,
+            |_store| Ok(Some(selection("openai", "OPENAI_API_KEY", "sk-managed"))),
+        )
+        .expect_err("stale revision must conflict");
+    assert!(matches!(
+        error,
+        StackError::ExtensionRevisionConflict { .. }
+    ));
+
+    // In memory: the overwrite is restored to its prior value and the fresh key never landed.
+    assert_eq!(store.get("EXISTING").expect("existing secret"), "old");
+    assert!(store.get("FRESH").is_err());
+    // On disk: identical — reopening sees the exact pre-deposit state, watermark still at 7.
+    let reopened = SecretStore::open(home.path()).expect("reopen");
+    assert_eq!(reopened.get("EXISTING").expect("existing secret"), "old");
+    assert!(reopened.get("FRESH").is_err());
+    assert_eq!(
+        reopened
+            .managed_state_record("platform-state")
+            .expect("watermark")
+            .revision,
+        7
+    );
+}
+
+#[test]
+fn deposit_and_apply_commits_the_secrets_and_the_apply_together() {
+    let home = fresh_home();
+    let mut store = SecretStore::open_or_create(home.path()).expect("open or create");
+    let outcome = store
+        .deposit_and_apply_managed_credential(
+            [("DEPOSITED", "sk-deposited")],
+            "platform-state",
+            "provider-credential",
+            3,
+            // The deposited secret is visible while the selection resolves — a `source_refs` entry
+            // could name it — proving the deposit lands in memory before resolution runs.
+            |store| {
+                assert_eq!(
+                    store
+                        .get("DEPOSITED")
+                        .expect("deposit visible during resolve"),
+                    "sk-deposited"
+                );
+                Ok(Some(selection("openai", "OPENAI_API_KEY", "sk-managed")))
+            },
+        )
+        .expect("deposit + apply");
+    assert_eq!(outcome, ManagedApplyOutcome::Applied);
+
+    // Both the flat secret and the managed apply are on disk under one write.
+    let reopened = SecretStore::open(home.path()).expect("reopen");
+    assert_eq!(
+        reopened.get("DEPOSITED").expect("secret persisted"),
+        "sk-deposited"
+    );
+    assert_eq!(
+        reopened
+            .managed_state_record("platform-state")
+            .expect("watermark")
+            .revision,
+        3
+    );
+}
+
+#[test]
+fn deposit_and_apply_rolls_back_after_an_ownership_conflict() {
+    let home = fresh_home();
+    let mut store = SecretStore::open_or_create(home.path()).expect("open or create");
+    store.set("EXISTING", "old").expect("seed secret");
+    // platform-state owns openai.
+    store
+        .apply_managed_state_credential(
+            "platform-state",
+            "provider-credential",
+            7,
+            Some(selection("openai", "OPENAI_API_KEY", "sk-owned")),
+        )
+        .expect("own openai");
+    // A different namespace depositing for the same provider conflicts on ownership after the
+    // secrets would have been written by the old set_many-first path.
+    let error = store
+        .deposit_and_apply_managed_credential(
+            [("EXISTING", "new"), ("FRESH", "value")],
+            "peer-state",
+            "provider-credential",
+            1,
+            |_store| Ok(Some(selection("openai", "OPENAI_API_KEY", "sk-other"))),
+        )
+        .expect_err("ownership conflict");
+    assert!(matches!(error, StackError::ExtensionStateOwnership { .. }));
+    assert_eq!(store.get("EXISTING").expect("existing secret"), "old");
+    assert!(store.get("FRESH").is_err());
+}
+
+#[test]
+fn deposit_and_apply_rolls_back_when_resolution_fails() {
+    let home = fresh_home();
+    let mut store = SecretStore::open_or_create(home.path()).expect("open or create");
+    store.set("EXISTING", "old").expect("seed secret");
+    let error = store
+        .deposit_and_apply_managed_credential(
+            [("EXISTING", "new"), ("FRESH", "value")],
+            "platform-state",
+            "provider-credential",
+            1,
+            |_store| {
+                Err(StackError::InvalidParam {
+                    field: "selection",
+                    reason: "unresolved source ref".to_owned(),
+                })
+            },
+        )
+        .expect_err("resolution failure");
+    assert!(matches!(error, StackError::InvalidParam { .. }));
+    assert_eq!(store.get("EXISTING").expect("existing secret"), "old");
+    assert!(store.get("FRESH").is_err());
+}
+
+#[test]
+fn deposit_and_apply_restores_the_snapshot_when_resolution_panics() {
+    let home = fresh_home();
+    let mut store = SecretStore::open_or_create(home.path()).expect("open or create");
+    store.set("EXISTING", "old").expect("seed secret");
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        store.deposit_and_apply_managed_credential(
+            [("EXISTING", "new"), ("FRESH", "value")],
+            "platform-state",
+            "provider-credential",
+            1,
+            |_store| panic!("resolution exploded"),
+        )
+    }))
+    .expect_err("the panic must propagate, not be swallowed");
+    assert_eq!(
+        panic.downcast_ref::<&str>().copied(),
+        Some("resolution exploded")
+    );
+
+    // The in-memory deposit is gone: the overwrite rolled back and the fresh key never landed.
+    assert_eq!(store.get("EXISTING").expect("existing secret"), "old");
+    assert!(store.get("FRESH").is_err());
+    // A later successful write through a recovered lock persists no orphan.
+    store.set("LATER", "clean").expect("later write");
+    let reopened = SecretStore::open(home.path()).expect("reopen");
+    assert_eq!(reopened.get("EXISTING").expect("existing secret"), "old");
+    assert_eq!(
+        reopened.get("LATER").expect("later write persisted"),
+        "clean"
+    );
+    assert!(reopened.get("FRESH").is_err());
+}
+
+#[test]
+fn deposit_and_apply_persists_secrets_even_when_the_apply_is_a_noop() {
+    let home = fresh_home();
+    let mut store = SecretStore::open_or_create(home.path()).expect("open or create");
+    store
+        .apply_managed_state_credential(
+            "platform-state",
+            "provider-credential",
+            7,
+            Some(selection("openai", "OPENAI_API_KEY", "sk-managed")),
+        )
+        .expect("apply");
+    // Identical replay at the same revision is a NOOP for the managed state, but the deposit
+    // carries a flat secret, so it must still be persisted under one write.
+    let outcome = store
+        .deposit_and_apply_managed_credential(
+            [("NEW_SECRET", "value")],
+            "platform-state",
+            "provider-credential",
+            7,
+            |_store| Ok(Some(selection("openai", "OPENAI_API_KEY", "sk-managed"))),
+        )
+        .expect("noop with a deposited secret");
+    assert_eq!(outcome, ManagedApplyOutcome::Noop);
+    let reopened = SecretStore::open(home.path()).expect("reopen");
+    assert_eq!(
+        reopened.get("NEW_SECRET").expect("secret persisted"),
+        "value"
+    );
+}
+
+#[test]
+fn an_empty_deposit_whose_apply_no_ops_writes_nothing() {
+    let home = fresh_home();
+    let mut store = SecretStore::open_or_create(home.path()).expect("open or create");
+    store
+        .apply_managed_state_credential(
+            "platform-state",
+            "provider-credential",
+            7,
+            Some(selection("openai", "OPENAI_API_KEY", "sk-managed")),
+        )
+        .expect("apply");
+    let before = std::fs::read(secret_store_path(home.path())).expect("read store");
+    let outcome = store
+        .deposit_and_apply_managed_credential(
+            std::iter::empty::<(&str, &str)>(),
+            "platform-state",
+            "provider-credential",
+            7,
+            |_store| Ok(Some(selection("openai", "OPENAI_API_KEY", "sk-managed"))),
+        )
+        .expect("empty deposit, noop apply");
+    assert_eq!(outcome, ManagedApplyOutcome::Noop);
+    // No write: age re-encryption randomises the ciphertext, so byte-identity proves nothing was
+    // rewritten.
+    let after = std::fs::read(secret_store_path(home.path())).expect("read store");
+    assert_eq!(
+        before, after,
+        "an empty deposit whose apply no-ops must not rewrite the store"
+    );
+}
+
+#[test]
 fn managed_clear_removes_credential_but_retains_watermark() {
     let home = fresh_home();
     let mut store = SecretStore::open_or_create(home.path()).expect("open or create");

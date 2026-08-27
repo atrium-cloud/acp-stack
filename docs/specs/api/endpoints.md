@@ -211,6 +211,26 @@ The client also folds `current_step` from the `step_started`/`step_finished` str
 - Errors: `409 init.result_unavailable` — unless a result is awaiting acknowledgement (see [init.md](../init.md)).
 - Notes: cancels a queued native-config import or rolls back the latest applied one.
 
+### `POST /v1/init/credential`
+
+- Tier: `bootstrap`
+- Request: `{ "secrets": [{ "name", "value" }], "namespace", "apply": { "schema_version", "revision", "desired" } }`. Unknown fields are rejected.
+    - `secrets`: flat-store secrets written before the managed apply resolves, so a `source_refs` entry in `desired` may reference a name this same body deposits. At most 16 entries, each value at most 16 KiB.
+    - `namespace`: the managed-state extension namespace the apply targets. It must resolve to a declared `type = "managed-state"` instance in the runtime config, so the platform declares that extension through the `extensions` field of the session request.
+    - `apply`: the admin-tier managed-state apply body verbatim, as accepted by `POST /v1/admin/extensions/{name}/apply`; the `selection` key semantics carry over unchanged.
+- Response: `{ "secrets_written", "applied_revision", "outcome" }` in the standard success envelope. `outcome` is `applied`, `cleared`, or `noop`.
+- Errors:
+    - `409 init.config_not_ready`: no runtime config exists yet; retry once the session has staged one.
+    - `404 extensions.not_found`: `namespace` does not resolve to a declared `type = "managed-state"` instance.
+    - `409 extensions.revision_conflict`: revision-ordering conflict against the namespace watermark.
+    - `400 extensions.state_ownership`: the desired state touches entries owned by the operator or another namespace.
+    - `400 request.invalid_param`: ref-name shape, count, size, or duplicate-name violations; the error never echoes a rejected value.
+- Notes:
+    - Secret writes and the managed apply commit under one lock, so a fresh-from-disk store read (model discovery, `/v1/models`) and the serve process's shared in-memory handle (the init provider lane) each observe both or neither. An identical replay at the same revision is a `noop`.
+    - Values are opaque to acp-stack, stored verbatim, and never replayed through status, events, or errors.
+    - The deposit lands while an init session runs: a previously soft-passed provider ref resolves on the next read, switching the provider lane to live resolution without restarting the session.
+    - Deposits are accepted whenever the bootstrap server runs and a runtime config exists, including before a session starts or after one completes, under the same bootstrap token.
+
 ## Config And Secrets
 
 The API withholds secret values from every response. Auth keys live outside the secret store.

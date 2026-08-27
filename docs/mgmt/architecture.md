@@ -93,11 +93,11 @@ flowchart LR
 - The sandbox backend is selected by config and is portable across deployments; the masked sensitive paths are derived from the runtime's own path helpers, never from operator config.
 - Platform-specific behavior ships behind the typed extension seams (`[extensions]`), each a generic contract `acp-stack` supervises or serves without learning the extension's semantics. Routes stay static, and plugin code runs only in external processes (see [../specs/extensions.md](../specs/extensions.md)).
 - Network isolation is the `network-provider` extension type on the `unshare` backend: a per-spawn supervisor owns the namespace lifecycle and gates workload execution on the provider's setup. All network policy lives in the provider behind a small versioned env-var contract.
-- Managed state is the `managed-state` extension type: an external orchestrator owns a named namespace through one fixed admin apply endpoint with revision watermarks, and the secret store enforces operator-vs-external provenance.
+- Managed state is the `managed-state` extension type: an external orchestrator owns a named namespace through one fixed admin apply endpoint with revision watermarks, and the secret store enforces operator-vs-external provenance. During hosted init the same apply runs through the bootstrap-tier `POST /v1/init/credential`, which commits flat-store secrets and the apply under one lock.
 
 ### Surfaces and deployment
 
-- `acps init serve` exposes bootstrap init routes plus a bootstrap-tier `GET /v1/models`, and exits after result acknowledgement.
+- `acps init serve` exposes bootstrap init routes plus a bootstrap-tier `GET /v1/models`, and exits after result acknowledgement. The server and the init wizard share one secret-store handle, so whole-file persists from the credential deposit route and the wizard never interleave.
 - The local socket is allowlisted for low-risk observability plus admin-enabled session-tier HTTP access; public admin APIs stay off it.
 - Deployment profiles change only process and edge shape, never runtime behavior.
 

@@ -3,6 +3,7 @@
 mod state_fold;
 mod support;
 
+mod credential_deposit;
 mod golden_frames;
 mod http_api;
 mod mcp_wizard;

@@ -27,6 +27,16 @@ pub(super) struct InputAcceptedResponse {
     pub(super) request_id: String,
 }
 
+/// `POST /v1/init/credential` result: the flat secrets persisted plus the
+/// managed apply outcome, mirroring the admin-tier apply response.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(super) struct DepositCredentialResponse {
+    pub(super) secrets_written: usize,
+    pub(super) applied_revision: i64,
+    #[schemars(extend("enum" = ["applied", "cleared", "noop"]))]
+    pub(super) outcome: &'static str,
+}
+
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub(super) struct InitEventsResponse {
     pub(super) session_id: String,

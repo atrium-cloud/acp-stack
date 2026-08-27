@@ -26,11 +26,13 @@ use crate::auth::constant_time_eq;
 use crate::config;
 use crate::envelope::{ApiError, ApiSuccess};
 use crate::error::{Result, StackError};
+use crate::extensions::managed_state::ApplyResponse;
 use crate::fs_util::{acquire_agent_config_mutation_file_lock, home_dir};
 use crate::runtime::agent::native_config_import::{NativeConfigInspection, NativeConfigSelection};
 use crate::runtime::init_runner::StepDisposition;
 #[cfg(test)]
 use crate::runtime::init_runner::step_kind;
+use crate::secrets::{SharedSecretStore, lock_shared_secret_store};
 use crate::state::default_state_path;
 
 use super::prompt::{
@@ -136,11 +138,19 @@ pub(super) fn run_init_serve(args: InitServeArgs) -> Result<()> {
             .local_addr()
             .map(|addr| addr.to_string())
             .unwrap_or(bind);
+        // The serve process's single writer-visible store handle, opened before
+        // any session so the wizard thread and the credential-deposit route
+        // share it: a second decrypted snapshot's whole-file persist would
+        // clobber the other writer's mutations.
+        let secret_store = crate::secrets::new_shared_secret_store(
+            crate::secrets::SecretStore::open_or_create(&home_dir()?)?,
+        );
         let state = BootstrapState {
             token: Arc::new(token),
             allowed_origins: Arc::new(args.allowed_origin),
-            manager: HostedInitManager::new(),
+            manager: HostedInitManager::new(secret_store.clone()),
             native_config_mutation: Arc::new(TokioMutex::new(())),
+            secret_store,
         };
         let manager = state.manager.clone();
         let shutdown_manager = state.manager.clone();

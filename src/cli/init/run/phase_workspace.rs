@@ -29,7 +29,7 @@ pub(super) fn run_workspace_materialize_step(flow: &mut InitFlow) -> Result<()> 
     // Pre-computed so a mid-clone failure still records the log dir on the init_steps row.
     let log_dir_str = log_paths.run_dir.display().to_string();
     let config = &flow.config;
-    let secret_store = &flow.secret_store;
+    let secret_store = flow.secret_store.clone();
     let materialize_report = &mut flow.materialize_report;
     let result = record_init_step_with_default_log_dir(
         &flow.store,
@@ -41,7 +41,7 @@ pub(super) fn run_workspace_materialize_step(flow: &mut InitFlow) -> Result<()> 
         || {
             let report = crate::runtime::workspace_sources::workspace_init::materialize_workspace(
                 &config.workspace,
-                secret_store,
+                &lock_shared_secret_store(&secret_store),
                 Some(&log_paths),
             )?;
             let step_log_dir = report.log_dir.as_ref().map(|p| p.display().to_string());
@@ -347,7 +347,7 @@ pub(super) fn run_capability_probe_step(flow: &mut InitFlow) -> Result<()> {
     let store = &flow.store;
     let home = &flow.home;
     let config = &flow.config;
-    let secret_store = &flow.secret_store;
+    let secret_store = flow.secret_store.clone();
     let probed_capabilities = &mut flow.probed_capabilities;
     let ignored_features = &mut flow.ignored_features;
     let result = record_init_step(
@@ -365,8 +365,11 @@ pub(super) fn run_capability_probe_step(flow: &mut InitFlow) -> Result<()> {
                 CapabilityProbeOutcome::Probed(capabilities) => {
                     store.upsert_agent_capabilities(&config.agent.id, &capabilities.to_json()?)?;
                     // Best-effort: an unresolvable MCP declaration surfaces at session time, not here.
-                    match crate::runtime::agent::mcp::resolve_mcp_servers(&config.mcp, secret_store)
-                        .and_then(|declared| capabilities.ignored_mcp_features(declared))
+                    match crate::runtime::agent::mcp::resolve_mcp_servers(
+                        &config.mcp,
+                        &lock_shared_secret_store(&secret_store),
+                    )
+                    .and_then(|declared| capabilities.ignored_mcp_features(declared))
                     {
                         Ok(ignored) => *ignored_features = ignored,
                         Err(error) => {
@@ -426,7 +429,7 @@ pub(super) fn run_mcp_configure_step(flow: &mut InitFlow) -> Result<()> {
     let probed_capabilities = &flow.probed_capabilities;
     let args = &mut flow.args;
     let config = &mut flow.config;
-    let secret_store = &mut flow.secret_store;
+    let secret_store = flow.secret_store.clone();
     let result = record_init_step(
         &flow.store,
         &flow.init_run,
@@ -492,7 +495,7 @@ pub(super) fn run_mcp_configure_step(flow: &mut InitFlow) -> Result<()> {
                 *config = config::load_config_from_str(&canonical)?;
                 atomic_write_owner_only(config_path, canonical.as_bytes())?;
                 let stored =
-                    collect_mcp_secret_refs_for_init(mcp_prompting_active, config, secret_store)?;
+                    collect_mcp_secret_refs_for_init(mcp_prompting_active, config, &secret_store)?;
                 if !stored.is_empty() {
                     init_println!(output_mode, "declared secrets: set ({})", stored.join(", "));
                 }

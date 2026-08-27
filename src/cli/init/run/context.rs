@@ -1,5 +1,6 @@
 use super::*;
 use crate::cli::init::skills::InitSkillInstallPlan;
+use crate::secrets::{SharedSecretStore, lock_shared_secret_store, new_shared_secret_store};
 
 /// Everything the tracked phases inherit from the untracked preflight.
 pub(super) struct InitSetup {
@@ -25,13 +26,20 @@ pub(super) struct InitSetup {
     pub(super) agent_selected: bool,
     pub(super) skill_install_plan: Option<InitSkillInstallPlan>,
     pub(super) mutation: crate::fs_util::AgentConfigMutationFileLock,
+    /// The serve process's shared store handle, hoisted to `acps init serve`
+    /// start so bootstrap HTTP handlers and the wizard write through one
+    /// handle. Absent for terminal/dev init, which opens its own below.
+    pub(super) shared_secret_store: Option<SharedSecretStore>,
 }
 
 /// The mutable frame the tracked steps thread through. Field order IS drop order:
 /// `key_handover` must render before the config-mutation lock is released.
 pub(super) struct InitFlow {
     pub(super) key_handover: KeyHandover,
-    pub(super) secret_store: SecretStore,
+    /// Shared with the bootstrap credential-deposit handler in serve mode; the
+    /// wizard locks it per consumer call and never across an `.await` (the
+    /// wizard thread is synchronous) so the async handler can always get in.
+    pub(super) secret_store: SharedSecretStore,
     pub(super) handoff_context: InitHandoffContext,
     pub(super) auth_status: &'static str,
     pub(super) args: InitArgs,
@@ -78,12 +86,19 @@ impl InitFlow {
             auth_ready: false,
             emitted: false,
         };
-        let secret_store = SecretStore::open_or_create(&setup.home)
-            .or_else(|error| finalize_failure(&setup.store, &setup.init_run, error))?;
+        let secret_store = match setup.shared_secret_store {
+            Some(handle) => handle,
+            None => new_shared_secret_store(
+                SecretStore::open_or_create(&setup.home)
+                    .or_else(|error| finalize_failure(&setup.store, &setup.init_run, error))?,
+            ),
+        };
         let handoff_context = InitHandoffContext {
             config_path: setup.config_path.clone(),
             state_path: setup.state_path.clone(),
-            secret_store_path: secret_store.store_path().to_path_buf(),
+            secret_store_path: lock_shared_secret_store(&secret_store)
+                .store_path()
+                .to_path_buf(),
             age_key_path: age_key_path(&setup.home),
             agent_id: setup.config.agent.id.clone(),
             agent_name: setup.config.agent.name.clone(),

@@ -46,7 +46,7 @@ use crate::runtime::install::agent_installer::InstallerOutcome;
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::runtime::install::skill_installer::SkillInstallReport;
 use crate::runtime::install::skill_registry::SkillCatalog;
-use crate::secrets::{SecretStore, age_key_path};
+use crate::secrets::{SecretStore, SharedSecretStore, age_key_path, lock_shared_secret_store};
 use crate::state::{
     DEPS_APPLY_ORIGIN_INIT, DEPS_APPLY_ORIGIN_INIT_BACKGROUND, INIT_RUN_FAILED, INIT_RUN_SUCCEEDED,
     INIT_STEP_FAILED, INIT_STEP_PENDING, INIT_STEP_RUNNING, INIT_STEP_SKIPPED, INIT_STEP_SUCCEEDED,

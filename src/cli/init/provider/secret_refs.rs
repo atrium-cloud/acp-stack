@@ -17,7 +17,7 @@ pub(crate) fn collect_prepared_secret_refs_for_init(
     registry: &RegistryCatalog,
     config: &Config,
     config_path: &Path,
-    secret_store: &mut SecretStore,
+    secret_store: &SharedSecretStore,
 ) -> Result<()> {
     validate_configured_provider_for_init(registry, config, config_path)?;
     if let Some(provider) = config.agent.provider.as_ref() {
@@ -91,7 +91,7 @@ fn config_mcp_secret_refs(config: &Config) -> BTreeSet<String> {
 pub(crate) fn collect_declared_secret_refs_for_init(
     interactive: bool,
     config: &Config,
-    secret_store: &mut SecretStore,
+    secret_store: &SharedSecretStore,
 ) -> Result<Vec<String>> {
     if !interactive {
         return Ok(Vec::new());
@@ -116,7 +116,7 @@ pub(crate) fn collect_declared_secret_refs_for_init(
 pub(crate) fn collect_mcp_secret_refs_for_init(
     interactive: bool,
     config: &Config,
-    secret_store: &mut SecretStore,
+    secret_store: &SharedSecretStore,
 ) -> Result<Vec<String>> {
     if !interactive {
         return Ok(Vec::new());
@@ -128,11 +128,14 @@ pub(crate) fn collect_mcp_secret_refs_for_init(
 fn prompt_missing_declared_refs(
     interactive: bool,
     declared_refs: &BTreeSet<String>,
-    secret_store: &mut SecretStore,
+    secret_store: &SharedSecretStore,
 ) -> Result<Vec<String>> {
     let mut collected = Vec::new();
     for env_ref in declared_refs {
-        if secret_store.contains(env_ref) {
+        // The lock is taken per store operation and never held across a prompt:
+        // a hosted client may answer the prompt only after its credential
+        // deposit returns, and the deposit takes this same lock.
+        if lock_shared_secret_store(secret_store).contains(env_ref) {
             continue;
         }
         let Some(value) = prompt::password(
@@ -152,7 +155,7 @@ fn prompt_missing_declared_refs(
     if collected.is_empty() {
         return Ok(Vec::new());
     }
-    secret_store.set_many(
+    lock_shared_secret_store(secret_store).set_many(
         collected
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str())),
@@ -261,7 +264,7 @@ pub(crate) fn pending_provider_credential_reason(provider_id: &str, api_key_ref:
 
 pub(crate) fn collect_missing_provider_refs(
     interactive: bool,
-    secret_store: &mut SecretStore,
+    secret_store: &SharedSecretStore,
     config: &Config,
     provider_id: Option<&str>,
     required_refs: &[String],
@@ -275,10 +278,18 @@ pub(crate) fn collect_missing_provider_refs(
         .collect();
     let required_refs = required_refs.as_slice();
     // With a provider context the ref may come from the flat store or the
-    // credential catalog; without one, only the flat store counts.
-    let satisfiable = |store: &SecretStore, env_ref: &str| match provider_id {
-        Some(provider_id) => env_ref_is_satisfiable_for_config(config, store, provider_id, env_ref),
-        None => store.contains(env_ref),
+    // credential catalog; without one, only the flat store counts. The check
+    // locks per call so the prompt loop below never parks on a hosted answer
+    // while holding the store lock: the deposit route needs that same lock,
+    // and a client may answer prompts only after its deposit returns.
+    let satisfiable = |env_ref: &str| {
+        let store = lock_shared_secret_store(secret_store);
+        match provider_id {
+            Some(provider_id) => {
+                env_ref_is_satisfiable_for_config(config, &store, provider_id, env_ref)
+            }
+            None => store.contains(env_ref),
+        }
     };
     // Gated on the explicit declaration, not on the presence of a hosted driver:
     // a driven init that made no such promise keeps the prompt and the hard failure.
@@ -296,7 +307,7 @@ pub(crate) fn collect_missing_provider_refs(
     if interactive {
         let mut collected = Vec::new();
         for env_ref in required_refs {
-            if deferrable(env_ref) || satisfiable(secret_store, env_ref) {
+            if deferrable(env_ref) || satisfiable(env_ref) {
                 continue;
             }
             // Masked entry: echoing an API key to the terminal and its scrollback
@@ -315,14 +326,16 @@ pub(crate) fn collect_missing_provider_refs(
                 collected.push((env_ref.as_str(), value));
             }
         }
-        secret_store.set_many(
-            collected
-                .iter()
-                .map(|(name, value)| (*name, value.as_str())),
-        )?;
+        if !collected.is_empty() {
+            lock_shared_secret_store(secret_store).set_many(
+                collected
+                    .iter()
+                    .map(|(name, value)| (*name, value.as_str())),
+            )?;
+        }
     }
     for env_ref in required_refs {
-        if satisfiable(secret_store, env_ref) {
+        if satisfiable(env_ref) {
             continue;
         }
         if deferrable(env_ref) {

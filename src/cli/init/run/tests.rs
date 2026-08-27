@@ -657,7 +657,9 @@ fn a_mode_only_discovery_failure_skips_the_lane_instead_of_failing_init() {
             &registry,
             &mut config,
             &tempdir.path().join("acps-config.toml"),
-            &SecretStore::open_or_create(tempdir.path()).expect("secret store"),
+            &crate::secrets::new_shared_secret_store(
+                SecretStore::open_or_create(tempdir.path()).expect("secret store"),
+            ),
         )
     })
     .expect("a mode-only discovery failure must not fail init");
@@ -684,7 +686,12 @@ fn a_mode_only_discovery_failure_skips_the_lane_instead_of_failing_init() {
 /// A custom provider whose api-key ref arrives later through a managed credential
 /// push: lanes that would spawn the agent must gate on the credential, not the spawn.
 #[cfg(unix)]
-fn pending_credential_fixture() -> (tempfile::TempDir, Config, RegistryCatalog, SecretStore) {
+fn pending_credential_fixture() -> (
+    tempfile::TempDir,
+    Config,
+    RegistryCatalog,
+    SharedSecretStore,
+) {
     use std::os::unix::fs::PermissionsExt;
 
     let tempdir = tempfile::tempdir().expect("tempdir");
@@ -714,7 +721,9 @@ fn pending_credential_fixture() -> (tempfile::TempDir, Config, RegistryCatalog, 
             model_name: None,
         }),
     });
-    let secrets = SecretStore::open_or_create(tempdir.path()).expect("secret store");
+    let secrets = crate::secrets::new_shared_secret_store(
+        SecretStore::open_or_create(tempdir.path()).expect("secret store"),
+    );
     (tempdir, config, registry, secrets)
 }
 
@@ -834,7 +843,9 @@ fn a_deferred_testflight_answer_is_not_a_decline() {
     let registry = RegistryCatalog::load_embedded().expect("registry");
     let config = config_for_agent("opencode");
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let secrets = SecretStore::open_or_create(tempdir.path()).expect("secret store");
+    let secrets = crate::secrets::new_shared_secret_store(
+        SecretStore::open_or_create(tempdir.path()).expect("secret store"),
+    );
     let args = parse_init_args(&[]);
     let resolve = |answer: prompt::ConfirmAnswer| {
         prompt::with_hosted_driver(Arc::new(ScriptedConfirmDriver(answer)), || {

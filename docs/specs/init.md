@@ -251,13 +251,19 @@ The hosted flow follows the same init steps as interactive `acps init`, but stre
 - MCP declarations the installed agent's capabilities do not cover are reported only through the result frame's `ignored_features`, never through progress frames.
 - Prompt answers arrive over the WebSocket `input` frame or the REST twin `POST /v1/init/sessions/{id}/input`, interchangeably. The bootstrap server also mounts `GET /v1/models` (with `?target_id=` target selection) so a backend renders pickers while the session runs.
 
-### Extension Declarations
+### Extension Declarations And In-Stream Credential Deposit
 
 The session-create request may carry an `extensions` map, staged into a freshly-created starter config before any tracked step runs:
 
 - A managed-state declaration names the namespace the platform later pushes credentials into. A network-provider declaration routes every sandboxed init phase through the egress provider from the start, since the declaration lands before install, probe, and discovery run.
 - A network-provider declaration pairs with `sandbox_mask_paths`: absolute paths (the provider's config and state dirs) unioned into the starter config's `[workspace.sandbox].mask_paths`, so the sandboxed agent cannot read them from the first spawn. Blank and relative entries are rejected.
 - Declarations apply only to a starter config; a request carrying `extensions` or `sandbox_mask_paths` against an existing config is rejected. The exception is `resume`: the recorded run's original staging stands and re-declarations are ignored, matching `data_sources` and `deps`.
+
+While the session runs, the platform pushes the sealed provider credential through `POST /v1/init/credential`:
+
+- The body carries flat-store secrets beside a managed-state apply (`namespace` plus the admin-tier apply body verbatim), committed under one lock. Model discovery reads the config and secret store fresh from disk, and the provider lane reads through the serve process's shared store handle, so the deposit is visible on their next read.
+- A ref that soft-passed under `defer_provider_credentials` resolves once the deposit lands, and the provider lane switches to live resolution without restarting the session.
+- An identical replay at the same revision is a noop, so reconnects may re-deposit safely. A deposit before the starter config exists is rejected with `init.config_not_ready` and retried after staging.
 
 ### Signals
 

@@ -6,6 +6,7 @@ pub(super) fn stage_init_config(
     mut args: InitArgs,
     base: InitBase,
     output_mode: InitOutputMode,
+    shared_secret_store: Option<SharedSecretStore>,
 ) -> Result<InitSetup> {
     let InitBase {
         home,
@@ -331,5 +332,6 @@ pub(super) fn stage_init_config(
         agent_selected,
         skill_install_plan,
         mutation,
+        shared_secret_store,
     })
 }

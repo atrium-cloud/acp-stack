@@ -6,7 +6,6 @@ pub(super) fn run_provider_configure_step(flow: &mut InitFlow) -> Result<()> {
     let output_mode = flow.output_mode;
     init_println!(output_mode, "progress: configuring provider and model");
     let provider_verify_config = flow.config.clone();
-    let provider_verify_home = flow.home.clone();
     let agent_selected = flow.agent_selected;
     let edge_requested = flow.edge_requested;
     let home = &flow.home;
@@ -14,7 +13,8 @@ pub(super) fn run_provider_configure_step(flow: &mut InitFlow) -> Result<()> {
     let registry = &flow.registry;
     let args = &flow.args;
     let config = &mut flow.config;
-    let secret_store = &mut flow.secret_store;
+    let secret_store = flow.secret_store.clone();
+    let verify_store = secret_store.clone();
     let result = record_init_step(
         &flow.store,
         &flow.init_run,
@@ -23,8 +23,9 @@ pub(super) fn run_provider_configure_step(flow: &mut InitFlow) -> Result<()> {
         || {
             // Idempotent only when no lane this step owns has an explicit change
             // requested; otherwise a resumed `--model`/`--mode`/`--effort` would be
-            // skipped because the prior succeeded row passes the verifier.
-            let secret_store = SecretStore::open(&provider_verify_home)?;
+            // skipped because the prior succeeded row passes the verifier. Reads
+            // ride the shared handle rather than a fresh `open`: the serve process
+            // keeps exactly one decrypted store instance.
             Ok(args.provider.is_none()
                 && args.model.is_none()
                 && args.mode.is_none()
@@ -32,14 +33,17 @@ pub(super) fn run_provider_configure_step(flow: &mut InitFlow) -> Result<()> {
                 && configured_provider_refs_satisfied(
                     registry,
                     &provider_verify_config,
-                    &secret_store,
+                    &lock_shared_secret_store(&verify_store),
                 ))
         },
         || {
             // All three lanes share one step, so each badges itself before the error
             // propagates; a step-level failure alone could not say which one broke.
+            // Each consumer re-locks the shared handle, so a credential deposit
+            // landing between the provider and model lanes is visible to the
+            // model lane's live discovery.
             let provider_configured =
-                configure_provider_for_init(args, registry, config, config_path, secret_store)
+                configure_provider_for_init(args, registry, config, config_path, &secret_store)
                     .inspect_err(|error| signal_category_failed(InitCategory::Provider, error))?;
             prompt::emit_state_signal(|| InitStateSignal::CategorySettled {
                 category: InitCategory::Provider,
@@ -55,7 +59,7 @@ pub(super) fn run_provider_configure_step(flow: &mut InitFlow) -> Result<()> {
                 registry,
                 config,
                 config_path,
-                secret_store,
+                &secret_store,
             )?;
             // Custom agents skip provider/model discovery and would otherwise never
             // spawn during init, so a broken binary must be caught here.

@@ -16,6 +16,7 @@ enum InitRequestTypes {
     NativeConfigCancelRequest(NativeConfigCancelRequest),
     ClientFrame(ClientFrame),
     SessionInputRequest(SessionInputRequest),
+    DepositCredentialRequest(DepositCredentialRequest),
 }
 
 /// Every top-level body the bootstrap init API emits (serialize contract).
@@ -27,6 +28,7 @@ enum InitResponseTypes {
     InitEventsResponse(InitEventsResponse),
     InitStatusResponse(InitStatusResponse),
     InputAcceptedResponse(InputAcceptedResponse),
+    DepositCredentialResponse(DepositCredentialResponse),
 }
 
 /// The init request DTOs' definitions, re-keyed under the `request` namespace.

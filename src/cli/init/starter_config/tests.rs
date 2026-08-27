@@ -5,6 +5,8 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 
+use crate::secrets::lock_shared_secret_store;
+
 #[derive(Debug, Parser)]
 struct TestInitArgs {
     #[command(flatten)]
@@ -605,8 +607,10 @@ fn declared_refs_config() -> Config {
 #[test]
 fn collect_declared_secret_refs_prompts_missing_and_skips_unanswered() {
     let home = tempdir().expect("tempdir");
-    let mut store = SecretStore::open_or_create(home.path()).expect("secret store");
-    store
+    let store = crate::secrets::new_shared_secret_store(
+        SecretStore::open_or_create(home.path()).expect("secret store"),
+    );
+    lock_shared_secret_store(&store)
         .set_many([("PRESENT_REF", "already-there")])
         .expect("seed store");
     let config = declared_refs_config();
@@ -623,7 +627,7 @@ fn collect_declared_secret_refs_prompts_missing_and_skips_unanswered() {
         ],
     ));
     let stored = prompt::with_hosted_driver(driver, || {
-        super::super::provider::collect_declared_secret_refs_for_init(true, &config, &mut store)
+        super::super::provider::collect_declared_secret_refs_for_init(true, &config, &store)
     })
     .expect("collection must not fail on a skipped ref");
     assert_eq!(
@@ -634,6 +638,7 @@ fn collect_declared_secret_refs_prompts_missing_and_skips_unanswered() {
             "SEARCH_API_KEY".to_owned(),
         ]
     );
+    let store = lock_shared_secret_store(&store);
     assert!(store.contains("AWS_ACCESS_KEY_ID"));
     assert!(store.contains("FILES_TOKEN"));
     assert!(store.contains("SEARCH_API_KEY"));
@@ -644,14 +649,16 @@ fn collect_declared_secret_refs_prompts_missing_and_skips_unanswered() {
 #[test]
 fn collect_declared_secret_refs_is_noop_under_unhandled_driver() {
     let home = tempdir().expect("tempdir");
-    let mut store = SecretStore::open_or_create(home.path()).expect("secret store");
+    let store = crate::secrets::new_shared_secret_store(
+        SecretStore::open_or_create(home.path()).expect("secret store"),
+    );
     let config = declared_refs_config();
     let stored = prompt::with_hosted_driver(Arc::new(UnhandledPromptDriver), || {
-        super::super::provider::collect_declared_secret_refs_for_init(true, &config, &mut store)
+        super::super::provider::collect_declared_secret_refs_for_init(true, &config, &store)
     })
     .expect("unhandled prompts must not fail collection");
     assert!(stored.is_empty());
-    assert!(!store.contains("FILES_TOKEN"));
+    assert!(!lock_shared_secret_store(&store).contains("FILES_TOKEN"));
 }
 
 #[test]

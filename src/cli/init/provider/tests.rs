@@ -1,4 +1,5 @@
 use super::*;
+use crate::secrets::new_shared_secret_store;
 
 fn summary_for(agent_id: &str, provider_id: &str) -> AgentProviderSummary {
     providers_for_agent(agent_id)
@@ -258,51 +259,35 @@ fn custom_provider_readiness_config() -> Config {
 fn declared_defer_gate_defers_missing_provider_ref_but_not_flat_only_refs() {
     use std::sync::Arc;
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let mut secret_store = SecretStore::open_or_create(tempdir.path()).expect("secret store");
+    let secret_store =
+        new_shared_secret_store(SecretStore::open_or_create(tempdir.path()).expect("secret store"));
     let config = custom_provider_readiness_config();
     let required = vec!["CUSTOM_KEY".to_owned()];
 
     // Local non-interactive run keeps the hard failure.
-    let error = collect_missing_provider_refs(
-        false,
-        &mut secret_store,
-        &config,
-        Some("my-custom"),
-        &required,
-    )
-    .expect_err("hard failure without hosted driver");
+    let error =
+        collect_missing_provider_refs(false, &secret_store, &config, Some("my-custom"), &required)
+            .expect_err("hard failure without hosted driver");
     assert!(error.to_string().contains("CUSTOM_KEY"));
 
     // A hosted driver that did NOT declare the deferral keeps the hard
     // failure; being hosted is not itself a promise of a later credential.
     let plain = Arc::new(prompt::RecordingPromptDriver::default());
     prompt::with_hosted_driver(plain, || {
-        collect_missing_provider_refs(
-            true,
-            &mut secret_store,
-            &config,
-            Some("my-custom"),
-            &required,
-        )
-        .expect_err("undeclared hosted run keeps the hard failure");
+        collect_missing_provider_refs(true, &secret_store, &config, Some("my-custom"), &required)
+            .expect_err("undeclared hosted run keeps the hard failure");
     });
 
     // Only a driver that declared `defer_provider_credentials` soft-passes a
     // missing provider ref, and a deferred ref never streams a value prompt.
     let deferring = Arc::new(prompt::RecordingPromptDriver::deferring_provider_credentials());
     prompt::with_hosted_driver(deferring.clone(), || {
-        collect_missing_provider_refs(
-            true,
-            &mut secret_store,
-            &config,
-            Some("my-custom"),
-            &required,
-        )
-        .expect("declared deferral soft-passes the custom-provider ref");
+        collect_missing_provider_refs(true, &secret_store, &config, Some("my-custom"), &required)
+            .expect("declared deferral soft-passes the custom-provider ref");
         let mapped_config = readiness_config("opencode");
         collect_missing_provider_refs(
             true,
-            &mut secret_store,
+            &secret_store,
             &mapped_config,
             Some("openai"),
             &["OPENAI_API_KEY".to_owned()],
@@ -313,14 +298,14 @@ fn declared_defer_gate_defers_missing_provider_ref_but_not_flat_only_refs() {
         let native_auth_config = readiness_config("claude-code");
         collect_missing_provider_refs(
             true,
-            &mut secret_store,
+            &secret_store,
             &native_auth_config,
             Some("amazon-bedrock"),
             &["AWS_REGION".to_owned()],
         )
         .expect_err("native-auth provider refs keep the hard failure under a declared deferral");
         // Refs without a provider context never soft-pass, and still prompt.
-        collect_missing_provider_refs(true, &mut secret_store, &config, None, &required)
+        collect_missing_provider_refs(true, &secret_store, &config, None, &required)
             .expect_err("flat-only refs keep the hard failure");
     });
     assert_eq!(
@@ -334,7 +319,8 @@ fn declared_defer_gate_defers_missing_provider_ref_but_not_flat_only_refs() {
 fn declared_defer_gate_rejects_non_push_deliverable_refs() {
     use std::sync::Arc;
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let mut secret_store = SecretStore::open_or_create(tempdir.path()).expect("secret store");
+    let secret_store =
+        new_shared_secret_store(SecretStore::open_or_create(tempdir.path()).expect("secret store"));
 
     // Even with the deferral declared, a ref the managed push cannot write
     // must not soft-pass: the push carries canonical env vars only.
@@ -345,7 +331,7 @@ fn declared_defer_gate_rejects_non_push_deliverable_refs() {
         // the alias.
         let alias_error = collect_missing_provider_refs(
             true,
-            &mut secret_store,
+            &secret_store,
             &mapped,
             Some("openai"),
             &["MY_OPENAI_ALIAS".to_owned()],
@@ -358,7 +344,7 @@ fn declared_defer_gate_rejects_non_push_deliverable_refs() {
         // The required ref is the inner secret, which the push never writes.
         let template_error = collect_missing_provider_refs(
             true,
-            &mut secret_store,
+            &secret_store,
             &mapped,
             Some("openai"),
             &["INNER_SECRET".to_owned()],
@@ -373,7 +359,7 @@ fn declared_defer_gate_rejects_non_push_deliverable_refs() {
         let custom = custom_provider_readiness_config();
         let custom_error = collect_missing_provider_refs(
             true,
-            &mut secret_store,
+            &secret_store,
             &custom,
             Some("my-custom"),
             &["INNER_SECRET".to_owned()],
@@ -401,7 +387,8 @@ fn declared_defer_gate_rejects_non_push_deliverable_refs() {
 fn declared_defer_gate_rejects_a_templated_provider_var() {
     use std::sync::Arc;
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let mut secret_store = SecretStore::open_or_create(tempdir.path()).expect("secret store");
+    let secret_store =
+        new_shared_secret_store(SecretStore::open_or_create(tempdir.path()).expect("secret store"));
 
     // A var resolved from a `VAR=template` entry needs its inner ref, which
     // the push never writes, so the canonical var name alone must not
@@ -413,7 +400,7 @@ fn declared_defer_gate_rejects_a_templated_provider_var() {
     prompt::with_hosted_driver(deferring.clone(), || {
         let error = collect_missing_provider_refs(
             true,
-            &mut secret_store,
+            &secret_store,
             &config,
             Some("openai"),
             &["OPENAI_API_KEY".to_owned()],
@@ -435,7 +422,8 @@ fn declared_defer_gate_rejects_a_templated_provider_var() {
 #[test]
 fn templated_provider_var_gate_targets_the_inner_ref() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let mut secret_store = SecretStore::open_or_create(tempdir.path()).expect("secret store");
+    let secret_store =
+        new_shared_secret_store(SecretStore::open_or_create(tempdir.path()).expect("secret store"));
     let mut config = readiness_config("opencode");
     config.agent.env = vec!["OPENAI_API_KEY=${MY_KEY}".to_owned()];
 
@@ -443,7 +431,7 @@ fn templated_provider_var_gate_targets_the_inner_ref() {
     // targets it.
     let error = collect_missing_provider_refs(
         false,
-        &mut secret_store,
+        &secret_store,
         &config,
         Some("openai"),
         &["OPENAI_API_KEY".to_owned()],
@@ -453,12 +441,12 @@ fn templated_provider_var_gate_targets_the_inner_ref() {
 
     // The canonical var name is never consulted; storing the secret there
     // would leave runtime resolution unresolved.
-    secret_store
+    lock_shared_secret_store(&secret_store)
         .set_many([("MY_KEY", "sk-value")])
         .expect("store inner ref");
     collect_missing_provider_refs(
         false,
-        &mut secret_store,
+        &secret_store,
         &config,
         Some("openai"),
         &["OPENAI_API_KEY".to_owned()],
@@ -469,26 +457,26 @@ fn templated_provider_var_gate_targets_the_inner_ref() {
 #[test]
 fn provider_gate_and_idempotence_verifier_accept_catalog_only_credential() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let mut secret_store = SecretStore::open_or_create(tempdir.path()).expect("secret store");
-    seed_catalog_credential(&mut secret_store, "my-custom", "CUSTOM_KEY", "catalog-key");
+    let secret_store =
+        new_shared_secret_store(SecretStore::open_or_create(tempdir.path()).expect("secret store"));
+    seed_catalog_credential(
+        &mut lock_shared_secret_store(&secret_store),
+        "my-custom",
+        "CUSTOM_KEY",
+        "catalog-key",
+    );
     let config = custom_provider_readiness_config();
     let required = vec!["CUSTOM_KEY".to_owned()];
 
-    collect_missing_provider_refs(
-        false,
-        &mut secret_store,
-        &config,
-        Some("my-custom"),
-        &required,
-    )
-    .expect("catalog credential satisfies the gate");
+    collect_missing_provider_refs(false, &secret_store, &config, Some("my-custom"), &required)
+        .expect("catalog credential satisfies the gate");
 
     let registry = crate::runtime::install::agent_registry::RegistryCatalog::load_embedded()
         .expect("registry");
     assert!(configured_provider_refs_satisfied(
         &registry,
         &config,
-        &secret_store
+        &lock_shared_secret_store(&secret_store)
     ));
 }
 

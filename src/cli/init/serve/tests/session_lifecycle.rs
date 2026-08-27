@@ -105,7 +105,7 @@ fn cancel_prevents_late_result_publication() {
 
 #[tokio::test]
 async fn error_is_parked_until_acked() {
-    let manager = HostedInitManager::new();
+    let manager = HostedInitManager::new(test_shared_secret_store().0);
     let session = HostedInitSession::new("init_error".to_owned(), manager.shutdown.clone(), false);
     *lock_unpoisoned(&manager.active) = Some(session.clone());
 
@@ -167,7 +167,7 @@ async fn set_result_on_an_errored_session_is_a_no_op() {
     // A late failed handoff must not overwrite a session that already parked
     // `errored`: publishing result_ready after the terminal error frame would
     // flip terminal_result from Err to Ok, exiting zero on a failed bootstrap.
-    let manager = HostedInitManager::new();
+    let manager = HostedInitManager::new(test_shared_secret_store().0);
     let session = HostedInitSession::new(
         "init_errored_guard".to_owned(),
         manager.shutdown.clone(),
@@ -238,7 +238,7 @@ async fn ack_error_is_rejected_without_parked_error() {
 async fn parked_error_blocks_new_session_and_surfaces_in_status() {
     let session = test_session("init_error_409");
     session.set_error("init.failed", "provider setup failed".to_owned());
-    let app = app_with_session(session);
+    let (app, _store_dir) = app_with_session(session);
 
     let (status, _) = request_json(
         app.clone(),
@@ -265,7 +265,7 @@ async fn parked_error_blocks_new_session_and_surfaces_in_status() {
 
 #[tokio::test]
 async fn expiring_unacked_error_notifies_shutdown_and_keeps_status() {
-    let manager = HostedInitManager::new();
+    let manager = HostedInitManager::new(test_shared_secret_store().0);
     let session =
         HostedInitSession::new("init_error_exp".to_owned(), manager.shutdown.clone(), false);
     *lock_unpoisoned(&manager.active) = Some(session.clone());
@@ -286,7 +286,7 @@ async fn expiring_unacked_error_notifies_shutdown_and_keeps_status() {
 
 #[tokio::test(start_paused = true)]
 async fn errored_session_expires_after_ack_grace_with_connected_ws() {
-    let manager = HostedInitManager::new();
+    let manager = HostedInitManager::new(test_shared_secret_store().0);
     let session =
         HostedInitSession::new("init_error_ws".to_owned(), manager.shutdown.clone(), false);
     *lock_unpoisoned(&manager.active) = Some(session.clone());

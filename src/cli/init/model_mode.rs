@@ -16,7 +16,7 @@ use crate::runtime::agent::model_discovery::{
 use crate::runtime::agent::provider_keys::{CODEX_AGENT_ID, agent_provider_id_for_provider_id};
 use crate::runtime::agent::provider_model_catalog::cached_models;
 use crate::runtime::install::agent_registry::RegistryCatalog;
-use crate::secrets::SecretStore;
+use crate::secrets::{SharedSecretStore, lock_shared_secret_store};
 
 use super::headless_snapshot::{
     capture_dir_listings_for, capture_path_snapshots, headless_config_candidate_paths,
@@ -153,7 +153,7 @@ pub(super) fn configure_model_and_mode_for_init(
     registry: &RegistryCatalog,
     config: &mut Config,
     config_path: &Path,
-    secrets: &SecretStore,
+    secrets: &SharedSecretStore,
 ) -> Result<ModelModeOutcome> {
     let Some(entry) = registry.lookup(&config.agent.id) else {
         return Ok(ModelModeOutcome::default());
@@ -257,10 +257,12 @@ pub(super) fn configure_model_and_mode_for_init(
 
     // A hosted init may still be awaiting a managed credential push, so the
     // spawn would fail on a state that is pending by design. Checked before the
-    // binary/cwd preconditions so the attribution names the credential.
+    // binary/cwd preconditions so the attribution names the credential. The
+    // read locks briefly and releases: the discovery spawn below must never run
+    // with the store lock held, since a deposit needs that same lock to land.
     if !fixture_discovery
         && let Some((provider_id, api_key_ref)) =
-            pending_deferred_provider_credential(config, secrets)
+            pending_deferred_provider_credential(config, &lock_shared_secret_store(secrets))
     {
         let reason = pending_provider_credential_reason(&provider_id, &api_key_ref);
         if let Some(flags) = explicit_flags {

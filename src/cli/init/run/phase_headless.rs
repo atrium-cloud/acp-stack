@@ -64,7 +64,7 @@ pub(super) fn run_edge_artifacts_step(flow: &mut InitFlow) -> Result<()> {
     }
     init_println!(output_mode, "progress: preparing Cloudflare edge artifacts");
     let config_path = &flow.config_path;
-    let secret_store = &flow.secret_store;
+    let secret_store = flow.secret_store.clone();
     let config = &mut flow.config;
     let provisioned_edge_artifacts = &mut flow.provisioned_edge_artifacts;
     let result =
@@ -90,8 +90,12 @@ pub(super) fn run_edge_artifacts_step(flow: &mut InitFlow) -> Result<()> {
                                     field: "edge.cloudflare.account_id_ref",
                                 },
                             )?;
-                            let api_token = secret_store.get(&api_token_ref)?.to_owned();
-                            let account_id = secret_store.get(&account_id_ref)?.to_owned();
+                            let api_token = lock_shared_secret_store(&secret_store)
+                                .get(&api_token_ref)?
+                                .to_owned();
+                            let account_id = lock_shared_secret_store(&secret_store)
+                                .get(&account_id_ref)?
+                                .to_owned();
                             let created_tunnel = {
                                 let cloudflare = config.edge.cloudflare.as_mut().ok_or(
                                     StackError::MissingField {

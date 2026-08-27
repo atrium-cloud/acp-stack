@@ -18,7 +18,9 @@ use crate::runtime::logging::supabase_mirror::{
     SUPABASE_WRITER_ROLE, canary_event, setup_sql,
 };
 use crate::runtime::logging::supabase_sink::{check_postgres_table, send_postgres_batch};
-use crate::secrets::{SecretStore, reject_auth_ref_mutation};
+use crate::secrets::{
+    SecretStore, SharedSecretStore, lock_shared_secret_store, reject_auth_ref_mutation,
+};
 
 use super::core::{OutputFormat, print_json};
 
@@ -201,7 +203,7 @@ pub(super) fn write_config(config: &Config) -> Result<()> {
 }
 
 pub(super) fn ensure_supabase_secret(
-    secret_store: &mut SecretStore,
+    secret_store: &SharedSecretStore,
     api_key_ref: &str,
     interactive: bool,
 ) -> Result<bool> {
@@ -209,16 +211,19 @@ pub(super) fn ensure_supabase_secret(
     if let Ok(value) = std::env::var(SUPABASE_SECRET_KEY_ENV)
         && !value.is_empty()
     {
-        secret_store.set(api_key_ref, &value)?;
+        lock_shared_secret_store(secret_store).set(api_key_ref, &value)?;
         return Ok(true);
     }
-    if secret_store.contains(api_key_ref) {
+    // The lock is taken per store operation and never held across the prompt:
+    // in hosted init a client may answer only after its credential deposit
+    // returns, and the deposit takes this same lock.
+    if lock_shared_secret_store(secret_store).contains(api_key_ref) {
         return Ok(false);
     }
     if interactive {
         let value = read_secret_interactive(api_key_ref)?;
         if !value.is_empty() {
-            secret_store.set(api_key_ref, &value)?;
+            lock_shared_secret_store(secret_store).set(api_key_ref, &value)?;
             return Ok(true);
         }
     }

@@ -20,6 +20,10 @@ pub(super) fn build_bootstrap_router(state: BootstrapState, max_request_bytes: u
             post(session_native_config_cancel_handler),
         )
         .route("/v1/init/sessions/{id}/ws", get(session_ws_handler))
+        // In-stream provider-credential deposit: the hosting platform pushes
+        // the opaque capsule secret and the managed selection mid-session so
+        // model discovery resolves refs live instead of soft-passing them.
+        .route("/v1/init/credential", post(deposit_credential_handler))
         // Same picker data as the session-tier `/v1/models` (shared handler
         // logic in `api::routes::providers`), served here so a hosted backend
         // can render model/mode choices while init is still running.
@@ -40,6 +44,11 @@ pub(super) struct BootstrapState {
     pub(super) allowed_origins: Arc<Vec<String>>,
     pub(super) manager: Arc<HostedInitManager>,
     pub(super) native_config_mutation: Arc<TokioMutex<()>>,
+    /// The serve process's single writer-visible store handle, shared with the
+    /// session wizard thread. Deliberately not the agent-config mutation
+    /// flock: the wizard holds that flock for its whole run, so the deposit
+    /// route serializes against the wizard through this mutex alone.
+    pub(super) secret_store: SharedSecretStore,
 }
 
 async fn require_bootstrap_auth(
@@ -289,6 +298,130 @@ async fn bootstrap_models_handler(Query(query): Query<ModelsParams>) -> Response
     match models_response_for_config(&config).await {
         Ok(models) => ApiSuccess::new(models).into_response(),
         Err(error) => error.into_response(),
+    }
+}
+
+/// `POST /v1/init/credential`: write flat secrets and apply a managed
+/// credential selection under one store lock, so fresh-from-disk readers
+/// (model discovery) observe the capsule env ref and the managed endpoint
+/// override together. Revision, identical-replay, and ownership semantics are
+/// the store's, identical to the admin-tier apply route; the bootstrap token
+/// is the only authorization difference.
+async fn deposit_credential_handler(
+    State(state): State<BootstrapState>,
+    Json(request): Json<DepositCredentialRequest>,
+) -> Response {
+    if let Err(error) = request.validate() {
+        return error.into_response();
+    }
+    let config_path = match config::default_config_path() {
+        Ok(path) => path,
+        Err(error) => return error.into_response(),
+    };
+    // The apply validates the selection against the configured agent/provider,
+    // which exists only after init stages the starter config. Report the early
+    // window as a retryable not-ready, matching the models route.
+    if !config_path.exists() {
+        return api_error(
+            StatusCode::CONFLICT,
+            "init.config_not_ready",
+            "init has not written the runtime config yet; retry once setup progresses past config staging",
+        );
+    }
+    let runtime_config = match load_runtime_config_from_disk(&config_path) {
+        Ok(config) => config,
+        Err(error) => return error.into_response(),
+    };
+    if let Err(error) =
+        crate::extensions::require_managed_state(&runtime_config, &request.namespace)
+    {
+        return error.into_response();
+    }
+    let secrets_written = request.secrets.len();
+    let namespace = request.namespace.clone();
+    let store = state.secret_store.clone();
+    // The locked section blocks (whole-file encrypt + persist), so it runs off
+    // the async workers; the closure never awaits while holding the guard. The
+    // wizard locks per store operation, so this deposit never queues behind a
+    // parked prompt for longer than one store write.
+    let outcome = tokio::task::spawn_blocking(move || -> Result<ApplyResponse> {
+        let previous_provider_id = lock_shared_secret_store(&store)
+            .managed_state_record(&request.namespace)
+            .and_then(|record| record.provider_id.clone());
+        let response = {
+            let mut guard = lock_shared_secret_store(&store);
+            // One transaction: the flat secrets and the managed-state apply commit together, so a
+            // validation failure (stale revision, ownership, invalid selection) cannot leave the
+            // deposited secrets orphaned. `source_refs` still see the just-deposited secrets.
+            crate::extensions::managed_state::deposit_and_apply(
+                &mut guard,
+                &runtime_config,
+                &request.namespace,
+                request
+                    .secrets
+                    .iter()
+                    .map(|entry| (entry.name.as_str(), entry.value.as_str())),
+                request.apply,
+            )?
+        };
+        // A picker call that raced the deposit may have cached a failed model
+        // listing; drop it for the outgoing and incoming provider, mirroring
+        // the admin-tier apply route.
+        if response.outcome != "noop"
+            && let Ok(home) = home_dir()
+        {
+            let new_provider_id = lock_shared_secret_store(&store)
+                .managed_state_record(&request.namespace)
+                .and_then(|record| record.provider_id.clone());
+            for provider_id in [previous_provider_id, new_provider_id]
+                .into_iter()
+                .flatten()
+                .collect::<std::collections::BTreeSet<_>>()
+            {
+                if let Err(error) =
+                    crate::runtime::agent::provider_model_catalog::invalidate_provider_models(
+                        &home,
+                        &provider_id,
+                    )
+                {
+                    tracing::warn!(
+                        error = %error,
+                        provider = %provider_id,
+                        "provider model catalog invalidation failed after credential deposit"
+                    );
+                }
+            }
+        }
+        Ok(response)
+    })
+    .await;
+    match outcome {
+        Ok(Ok(response)) => {
+            // The deposit route's success audit: names and counts only, never values.
+            tracing::info!(
+                namespace = %namespace,
+                applied_revision = response.applied_revision,
+                outcome = %response.outcome,
+                secrets_written,
+                "init credential deposit applied"
+            );
+            ApiSuccess::new(DepositCredentialResponse {
+                secrets_written,
+                applied_revision: response.applied_revision,
+                outcome: response.outcome,
+            })
+            .into_response()
+        }
+        Ok(Err(error)) => error.into_response(),
+        Err(error) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            if error.is_panic() {
+                "init.credential_deposit_panicked"
+            } else {
+                "init.credential_deposit_cancelled"
+            },
+            "credential deposit task failed unexpectedly",
+        ),
     }
 }
 

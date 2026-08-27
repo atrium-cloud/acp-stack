@@ -8,6 +8,8 @@ use serde_json::json;
 use std::time::Duration;
 use tower::ServiceExt;
 
+use crate::secrets::{SecretStore, new_shared_secret_store};
+
 pub(crate) const TEST_TOKEN: &str = "test_bootstrap_token";
 
 /// Serializes tests that rewrite process-wide env (HOME, discovery fixture
@@ -63,6 +65,14 @@ impl Drop for TestEnvGuard {
 
 pub(crate) fn test_session(id: &str) -> Arc<HostedInitSession> {
     HostedInitSession::new(id.to_owned(), Arc::new(Notify::new()), false)
+}
+
+/// A shared store in a fresh tempdir; the returned guard must outlive the
+/// router built on the handle, or a later mutation writes into a deleted dir.
+pub(crate) fn test_shared_secret_store() -> (SharedSecretStore, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SecretStore::open_or_create(dir.path()).expect("secret store");
+    (new_shared_secret_store(store), dir)
 }
 
 /// A session whose start request declared `defer_provider_credentials`.
@@ -157,22 +167,32 @@ pub(crate) fn mcp_capabilities(
     .expect("capabilities fixture")
 }
 
-pub(crate) fn app_with_manager(manager: Arc<HostedInitManager>) -> Router {
+pub(crate) fn app_with_manager_and_store(
+    manager: Arc<HostedInitManager>,
+    secret_store: SharedSecretStore,
+) -> Router {
     build_bootstrap_router(
         BootstrapState {
             token: Arc::new(TEST_TOKEN.to_owned()),
             allowed_origins: Arc::new(vec!["https://backend.example".to_owned()]),
             manager,
             native_config_mutation: Arc::new(TokioMutex::new(())),
+            secret_store,
         },
         super::super::super::STARTER_MAX_REQUEST_BYTES,
     )
 }
 
-pub(crate) fn app_with_session(session: Arc<HostedInitSession>) -> Router {
-    let manager = HostedInitManager::new();
+pub(crate) fn app_with_manager(manager: Arc<HostedInitManager>) -> (Router, tempfile::TempDir) {
+    let (secret_store, dir) = test_shared_secret_store();
+    (app_with_manager_and_store(manager, secret_store), dir)
+}
+
+pub(crate) fn app_with_session(session: Arc<HostedInitSession>) -> (Router, tempfile::TempDir) {
+    let (secret_store, dir) = test_shared_secret_store();
+    let manager = HostedInitManager::new(secret_store.clone());
     *lock_unpoisoned(&manager.active) = Some(session);
-    app_with_manager(manager)
+    (app_with_manager_and_store(manager, secret_store), dir)
 }
 
 pub(crate) async fn request_json(

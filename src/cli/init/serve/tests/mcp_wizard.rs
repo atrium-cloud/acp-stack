@@ -7,7 +7,7 @@ use super::super::super::provider::{
     collect_mcp_secret_refs_for_init, collect_missing_provider_refs,
 };
 use super::super::super::starter_config::{mcp_servers_from_prompted, prompt_mcp_servers};
-use crate::secrets::SecretStore;
+use crate::secrets::{SecretStore, new_shared_secret_store};
 
 use serde_json::json;
 use std::time::Duration;
@@ -272,9 +272,10 @@ fn hosted_mcp_secret_values_are_collected_as_password_prompts() {
     });
     let home_path = home.path().to_path_buf();
     let collector = std::thread::spawn(move || {
-        let mut store = SecretStore::open_or_create(&home_path).expect("secret store");
+        let store =
+            new_shared_secret_store(SecretStore::open_or_create(&home_path).expect("secret store"));
         let stored = prompt::with_hosted_driver(driver, || {
-            collect_mcp_secret_refs_for_init(true, &config_with_mcp_env_ref(), &mut store)
+            collect_mcp_secret_refs_for_init(true, &config_with_mcp_env_ref(), &store)
         })?;
         Ok::<_, StackError>((stored, store))
     });
@@ -289,11 +290,61 @@ fn hosted_mcp_secret_values_are_collected_as_password_prompts() {
         .expect("collector thread")
         .expect("collect");
     assert_eq!(stored, ["FILES_TOKEN".to_owned()]);
-    assert_eq!(store.get("FILES_TOKEN").expect("stored ref"), SECRET);
+    assert_eq!(
+        lock_shared_secret_store(&store)
+            .get("FILES_TOKEN")
+            .expect("stored ref"),
+        SECRET
+    );
     let events = serde_json::to_string(&session.events_after(0)).expect("events");
     assert!(
         !events.contains(SECRET),
         "a collected secret value must never reach the stream"
+    );
+}
+
+// A prompt-path helper must not hold the store lock while parked on a hosted
+// prompt: the deposit route takes the same lock, and a client may answer
+// prompts only after its deposit returns, so a held lock would deadlock the
+// session. `try_lock` fails fast instead of hanging the test on a regression.
+#[test]
+fn a_prompt_wait_does_not_hold_the_store_lock() {
+    const SECRET: &str = "files-token-value";
+    let (store, _store_dir) = test_shared_secret_store();
+    let session = test_session("init_prompt_lock_free");
+    let driver: Arc<dyn HostedPromptDriver> = Arc::new(SessionPromptDriver {
+        session: session.clone(),
+    });
+    let collector_store = store.clone();
+    let collector = std::thread::spawn(move || {
+        prompt::with_hosted_driver(driver, || {
+            collect_mcp_secret_refs_for_init(true, &config_with_mcp_env_ref(), &collector_store)
+        })
+    });
+
+    let mut transcript = HostedPromptTranscript::new(session.clone());
+    let pending = transcript.next_pending();
+    assert_eq!(pending.kind, HostedPromptKind::SecretRefValue.as_str());
+    // Parked on the password prompt: a deposit must be able to land right now.
+    store
+        .try_lock()
+        .expect("the store lock must be free while the wizard awaits a prompt")
+        .set("DEPOSITED_DURING_PROMPT", "pushed")
+        .expect("deposit during the prompt wait");
+    transcript.answer(HostedPromptKind::SecretRefValue, json!(SECRET));
+
+    let stored = collector
+        .join()
+        .expect("collector thread")
+        .expect("collect");
+    assert_eq!(stored, ["FILES_TOKEN".to_owned()]);
+    let store = lock_shared_secret_store(&store);
+    assert_eq!(store.get("FILES_TOKEN").expect("stored ref"), SECRET);
+    assert_eq!(
+        store
+            .get("DEPOSITED_DURING_PROMPT")
+            .expect("the deposit survives the collector's later write"),
+        "pushed"
     );
 }
 
@@ -304,7 +355,8 @@ fn hosted_deferral_soft_passes_custom_provider_key_without_prompting() {
     let driver: Arc<dyn HostedPromptDriver> = Arc::new(SessionPromptDriver {
         session: session.clone(),
     });
-    let mut store = SecretStore::open_or_create(home.path()).expect("secret store");
+    let store =
+        new_shared_secret_store(SecretStore::open_or_create(home.path()).expect("secret store"));
     let mut config = config::load_config_from_str(include_str!(
         "../../../../../tests/fixtures/valid-opencode-stack.toml"
     ))
@@ -327,7 +379,7 @@ fn hosted_deferral_soft_passes_custom_provider_key_without_prompting() {
     prompt::with_hosted_driver(driver, || {
         collect_missing_provider_refs(
             true,
-            &mut store,
+            &store,
             &config,
             Some("my-custom"),
             &["CUSTOM_KEY".to_owned()],
@@ -344,7 +396,8 @@ fn hosted_deferral_soft_passes_mapped_provider_key_without_prompting() {
     let driver: Arc<dyn HostedPromptDriver> = Arc::new(SessionPromptDriver {
         session: session.clone(),
     });
-    let mut store = SecretStore::open_or_create(home.path()).expect("secret store");
+    let store =
+        new_shared_secret_store(SecretStore::open_or_create(home.path()).expect("secret store"));
     let mut config = config::load_config_from_str(include_str!(
         "../../../../../tests/fixtures/valid-opencode-stack.toml"
     ))
@@ -359,7 +412,7 @@ fn hosted_deferral_soft_passes_mapped_provider_key_without_prompting() {
     prompt::with_hosted_driver(driver, || {
         collect_missing_provider_refs(
             true,
-            &mut store,
+            &store,
             &config,
             Some("openrouter"),
             &["OPENROUTER_API_KEY".to_owned()],

@@ -14,7 +14,7 @@ use crate::runtime::agent::provider_keys::{
     reconcile_kimi_lane_env_declarations, required_env_refs_for_agent_provider_id,
 };
 use crate::runtime::install::agent_registry::RegistryCatalog;
-use crate::secrets::SecretStore;
+use crate::secrets::{SecretStore, SharedSecretStore, lock_shared_secret_store};
 
 use super::super::agent::validate_custom_provider_api_for_agent;
 use super::{InitArgs, prompt, prompts_enabled};
@@ -147,7 +147,7 @@ pub(super) fn configure_provider_for_init(
     registry: &RegistryCatalog,
     config: &mut Config,
     config_path: &Path,
-    secret_store: &mut SecretStore,
+    secret_store: &SharedSecretStore,
 ) -> Result<bool> {
     let Some(entry) = registry.lookup(&config.agent.id) else {
         return Ok(false);
@@ -302,7 +302,7 @@ fn select_provider_for_init(
     args: &InitArgs,
     registry: &RegistryCatalog,
     config: &Config,
-    secret_store: &SecretStore,
+    secret_store: &SharedSecretStore,
 ) -> Result<Option<String>> {
     if let Some(provider_id) = &args.provider {
         return Ok(Some(provider_id.clone()));
@@ -344,31 +344,37 @@ fn select_provider_for_init(
         })?;
         return Ok(Some(provider_id));
     }
-    let (available, needs_input): (Vec<_>, Vec<_>) = providers
-        .iter()
-        .partition(|summary| provider_has_available_secret_refs(config, summary, secret_store));
     // Ready providers first, then ones needing secret/custom setup; the hint
-    // column carries the readiness label in place of section headers.
+    // column carries the readiness label in place of section headers. The
+    // readiness reads lock once and release before the picker prompt below, so
+    // a credential deposit is never queued behind a parked prompt.
     #[derive(Clone, PartialEq, Eq)]
     enum ProviderChoice {
         Id(String),
         Custom,
     }
-    let mut items: Vec<prompt::PromptItem<ProviderChoice>> = Vec::new();
-    for summary in available.iter().chain(needs_input.iter()) {
+    let items: Vec<prompt::PromptItem<ProviderChoice>> = {
+        let store = lock_shared_secret_store(secret_store);
+        let (available, needs_input): (Vec<_>, Vec<_>) = providers
+            .iter()
+            .partition(|summary| provider_has_available_secret_refs(config, summary, &store));
+        let mut items = Vec::new();
+        for summary in available.iter().chain(needs_input.iter()) {
+            items.push(prompt::item(
+                ProviderChoice::Id(summary.id.to_owned()),
+                summary.id,
+                format!("{} ({})", summary.name, summary.id),
+                provider_readiness_label(config, summary, &store),
+            ));
+        }
         items.push(prompt::item(
-            ProviderChoice::Id(summary.id.to_owned()),
-            summary.id,
-            format!("{} ({})", summary.name, summary.id),
-            provider_readiness_label(config, summary, secret_store),
+            ProviderChoice::Custom,
+            "__custom",
+            "enter a provider id manually",
+            "",
         ));
-    }
-    items.push(prompt::item(
-        ProviderChoice::Custom,
-        "__custom",
-        "enter a provider id manually",
-        "",
-    ));
+        items
+    };
     match prompt::searchable_select(
         prompt::HostedPromptKind::ProviderId,
         interactive,

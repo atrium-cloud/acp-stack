@@ -42,7 +42,9 @@ pub(super) fn print_init_summary(flow: &InitFlow) {
     init_println!(
         output_mode,
         "secrets: {}",
-        flow.secret_store.store_path().display()
+        lock_shared_secret_store(&flow.secret_store)
+            .store_path()
+            .display()
     );
     init_println!(
         output_mode,

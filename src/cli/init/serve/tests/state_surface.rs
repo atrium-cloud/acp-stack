@@ -23,7 +23,7 @@ async fn folded_view_rides_hello_and_rest_status() {
     assert_eq!(hello_view["current_step"], json!("agent_install"));
 
     let hello: Value = serde_json::from_str(&session.hello_frame()).expect("hello must be json");
-    let app = app_with_session(session.clone());
+    let (app, _store_dir) = app_with_session(session.clone());
     let (status, body) = request_json(
         app,
         Method::GET,

@@ -5,6 +5,9 @@ pub(super) struct HostedInitManager {
     pub(super) shutdown: Arc<Notify>,
     activity: Mutex<tokio::time::Instant>,
     shutdown_reason: Mutex<Option<&'static str>>,
+    /// The serve process's shared store handle, handed to every session's
+    /// wizard thread so its mutations stay visible to the deposit route.
+    secret_store: SharedSecretStore,
 }
 
 pub(super) enum StartSessionError {
@@ -12,12 +15,13 @@ pub(super) enum StartSessionError {
 }
 
 impl HostedInitManager {
-    pub(super) fn new() -> Arc<Self> {
+    pub(super) fn new(secret_store: SharedSecretStore) -> Arc<Self> {
         Arc::new(Self {
             active: Mutex::new(None),
             shutdown: Arc::new(Notify::new()),
             activity: Mutex::new(tokio::time::Instant::now()),
             shutdown_reason: Mutex::new(None),
+            secret_store,
         })
     }
 
@@ -45,6 +49,7 @@ impl HostedInitManager {
         let driver: Arc<dyn HostedPromptDriver> = Arc::new(SessionPromptDriver {
             session: session.clone(),
         });
+        let secret_store = self.secret_store.clone();
         std::thread::spawn(move || {
             // Backstop for a panic OUTSIDE any recorded step body, so a panic can
             // never leave the session `running` until a reaper cancels it. The
@@ -52,7 +57,7 @@ impl HostedInitManager {
             // the `InitFlow`); `acps init --resume` recovers it.
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 prompt::with_hosted_driver(driver, || {
-                    run_hosted_init(init_args, InitMode::Operator)
+                    run_hosted_init(init_args, InitMode::Operator, secret_store)
                 })
             }));
             let result = outcome.unwrap_or_else(|payload| {

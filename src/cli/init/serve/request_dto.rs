@@ -169,6 +169,89 @@ struct NativeConfigUploadRequest {
     content: String,
 }
 
+/// Bootstrap-tier credential deposit (`POST /v1/init/credential`): flat-store
+/// secrets plus a managed credential apply, mirroring the admin-tier
+/// managed-state apply body (`POST /v1/admin/extensions/{name}/apply`) with
+/// the namespace carried in the body instead of the path. Secret values are
+/// opaque to acp-stack and stored verbatim.
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct DepositCredentialRequest {
+    /// Flat-store secrets written before the managed apply resolves, so a
+    /// `source_refs` entry may reference a name this same body deposits.
+    #[serde(default)]
+    pub(super) secrets: Vec<DepositSecretEntry>,
+    /// Managed-state extension namespace the apply targets; must resolve to a
+    /// declared `type = "managed-state"` instance in the runtime config.
+    pub(super) namespace: String,
+    /// The admin-tier apply body, verbatim: schema version, revision, and the
+    /// kind-discriminated desired state.
+    pub(super) apply: crate::extensions::managed_state::ApplyRequest,
+}
+
+/// One flat-store secret in a deposit. The value rides the bootstrap token's
+/// channel rather than the prompt stream because the hosting platform cannot
+/// answer a secret-ref prompt with a value it holds sealed.
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct DepositSecretEntry {
+    pub(super) name: String,
+    pub(super) value: String,
+}
+
+/// Mirrors the flat-secret bounds the managed-state selection enforces, so the
+/// two credential channels into the store agree on what fits.
+const MAX_DEPOSIT_SECRET_COUNT: usize = 16;
+const MAX_DEPOSIT_SECRET_VALUE_BYTES: usize = 16 * 1024;
+
+impl DepositCredentialRequest {
+    /// Wire-level checks the store and the managed apply cannot express:
+    /// ref-name shape, count and size bounds. Screening runs first so a pasted
+    /// credential in the name position is rejected without being echoed.
+    pub(super) fn validate(&self) -> Result<()> {
+        if self.secrets.len() > MAX_DEPOSIT_SECRET_COUNT {
+            return Err(StackError::InvalidParam {
+                field: "secrets",
+                reason: format!("secret count exceeds the {MAX_DEPOSIT_SECRET_COUNT}-entry limit"),
+            });
+        }
+        let mut seen_names = std::collections::BTreeSet::new();
+        for entry in &self.secrets {
+            crate::config::screen_ref_name("secrets", &entry.name).map_err(|error| {
+                StackError::InvalidParam {
+                    field: "secrets",
+                    reason: error.to_string(),
+                }
+            })?;
+            crate::config::validate_secret_ref_name_value(&entry.name).map_err(|error| {
+                StackError::InvalidParam {
+                    field: "secrets",
+                    reason: error.to_string(),
+                }
+            })?;
+            // A repeated name would collapse in the store's map yet still count in
+            // `secrets_written`, so the response would overstate what landed.
+            if !seen_names.insert(entry.name.as_str()) {
+                return Err(StackError::InvalidParam {
+                    field: "secrets",
+                    reason: format!("duplicate secret name `{}`", entry.name),
+                });
+            }
+            crate::secrets::reject_auth_ref_mutation(&entry.name)?;
+            if entry.value.is_empty() || entry.value.len() > MAX_DEPOSIT_SECRET_VALUE_BYTES {
+                return Err(StackError::InvalidParam {
+                    field: "secrets",
+                    reason: format!(
+                        "value for `{}` must be non-empty and at most {MAX_DEPOSIT_SECRET_VALUE_BYTES} bytes",
+                        entry.name
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct McpStdioServerRequest {

@@ -16,7 +16,7 @@ pub(super) fn run_secrets_phase(flow: &mut InitFlow) -> Result<()> {
     let legacy_auth = flow.legacy_auth.as_ref();
     let auth_status = &mut flow.auth_status;
     let key_handover = &mut flow.key_handover;
-    let secret_store = &mut flow.secret_store;
+    let mut secret_store = lock_shared_secret_store(&flow.secret_store);
     let step_result = record_init_step(
         store,
         &flow.init_run,
@@ -32,7 +32,8 @@ pub(super) fn run_secrets_phase(flow: &mut InitFlow) -> Result<()> {
             }
         },
         || {
-            let outcome = perform_auth_init(store, legacy_auth, home, secret_store, key_policy)?;
+            let outcome =
+                perform_auth_init(store, legacy_auth, home, &mut secret_store, key_policy)?;
             *auth_status = outcome.status;
             let generated_keys = outcome.generated_keys;
             let rotated = outcome.rotated_keys;
@@ -67,6 +68,9 @@ pub(super) fn run_secrets_phase(flow: &mut InitFlow) -> Result<()> {
             ))
         },
     );
+    // The guard covers only the tracked step body; every later consumer in this
+    // phase re-locks so a deposit can land between them.
+    drop(secret_store);
     let disposition = match step_result {
         Ok(d) => d,
         Err(error) => return finalize_with_error(&flow.store, &flow.init_run, error),
@@ -78,7 +82,10 @@ pub(super) fn run_secrets_phase(flow: &mut InitFlow) -> Result<()> {
     // Ref names are appended to `agent.env` only AFTER verification succeeds, so a run
     // that fails here never persists an unresolved ref a later `--resume` skips over.
     let env_apply = (|| -> Result<()> {
-        apply_agent_env_collection(&mut flow.secret_store, &flow.agent_env_collection)?;
+        apply_agent_env_collection(
+            &mut lock_shared_secret_store(&flow.secret_store),
+            &flow.agent_env_collection,
+        )?;
         if append_agent_env_refs(&mut flow.config, &flow.agent_env_collection) {
             let canonical = flow.config.to_canonical_toml()?;
             flow.config = config::load_config_from_str(&canonical)?;
@@ -103,10 +110,8 @@ pub(super) fn run_secrets_phase(flow: &mut InitFlow) -> Result<()> {
     if let Err(error) = kilo_env_seed {
         return finalize_with_error(&flow.store, &flow.init_run, error);
     }
-    // Uses the phase's own store handle: the store is a whole-file read-modify-write,
-    // so a second handle's later writes would clobber the placeholder.
     match crate::cli::agent::record_empty_key_placeholders_for_provider_native_env(
-        &mut flow.secret_store,
+        &mut lock_shared_secret_store(&flow.secret_store),
         &flow.config.agent,
     ) {
         Ok(recorded) => {
@@ -125,7 +130,7 @@ pub(super) fn run_secrets_phase(flow: &mut InitFlow) -> Result<()> {
         match collect_declared_secret_refs_for_init(
             prompts_enabled(&flow.args),
             &flow.config,
-            &mut flow.secret_store,
+            &flow.secret_store,
         ) {
             Ok(stored) if !stored.is_empty() => {
                 init_println!(output_mode, "declared secrets: set ({})", stored.join(", "));
@@ -139,7 +144,7 @@ pub(super) fn run_secrets_phase(flow: &mut InitFlow) -> Result<()> {
     {
         let api_key_ref = supabase.api_key_ref.clone();
         let stored = match ensure_supabase_secret(
-            &mut flow.secret_store,
+            &flow.secret_store,
             &api_key_ref,
             prompts_enabled(&flow.args),
         ) {
@@ -174,7 +179,7 @@ pub(super) fn run_secrets_phase(flow: &mut InitFlow) -> Result<()> {
             &flow.registry,
             &prepared.canonical_config,
             &flow.config_path,
-            &mut flow.secret_store,
+            &flow.secret_store,
         ) {
             return finalize_with_error(&flow.store, &flow.init_run, error);
         }
@@ -183,7 +188,7 @@ pub(super) fn run_secrets_phase(flow: &mut InitFlow) -> Result<()> {
         // lands.
         let validation = match pending_deferred_provider_credential(
             &prepared.canonical_config,
-            &flow.secret_store,
+            &lock_shared_secret_store(&flow.secret_store),
         ) {
             Some((provider_id, api_key_ref)) => {
                 init_println!(

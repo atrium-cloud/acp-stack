@@ -23,7 +23,7 @@ async fn bootstrap_api_auth_conflict_status_and_event_replay_are_non_secret() {
         "session_key": "acps_session_api_secret",
         "admin_key": "acps_admin_api_secret"
     }));
-    let app = app_with_session(session);
+    let (app, _store_dir) = app_with_session(session);
 
     let (status, _) = request_json(
         app.clone(),
@@ -78,7 +78,7 @@ async fn bootstrap_api_auth_conflict_status_and_event_replay_are_non_secret() {
 
 #[tokio::test]
 async fn bootstrap_api_rejects_duplicate_authorization_headers() {
-    let app = app_with_session(test_session("init_duplicate_auth"));
+    let (app, _store_dir) = app_with_session(test_session("init_duplicate_auth"));
     let request = Request::builder()
         .method(Method::GET)
         .uri("/v1/init/sessions/init_duplicate_auth")
@@ -98,7 +98,7 @@ async fn bootstrap_api_rejects_duplicate_authorization_headers() {
 
 #[tokio::test]
 async fn bootstrap_api_malformed_json_uses_error_envelope() {
-    let app = app_with_session(test_session("init_malformed"));
+    let (app, _store_dir) = app_with_session(test_session("init_malformed"));
     let (status, body) = request_raw_json(
         app,
         Method::POST,
@@ -116,7 +116,7 @@ async fn bootstrap_api_malformed_json_uses_error_envelope() {
 async fn bootstrap_native_config_cancel_guards_session_state() {
     const CANCEL_BODY: &str = r#"{"operation_id":"nci_init_deadbeefdeadbeefdeadbeef","revision":"0000000000000000000000000000000000000000000000000000000000000000"}"#;
 
-    let app = app_with_session(test_session("init_nc_cancel"));
+    let (app, _store_dir) = app_with_session(test_session("init_nc_cancel"));
     let (status, body) = request_raw_json(
         app,
         Method::POST,
@@ -128,7 +128,7 @@ async fn bootstrap_native_config_cancel_guards_session_state() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["error"]["code"], "init.session_not_found");
 
-    let app = app_with_session(test_session("init_nc_cancel"));
+    let (app, _store_dir) = app_with_session(test_session("init_nc_cancel"));
     let (status, body) = request_raw_json(
         app,
         Method::POST,
@@ -143,7 +143,7 @@ async fn bootstrap_native_config_cancel_guards_session_state() {
 
 #[tokio::test]
 async fn bootstrap_models_and_input_require_auth() {
-    let app = app_with_session(test_session("init_auth_gate"));
+    let (app, _store_dir) = app_with_session(test_session("init_auth_gate"));
     let (status, _) = request_json(app.clone(), Method::GET, "/v1/models", None, None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
@@ -173,7 +173,7 @@ async fn bootstrap_input_rest_answers_pending_prompt() {
     let handle = std::thread::spawn(move || driver.select(request));
     let pending = wait_for_pending_input(&session);
 
-    let app = app_with_session(session.clone());
+    let (app, _store_dir) = app_with_session(session.clone());
     let (status, body) = request_json(
         app,
         Method::POST,
@@ -209,7 +209,7 @@ async fn bootstrap_input_rest_carries_deferred_flag() {
     let handle = std::thread::spawn(move || driver.confirm_with_deferral(request));
     let pending = wait_for_pending_input(&session);
 
-    let app = app_with_session(session.clone());
+    let (app, _store_dir) = app_with_session(session.clone());
     let (status, _) = request_json(
         app,
         Method::POST,
@@ -235,7 +235,7 @@ async fn bootstrap_input_rest_carries_deferred_flag() {
 
 #[tokio::test]
 async fn bootstrap_input_rest_rejections_are_mapped() {
-    let app = app_with_session(test_session("init_input_reject"));
+    let (app, _store_dir) = app_with_session(test_session("init_input_reject"));
     let (status, body) = request_json(
         app.clone(),
         Method::POST,
@@ -273,7 +273,7 @@ async fn bootstrap_input_rest_rejections_are_mapped() {
     );
     let handle = std::thread::spawn(move || driver.select(request));
     let pending = wait_for_pending_input(&session);
-    let app = app_with_session(session.clone());
+    let (app, _store_dir) = app_with_session(session.clone());
     let (status, body) = request_json(
         app.clone(),
         Method::POST,
@@ -400,7 +400,7 @@ async fn bootstrap_models_serves_fixture_discovery() {
         ),
     ]);
 
-    let app = app_with_manager(HostedInitManager::new());
+    let (app, _store_dir) = app_with_manager(HostedInitManager::new(test_shared_secret_store().0));
     let (status, body) = request_json(app, Method::GET, "/v1/models", None, Some(TEST_TOKEN)).await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(body["data"]["agent_id"], "opencode");
@@ -444,7 +444,7 @@ async fn bootstrap_models_target_param_resolves_array_target() {
         ),
     ]);
 
-    let app = app_with_manager(HostedInitManager::new());
+    let (app, _store_dir) = app_with_manager(HostedInitManager::new(test_shared_secret_store().0));
     let (status, body) = request_json(
         app.clone(),
         Method::GET,
@@ -487,7 +487,7 @@ async fn bootstrap_models_rejects_unknown_and_gated_agent() {
     let home = write_models_test_home(tempdir.path(), MODELS_TEST_CONFIG_TOML);
     let _guard = TestEnvGuard::set(&[("HOME", home.as_path())]);
 
-    let app = app_with_manager(HostedInitManager::new());
+    let (app, _store_dir) = app_with_manager(HostedInitManager::new(test_shared_secret_store().0));
     // Array mode is off in the test config, so any non-primary id is rejected
     // by the same gate `session_agent_target` applies — never a silent
     // fallback to the default target.
@@ -513,7 +513,7 @@ async fn bootstrap_models_not_ready_before_config_is_staged() {
     std::fs::create_dir_all(&home).expect("home dir");
     let _guard = TestEnvGuard::set(&[("HOME", home.as_path())]);
 
-    let app = app_with_manager(HostedInitManager::new());
+    let (app, _store_dir) = app_with_manager(HostedInitManager::new(test_shared_secret_store().0));
     let (status, body) = request_json(app, Method::GET, "/v1/models", None, Some(TEST_TOKEN)).await;
     assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
     assert_eq!(body["error"]["code"], "init.config_not_ready");

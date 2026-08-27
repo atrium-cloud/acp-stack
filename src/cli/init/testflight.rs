@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::error::{Result, StackError};
 use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry};
-use crate::secrets::SecretStore;
+use crate::secrets::{SharedSecretStore, lock_shared_secret_store};
 
 use super::provider::{pending_deferred_provider_credential, pending_provider_credential_reason};
 use super::{InitArgs, prompt, prompts_enabled};
@@ -76,7 +76,7 @@ pub(super) fn resolve_testflight_decision(
     args: &InitArgs,
     config: &Config,
     registry: &RegistryCatalog,
-    secrets: &SecretStore,
+    secrets: &SharedSecretStore,
 ) -> Result<Option<TestflightDecision>> {
     if args.skip_testflight {
         return Ok(Some(TestflightDecision::SkipExplicit));
@@ -100,8 +100,10 @@ pub(super) fn resolve_testflight_decision(
         return Ok(Some(TestflightDecision::SkipUnsupported));
     }
     // The testflight sends a real prompt, so a ref still deferred to a managed push would surface
-    // here as an opaque spawn failure.
-    if let Some((provider_id, api_key_ref)) = pending_deferred_provider_credential(config, secrets)
+    // here as an opaque spawn failure. The read locks briefly and releases before the confirm
+    // prompt below, so a credential deposit is never queued behind a parked prompt.
+    if let Some((provider_id, api_key_ref)) =
+        pending_deferred_provider_credential(config, &lock_shared_secret_store(secrets))
     {
         if args.testflight {
             return Err(StackError::InvalidParam {
