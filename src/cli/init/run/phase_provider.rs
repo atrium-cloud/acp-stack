@@ -61,15 +61,16 @@ pub(super) fn run_provider_configure_step(flow: &mut InitFlow) -> Result<()> {
                 config_path,
                 &secret_store,
             )?;
-            // Custom agents skip provider/model discovery and would otherwise never
-            // spawn during init, so a broken binary must be caught here.
-            if is_custom_agent(config, registry) {
+            // A custom agent that could not complete provisional discovery still needs
+            // the initialize-only verification before init may succeed.
+            if is_custom_agent(config, registry) && !model_mode_outcome.acp_verified {
                 verify_agent_acp_connection(home, config, output_mode.is_text())?;
             }
             let model_mode_changed =
                 matches!(model_mode_outcome.model_action, ModelModeAction::Set)
                     || matches!(model_mode_outcome.mode_action, ModelModeAction::Set)
-                    || matches!(model_mode_outcome.effort_action, ModelModeAction::Set);
+                    || matches!(model_mode_outcome.effort_action, ModelModeAction::Set)
+                    || model_mode_outcome.config_options_changed;
             let subagent_configured =
                 configure_subagent_inherit_for_init(prompts_enabled(args), registry, config)?;
             if agent_selected
@@ -83,10 +84,11 @@ pub(super) fn run_provider_configure_step(flow: &mut InitFlow) -> Result<()> {
                 atomic_write_owner_only(config_path, canonical.as_bytes())?;
             }
             Ok(StepOutcome::with_payload(format!(
-                r#"{{"provider_configured":{provider_configured},"model_action":"{:?}","mode_action":"{:?}","effort_action":"{:?}","subagent_configured":{subagent_configured}}}"#,
+                r#"{{"provider_configured":{provider_configured},"model_action":"{:?}","mode_action":"{:?}","effort_action":"{:?}","config_options_changed":{},"subagent_configured":{subagent_configured}}}"#,
                 model_mode_outcome.model_action,
                 model_mode_outcome.mode_action,
                 model_mode_outcome.effort_action,
+                model_mode_outcome.config_options_changed,
             )))
         },
     );

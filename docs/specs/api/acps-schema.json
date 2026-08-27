@@ -7460,6 +7460,17 @@
                 "type": "null"
               }
             ]
+          },
+          "config_option": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/response/SessionConfigOptionSnapshot"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Present only for `kind: \"config_option\"`; this is the exact advertised\noption the answer's `config_id` and typed value are validated against."
           }
         },
         "required": [

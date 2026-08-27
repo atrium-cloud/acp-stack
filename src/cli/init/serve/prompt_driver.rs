@@ -92,6 +92,90 @@ impl HostedPromptDriver for SessionPromptDriver {
         Ok(HostedPromptOutcome::Handled(selection))
     }
 
+    fn config_option(
+        &self,
+        request: HostedPromptRequest,
+    ) -> Result<HostedPromptOutcome<Option<crate::config::AgentConfigOptionValue>>> {
+        let advertised = request
+            .config_option
+            .clone()
+            .ok_or_else(|| StackError::InvalidParam {
+                field: "init",
+                reason: "config-option input omitted its advertised option".to_owned(),
+            })?;
+        let Some(answer) = self.session.request_input(request)? else {
+            return Ok(HostedPromptOutcome::Unhandled);
+        };
+        let Some(answer) = answer.value.as_object() else {
+            return Err(StackError::InvalidParam {
+                field: "init",
+                reason: "config-option input must carry `config_id` and `value`".to_owned(),
+            });
+        };
+        let Some(config_id) = answer.get("config_id").and_then(Value::as_str) else {
+            return Err(StackError::InvalidParam {
+                field: "init",
+                reason: "config-option input must carry a string `config_id`".to_owned(),
+            });
+        };
+        if config_id != advertised.id {
+            return Err(StackError::InvalidParam {
+                field: "init",
+                reason: format!(
+                    "config-option input names `{config_id}`, expected `{}`",
+                    advertised.id
+                ),
+            });
+        }
+        let Some(value) = answer.get("value") else {
+            return Err(StackError::InvalidParam {
+                field: "init",
+                reason: "config-option input omitted `value`".to_owned(),
+            });
+        };
+        if value.is_null() {
+            return Ok(HostedPromptOutcome::Handled(None));
+        }
+        let configured = match advertised.kind.as_str() {
+            crate::runtime::agent::config_options::SNAPSHOT_KIND_BOOLEAN => value
+                .as_bool()
+                .map(crate::config::AgentConfigOptionValue::Bool)
+                .ok_or_else(|| StackError::InvalidParam {
+                    field: "init",
+                    reason: format!("config option `{}` requires a boolean value", advertised.id),
+                })?,
+            crate::runtime::agent::config_options::SNAPSHOT_KIND_SELECT => {
+                let selected = value.as_str().ok_or_else(|| StackError::InvalidParam {
+                    field: "init",
+                    reason: format!("config option `{}` requires a string value", advertised.id),
+                })?;
+                let advertised_value = advertised
+                    .options
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|choice| choice.value == selected);
+                if !advertised_value {
+                    return Err(StackError::InvalidParam {
+                        field: "init",
+                        reason: format!(
+                            "config option `{}` does not advertise `{selected}`",
+                            advertised.id
+                        ),
+                    });
+                }
+                crate::config::AgentConfigOptionValue::Text(selected.to_owned())
+            }
+            _ => {
+                return Err(StackError::InvalidParam {
+                    field: "init",
+                    reason: format!("config option `{}` has an unsupported type", advertised.id),
+                });
+            }
+        };
+        Ok(HostedPromptOutcome::Handled(Some(configured)))
+    }
+
     fn progress(&self, message: String) {
         self.session.push_event(ServerEvent::Progress { message });
     }
@@ -135,6 +219,7 @@ pub(super) fn should_handle_hosted_prompt(request: &HostedPromptRequest) -> bool
         | HostedPromptKind::McpHttpName
         | HostedPromptKind::McpHttpUrl
         | HostedPromptKind::McpHttpHeaders => true,
+        HostedPromptKind::ConfigOption => request.config_option.is_some(),
         // A review without an inspection is unanswerable: it is what the client
         // renders and echoes back in its revision-matched selection.
         HostedPromptKind::NativeConfigReview => request.inspection.is_some(),
@@ -201,6 +286,7 @@ pub(super) fn public_input_request(request: HostedPromptRequest) -> PublicInputR
             })
             .collect(),
         inspection: request.inspection,
+        config_option: request.config_option,
     }
 }
 

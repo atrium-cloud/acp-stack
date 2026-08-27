@@ -117,6 +117,7 @@ pub(crate) fn hosted_test_request(
         default: None,
         items: hosted_items(labels),
         inspection: None,
+        config_option: None,
     }
 }
 

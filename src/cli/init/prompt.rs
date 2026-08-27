@@ -8,7 +8,12 @@ use std::cell::RefCell;
 use std::io;
 use std::sync::Arc;
 
+use crate::config::AgentConfigOptionValue;
 use crate::error::{Result, StackError};
+use crate::runtime::agent::config_options::{
+    SNAPSHOT_KIND_BOOLEAN, SNAPSHOT_KIND_SELECT, SessionConfigOptionSnapshot,
+    SessionConfigOptionSnapshotValue,
+};
 use crate::runtime::agent::native_config_import::{NativeConfigInspection, NativeConfigSelection};
 
 #[cfg(test)]
@@ -27,6 +32,7 @@ pub(super) enum HostedPromptKind {
     Model,
     Mode,
     Effort,
+    ConfigOption,
     NativeConfigReview,
     TestflightConfirm,
     ProviderApiKeyValue,
@@ -94,6 +100,7 @@ impl HostedPromptKind {
             HostedPromptKind::Model => "model",
             HostedPromptKind::Mode => "mode",
             HostedPromptKind::Effort => "effort",
+            HostedPromptKind::ConfigOption => "config_option",
             HostedPromptKind::NativeConfigReview => "native_config_review",
             HostedPromptKind::TestflightConfirm => "testflight_confirm",
             HostedPromptKind::ProviderApiKeyValue => "provider_api_key_value",
@@ -176,7 +183,8 @@ impl HostedPromptKind {
             | HostedPromptKind::McpHttpName
             | HostedPromptKind::McpHttpUrl
             | HostedPromptKind::McpHttpHeaders => Some(InitCategory::Mcp),
-            HostedPromptKind::SecretRefValue
+            HostedPromptKind::ConfigOption
+            | HostedPromptKind::SecretRefValue
             | HostedPromptKind::TestflightConfirm
             | HostedPromptKind::ConfigSource
             | HostedPromptKind::ConfigSourcePath
@@ -233,6 +241,7 @@ pub(super) const ALL_HOSTED_PROMPT_KINDS: &[HostedPromptKind] = &[
     HostedPromptKind::Model,
     HostedPromptKind::Mode,
     HostedPromptKind::Effort,
+    HostedPromptKind::ConfigOption,
     HostedPromptKind::NativeConfigReview,
     HostedPromptKind::TestflightConfirm,
     HostedPromptKind::ProviderApiKeyValue,
@@ -339,6 +348,7 @@ pub(super) struct HostedPromptRequest {
     pub(super) default: Option<bool>,
     pub(super) items: Vec<HostedPromptItem>,
     pub(super) inspection: Option<NativeConfigInspection>,
+    pub(super) config_option: Option<SessionConfigOptionSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -387,6 +397,12 @@ pub(super) trait HostedPromptDriver: Send + Sync {
         &self,
         _request: HostedPromptRequest,
     ) -> Result<HostedPromptOutcome<NativeConfigSelection>> {
+        Ok(HostedPromptOutcome::Unhandled)
+    }
+    fn config_option(
+        &self,
+        _request: HostedPromptRequest,
+    ) -> Result<HostedPromptOutcome<Option<AgentConfigOptionValue>>> {
         Ok(HostedPromptOutcome::Unhandled)
     }
     fn progress(&self, message: String);
@@ -559,6 +575,7 @@ pub(super) fn native_config_review(
         default: None,
         items: Vec::new(),
         inspection: Some(inspection),
+        config_option: None,
     };
     match driver.native_config_review(request)? {
         HostedPromptOutcome::Handled(selection) => Ok(selection),
@@ -567,6 +584,139 @@ pub(super) fn native_config_review(
             reason: "hosted init client did not handle native config review".to_owned(),
         }),
     }
+}
+
+/// One generic ACP config option discovered from the provisional init session.
+/// A hosted client answers with `{ "config_id": "...", "value": ... }`; a
+/// null value keeps the agent's advertised default and writes no override.
+pub(super) fn config_option(
+    option: SessionConfigOptionSnapshot,
+    interactive: bool,
+) -> Result<Option<AgentConfigOptionValue>> {
+    if let Some(driver) = HOSTED_DRIVER.with(|slot| slot.borrow().clone()) {
+        let style = match option.kind.as_str() {
+            SNAPSHOT_KIND_SELECT => HostedPromptStyle::SearchableSelect,
+            SNAPSHOT_KIND_BOOLEAN => HostedPromptStyle::Confirm,
+            _ => {
+                return Err(StackError::InvalidParam {
+                    field: "agent.config_options",
+                    reason: format!("option `{}` has an unsupported type", option.id),
+                });
+            }
+        };
+        let default = match &option.current_value {
+            SessionConfigOptionSnapshotValue::Bool(value) => Some(*value),
+            SessionConfigOptionSnapshotValue::Text(_) => None,
+        };
+        let items = option
+            .options
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|choice| HostedPromptItem {
+                value: choice.value.clone(),
+                label: choice.name.clone(),
+                hint: choice.description.clone().unwrap_or_default(),
+            })
+            .collect();
+        let request = HostedPromptRequest {
+            kind: HostedPromptKind::ConfigOption,
+            style,
+            prompt: option.name.clone(),
+            required: false,
+            default,
+            items,
+            inspection: None,
+            config_option: Some(option),
+        };
+        return match driver.config_option(request)? {
+            HostedPromptOutcome::Handled(value) => Ok(value),
+            HostedPromptOutcome::Unhandled => Ok(None),
+        };
+    }
+    if !interactive {
+        return Ok(None);
+    }
+
+    let items = config_option_items(&option)?;
+    match select(
+        HostedPromptKind::ConfigOption,
+        interactive,
+        &option.name,
+        &items,
+    )? {
+        Some(ConfigOptionChoice::Bool(value)) => Ok(Some(AgentConfigOptionValue::Bool(value))),
+        Some(ConfigOptionChoice::Text(value)) => Ok(Some(AgentConfigOptionValue::Text(value))),
+        Some(ConfigOptionChoice::KeepCurrent) | None => Ok(None),
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+enum ConfigOptionChoice {
+    Bool(bool),
+    Text(String),
+    KeepCurrent,
+}
+
+/// Interactive items for one generic config option. The advertised current
+/// value is marked so an operator can see what "Keep current" preserves; the
+/// hosted path communicates it through the snapshot on the request instead.
+fn config_option_items(
+    option: &SessionConfigOptionSnapshot,
+) -> Result<Vec<PromptItem<ConfigOptionChoice>>> {
+    let current = match &option.current_value {
+        SessionConfigOptionSnapshotValue::Bool(value) => ConfigOptionChoice::Bool(*value),
+        SessionConfigOptionSnapshotValue::Text(value) => ConfigOptionChoice::Text(value.clone()),
+    };
+    let label = |choice: &ConfigOptionChoice, name: &str| {
+        if *choice == current {
+            format!("{name} (current)")
+        } else {
+            name.to_owned()
+        }
+    };
+    let mut items: Vec<PromptItem<ConfigOptionChoice>> = match option.kind.as_str() {
+        SNAPSHOT_KIND_SELECT => option
+            .options
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|choice| {
+                let value = ConfigOptionChoice::Text(choice.value.clone());
+                item(
+                    value.clone(),
+                    choice.value.clone(),
+                    label(&value, &choice.name),
+                    choice.description.clone().unwrap_or_default(),
+                )
+            })
+            .collect(),
+        SNAPSHOT_KIND_BOOLEAN => [(true, "Enabled"), (false, "Disabled")]
+            .into_iter()
+            .map(|(enabled, name)| {
+                let value = ConfigOptionChoice::Bool(enabled);
+                item(
+                    value.clone(),
+                    if enabled { "true" } else { "false" },
+                    label(&value, name),
+                    "",
+                )
+            })
+            .collect(),
+        _ => {
+            return Err(StackError::InvalidParam {
+                field: "agent.config_options",
+                reason: format!("option `{}` has an unsupported type", option.id),
+            });
+        }
+    };
+    items.push(item(
+        ConfigOptionChoice::KeepCurrent,
+        "__keep_current",
+        "Keep current",
+        "",
+    ));
+    Ok(items)
 }
 
 fn map_interact_error(source: io::Error) -> StackError {
@@ -685,6 +835,7 @@ pub(super) fn confirm_with_deferral(
             default: Some(default),
             items: Vec::new(),
             inspection: None,
+            config_option: None,
         };
         return match driver.confirm_with_deferral(request)? {
             HostedPromptOutcome::Handled(answer) => Ok(answer),
@@ -718,6 +869,7 @@ pub(super) fn text(
             default: None,
             items: Vec::new(),
             inspection: None,
+            config_option: None,
         };
         return match driver.text(request)? {
             HostedPromptOutcome::Handled(value) => Ok(value),
@@ -773,6 +925,7 @@ pub(super) fn password(
             default: None,
             items: Vec::new(),
             inspection: None,
+            config_option: None,
         };
         return match driver.password(request)? {
             HostedPromptOutcome::Handled(value) => Ok(value),
@@ -812,6 +965,7 @@ fn hosted_request<T>(
             })
             .collect(),
         inspection: None,
+        config_option: None,
     }
 }
 
@@ -931,5 +1085,50 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn config_option_items_mark_the_advertised_current_value() {
+        let select: SessionConfigOptionSnapshot = serde_json::from_value(serde_json::json!({
+            "id": "agent.persona",
+            "name": "Persona",
+            "type": "select",
+            "current_value": "balanced",
+            "options": [
+                { "value": "balanced", "name": "Balanced" },
+                { "value": "research", "name": "Research" }
+            ]
+        }))
+        .expect("select option");
+        let items = config_option_items(&select).expect("select items");
+        let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+        assert_eq!(labels, ["Balanced (current)", "Research", "Keep current"]);
+
+        let boolean: SessionConfigOptionSnapshot = serde_json::from_value(serde_json::json!({
+            "id": "fast",
+            "name": "Fast mode",
+            "type": "boolean",
+            "current_value": false
+        }))
+        .expect("boolean option");
+        let items = config_option_items(&boolean).expect("boolean items");
+        let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+        assert_eq!(labels, ["Enabled", "Disabled (current)", "Keep current"]);
+    }
+
+    #[test]
+    fn config_option_items_reject_an_unsupported_kind() {
+        let option: SessionConfigOptionSnapshot = serde_json::from_value(serde_json::json!({
+            "id": "future",
+            "name": "Future",
+            "type": "slider",
+            "current_value": "1"
+        }))
+        .expect("option");
+        let error = config_option_items(&option).expect_err("unsupported kind");
+        assert!(
+            error.to_string().contains("unsupported type"),
+            "error: {error}"
+        );
     }
 }

@@ -76,6 +76,7 @@ fn a_cross_cutting_prompt_records_input_required_with_no_signal() {
         default: None,
         items: Vec::new(),
         inspection: None,
+        config_option: None,
     };
     let handle = std::thread::spawn(move || driver.password(request));
     let pending = wait_for_pending_input(&session);

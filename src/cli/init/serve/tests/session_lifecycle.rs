@@ -22,6 +22,7 @@ fn stale_input_request_id_is_rejected() {
         default: None,
         items: Vec::new(),
         inspection: None,
+        config_option: None,
     };
     let handle = std::thread::spawn(move || driver.password(request));
     let pending = wait_for_pending_input(&session);

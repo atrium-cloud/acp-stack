@@ -152,6 +152,7 @@ fn secret_answers_never_reach_the_state_surface() {
         default: None,
         items: Vec::new(),
         inspection: None,
+        config_option: None,
     };
     let handle = std::thread::spawn(move || driver.password(request));
     let pending = wait_for_pending_input(&session);

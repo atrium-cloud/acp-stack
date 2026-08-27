@@ -86,6 +86,11 @@ pub(super) struct PublicInputRequest {
     pub(super) options: Vec<PublicInputOption>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) inspection: Option<NativeConfigInspection>,
+    /// Present only for `kind: "config_option"`; this is the exact advertised
+    /// option the answer's `config_id` and typed value are validated against.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) config_option:
+        Option<crate::runtime::agent::config_options::SessionConfigOptionSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]

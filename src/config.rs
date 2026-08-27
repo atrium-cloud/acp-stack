@@ -35,7 +35,9 @@ pub use self::secret_template::{
     env_entry_var_name, parse_env_entry, ref_names_lossy, resolve_env_entry, screen_env_entry,
     screen_ref_name, screen_template, template_pieces_lossy,
 };
-pub(crate) use self::validate::agent::AGENT_UPDATE_FREQUENCY_LIMITS;
+pub(crate) use self::validate::agent::{
+    AGENT_UPDATE_FREQUENCY_LIMITS, validate_agent_config_options,
+};
 pub(crate) use self::validate::mcp::validate_mcp_http_url;
 pub(crate) use self::validate::primitives::{
     DurationLimits, EndpointUrlProblem, MAX_ENDPOINT_URL_BYTES, check_endpoint_url,

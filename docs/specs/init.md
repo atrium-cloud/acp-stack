@@ -138,10 +138,11 @@ The operator-facing sequence, in order:
     - Hosted sessions get the same prompts on the stream, each carrying its machine-readable kind. Secret values are requested only as `password` inputs; refs and header templates are ordinary text inputs, screened at the boundary so a pasted credential is rejected without being echoed.
     - Skips are reported as progress, so a hosted client learns why the picker never appeared (probe unavailable, or the agent does not advertise MCP support).
     - Resume never re-drives these prompts.
-13. Provider, model, mode, and effort.
+13. Provider, model, mode, effort, and session config options.
     - Supported registry agents:
         - Select or validate provider and required secret refs. A ref is satisfied by the flat secret store or by a structured catalog credential covering it (registry providers via their canonical mapping, custom providers via the configured `api_key_ref`); the provider picker's readiness labels and the resume-time idempotence check use the same rule.
         - Discover ACP-advertised model, mode, and reasoning-effort options with one provisional session shared by all lanes. Effort values come from the agent's `thought_level` session config option.
+        - Interactive runs also prompt the select and boolean session config options the typed lanes do not own. An explicit answer persists under `[agent.config_options]`; a skip keeps the agent's advertised current value and writes no override.
         - The mode and effort lanes run only for agents the registry marks as supporting them; `--mode` or `--effort` against any other registry agent is rejected before discovery, as `--model` is.
         - Provider-backed agents need a provider (passed this run or already in config) before any lane runs, since the harness cannot be launched to advertise anything without one.
         - Interactive runs offer mode and effort selectors alongside the model selector.
@@ -158,8 +159,8 @@ The operator-facing sequence, in order:
         - Kimi Code skips model discovery: `--model` is accepted as supplied, and without it init pins the selected provider lane's default (`kimi-for-coding` on the subscription lanes, `kimi-k3` on the Moonshot platform) unless config already has a model.
         - Provider selection follows the standard provider-backed rules; at runtime, a legacy config without `[agent.provider]` launches on the Kimi For Coding subscription lane.
     - Custom agents:
-        - Skip provider/model/mode/effort discovery.
-        - Run one ACP connection gate when the launch command and cwd are present.
+        - Skip provider/model/mode/effort discovery; interactive runs still prompt generic session config options from one provisional session.
+        - A completed provisional session doubles as the ACP connection gate; otherwise one initialize-only gate runs when the launch command and cwd are present.
         - Explicit `--model`, `--mode`, and `--effort` are rejected.
 14. `acp-stack` auto-update.
     - Configure `[updates.acp_stack]` as on, security-only, or off.
@@ -236,12 +237,14 @@ The hosted flow follows the same init steps as interactive `acps init`, but stre
 - Required secret collection.
 - Custom-provider fields.
 - Model, mode, and effort selection.
+- Select and boolean ACP session config options not owned by those typed settings.
 - The post-install MCP setup.
 - The simple confirmations on that path.
 
 ### Stream Rules
 
 - Every streamed prompt carries a machine-readable `kind` and, for selections, stable option values, so a client routes and answers by id rather than by prompt text.
+- After credentials are available, the provisional `session/new` response drives the typed model/mode/effort prompts and generic `config_option` prompts. Explicit generic answers persist under `[agent.config_options]`; a skipped option keeps the agent's advertised current value.
 - Environment configuration (skills, dependencies, browser-use, data sources) and the acp-stack/agent auto-update policies (`stack_update`/`stack_update_frequency`, `agent_update`/`agent_update_frequency`) are declared up-front in the session-create request instead of being streamed. These wizard prompts remain outside the streamed set, and the request fields map onto the same init arguments the wizard would produce.
 - Secret collection covers the refs those declarations name: MCP env/header refs (whole-value refs and refs named inside `${}` templates alike) and S3 data-source key refs missing from the store are requested as `password` inputs.
 - An unanswered ref skips without failing init and surfaces later through MCP health or workspace materialization.

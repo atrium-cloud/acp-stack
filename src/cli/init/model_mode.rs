@@ -9,6 +9,7 @@ use crate::error::{Result, StackError};
 use crate::runtime::agent::acp_bridge::AgentSessionConfigCategory;
 use crate::runtime::agent::acp_bridge::{KIMI_CODE_AGENT_ID, kimi_default_model_for_provider};
 use crate::runtime::agent::agent_headless_config::HERMES_AGENT_ID;
+use crate::runtime::agent::config_options::{SessionConfigOptionSnapshot, project_config_options};
 use crate::runtime::agent::model_discovery::{
     advertised_values_for_category, fetch_session_config, resolve_advertised_model_value,
     validate_advertised_value,
@@ -48,6 +49,8 @@ pub(super) struct ModelModeOutcome {
     pub(super) model_action: ModelModeAction,
     pub(super) mode_action: ModelModeAction,
     pub(super) effort_action: ModelModeAction,
+    pub(super) config_options_changed: bool,
+    pub(super) acp_verified: bool,
 }
 
 /// Capability gates for all three lanes, evaluated before any side effects.
@@ -155,18 +158,25 @@ pub(super) fn configure_model_and_mode_for_init(
     config_path: &Path,
     secrets: &SharedSecretStore,
 ) -> Result<ModelModeOutcome> {
-    let Some(entry) = registry.lookup(&config.agent.id) else {
-        return Ok(ModelModeOutcome::default());
-    };
     preflight_model_and_mode_for_init(args, registry, config, config_path)?;
-    if !entry.set_model && !entry.set_mode && !entry.set_effort {
+    let entry = registry.lookup(&config.agent.id);
+    let set_model = entry.is_some_and(|entry| entry.set_model);
+    let set_mode = entry.is_some_and(|entry| entry.set_mode);
+    let set_effort = entry.is_some_and(|entry| entry.set_effort);
+    let set_provider = entry.is_some_and(|entry| entry.set_provider);
+    let agent_name = entry
+        .map(|entry| entry.name.as_str())
+        .unwrap_or(config.agent.name.as_str())
+        .to_owned();
+    let interactive = prompts_enabled(args);
+    if !set_model && !set_mode && !set_effort && !interactive {
         return Ok(ModelModeOutcome::default());
     }
     let mut outcome = ModelModeOutcome::default();
     // Kimi cannot initialize its ACP process without a model, so the model
     // lane MUST settle here before the mode lane may spawn the harness.
     let mut model_lane_resolved = false;
-    if entry.set_model
+    if set_model
         && config.agent.id == KIMI_CODE_AGENT_ID
         && args.model.is_none()
         && config.agent.provider.is_some()
@@ -188,7 +198,7 @@ pub(super) fn configure_model_and_mode_for_init(
             write_model_into_config(
                 config,
                 kimi_default_model_for_provider(provider_id).to_owned(),
-                entry.set_provider,
+                set_provider,
             );
             outcome.model_action = ModelModeAction::Set;
         }
@@ -200,23 +210,22 @@ pub(super) fn configure_model_and_mode_for_init(
     // Discovery is skipped, but an explicit `--model` still has to land or a
     // rerun over an existing custom-provider config would drop the flag.
     if skip_model_lane
-        && entry.set_model
+        && set_model
         && let Some(model) = args.model.as_deref()
     {
-        write_model_into_config(config, model.to_owned(), entry.set_provider);
+        write_model_into_config(config, model.to_owned(), set_provider);
         outcome.model_action = ModelModeAction::Set;
     }
 
-    let interactive = prompts_enabled(args);
     let provider_set_this_run = args.provider.is_some();
     // Without a provider the picker would write root `agent.model`, which the
     // supervisor prefers and the provider-backed ownership contract forbids.
     let provider_present =
-        provider_set_this_run || config.agent.provider.is_some() || !entry.set_provider;
+        provider_set_this_run || config.agent.provider.is_some() || !set_provider;
     let explicit_model_without_discovery = args.model.is_some()
         && !args.custom_provider
         && agent_model_is_explicit_without_discovery(config);
-    let mut model_lane_active = entry.set_model
+    let mut model_lane_active = set_model
         && !skip_model_lane
         && !model_lane_resolved
         && provider_present
@@ -225,17 +234,17 @@ pub(super) fn configure_model_and_mode_for_init(
         && explicit_model_without_discovery
         && let Some(model) = args.model.as_deref()
     {
-        write_model_into_config(config, model.to_owned(), entry.set_provider);
+        write_model_into_config(config, model.to_owned(), set_provider);
         outcome.model_action = ModelModeAction::Set;
         model_lane_active = false;
     }
     // No print-the-list fallback here, so an unattended run without
     // `--mode`/`--effort` never spawns the harness at all.
-    let mode_lane_active =
-        entry.set_mode && provider_present && (args.mode.is_some() || interactive);
+    let mode_lane_active = set_mode && provider_present && (args.mode.is_some() || interactive);
     let effort_lane_active =
-        entry.set_effort && provider_present && (args.effort.is_some() || interactive);
-    if !model_lane_active && !mode_lane_active && !effort_lane_active {
+        set_effort && provider_present && (args.effort.is_some() || interactive);
+    let generic_lane_active = interactive && provider_present;
+    if !model_lane_active && !mode_lane_active && !effort_lane_active && !generic_lane_active {
         return Ok(outcome);
     }
     let live_flags: Vec<&str> = [
@@ -271,7 +280,7 @@ pub(super) fn configure_model_and_mode_for_init(
             // surfaces at the first real session instead.
             if prompt::defer_provider_credentials() {
                 if model_lane_active && let Some(model) = args.model.as_deref() {
-                    write_model_into_config(config, model.to_owned(), entry.set_provider);
+                    write_model_into_config(config, model.to_owned(), set_provider);
                     outcome.model_action = ModelModeAction::Set;
                 }
                 if mode_lane_active && let Some(mode) = args.mode.as_deref() {
@@ -290,7 +299,7 @@ pub(super) fn configure_model_and_mode_for_init(
             }
             let error = StackError::AgentConfigProvision {
                 path: config_path.to_path_buf(),
-                reason: format!("cannot validate {flags} for {}: {reason}", entry.name),
+                reason: format!("cannot validate {flags} for {agent_name}: {reason}"),
             };
             signal_lane_failure(
                 model_lane_active,
@@ -304,7 +313,12 @@ pub(super) fn configure_model_and_mode_for_init(
             args,
             &format!(
                 "{} discovery skipped: {reason}",
-                active_lane_label(model_lane_active, mode_lane_active, effort_lane_active)
+                active_lane_label(
+                    model_lane_active,
+                    mode_lane_active,
+                    effort_lane_active,
+                    generic_lane_active,
+                )
             ),
         );
         return Ok(outcome);
@@ -346,7 +360,7 @@ pub(super) fn configure_model_and_mode_for_init(
             };
             let error = StackError::AgentConfigProvision {
                 path: config_path.to_path_buf(),
-                reason: format!("cannot validate {flags} for {}: {reason}", entry.name),
+                reason: format!("cannot validate {flags} for {agent_name}: {reason}"),
             };
             signal_lane_failure(
                 model_lane_active,
@@ -356,7 +370,12 @@ pub(super) fn configure_model_and_mode_for_init(
             );
             return Err(error);
         }
-        let lanes = active_lane_label(model_lane_active, mode_lane_active, effort_lane_active);
+        let lanes = active_lane_label(
+            model_lane_active,
+            mode_lane_active,
+            effort_lane_active,
+            generic_lane_active,
+        );
         let skip_reason = if binary_missing {
             format!(
                 "{lanes} discovery skipped: agent command `{}` not found on PATH",
@@ -409,7 +428,12 @@ pub(super) fn configure_model_and_mode_for_init(
             Err(error) if !model_lane_active && args.mode.is_none() && args.effort.is_none() => {
                 let reason = format!(
                     "{} discovery skipped: {error}",
-                    active_lane_label(false, mode_lane_active, effort_lane_active)
+                    active_lane_label(
+                        false,
+                        mode_lane_active,
+                        effort_lane_active,
+                        generic_lane_active
+                    )
                 );
                 init_progress(args, &reason);
                 prompt::emit_state_signals(|| {
@@ -439,12 +463,7 @@ pub(super) fn configure_model_and_mode_for_init(
                 return Err(error);
             }
         };
-        emit_discovery_applicability_corrections(
-            &response,
-            entry.set_model,
-            entry.set_mode,
-            entry.set_effort,
-        );
+        emit_discovery_applicability_corrections(&response, set_model, set_mode, set_effort);
         if model_lane_active {
             outcome.model_action = configure_model_for_init(
                 args,
@@ -452,8 +471,8 @@ pub(super) fn configure_model_and_mode_for_init(
                 config,
                 config_path,
                 &response,
-                &entry.name,
-                entry.set_provider,
+                &agent_name,
+                set_provider,
             )
             .inspect_err(|error| signal_lane_failure(true, false, false, error))?;
         }
@@ -467,6 +486,9 @@ pub(super) fn configure_model_and_mode_for_init(
                 configure_effort_for_init(args, config, config_path, &response, interactive)
                     .inspect_err(|error| signal_lane_failure(false, false, true, error))?;
         }
+        outcome.acp_verified = true;
+        outcome.config_options_changed =
+            configure_generic_config_options_for_init(config, &response, interactive)?;
         Ok::<ModelModeOutcome, StackError>(outcome)
     })();
 
@@ -480,21 +502,68 @@ pub(super) fn configure_model_and_mode_for_init(
     }
 }
 
+/// Prompt every config option not owned by the typed model/mode/effort lanes and persist only
+/// explicit selections. The provisional ACP response was obtained after any deferred credential
+/// deposit settled, so this reuses the exact discovery snapshot that populated the typed pickers.
+fn configure_generic_config_options_for_init(
+    config: &mut Config,
+    response: &agent_client_protocol::schema::v1::NewSessionResponse,
+    interactive: bool,
+) -> Result<bool> {
+    let advertised = project_config_options(response.config_options.as_deref().unwrap_or_default());
+    let mut updated = config.agent.config_options.clone();
+    for option in advertised
+        .into_iter()
+        .filter(|option| !typed_lane_owns(option))
+    {
+        let id = option.id.clone();
+        if let Some(value) = prompt::config_option(option, interactive)?
+            && updated.get(&id) != Some(&value)
+        {
+            let mut candidate = updated.clone();
+            candidate.insert(id, value);
+            crate::config::validate_agent_config_options(&candidate)?;
+            updated = candidate;
+        }
+    }
+    let changed = updated != config.agent.config_options;
+    if changed {
+        config.agent.config_options = updated;
+    }
+    Ok(changed)
+}
+
+fn typed_lane_owns(option: &SessionConfigOptionSnapshot) -> bool {
+    option.kind == crate::runtime::agent::config_options::SNAPSHOT_KIND_SELECT
+        && (matches!(
+            option.category.as_deref(),
+            Some("model" | "mode" | "thought_level")
+        ) || [
+            AgentSessionConfigCategory::Model,
+            AgentSessionConfigCategory::Mode,
+            AgentSessionConfigCategory::Effort,
+        ]
+        .into_iter()
+        .any(|category| category.matches_id(&option.id)))
+}
+
 fn active_lane_label(
     model_lane_active: bool,
     mode_lane_active: bool,
     effort_lane_active: bool,
+    generic_lane_active: bool,
 ) -> String {
     let lanes: Vec<&str> = [
         model_lane_active.then_some("model"),
         mode_lane_active.then_some("mode"),
         effort_lane_active.then_some("effort"),
+        generic_lane_active.then_some("config-option"),
     ]
     .into_iter()
     .flatten()
     .collect();
     match lanes.as_slice() {
-        [] => "model".to_owned(),
+        [] => "session config".to_owned(),
         lanes => lanes.join(" and "),
     }
 }

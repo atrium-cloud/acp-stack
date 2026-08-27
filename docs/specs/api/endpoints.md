@@ -84,7 +84,7 @@ Session-tier HTTP routes are also mounted on the local socket and serve only whi
 - Tier: `init`
 - Request: none.
 - Response: non-secret status, the `signals` replay, pending input, recent progress, `last_activity_age_secs`, and `completed_awaiting_ack` when a result exists.
-    - Pending input entries carry `request_id`, `kind`, `style`, `prompt`, `required`, optional `default`, and per-option `index`, `value`, `label`, and `hint`.
+    - Pending input entries carry `request_id`, `kind`, `style`, `prompt`, `required`, optional `default`, and per-option `index`, `value`, `label`, and `hint`. A `config_option` input additionally carries the advertised option as `config_option`: stable `id`, `name`, optional `description` and `category`, `type`, `current_value`, and select `options` when applicable.
     - `kind` is the machine-readable prompt identity (`agent`, `provider_id`, `model`, `mode`, `effort`, `mcp_transport`, `secret_ref_value`, and so on) and is the field a client routes on. `style` remains the rendering hint.
     - Option `value` is a stable id that survives display rewording, so answers may address a choice as `{"value": "<id>"}` in addition to the index, label, and `null` forms. An unknown value is rejected as an invalid parameter.
     - A native upload produces `style: "native_config_review"` plus the redacted `inspection`. Its client response value is the revision-bound selection object used by the normal import contract.
@@ -121,6 +121,7 @@ Session-tier HTTP routes are also mounted on the local socket and serve only whi
 - Errors: none route-specific.
 - Notes:
     - Client `input` frames must include the active `request_id`; stale input is rejected. Unknown fields on a client frame are ignored rather than rejected.
+    - For a `config_option` prompt, the input frame's `value` is `{ "config_id": "...", "value": <string|boolean|null> }`. The id and typed value are checked against the advertised option; `null` keeps the agent's current value without writing an override.
     - One optional input field is defined: an `input` frame answering the `testflight_confirm` prompt may carry `deferred: true` beside `value: false`. It tells init the answer is a hosting backend that will run the testflight itself after setup rather than an operator declining it.
     - The testflight step then reports `testflight: deferred (runs after setup)` and records the `SkipDeferred` decision instead of `SkipDeclined`. The flag is ignored on every other prompt and on an accepting answer.
     - The final `result` frame carries the platform handoff payload and always includes plaintext `session_key` and `admin_key`. Hosted init generates them on a fresh instance and rotates them over pre-existing state, so every result carries working keys.

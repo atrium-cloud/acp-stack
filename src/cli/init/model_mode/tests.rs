@@ -57,6 +57,50 @@ fn response_with_efforts(efforts: &[&str]) -> NewSessionResponse {
     NewSessionResponse::new("test").config_options(vec![option])
 }
 
+fn response_with_typed_and_generic_options() -> NewSessionResponse {
+    let mut response = response_with(&["openai/gpt-5.5"], &["build", "plan"]);
+    let options = response.config_options.get_or_insert_default();
+    options.push(
+        serde_json::from_value(serde_json::json!({
+            "id": "reasoning_effort",
+            "name": "Reasoning Effort",
+            "category": "thought_level",
+            "type": "select",
+            "currentValue": "medium",
+            "options": [
+                { "value": "low", "name": "Low" },
+                { "value": "medium", "name": "Medium" }
+            ]
+        }))
+        .expect("effort option"),
+    );
+    options.push(
+        serde_json::from_value(serde_json::json!({
+            "id": "agent.persona",
+            "name": "Persona",
+            "description": "Response style",
+            "category": "_behavior",
+            "type": "select",
+            "currentValue": "balanced",
+            "options": [
+                { "value": "balanced", "name": "Balanced" },
+                { "value": "research", "name": "Research" }
+            ]
+        }))
+        .expect("generic select option"),
+    );
+    options.push(
+        serde_json::from_value(serde_json::json!({
+            "id": "fast",
+            "name": "Fast mode",
+            "type": "boolean",
+            "currentValue": false
+        }))
+        .expect("generic boolean option"),
+    );
+    response
+}
+
 fn amp_config() -> Config {
     let mut config = crate::config::load_config_from_str(include_str!(
         "../../../../tests/fixtures/valid-opencode-stack.toml"
@@ -233,6 +277,66 @@ struct FirstChoiceDriver {
     offered: std::sync::Mutex<Vec<Vec<String>>>,
 }
 
+#[derive(Default)]
+struct GenericConfigDriver {
+    offered: std::sync::Mutex<Vec<String>>,
+    skip_all: bool,
+}
+
+impl prompt::HostedPromptDriver for GenericConfigDriver {
+    fn select(
+        &self,
+        _request: prompt::HostedPromptRequest,
+    ) -> Result<prompt::HostedPromptOutcome<Option<usize>>> {
+        Ok(prompt::HostedPromptOutcome::Unhandled)
+    }
+
+    fn confirm(
+        &self,
+        _request: prompt::HostedPromptRequest,
+    ) -> Result<prompt::HostedPromptOutcome<bool>> {
+        Ok(prompt::HostedPromptOutcome::Unhandled)
+    }
+
+    fn text(
+        &self,
+        _request: prompt::HostedPromptRequest,
+    ) -> Result<prompt::HostedPromptOutcome<Option<String>>> {
+        Ok(prompt::HostedPromptOutcome::Unhandled)
+    }
+
+    fn password(
+        &self,
+        _request: prompt::HostedPromptRequest,
+    ) -> Result<prompt::HostedPromptOutcome<Option<String>>> {
+        Ok(prompt::HostedPromptOutcome::Unhandled)
+    }
+
+    fn config_option(
+        &self,
+        request: prompt::HostedPromptRequest,
+    ) -> Result<prompt::HostedPromptOutcome<Option<crate::config::AgentConfigOptionValue>>> {
+        let option = request.config_option.expect("advertised option metadata");
+        self.offered
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(option.id.clone());
+        if self.skip_all {
+            return Ok(prompt::HostedPromptOutcome::Handled(None));
+        }
+        let value = match option.id.as_str() {
+            "agent.persona" => crate::config::AgentConfigOptionValue::Text("research".to_owned()),
+            "fast" => crate::config::AgentConfigOptionValue::Bool(true),
+            other => panic!("typed option was prompted generically: {other}"),
+        };
+        Ok(prompt::HostedPromptOutcome::Handled(Some(value)))
+    }
+
+    fn progress(&self, _message: String) {}
+
+    fn result(&self, _payload: serde_json::Value) {}
+}
+
 impl prompt::HostedPromptDriver for FirstChoiceDriver {
     fn select(
         &self,
@@ -309,6 +413,73 @@ fn a_repeated_advertised_value_is_offered_once() {
             "default".to_owned(),
             "__skip".to_owned()
         ]]
+    );
+}
+
+#[test]
+fn generic_options_are_prompted_once_without_duplicating_typed_lanes() {
+    let mut config = amp_config();
+    let driver = std::sync::Arc::new(GenericConfigDriver::default());
+
+    let changed = prompt::with_hosted_driver(driver.clone(), || {
+        configure_generic_config_options_for_init(
+            &mut config,
+            &response_with_typed_and_generic_options(),
+            true,
+        )
+    })
+    .expect("generic options persist");
+
+    assert!(changed);
+    assert_eq!(
+        driver
+            .offered
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_slice(),
+        ["agent.persona", "fast"]
+    );
+    assert_eq!(
+        config.agent.config_options.get("agent.persona"),
+        Some(&crate::config::AgentConfigOptionValue::Text(
+            "research".to_owned()
+        ))
+    );
+    assert_eq!(
+        config.agent.config_options.get("fast"),
+        Some(&crate::config::AgentConfigOptionValue::Bool(true))
+    );
+    let canonical = config.to_canonical_toml().expect("canonical config");
+    let reloaded = crate::config::load_config_from_str(&canonical).expect("reload config");
+    assert_eq!(reloaded.agent.config_options, config.agent.config_options);
+}
+
+#[test]
+fn skipped_generic_options_keep_the_advertised_defaults_unoverridden() {
+    let mut config = amp_config();
+    let driver = std::sync::Arc::new(GenericConfigDriver {
+        skip_all: true,
+        ..GenericConfigDriver::default()
+    });
+
+    let changed = prompt::with_hosted_driver(driver.clone(), || {
+        configure_generic_config_options_for_init(
+            &mut config,
+            &response_with_typed_and_generic_options(),
+            true,
+        )
+    })
+    .expect("skipped options retain defaults");
+
+    assert!(!changed);
+    assert!(config.agent.config_options.is_empty());
+    assert_eq!(
+        driver
+            .offered
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_slice(),
+        ["agent.persona", "fast"]
     );
 }
 

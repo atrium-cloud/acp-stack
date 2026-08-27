@@ -5,6 +5,63 @@ use super::support::*;
 
 use serde_json::json;
 
+fn advertised_config_option(
+    kind: &str,
+) -> crate::runtime::agent::config_options::SessionConfigOptionSnapshot {
+    serde_json::from_value(match kind {
+        "select" => json!({
+            "id": "agent.persona",
+            "name": "Persona",
+            "description": "Response style",
+            "category": "_behavior",
+            "type": "select",
+            "current_value": "balanced",
+            "options": [
+                { "value": "balanced", "name": "Balanced" },
+                { "value": "research", "name": "Research", "description": "Prioritize research" }
+            ]
+        }),
+        "boolean" => json!({
+            "id": "fast",
+            "name": "Fast mode",
+            "type": "boolean",
+            "current_value": false
+        }),
+        other => panic!("unsupported fixture kind {other}"),
+    })
+    .expect("config option snapshot")
+}
+
+fn config_option_result(
+    advertised: crate::runtime::agent::config_options::SessionConfigOptionSnapshot,
+    answer: serde_json::Value,
+) -> Result<HostedPromptOutcome<Option<crate::config::AgentConfigOptionValue>>> {
+    let session = test_session("init_driver_config_option");
+    let driver = SessionPromptDriver {
+        session: session.clone(),
+    };
+    let request = HostedPromptRequest {
+        kind: HostedPromptKind::ConfigOption,
+        style: if advertised.kind == "select" {
+            HostedPromptStyle::SearchableSelect
+        } else {
+            HostedPromptStyle::Confirm
+        },
+        prompt: advertised.name.clone(),
+        required: false,
+        default: None,
+        items: Vec::new(),
+        inspection: None,
+        config_option: Some(advertised),
+    };
+    let handle = std::thread::spawn(move || driver.config_option(request));
+    let pending = wait_for_pending_input(&session);
+    session
+        .submit_input(&pending.request_id, answer)
+        .expect("submit config-option answer");
+    handle.join().expect("driver thread")
+}
+
 #[test]
 fn hosted_driver_accepts_provider_password_and_model_responses() {
     let provider = send_select_response(
@@ -35,6 +92,7 @@ fn hosted_driver_accepts_provider_password_and_model_responses() {
         default: None,
         items: Vec::new(),
         inspection: None,
+        config_option: None,
     };
     let handle = std::thread::spawn(move || driver.password(request));
     let pending = wait_for_pending_input(&session);
@@ -64,6 +122,7 @@ fn hosted_driver_streams_testflight_confirmation() {
         default: Some(false),
         items: Vec::new(),
         inspection: None,
+        config_option: None,
     };
     let handle = std::thread::spawn(move || driver.confirm(request));
     let pending = wait_for_pending_input(&session);
@@ -73,6 +132,75 @@ fn hosted_driver_streams_testflight_confirmation() {
         .expect("submit confirm");
     let confirm = handle.join().expect("driver thread").expect("confirm");
     assert_eq!(confirm, HostedPromptOutcome::Handled(true));
+}
+
+#[test]
+fn hosted_driver_streams_and_accepts_typed_config_options() {
+    let select = advertised_config_option("select");
+    let session = test_session("init_driver_config_option_metadata");
+    let driver = SessionPromptDriver {
+        session: session.clone(),
+    };
+    let request = HostedPromptRequest {
+        kind: HostedPromptKind::ConfigOption,
+        style: HostedPromptStyle::SearchableSelect,
+        prompt: select.name.clone(),
+        required: false,
+        default: None,
+        items: Vec::new(),
+        inspection: None,
+        config_option: Some(select.clone()),
+    };
+    let handle = std::thread::spawn(move || driver.config_option(request));
+    let pending = wait_for_pending_input(&session);
+    assert_eq!(pending.kind, "config_option");
+    assert_eq!(pending.config_option.as_ref(), Some(&select));
+    session
+        .submit_input(
+            &pending.request_id,
+            json!({ "config_id": "agent.persona", "value": "research" }),
+        )
+        .expect("submit config option");
+    assert_eq!(
+        handle.join().expect("driver thread").expect("answer"),
+        HostedPromptOutcome::Handled(Some(crate::config::AgentConfigOptionValue::Text(
+            "research".to_owned()
+        )))
+    );
+
+    assert_eq!(
+        config_option_result(
+            advertised_config_option("boolean"),
+            json!({ "config_id": "fast", "value": true })
+        )
+        .expect("boolean answer"),
+        HostedPromptOutcome::Handled(Some(crate::config::AgentConfigOptionValue::Bool(true)))
+    );
+}
+
+#[test]
+fn hosted_driver_rejects_invalid_config_option_answers() {
+    for (advertised, answer, expected) in [
+        (
+            advertised_config_option("select"),
+            json!({ "config_id": "unknown", "value": "research" }),
+            "expected `agent.persona`",
+        ),
+        (
+            advertised_config_option("boolean"),
+            json!({ "config_id": "fast", "value": "true" }),
+            "requires a boolean",
+        ),
+        (
+            advertised_config_option("select"),
+            json!({ "config_id": "agent.persona", "value": "unadvertised" }),
+            "does not advertise",
+        ),
+    ] {
+        let error = config_option_result(advertised, answer)
+            .expect_err("invalid config-option answer must be rejected");
+        assert!(error.to_string().contains(expected), "error: {error}");
+    }
 }
 
 /// Answers a streamed testflight confirm with a raw client frame, so it goes through the same parser the websocket uses.
@@ -89,6 +217,7 @@ fn testflight_confirm_answer(session_id: &str, fields: &str) -> ConfirmAnswer {
         default: Some(false),
         items: Vec::new(),
         inspection: None,
+        config_option: None,
     };
     let handle = std::thread::spawn(move || driver.confirm_with_deferral(request));
     let pending = wait_for_pending_input(&session);
@@ -182,6 +311,7 @@ fn hosted_driver_streams_redacted_native_config_review() {
         default: None,
         items: Vec::new(),
         inspection: Some(inspection),
+        config_option: None,
     };
     let handle = std::thread::spawn(move || driver.native_config_review(request));
     let pending = wait_for_pending_input(&session);
@@ -221,6 +351,7 @@ fn hosted_driver_leaves_non_bootstrap_text_prompts_unhandled() {
         default: None,
         items: Vec::new(),
         inspection: None,
+        config_option: None,
     };
     let outcome = driver.text(request).expect("text");
     assert_eq!(outcome, HostedPromptOutcome::Unhandled);
