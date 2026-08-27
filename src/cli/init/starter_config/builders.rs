@@ -66,6 +66,59 @@ pub(crate) fn reject_data_source_args_for_existing_config(args: &InitArgs) -> Re
     Ok(())
 }
 
+/// Extension declarations stage into a fresh starter config only; against an
+/// existing config they would be silently dropped, so reject them instead.
+pub(crate) fn reject_extensions_args_for_existing_config(args: &InitArgs) -> Result<()> {
+    if args.prompt_extensions.is_empty() {
+        return Ok(());
+    }
+    Err(StackError::InvalidParam {
+        field: "extensions",
+        reason: "extension declarations apply only when creating a starter config".to_owned(),
+    })
+}
+
+/// Sandbox mask path declarations stage into a fresh starter config only, for
+/// the same reason as extension declarations.
+pub(crate) fn reject_sandbox_mask_paths_args_for_existing_config(args: &InitArgs) -> Result<()> {
+    if args.prompt_sandbox_mask_paths.is_empty() {
+        return Ok(());
+    }
+    Err(StackError::InvalidParam {
+        field: "sandbox_mask_paths",
+        reason: "sandbox mask path declarations apply only when creating a starter config"
+            .to_owned(),
+    })
+}
+
+/// Declared mask paths union onto whatever the starter sandbox config already
+/// carries, so a declaration extends the mask set instead of clobbering it.
+/// Blank and relative entries are rejected here, in the style of the config
+/// schema's mask/allow validation, rather than surfacing later at config load.
+pub(super) fn union_sandbox_mask_paths(
+    mut base: Vec<String>,
+    declared: &[String],
+) -> Result<Vec<String>> {
+    for path in declared {
+        if path.trim().is_empty() {
+            return Err(StackError::InvalidParam {
+                field: "workspace.sandbox.mask_paths",
+                reason: "sandbox mask path must be non-blank".to_owned(),
+            });
+        }
+        if !Path::new(path).is_absolute() {
+            return Err(StackError::InvalidParam {
+                field: "workspace.sandbox.mask_paths",
+                reason: format!("sandbox mask path `{path}` must be absolute"),
+            });
+        }
+        if !base.contains(path) {
+            base.push(path.clone());
+        }
+    }
+    Ok(base)
+}
+
 fn sandbox_mode_str(mode: SandboxMode) -> &'static str {
     match mode {
         SandboxMode::Off => "off",
@@ -88,13 +141,17 @@ fn parse_sandbox_mode(raw: &str) -> Result<SandboxMode> {
     }
 }
 
-/// Sandbox config for a freshly-created starter config; only `mode` is settable here.
+/// Sandbox config for a freshly-created starter config. `mode` comes from
+/// `--sandbox`; declared mask paths union in regardless of mode so a staged
+/// network-provider's egress dirs stay masked even while the mode is decided.
 fn sandbox_from_args(args: &InitArgs) -> Result<SandboxConfig> {
-    let Some(raw) = args.sandbox.as_deref() else {
-        return Ok(SandboxConfig::default());
+    let mode = match args.sandbox.as_deref() {
+        Some(raw) => parse_sandbox_mode(raw)?,
+        None => SandboxMode::default(),
     };
     Ok(SandboxConfig {
-        mode: parse_sandbox_mode(raw)?,
+        mode,
+        mask_paths: union_sandbox_mask_paths(Vec::new(), &args.prompt_sandbox_mask_paths)?,
         ..SandboxConfig::default()
     })
 }
@@ -187,7 +244,12 @@ pub(crate) fn starter_config(args: &InitArgs) -> Result<String> {
         mcp: mcp_from_args(args)?,
         skills: Default::default(),
         local: Default::default(),
-        extensions: Default::default(),
+        // Declared at init start so every sandboxed spawn from the first
+        // tracked step onward sees the declaration. Note the behavior change
+        // this implies: with a network-provider declared here, every sandboxed
+        // init phase (deps install, discovery, materialization) egresses
+        // through the provider's relay instead of unrestricted host networking.
+        extensions: args.prompt_extensions.clone(),
     };
 
     let canonical = starter.to_canonical_toml()?;

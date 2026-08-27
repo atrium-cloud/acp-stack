@@ -912,3 +912,146 @@ fn browser_use_profile_declares_dependency_without_generic_mcp_prompt_config() {
     let canonical = config.to_canonical_toml().expect("canonical config");
     config::load_config_from_str(&canonical).expect("canonical config validates");
 }
+
+fn network_provider_extension() -> config::ExtensionConfig {
+    config::ExtensionConfig {
+        extension_type: config::ExtensionType::NetworkProvider,
+        provider: vec!["/usr/local/bin/egress-provider".to_owned()],
+        provider_timeout: None,
+        provider_stderr: Default::default(),
+        workload_env: Default::default(),
+        capability: None,
+    }
+}
+
+#[test]
+fn hosted_network_provider_extension_stages_into_starter_config() {
+    let mut args = parse_init_args(&["--agent", "placebo", "--sandbox", "unshare"]);
+    args.prompt_extensions
+        .insert("network-egress".to_owned(), network_provider_extension());
+    let config = starter_config_from_args(&args);
+    let extension = config
+        .extensions
+        .get("network-egress")
+        .expect("the declaration must be staged before any tracked step runs");
+    assert_eq!(
+        extension.extension_type,
+        config::ExtensionType::NetworkProvider
+    );
+    assert_eq!(
+        extension.provider,
+        ["/usr/local/bin/egress-provider".to_owned()]
+    );
+}
+
+#[test]
+fn hosted_network_provider_extension_requires_unshare_sandbox() {
+    // Without `--sandbox unshare` the starter sandbox stays off, so the
+    // declaration must fail config validation rather than stage an
+    // unenforceable network guarantee.
+    let mut args = parse_init_args(&["--agent", "placebo"]);
+    args.prompt_extensions
+        .insert("network-egress".to_owned(), network_provider_extension());
+    let error = starter_config(&args).expect_err("validation must reject the pairing");
+    assert!(
+        error.to_string().contains("unshare"),
+        "error must name the required sandbox mode: {error}"
+    );
+}
+
+#[test]
+fn hosted_extensions_are_rejected_against_an_existing_config() {
+    let mut args = parse_init_args(&["--agent", "placebo"]);
+    args.prompt_extensions
+        .insert("network-egress".to_owned(), network_provider_extension());
+    let error = reject_extensions_args_for_existing_config(&args)
+        .expect_err("declarations against an existing config must be rejected");
+    assert!(
+        error.to_string().contains("starter config"),
+        "error must explain the starter-only scope: {error}"
+    );
+    reject_extensions_args_for_existing_config(&parse_init_args(&["--agent", "placebo"]))
+        .expect("no declarations, no rejection");
+}
+
+#[test]
+fn hosted_sandbox_mask_paths_stage_into_the_starter_config() {
+    let mut args = parse_init_args(&["--agent", "placebo", "--sandbox", "unshare"]);
+    args.prompt_sandbox_mask_paths = vec![
+        "/var/lib/network-egress".to_owned(),
+        "/etc/network-egress".to_owned(),
+        "/var/lib/network-egress".to_owned(),
+    ];
+    let config = starter_config_from_args(&args);
+    assert_eq!(
+        config.workspace.sandbox.mask_paths,
+        [
+            "/var/lib/network-egress".to_owned(),
+            "/etc/network-egress".to_owned()
+        ],
+        "declared paths stage in declaration order, duplicates collapse"
+    );
+    assert_eq!(
+        config.workspace.sandbox.mode,
+        config::SandboxMode::Unshare,
+        "the declaration leaves the sandbox mode untouched"
+    );
+}
+
+#[test]
+fn hosted_sandbox_mask_paths_stage_without_a_sandbox_mode_flag() {
+    // The mask set matters from the first sandboxed spawn, which the extension
+    // declaration can cause even while `--sandbox` is absent, so the paths stage
+    // regardless of the mode flag.
+    let mut args = parse_init_args(&["--agent", "placebo"]);
+    args.prompt_sandbox_mask_paths = vec!["/var/lib/network-egress".to_owned()];
+    let config = starter_config_from_args(&args);
+    assert_eq!(
+        config.workspace.sandbox.mask_paths,
+        ["/var/lib/network-egress".to_owned()]
+    );
+}
+
+#[test]
+fn union_sandbox_mask_paths_preserves_existing_entries() {
+    let merged = super::builders::union_sandbox_mask_paths(
+        vec!["/daemon/state".to_owned()],
+        &["/egress/config".to_owned(), "/daemon/state".to_owned()],
+    )
+    .expect("valid paths merge");
+    assert_eq!(
+        merged,
+        ["/daemon/state".to_owned(), "/egress/config".to_owned()],
+        "existing entries keep their place and are never dropped or duplicated"
+    );
+}
+
+#[test]
+fn hosted_sandbox_mask_paths_reject_blank_and_relative_entries() {
+    for (declared, reason) in [
+        (vec!["   ".to_owned()], "non-blank"),
+        (vec!["egress/config".to_owned()], "must be absolute"),
+    ] {
+        let mut args = parse_init_args(&["--agent", "placebo"]);
+        args.prompt_sandbox_mask_paths = declared;
+        let error = starter_config(&args).expect_err("an invalid mask path must fail");
+        assert!(
+            error.to_string().contains(reason),
+            "error must explain the rejection ({reason}): {error}"
+        );
+    }
+}
+
+#[test]
+fn hosted_sandbox_mask_paths_are_rejected_against_an_existing_config() {
+    let mut args = parse_init_args(&["--agent", "placebo"]);
+    args.prompt_sandbox_mask_paths = vec!["/var/lib/network-egress".to_owned()];
+    let error = reject_sandbox_mask_paths_args_for_existing_config(&args)
+        .expect_err("declarations against an existing config must be rejected");
+    assert!(
+        error.to_string().contains("starter config"),
+        "error must explain the starter-only scope: {error}"
+    );
+    reject_sandbox_mask_paths_args_for_existing_config(&parse_init_args(&["--agent", "placebo"]))
+        .expect("no declarations, no rejection");
+}

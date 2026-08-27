@@ -427,6 +427,15 @@ pub struct InitArgs {
     /// run leaves this false and keeps the hard failure.
     #[arg(skip)]
     pub(super) defer_provider_credentials: bool,
+    /// Extension declarations from the hosted start request (`extensions`),
+    /// staged into the starter config before any tracked step runs.
+    #[arg(skip)]
+    pub(super) prompt_extensions: std::collections::BTreeMap<String, config::ExtensionConfig>,
+    /// Sandbox mask paths from the hosted start request (`sandbox_mask_paths`),
+    /// unioned into the starter config's `[workspace.sandbox].mask_paths` so a
+    /// staged network-provider's egress dirs are masked from the first spawn.
+    #[arg(skip)]
+    pub(super) prompt_sandbox_mask_paths: Vec<String>,
     /// Resume the most recent non-terminal init run. With `--run-id`, resume
     /// the specified run. Conflicts with `--fresh`.
     #[arg(long, conflicts_with = "fresh")]
@@ -523,6 +532,8 @@ impl Default for InitArgs {
             native_config_upload: None,
             native_config_revision: None,
             defer_provider_credentials: false,
+            prompt_extensions: std::collections::BTreeMap::new(),
+            prompt_sandbox_mask_paths: Vec::new(),
             skip_testflight: false,
             standard_agent_work_deps: false,
             browser_use_profile: false,

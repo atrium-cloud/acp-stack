@@ -251,6 +251,14 @@ The hosted flow follows the same init steps as interactive `acps init`, but stre
 - MCP declarations the installed agent's capabilities do not cover are reported only through the result frame's `ignored_features`, never through progress frames.
 - Prompt answers arrive over the WebSocket `input` frame or the REST twin `POST /v1/init/sessions/{id}/input`, interchangeably. The bootstrap server also mounts `GET /v1/models` (with `?target_id=` target selection) so a backend renders pickers while the session runs.
 
+### Extension Declarations
+
+The session-create request may carry an `extensions` map, staged into a freshly-created starter config before any tracked step runs:
+
+- A managed-state declaration names the namespace the platform later pushes credentials into. A network-provider declaration routes every sandboxed init phase through the egress provider from the start, since the declaration lands before install, probe, and discovery run.
+- A network-provider declaration pairs with `sandbox_mask_paths`: absolute paths (the provider's config and state dirs) unioned into the starter config's `[workspace.sandbox].mask_paths`, so the sandboxed agent cannot read them from the first spawn. Blank and relative entries are rejected.
+- Declarations apply only to a starter config; a request carrying `extensions` or `sandbox_mask_paths` against an existing config is rejected. The exception is `resume`: the recorded run's original staging stands and re-declarations are ignored, matching `data_sources` and `deps`.
+
 ### Signals
 
 Alongside the prompt stream, the session reports structured readiness through `signal` events:

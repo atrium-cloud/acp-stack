@@ -68,6 +68,8 @@ pub(super) fn prepare_init_base(
         reject_agent_env_refs_for_existing_config(args)?;
         reject_deps_args_for_existing_config(args)?;
         reject_data_source_args_for_existing_config(args)?;
+        reject_extensions_args_for_existing_config(args)?;
+        reject_sandbox_mask_paths_args_for_existing_config(args)?;
     }
     // A `--custom-agent-*` spec satisfies the real-agent requirement without an `--agent` registry id.
     let mut custom_agent_spec: Option<CustomAgentSpec> = resolve_custom_agent_spec(args)?;

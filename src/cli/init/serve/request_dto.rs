@@ -140,6 +140,19 @@ pub(super) struct StartInitRequest {
     /// provider's refs cannot arrive through the push and still hard-fail.
     /// Absent → false.
     defer_provider_credentials: Option<bool>,
+    /// `[extensions]` tables staged into a freshly-created starter config,
+    /// e.g. `{ "network-egress": { "type": "network-provider", "provider": [...] } }`.
+    /// Semantic validation (name shape, per-type field discipline, the
+    /// network-provider/unshare pairing) runs in-session with the rest of the
+    /// config validation. Applies only when creating a starter config.
+    #[serde(default)]
+    extensions: std::collections::BTreeMap<String, config::ExtensionConfig>,
+    /// Absolute paths unioned into the starter config's
+    /// `[workspace.sandbox].mask_paths`, so a network-provider declared through
+    /// `extensions` has its egress config/state dirs masked from the first
+    /// sandboxed spawn. Applies only when creating a starter config.
+    #[serde(default)]
+    sandbox_mask_paths: Vec<String>,
     #[serde(default)]
     data_sources: Vec<DataSourceRequest>,
     /// Continue the most recent unfinished or failed run instead of starting a
@@ -582,6 +595,8 @@ impl StartInitRequest {
         args.agent_update = self.agent_update;
         args.agent_update_frequency = self.agent_update_frequency;
         args.defer_provider_credentials = self.defer_provider_credentials.unwrap_or(false);
+        args.prompt_extensions = self.extensions;
+        args.prompt_sandbox_mask_paths = self.sandbox_mask_paths;
         args.prompt_data_sources = self
             .data_sources
             .into_iter()

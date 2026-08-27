@@ -1532,6 +1532,22 @@
             ],
             "description": "The caller's declaration that it will push the configured provider's\ncredential through the managed-state extension after init. Only then does\na missing provider ref soft-pass, and only for a ref the push can deliver:\na custom provider's api-key ref, or a mapped key-based provider's api-key\nand companion env vars under the names the agent reads. A noncanonical\napi-key alias, a `VAR=template` inner ref, or an agent-native-auth\nprovider's refs cannot arrive through the push and still hard-fail.\nAbsent → false."
           },
+          "extensions": {
+            "type": "object",
+            "default": {},
+            "description": "`[extensions]` tables staged into a freshly-created starter config,\ne.g. `{ \"network-egress\": { \"type\": \"network-provider\", \"provider\": [...] } }`.\nSemantic validation (name shape, per-type field discipline, the\nnetwork-provider/unshare pairing) runs in-session with the rest of the\nconfig validation. Applies only when creating a starter config.",
+            "additionalProperties": {
+              "$ref": "#/$defs/request/ExtensionConfig"
+            }
+          },
+          "sandbox_mask_paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Absolute paths unioned into the starter config's\n`[workspace.sandbox].mask_paths`, so a network-provider declared through\n`extensions` has its egress config/state dirs masked from the first\nsandboxed spawn. Applies only when creating a starter config.",
+            "default": []
+          },
           "data_sources": {
             "type": "array",
             "items": {
@@ -1666,6 +1682,66 @@
           }
         },
         "additionalProperties": false
+      },
+      "ExtensionConfig": {
+        "type": "object",
+        "description": "A typed, data-declared extension seam. An `[extensions.<name>]` table\ndeclares one instance of an acp-stack-defined extension type; acp-stack\nsupervises or serves the type's generic contract and never learns the\nextension's semantics. The struct is flat across all types; the extensions\nvalidator rejects fields that do not belong to the declared `type`.",
+        "properties": {
+          "type": {
+            "$ref": "#/$defs/request/ExtensionType"
+          },
+          "provider": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "`network-provider` only. Lifecycle provider argv, invoked as\n`<exe> setup|teardown <args...>` around each network-isolated spawn.\nEmpty means no provider: the namespace stays deny-all."
+          },
+          "provider_timeout": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`network-provider` only. Duration string applied independently to\nprovider setup and teardown."
+          },
+          "provider_stderr": {
+            "$ref": "#/$defs/request/SandboxProviderStderr",
+            "description": "`network-provider` only. Where provider stderr goes: the daemon's\nstderr diagnostic channel, or discarded. Stdout is always discarded."
+          },
+          "workload_env": {
+            "type": "object",
+            "description": "`network-provider` only. Environment variables injected into every\nworkload spawned inside the provider's namespace (agent harness,\nmediated commands, ACP terminals) so the workload can reach whatever\negress path the provider set up — proxy endpoints, CA bundle paths.\nNever passed to the provider executable itself, and never in argv.\n`BTreeMap` for deterministic ordering across serialization round-trips.",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "capability": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`managed-state` only. The state contract the namespace applies;\n`provider-credential` is the only capability today."
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "additionalProperties": false
+      },
+      "ExtensionType": {
+        "type": "string",
+        "enum": [
+          "network-provider",
+          "managed-state"
+        ],
+        "description": "The extension types acp-stack defines. Declaring a `network-provider`\ninstance switches every sandboxed spawn to an isolated network namespace\nwhose policy belongs to the external provider executable; declaring a\n`managed-state` instance grants an external orchestrator ownership of a\nnamed state namespace via the admin apply endpoint."
+      },
+      "SandboxProviderStderr": {
+        "type": "string",
+        "enum": [
+          "daemon",
+          "null"
+        ]
       },
       "DataSourceRequest": {
         "oneOf": [
@@ -1860,6 +1936,49 @@
           "request_id"
         ],
         "description": "REST twin of the WebSocket `input` client frame (see `ClientFrame` in\nroutes.rs): same fields, defaults, and answer semantics. Unknown fields are\nignored to match the frame's forward-compat handling, so a client may POST a\nsocket frame verbatim (including its `type` discriminator) or carry fields a\nnewer backend adds, rather than hitting a 422 the socket would not."
+      },
+      "DepositCredentialRequest": {
+        "type": "object",
+        "description": "Bootstrap-tier credential deposit (`POST /v1/init/credential`): flat-store\nsecrets plus a managed credential apply, mirroring the admin-tier\nmanaged-state apply body (`POST /v1/admin/extensions/{name}/apply`) with\nthe namespace carried in the body instead of the path. Secret values are\nopaque to acp-stack and stored verbatim.",
+        "properties": {
+          "secrets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/request/DepositSecretEntry"
+            },
+            "description": "Flat-store secrets written before the managed apply resolves, so a\n`source_refs` entry may reference a name this same body deposits."
+          },
+          "namespace": {
+            "type": "string",
+            "description": "Managed-state extension namespace the apply targets; must resolve to a\ndeclared `type = \"managed-state\"` instance in the runtime config."
+          },
+          "apply": {
+            "$ref": "#/$defs/request/ApplyRequest",
+            "description": "The admin-tier apply body, verbatim: schema version, revision, and the\nkind-discriminated desired state."
+          }
+        },
+        "required": [
+          "namespace",
+          "apply"
+        ],
+        "additionalProperties": false
+      },
+      "DepositSecretEntry": {
+        "type": "object",
+        "description": "One flat-store secret in a deposit. The value rides the bootstrap token's\nchannel rather than the prompt stream because the hosting platform cannot\nanswer a secret-ref prompt with a value it holds sealed.",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "value"
+        ],
+        "additionalProperties": false
       }
     },
     "response": {
@@ -7399,6 +7518,34 @@
           "request_id"
         ],
         "description": "REST twin of the `input_accepted` server event: the socket carries the ack\nas an event frame, `POST /v1/init/sessions/{id}/input` returns it as the\nsuccess data."
+      },
+      "DepositCredentialResponse": {
+        "type": "object",
+        "properties": {
+          "secrets_written": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "applied_revision": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "applied",
+              "cleared",
+              "noop"
+            ]
+          }
+        },
+        "required": [
+          "secrets_written",
+          "applied_revision",
+          "outcome"
+        ],
+        "description": "`POST /v1/init/credential` result: the flat secrets persisted plus the\nmanaged apply outcome, mirroring the admin-tier apply response."
       }
     },
     "config": {
