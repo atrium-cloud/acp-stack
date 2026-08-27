@@ -211,6 +211,12 @@ fn init_handoff_json_prints_fresh_keys_once() {
     );
     assert_eq!(body["agent"]["id"], "placebo");
     assert_eq!(body["agent"]["name"], "Placebo Agent");
+    // Placebo settles no provider/model/mode/effort lane, so the selection
+    // reports explicit nulls rather than omitting the keys.
+    assert_eq!(
+        body["selection"],
+        json!({"provider": null, "model": null, "mode": null, "effort": null})
+    );
     assert_eq!(body["auth"]["generated_keys"], json!(["session", "admin"]));
     assert_eq!(body["auth"]["preserved_keys"], json!([]));
     let session_key = body["session_key"].as_str().expect("session key");
@@ -222,6 +228,81 @@ fn init_handoff_json_prints_fresh_keys_once() {
     let verifiers = store.load_auth_verifier_pair().expect("auth verifiers");
     assert_eq!(verifiers.verify(session_key), Some(KeyKind::Session));
     assert_eq!(verifiers.verify(admin_key), Some(KeyKind::Admin));
+}
+
+#[test]
+fn init_handoff_json_reports_the_settled_selection() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir");
+    let workspace = tempdir.path().join("workspace");
+    fs::create_dir_all(&workspace).expect("workspace dir");
+    let config = VALID_CONFIG
+        .replace(
+            r#"root = "/workspace""#,
+            &format!(r#"root = "{}""#, workspace.display()),
+        )
+        .replace(
+            r#"uploads = "/workspace/uploads""#,
+            &format!(r#"uploads = "{}/uploads""#, workspace.display()),
+        )
+        .replace(
+            r#"cwd = "/workspace""#,
+            &format!(r#"cwd = "{}""#, workspace.display()),
+        )
+        .replace(r#"command = "opencode""#, r#"command = "/bin/true""#);
+    fs::write(config_dir.join("acps-config.toml"), config).expect("config");
+    seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
+    let options_path = write_acp_config_options_with_efforts(
+        tempdir.path(),
+        &["openai/gpt-5.5"],
+        &["build", "plan"],
+        &["low", "high"],
+    );
+
+    let output = acps_with_empty_path(tempdir.path())
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args([
+            "init",
+            "--handoff-json",
+            "--agent",
+            "opencode",
+            "--provider",
+            "openai",
+            "--api-key-ref",
+            "OPENAI_API_KEY",
+            "--model",
+            "openai/gpt-5.5",
+            "--mode",
+            "plan",
+            "--effort",
+            "high",
+            "--skip-testflight",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("handoff json parses");
+    assert_eq!(body["status"], "initialized");
+    assert_eq!(body["selection"]["provider"], "openai");
+    assert_eq!(body["selection"]["model"], "openai/gpt-5.5");
+    assert_eq!(body["selection"]["mode"], "plan");
+    assert_eq!(body["selection"]["effort"], "high");
+
+    // The selection is read back from the written config, and a provider-backed
+    // agent's model lives only in the provider slot: the value above proves the
+    // payload read that slot rather than the cleared agent root.
+    let written = load_config_from_str(
+        &fs::read_to_string(config_dir.join("acps-config.toml")).expect("config readable"),
+    )
+    .expect("config parses");
+    let provider = written.agent.provider.as_ref().expect("provider written");
+    assert_eq!(provider.id, "openai");
+    assert_eq!(provider.model.as_deref(), Some("openai/gpt-5.5"));
+    assert!(written.agent.model.is_none());
 }
 
 #[test]
@@ -321,6 +402,7 @@ fn init_handoff_json_failure_reports_fresh_keys_once() {
     let stdout = String::from_utf8(output.clone()).expect("utf8");
     let body: Value = serde_json::from_slice(&output).expect("handoff json parses");
     assert_eq!(body["status"], "failed");
+    assert!(body.get("selection").is_none(), "{body}");
     assert_eq!(body["auth"]["generated_keys"], json!(["session", "admin"]));
     assert_eq!(body["auth"]["preserved_keys"], json!([]));
     let session_key = body["session_key"].as_str().expect("session key");

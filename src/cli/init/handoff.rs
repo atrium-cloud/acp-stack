@@ -46,6 +46,42 @@ pub(super) struct InitHandoffContext {
     pub(super) deps_apply_run_id: Option<String>,
 }
 
+/// The agent selection the run settled into the written config, reported on
+/// the success handoff payload so the driver consuming it knows what the run
+/// resolved. Each field stays independently nullable: a lane that settled
+/// without writing a value reads as an explicit null, distinct from the
+/// failure payload, which omits `selection` entirely.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct InitSelection {
+    pub(super) provider: Option<String>,
+    pub(super) model: Option<String>,
+    pub(super) mode: Option<String>,
+    pub(super) effort: Option<String>,
+}
+
+/// Recover the settled selection from the final config. The model read order
+/// mirrors `write_model_into_config`, which fills the provider slot for
+/// provider-backed agents and the agent root otherwise while clearing the
+/// unused slot: provider slot first, agent root as fallback, so a cleared
+/// provider slot falls through instead of masking the root value.
+pub(super) fn init_selection_from_config(config: &Config) -> InitSelection {
+    InitSelection {
+        provider: config
+            .agent
+            .provider
+            .as_ref()
+            .map(|provider| provider.id.clone()),
+        model: config
+            .agent
+            .provider
+            .as_ref()
+            .and_then(|provider| provider.model.clone())
+            .or_else(|| config.agent.model.clone()),
+        mode: config.agent.mode.clone(),
+        effort: config.agent.effort.clone(),
+    }
+}
+
 /// Drop guard that performs the session/admin key handover last. Rendering on Drop
 /// means a run that fails AFTER key generation still surfaces the otherwise
 /// unrecoverable, non-regenerable admin key before init exits.
@@ -122,8 +158,9 @@ impl KeyHandover {
         &mut self,
         status: &'static str,
         context: &InitHandoffContext,
+        selection: Option<&InitSelection>,
     ) -> Result<()> {
-        let payload = init_handoff_payload(status, context, self.keys.as_ref());
+        let payload = init_handoff_payload(status, context, self.keys.as_ref(), selection);
         let rendered =
             serde_json::to_string_pretty(&payload).map_err(|source| StackError::ServeIo {
                 source: std::io::Error::other(format!("serialize init handoff JSON: {source}")),
@@ -138,8 +175,9 @@ impl KeyHandover {
         &mut self,
         status: &'static str,
         context: &InitHandoffContext,
+        selection: Option<&InitSelection>,
     ) {
-        let payload = init_handoff_payload(status, context, self.keys.as_ref());
+        let payload = init_handoff_payload(status, context, self.keys.as_ref(), selection);
         prompt::emit_result(payload);
         self.keys.take();
         self.emitted = true;
@@ -152,7 +190,7 @@ impl KeyHandover {
         if !self.auth_ready {
             return;
         }
-        let payload = init_handoff_payload("failed", context, self.keys.as_ref());
+        let payload = init_handoff_payload("failed", context, self.keys.as_ref(), None);
         match serde_json::to_string_pretty(&payload) {
             Ok(rendered) => println!("{rendered}"),
             Err(error) => eprintln!("failed to serialize init handoff JSON: {error}"),
@@ -168,7 +206,7 @@ impl KeyHandover {
         if !self.auth_ready {
             return;
         }
-        let payload = init_handoff_payload("failed", context, self.keys.as_ref());
+        let payload = init_handoff_payload("failed", context, self.keys.as_ref(), None);
         prompt::emit_result(payload);
         self.keys.take();
         self.emitted = true;
@@ -179,6 +217,7 @@ fn init_handoff_payload(
     status: &'static str,
     context: &InitHandoffContext,
     fresh_keys: Option<&FreshKeys>,
+    selection: Option<&InitSelection>,
 ) -> serde_json::Value {
     let generated_keys = if fresh_keys.is_some() {
         serde_json::json!(["session", "admin"])
@@ -205,6 +244,20 @@ fn init_handoff_payload(
             "preserved_keys": preserved_keys,
         },
     });
+    if let Some(selection) = selection {
+        let object = payload
+            .as_object_mut()
+            .expect("init handoff payload is an object");
+        object.insert(
+            "selection".to_owned(),
+            serde_json::json!({
+                "provider": selection.provider,
+                "model": selection.model,
+                "mode": selection.mode,
+                "effort": selection.effort,
+            }),
+        );
+    }
     if let Some(keys) = fresh_keys {
         let object = payload
             .as_object_mut()

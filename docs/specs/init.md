@@ -213,14 +213,21 @@ Successful text-mode runs end with a next-step hint pointing at `acps serve` and
     "generated_keys": ["session", "admin"],
     "preserved_keys": []
   },
+  "selection": {
+    "provider": "openai",
+    "model": "openai/gpt-5.5",
+    "mode": "plan",
+    "effort": null
+  },
   "session_key": "acps_...",
   "admin_key": "acps_..."
 }
 ```
 
+- `selection` reports the agent selection the run settled into the written config: the provider id, the provider-native model id verbatim (prefix included, never joined to or split from the provider id), and the mode and effort. It appears only on the success payload and always carries all four keys; a lane that settled without writing a value reports an explicit null.
 - `session_key` and `admin_key` appear only when that invocation freshly generated or rotated the keys. Rotated keys are reported under `generated_keys`.
 - A later run without `--rotate-keys` preserves the verifier rows and reports `"preserved_keys": ["session", "admin"]` without reprinting either plaintext key.
-- If init fails after fresh key generation, handoff mode emits the same shape with `"status": "failed"`, so automation can capture the one-time keys before retrying.
+- If init fails after fresh key generation, handoff mode emits the same shape with `"status": "failed"` and without `selection`, so automation can capture the one-time keys before retrying.
 
 The payload carries an `ignored_features` array (omitted when empty) listing configured features outside the capability probe's advertised set: `[{"feature": "mcp.server", "value": "linear", "capability": "mcpCapabilities.http", "reason": "..."}]`.
 

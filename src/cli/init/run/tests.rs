@@ -956,3 +956,75 @@ fn background_deps_launch_rejects_a_foreign_live_apply() {
         other => panic!("expected DepsApplyInFlight, got {other:?}"),
     }
 }
+
+fn provider_config(id: &str, model: Option<&str>) -> crate::config::AgentProviderConfig {
+    crate::config::AgentProviderConfig {
+        id: id.to_owned(),
+        model: model.map(str::to_owned),
+        api_key_ref: None,
+        custom: None,
+    }
+}
+
+#[test]
+fn settled_selection_reads_provider_id_and_prefers_the_provider_slot_model() {
+    // `write_model_into_config` clears the agent root when it fills the
+    // provider slot, so the provider slot must win even if a stray root
+    // value survives from an older write.
+    let mut config = config_for_agent("opencode");
+    config.agent.provider = Some(provider_config("openai", Some("openai/gpt-5.5")));
+    config.agent.model = Some("stale-root-model".to_owned());
+    config.agent.mode = Some("plan".to_owned());
+    config.agent.effort = Some("high".to_owned());
+
+    let selection = init_selection_from_config(&config);
+
+    assert_eq!(
+        selection,
+        InitSelection {
+            provider: Some("openai".to_owned()),
+            model: Some("openai/gpt-5.5".to_owned()),
+            mode: Some("plan".to_owned()),
+            effort: Some("high".to_owned()),
+        }
+    );
+}
+
+#[test]
+fn settled_selection_model_falls_back_to_the_agent_root() {
+    // Non-provider-backed agents keep their model at the agent root, with the
+    // provider slot cleared.
+    let mut config = config_for_agent("opencode");
+    config.agent.provider = Some(provider_config("openai", None));
+    config.agent.model = Some("root-model".to_owned());
+
+    let selection = init_selection_from_config(&config);
+
+    assert_eq!(selection.provider.as_deref(), Some("openai"));
+    assert_eq!(selection.model.as_deref(), Some("root-model"));
+}
+
+#[test]
+fn settled_selection_model_stays_null_when_both_slots_are_cleared() {
+    let mut config = config_for_agent("opencode");
+    config.agent.provider = Some(provider_config("openai", None));
+    config.agent.model = None;
+
+    let selection = init_selection_from_config(&config);
+
+    assert_eq!(selection.provider.as_deref(), Some("openai"));
+    assert_eq!(selection.model, None);
+}
+
+#[test]
+fn settled_selection_reports_explicit_nulls_when_nothing_settled() {
+    let mut config = config_for_agent("placebo");
+    config.agent.provider = None;
+    config.agent.model = None;
+    config.agent.mode = None;
+    config.agent.effort = None;
+
+    let selection = init_selection_from_config(&config);
+
+    assert_eq!(selection, InitSelection::default());
+}

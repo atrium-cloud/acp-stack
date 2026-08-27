@@ -211,12 +211,22 @@ pub(super) fn finalize_init_run(flow: &mut InitFlow) -> Result<()> {
             &flow.init_run.id,
             INIT_RUN_SUCCEEDED,
         )?;
+        // Read back what the run settled from the final config rather than
+        // tracking settle sites: they see only `&mut Config`, so the written
+        // config is the one source every lane agrees on.
+        let selection = init_selection_from_config(&flow.config);
         if flow.output_mode.is_handoff_json() {
-            flow.key_handover
-                .print_handoff_json("initialized", &flow.handoff_context)?;
+            flow.key_handover.print_handoff_json(
+                "initialized",
+                &flow.handoff_context,
+                Some(&selection),
+            )?;
         } else {
-            flow.key_handover
-                .emit_handoff_payload("initialized", &flow.handoff_context);
+            flow.key_handover.emit_handoff_payload(
+                "initialized",
+                &flow.handoff_context,
+                Some(&selection),
+            );
         }
     } else {
         // Finalize BEFORE printing so a state-store failure surfaces as a failed
