@@ -14,6 +14,17 @@ mod responses;
 
 pub use coverage::{CoverageReport, NamespaceCoverage, coverage_report};
 
+/// Shared vocabulary defs published at the top level of `$defs`, outside the
+/// three contract namespaces: they name fixed wire vocabularies rather than
+/// request/response/config payloads. Members must stay ref-free: their defs are
+/// flattened into the top level of `$defs`, which drops the ref-rewrite prefix
+/// the pass applies.
+#[derive(schemars::JsonSchema)]
+#[allow(dead_code)]
+enum AcpsSharedTypes {
+    AuthTier(crate::auth::AuthTier),
+}
+
 // CONSTANTS
 /// In-repo location of the generated schema, relative to the crate manifest.
 pub const SCHEMA_PATH: &str = "docs/specs/api/acps-schema.json";
@@ -36,9 +47,11 @@ const SCHEMA_DESCRIPTION: &str = concat!(
     "direction but not the other — `request` is the deserialize contract (what a client sends), ",
     "`response` is the serialize contract (what the server emits), and `config` is the ",
     "deserialize contract for `acps-config.toml`. A type used on both sides appears once per ",
-    "namespace. Conventions: timestamp fields are RFC 3339 strings; an optional response field ",
-    "is omitted when absent rather than emitted as null, so its nullable type means absent and ",
-    "null are equivalent. Not covered, by design: the `/v1/ws` `LiveEvent` frames and the ",
+    "namespace. `$defs/AuthTier` sits outside the namespaces as a sibling: it is the shared ",
+    "auth-tier vocabulary (`init`, `session`, `admin`, `local`), described per tier by the root ",
+    "`x-auth-tiers` annotation. Conventions: timestamp fields are RFC 3339 strings; an optional ",
+    "response field is omitted when absent rather than emitted as null, so its nullable type means ",
+    "absent and null are equivalent. Not covered, by design: the `/v1/ws` `LiveEvent` frames and the ",
     "`acps init serve` streaming frames and state signals (hand-built and byte-pinned by golden ",
     "tests), the envelope-bypassing binary download handler and the `health/ready` handler ",
     "(whose readiness body is hand-built, not a typed DTO), and the untyped `config` import ",
@@ -146,7 +159,9 @@ fn merge_pass<T: schemars::JsonSchema>(
 }
 
 /// The full published schema document: one draft-2020-12 root whose `$defs`
-/// carries the `request`, `response`, and `config` namespaces.
+/// carries the `request`, `response`, and `config` namespaces plus the shared
+/// vocabulary defs (e.g. `AuthTier`), and whose `x-auth-tiers` annotation
+/// describes each auth tier.
 pub fn acps_schema() -> Value {
     let mut request = Map::new();
     merge_pass::<requests::AcpsRequestTypes>(Contract::Deserialize, "request", &mut request);
@@ -159,16 +174,29 @@ pub fn acps_schema() -> Value {
     let mut config = Map::new();
     merge_pass::<config::AcpsConfigTypes>(Contract::Deserialize, "config", &mut config);
 
+    let mut shared = Map::new();
+    merge_pass::<AcpsSharedTypes>(Contract::Serialize, "shared", &mut shared);
+
+    let mut defs = Map::new();
+    defs.insert("request".to_owned(), Value::Object(request));
+    defs.insert("response".to_owned(), Value::Object(response));
+    defs.insert("config".to_owned(), Value::Object(config));
+    defs.append(&mut shared);
+
+    // Built from the enum, not literals, so the annotation cannot drift from
+    // the `$defs/AuthTier` values.
+    let auth_tiers: Map<String, Value> = crate::auth::AuthTier::ALL
+        .into_iter()
+        .map(|tier| (tier.as_wire_str().to_owned(), json!(tier.description())))
+        .collect();
+
     json!({
         "$schema": META_SCHEMA_DRAFT,
         "$id": SCHEMA_ID,
         "title": SCHEMA_TITLE,
         "description": SCHEMA_DESCRIPTION,
-        "$defs": {
-            "request": Value::Object(request),
-            "response": Value::Object(response),
-            "config": Value::Object(config),
-        }
+        "x-auth-tiers": Value::Object(auth_tiers),
+        "$defs": Value::Object(defs),
     })
 }
 
@@ -249,6 +277,45 @@ mod tests {
             report.request.uncovered,
             report.response.uncovered,
         );
+    }
+
+    #[test]
+    fn auth_tiers_are_declared_at_the_root() {
+        let schema = acps_schema();
+        let declared: Vec<&str> = crate::auth::AuthTier::ALL
+            .iter()
+            .map(|tier| tier.as_wire_str())
+            .collect();
+
+        let annotation = schema
+            .get("x-auth-tiers")
+            .and_then(Value::as_object)
+            .expect("root x-auth-tiers annotation");
+        let mut annotated: Vec<&str> = annotation.keys().map(String::as_str).collect();
+        annotated.sort_unstable();
+        let mut expected = declared.clone();
+        expected.sort_unstable();
+        assert_eq!(annotated, expected, "x-auth-tiers keys must match AuthTier");
+        for tier in crate::auth::AuthTier::ALL {
+            assert_eq!(
+                annotation.get(tier.as_wire_str()).and_then(Value::as_str),
+                Some(tier.description()),
+                "x-auth-tiers description for {}",
+                tier.as_wire_str(),
+            );
+        }
+
+        let def = schema
+            .pointer("/$defs/AuthTier")
+            .expect("$defs/AuthTier definition");
+        let values: Vec<&str> = def
+            .get("enum")
+            .and_then(Value::as_array)
+            .expect("AuthTier enum values")
+            .iter()
+            .map(|value| value.as_str().expect("string enum value"))
+            .collect();
+        assert_eq!(values, declared, "$defs/AuthTier must list every AuthTier");
     }
 
     #[test]

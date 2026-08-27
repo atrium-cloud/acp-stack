@@ -42,6 +42,61 @@ impl KeyKind {
     }
 }
 
+/// The auth-tier vocabulary of the acp-stack API, described per tier by the
+/// root `x-auth-tiers` annotation of the published schema.
+// Distinct from `KeyKind`, the runtime request tag: `KeyKind::Unknown`
+// classifies failed authentication and is not a tier, and the `init` tier has
+// no `KeyKind` because the init-serve token never passes through the TCP
+// router's key verifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthTier {
+    Init,
+    Session,
+    Admin,
+    Local,
+}
+
+impl AuthTier {
+    pub const ALL: [AuthTier; 4] = [
+        AuthTier::Init,
+        AuthTier::Session,
+        AuthTier::Admin,
+        AuthTier::Local,
+    ];
+
+    pub fn as_wire_str(self) -> &'static str {
+        match self {
+            AuthTier::Init => "init",
+            AuthTier::Session => "session",
+            AuthTier::Admin => "admin",
+            AuthTier::Local => "local",
+        }
+    }
+
+    /// One-line tier summary, published as the `x-auth-tiers` values.
+    pub fn description(self) -> &'static str {
+        match self {
+            AuthTier::Init => {
+                "one-off bearer token for `acps init serve`, valid only while hosted setup \
+                 runs before session/admin keys exist; supplied via process input"
+            }
+            AuthTier::Session => {
+                "everyday key for sessions, workspace files, mediated commands, logs, status, \
+                 and pending permissions"
+            }
+            AuthTier::Admin => {
+                "instance-control key for secrets, config import, agent process control, and \
+                 security-sensitive operations"
+            }
+            AuthTier::Local => {
+                "keyless same-user access over the internal Unix socket for local `acps` \
+                 routes; never accepted on the TCP router"
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthFailureReason {
@@ -387,6 +442,33 @@ mod tests {
         assert_eq!(KeyKind::Admin.as_wire_str(), "admin");
         assert_eq!(KeyKind::Local.as_wire_str(), "local");
         assert_eq!(KeyKind::Unknown.as_wire_str(), "unknown");
+    }
+
+    #[test]
+    fn auth_tier_wire_strings_are_stable() {
+        assert_eq!(AuthTier::Init.as_wire_str(), "init");
+        assert_eq!(AuthTier::Session.as_wire_str(), "session");
+        assert_eq!(AuthTier::Admin.as_wire_str(), "admin");
+        assert_eq!(AuthTier::Local.as_wire_str(), "local");
+    }
+
+    #[test]
+    fn auth_tier_strings_match_key_kind_for_shared_tiers() {
+        assert_eq!(
+            AuthTier::Session.as_wire_str(),
+            KeyKind::Session.as_wire_str()
+        );
+        assert_eq!(AuthTier::Admin.as_wire_str(), KeyKind::Admin.as_wire_str());
+        assert_eq!(AuthTier::Local.as_wire_str(), KeyKind::Local.as_wire_str());
+    }
+
+    #[test]
+    fn auth_tier_all_covers_every_variant() {
+        assert_eq!(AuthTier::ALL.len(), 4);
+        for tier in AuthTier::ALL {
+            assert!(!tier.as_wire_str().is_empty());
+            assert!(!tier.description().is_empty());
+        }
     }
 
     #[test]

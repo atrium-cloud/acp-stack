@@ -1,4 +1,4 @@
-//! `POST /v1/init/credential` tests: the bootstrap-tier credential deposit,
+//! `POST /v1/init/credential` tests: the init-tier credential deposit,
 //! its revision/replay/ownership semantics, and the shared store handle's
 //! visibility contract with the session wizard.
 

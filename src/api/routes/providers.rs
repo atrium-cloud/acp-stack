@@ -157,7 +157,7 @@ pub(crate) async fn models_handler(
 }
 
 /// Discovery behind `GET /v1/models`, shared by the session-tier handler and
-/// the bootstrap-tier handler in `cli::init::serve`, which resolves the same
+/// the init-tier handler in `cli::init::serve`, which resolves the same
 /// fresh config from disk without an `AppState`.
 pub(crate) async fn models_response_for_config(config: &Config) -> Result<ModelsResponse> {
     let agent_id = config.agent.id.clone();

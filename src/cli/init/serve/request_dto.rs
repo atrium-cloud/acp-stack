@@ -169,7 +169,7 @@ struct NativeConfigUploadRequest {
     content: String,
 }
 
-/// Bootstrap-tier credential deposit (`POST /v1/init/credential`): flat-store
+/// Init-tier credential deposit (`POST /v1/init/credential`): flat-store
 /// secrets plus a managed credential apply, mirroring the admin-tier
 /// managed-state apply body (`POST /v1/admin/extensions/{name}/apply`) with
 /// the namespace carried in the body instead of the path. Secret values are

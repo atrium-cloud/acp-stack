@@ -10,13 +10,16 @@ Authorization: Bearer <key>
 
 ## Auth Tiers
 
-Three key tiers separate everyday traffic from instance control:
+Four tiers separate first-time setup and everyday traffic from instance control:
 
-| Tier        | Used for                                                                        |
-| ----------- | ------------------------------------------------------------------------------- |
-| Session key | sessions, workspace files, mediated commands, logs, status, pending permissions |
-| Admin key   | secrets, config import, agent process control, security-sensitive operations    |
-| Local       | internal Unix socket used by keyless local `acps` routes                        |
+| Tier        | Used for                                                                                  |
+| ----------- | ----------------------------------------------------------------------------------------- |
+| Init        | hosted setup via `acps init serve`; one-off token from process input                      |
+| Session key | sessions, workspace files, mediated commands, logs, status, pending permissions           |
+| Admin key   | secrets, config import, agent process control, security-sensitive operations              |
+| Local       | internal Unix socket used by keyless local `acps` routes                                  |
+
+The published JSON Schema declares this vocabulary as `$defs/AuthTier` and describes each tier in the root `x-auth-tiers` annotation.
 
 ### Key Lifecycle
 

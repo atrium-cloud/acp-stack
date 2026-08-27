@@ -268,7 +268,7 @@ async fn session_input_handler(
     }
 }
 
-/// Bootstrap-tier `GET /v1/models`: the session-tier discovery with the same
+/// Init-tier `GET /v1/models`: the session-tier discovery with the same
 /// fresh-from-disk config read, resolved without an `AppState` (the bootstrap
 /// server has none). `?target_id=` (alias `target`) picks the Array target
 /// exactly as on the session tier.

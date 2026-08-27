@@ -6,7 +6,7 @@ All public HTTP routes are versioned under `/v1`. Clients authenticate with a be
 Authorization: Bearer <key>
 ```
 
-The tier names (`session`, `admin`, `bootstrap`), the response envelope, and the error-code model are defined in [api.md](api.md). Each entry below uses the same fields:
+The tier names (`init`, `session`, `admin`, `local`), the response envelope, and the error-code model are defined in [api.md](api.md). Each entry below uses the same fields:
 
 - Tier — which key authorizes the route.
 - Request — query parameters and body shape.
@@ -28,11 +28,11 @@ Session-tier HTTP routes are also mounted on the local socket and serve only whi
 
 ## Bootstrap Init
 
-`acps init serve` exposes the routes in this section plus the session-tier `GET /v1/models` (below), served here on the `bootstrap` tier; this mode omits the other normal session/admin `/v1` routes. Calls use exactly one `Authorization: Bearer <bootstrap-token>` header; the token comes from process input alone.
+`acps init serve` exposes the routes in this section plus the session-tier `GET /v1/models` (below), served here on the `init` tier; this mode omits the other normal session/admin `/v1` routes. Calls use exactly one `Authorization: Bearer <bootstrap-token>` header; the token comes from process input alone.
 
 ### `POST /v1/init/sessions`
 
-- Tier: `bootstrap`
+- Tier: `init`
 - Request: starts one active init session. Accepts optional initial agent/provider/model/workspace args, environment configuration declarations, and an in-memory native config upload. Unknown request fields are rejected. Body fields, grouped:
     - Agent/provider/model/mode/effort: `agent`, `provider`, `api_key_ref`, `model`, `mode`, `effort`, `custom_provider`, `provider_name`, `base_url`, `provider_api`, `model_name`, `context`, `output_max_tokens`, `skip_testflight`, `testflight`, `native_config` (`{ "filename", "content" }`).
         - `mode` is the initial session mode id, validated against the agent's ACP-advertised `mode` values by the same provisional session that discovers models. Declaring it skips the streamed mode picker.
@@ -81,7 +81,7 @@ Session-tier HTTP routes are also mounted on the local socket and serve only whi
 
 ### `GET /v1/init/sessions/{id}`
 
-- Tier: `bootstrap`
+- Tier: `init`
 - Request: none.
 - Response: non-secret status, the `signals` replay, pending input, recent progress, `last_activity_age_secs`, and `completed_awaiting_ack` when a result exists.
     - Pending input entries carry `request_id`, `kind`, `style`, `prompt`, `required`, optional `default`, and per-option `index`, `value`, `label`, and `hint`.
@@ -96,14 +96,14 @@ Session-tier HTTP routes are also mounted on the local socket and serve only whi
 
 ### `GET /v1/init/sessions/{id}/events?after_seq=N`
 
-- Tier: `bootstrap`
+- Tier: `init`
 - Request: `after_seq` query parameter.
 - Response: replays non-secret progress, signal, and input lifecycle events. Entries are the same seq-bearing frames a live client receives. Bounded to recent history and may not reach the oldest signals; the authoritative full replay is the `signals` field of the status body and `hello`.
 - Errors: none route-specific.
 
 ### `POST /v1/init/sessions/{id}/input`
 
-- Tier: `bootstrap`
+- Tier: `init`
 - Request: `{ "request_id": "...", "value": <any>, "deferred": false }`. The REST twin of the WebSocket `input` frame, with the same fields, defaults, and answer semantics, parsed by the same prompt-driver logic. Unknown fields are ignored, matching the frame, so a client may post a socket frame verbatim (including its `type`).
 - Response: `{ "request_id": "..." }` in the standard success envelope. The `input_accepted` event still reaches subscribed sockets.
 - Errors:
@@ -113,7 +113,7 @@ Session-tier HTTP routes are also mounted on the local socket and serve only whi
 
 ### `GET /v1/init/sessions/{id}/ws`
 
-- Tier: `bootstrap`
+- Tier: `init`
 - Request: WebSocket upgrade.
 - Response: the hosted init WebSocket stream.
     - Server frames: `hello`, `progress`, `signal`, `input_required`, `input_accepted`, `result`, `error`.
@@ -197,7 +197,7 @@ The client also folds `current_step` from the `step_started`/`step_finished` str
 
 ### `POST /v1/init/sessions/{id}/cancel`
 
-- Tier: `bootstrap`
+- Tier: `init`
 - Request: none.
 - Response: the post-cancel `{session_id, status}`.
 - Errors: none route-specific.
@@ -205,7 +205,7 @@ The client also folds `current_step` from the `step_started`/`step_finished` str
 
 ### `POST /v1/init/sessions/{id}/native-config/cancel`
 
-- Tier: `bootstrap`
+- Tier: `init`
 - Request: `{operation_id, revision}`.
 - Response: standard envelope.
 - Errors: `409 init.result_unavailable` — unless a result is awaiting acknowledgement (see [init.md](../init.md)).
@@ -213,7 +213,7 @@ The client also folds `current_step` from the `step_started`/`step_finished` str
 
 ### `POST /v1/init/credential`
 
-- Tier: `bootstrap`
+- Tier: `init`
 - Request: `{ "secrets": [{ "name", "value" }], "namespace", "apply": { "schema_version", "revision", "desired" } }`. Unknown fields are rejected.
     - `secrets`: flat-store secrets written before the managed apply resolves, so a `source_refs` entry in `desired` may reference a name this same body deposits. At most 16 entries, each value at most 16 KiB.
     - `namespace`: the managed-state extension namespace the apply targets. It must resolve to a declared `type = "managed-state"` instance in the runtime config, so the platform declares that extension through the `extensions` field of the session request.
@@ -559,7 +559,7 @@ All skill routes load config leniently, dropping individually invalid `[[skills.
 
 ### `GET /v1/models`
 
-- Tier: `session` (also mounted on the `bootstrap` tier of `acps init serve`, where the bootstrap bearer token replaces the session key, so a hosted backend renders pickers while init is still running).
+- Tier: `session` (also mounted on the `init` tier of `acps init serve`, where the bootstrap bearer token replaces the session key, so a hosted backend renders pickers while init is still running).
 - Request: optional `?target_id=<id>` (alias `?target=`) query param selecting a non-default Array target.
 - Response: `{ "agent_id", "source", "models": [{ "value", "display_name"? }], "modes": [...], "efforts": [...], "catalog_error"? }`.
     - `efforts` carries the agent's ACP-advertised reasoning-effort values (the `thought_level` session config option) and is empty when the agent exposes no such option.
@@ -570,7 +570,7 @@ All skill routes load config leniently, dropping individually invalid `[[skills.
     - The catalog serves only mapped providers of agents whose harness takes the model verbatim from on-disk config (Claude Code profiled providers, Codex with OpenRouter, Hermes Agent). Custom providers have no listing endpoint, and agents with real ACP discovery keep their advertised list.
     - On the catalog path an ACP discovery failure degrades to `modes: []` and `efforts: []` instead of failing the request.
     - `?target_id=<id>` (alias `?target=`) discovers against that Array target instead of the default (primary) target. The id is validated the way other agent-target inputs are, so with Array mode off any non-primary id (and an unknown id generally) is a `400 request.invalid_param`, never a silent fallback to the default.
-    - On the bootstrap tier the picker reads the on-disk config, which a fresh init writes early in the run (before agent install). A call made before init has staged the config returns `409 init.config_not_ready`; retry once setup has progressed past config staging.
+    - On the init tier the picker reads the on-disk config, which a fresh init writes early in the run (before agent install). A call made before init has staged the config returns `409 init.config_not_ready`; retry once setup has progressed past config staging.
 
 ## Array
 
