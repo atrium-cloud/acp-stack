@@ -18,7 +18,7 @@ struct LatestResponse {
 
 /// Return the latest published version for `package`; scoped names need no extra escaping.
 pub fn latest_version(package: &str) -> Result<String> {
-    let client = reqwest::blocking::Client::builder()
+    let client = crate::http_client::blocking_client_builder()
         .timeout(REQUEST_TIMEOUT)
         .user_agent(USER_AGENT)
         .build()

@@ -149,9 +149,11 @@ pub fn run_managed_agent_update(
         &dest_dir,
         Some(&log_base),
         options,
+        &home,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn update_agent_for_config(
     config: &Config,
     entry: &RegistryEntry,
@@ -160,6 +162,7 @@ pub fn update_agent_for_config(
     dest_dir: &Path,
     log_base: Option<&Path>,
     options: AgentUpdateOptions,
+    home: &Path,
 ) -> Result<AgentUpdateReport> {
     if options.agent_running {
         return Ok(AgentUpdateReport::skipped(
@@ -179,6 +182,7 @@ pub fn update_agent_for_config(
         state,
         log_base,
         force: options.force,
+        home,
     };
     let mut steps = Vec::new();
     for component in update_components(entry, &config.agent)? {
@@ -229,6 +233,7 @@ struct UpdateExecutionContext<'a> {
     state: &'a StateStore,
     log_base: Option<&'a Path>,
     force: bool,
+    home: &'a Path,
 }
 
 fn update_component(
@@ -282,6 +287,7 @@ fn update_component(
                 // the step-level spawn probe MUST keep running here.
                 false,
                 Some(&progress),
+                context.home,
             );
             if let Some(err) = chain.terminal_error {
                 let mut rows = chain.rows;
@@ -307,6 +313,7 @@ fn update_component(
                     apt,
                     context.workspace_root,
                     context.dest_dir,
+                    context.home,
                 )
             },
         )],
@@ -320,6 +327,7 @@ fn update_component(
                     &command,
                     context.workspace_root,
                     context.dest_dir,
+                    context.home,
                 )
             },
         )],
@@ -631,6 +639,7 @@ fn run_apt_update_step(
     apt: AptUpdate,
     workspace_root: &Path,
     dest_dir: &Path,
+    home: &Path,
 ) -> crate::runtime::install::agent_installer::InstallerRowDraft {
     let args = ["install", "--only-upgrade", "-y", apt.package.as_str()];
     run_command_step(
@@ -641,6 +650,7 @@ fn run_apt_update_step(
         workspace_root,
         dest_dir,
         UPDATE_COMMAND_TIMEOUT,
+        home,
     )
 }
 
@@ -649,6 +659,7 @@ fn run_native_update_step(
     command: &str,
     workspace_root: &Path,
     dest_dir: &Path,
+    home: &Path,
 ) -> crate::runtime::install::agent_installer::InstallerRowDraft {
     let started_at = crate::runtime::install::agent_installer::current_timestamp();
     let Some(path) = resolve_creates(command, workspace_root, &[dest_dir]) else {
@@ -659,7 +670,7 @@ fn run_native_update_step(
             format!("native update command `{command}` did not resolve"),
         );
     };
-    let subcommand = match probe_native_update_subcommand(&path, workspace_root, dest_dir) {
+    let subcommand = match probe_native_update_subcommand(&path, workspace_root, dest_dir, home) {
         Ok(subcommand) => subcommand,
         Err(failure) => {
             let headline = if failure.command_ran {
@@ -682,6 +693,7 @@ fn run_native_update_step(
         workspace_root,
         dest_dir,
         timeout: UPDATE_COMMAND_TIMEOUT,
+        home,
     };
     run_command_step_with_started_at(
         step,
@@ -704,11 +716,13 @@ fn probe_native_update_subcommand(
     path: &Path,
     workspace_root: &Path,
     dest_dir: &Path,
+    home: &Path,
 ) -> std::result::Result<String, NativeProbeFailure> {
     let context = CommandStepContext {
         workspace_root,
         dest_dir,
         timeout: HELP_PROBE_TIMEOUT,
+        home,
     };
     let mut command_ran = false;
     let mut failures = Vec::new();
@@ -801,6 +815,7 @@ fn help_output_contains_command(output: &str, command: &str) -> bool {
         .any(|token| token == command)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_command_step(
     step: &'static str,
     method: &'static str,
@@ -809,12 +824,14 @@ fn run_command_step(
     workspace_root: &Path,
     dest_dir: &Path,
     timeout: Duration,
+    home: &Path,
 ) -> crate::runtime::install::agent_installer::InstallerRowDraft {
     let started_at = crate::runtime::install::agent_installer::current_timestamp();
     let context = CommandStepContext {
         workspace_root,
         dest_dir,
         timeout,
+        home,
     };
     run_command_step_with_started_at(
         step,
@@ -830,6 +847,7 @@ struct CommandStepContext<'a> {
     workspace_root: &'a Path,
     dest_dir: &'a Path,
     timeout: Duration,
+    home: &'a Path,
 }
 
 fn run_command_step_with_started_at(
@@ -844,7 +862,10 @@ fn run_command_step_with_started_at(
     command.args(args);
     command.current_dir(context.workspace_root);
     command.env_clear();
-    forward_host_env(&mut command, "HOME");
+    // HOME is the boot-time runtime home threaded down from the entry point,
+    // not the daemon's process env, so updater subprocesses stay out of the
+    // developer's real home when tests drive the updater in-process.
+    command.env("HOME", context.home);
     forward_host_env(&mut command, "LANG");
     if let Some(path) = path_env_with_extra_dirs(&[context.dest_dir]) {
         command.env("PATH", path);

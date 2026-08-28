@@ -14,8 +14,7 @@ fn config_import_refuses_without_force_when_config_exists() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_init_with_home(tempdir.path());
 
-    let exported = acps_command()
-        .env("HOME", tempdir.path())
+    let exported = acps_command(tempdir.path())
         .args(["config", "export"])
         .assert()
         .success()
@@ -25,8 +24,7 @@ fn config_import_refuses_without_force_when_config_exists() {
     let import_path = tempdir.path().join("exported.toml");
     fs::write(&import_path, exported).expect("write export");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["config", "import", import_path.to_str().unwrap()])
         .assert()
         .failure()
@@ -45,8 +43,7 @@ fn config_import_with_force_replaces_existing_config() {
     let import_path = tempdir.path().join("alt.toml");
     fs::write(&import_path, &modified).expect("write alt");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "config",
             "import",
@@ -76,8 +73,7 @@ fn config_import_force_replaces_invalid_existing_config() {
     let import_path = tempdir.path().join("replacement.toml");
     fs::write(&import_path, &modified).expect("write replacement");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "config",
             "import",
@@ -129,8 +125,7 @@ async fn config_import_treats_auth_rejection_from_previous_daemon_as_deferred_ap
         let import_path = tempdir.path().join("replacement.toml");
         fs::write(&import_path, &modified).expect("write replacement");
 
-        acps_command()
-            .env("HOME", tempdir.path())
+        acps_command(tempdir.path())
             .args([
                 "config",
                 "import",
@@ -156,8 +151,7 @@ fn config_validate_and_import_dry_run_format_json() {
     let (_, admin_key) = run_init_with_home(tempdir.path());
     let config_path = tempdir.path().join(".config/acp-stack/acps-config.toml");
 
-    let validate_output = acps_command()
-        .env("HOME", tempdir.path())
+    let validate_output = acps_command(tempdir.path())
         .args(["config", "validate", "--format", "json"])
         .assert()
         .success()
@@ -169,8 +163,7 @@ fn config_validate_and_import_dry_run_format_json() {
     assert_eq!(validate_body["valid"], true);
     assert!(validate_body["path"].is_null(), "{validate_body}");
 
-    let import_output = acps_command()
-        .env("HOME", tempdir.path())
+    let import_output = acps_command(tempdir.path())
         .arg("config")
         .arg("import")
         .arg(&config_path)
@@ -197,8 +190,7 @@ fn config_export_format_json_wraps_toml_without_leaking_secret_values() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_init_with_home(tempdir.path());
 
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args(["config", "export", "--format", "json"])
         .assert()
         .success()
@@ -221,8 +213,7 @@ fn config_export_to_output_reports_progress() {
     run_init_with_home(tempdir.path());
     let output_path = tempdir.path().join("exported.toml");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["config", "export", "--output"])
         .arg(&output_path)
         .assert()
@@ -246,8 +237,7 @@ fn config_import_supports_base64_input() {
         VALID_PLACEBO_CONFIG.replace(r#"bind = "127.0.0.1:7700""#, r#"bind = "127.0.0.1:7788""#);
     let encoded = base64::engine::general_purpose::STANDARD.encode(modified);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "config",
             "import",
@@ -278,8 +268,7 @@ fn init_from_base64_imports_config_and_continues() {
         VALID_PLACEBO_CONFIG.replace(r#"bind = "127.0.0.1:7700""#, r#"bind = "127.0.0.1:7791""#);
     let encoded = base64::engine::general_purpose::STANDARD.encode(modified);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -308,8 +297,7 @@ fn init_from_file_imports_config_and_continues() {
     let import_path = tempdir.path().join("import-acps-config.toml");
     fs::write(&import_path, modified).expect("import config");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -360,8 +348,7 @@ fn config_import_preserves_adapter_override_block() {
     let import_path = tempdir.path().join("override.toml");
     fs::write(&import_path, placebo_config_with_adapter_override()).expect("write import");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "config",
             "import",
@@ -392,8 +379,7 @@ fn init_from_file_preserves_adapter_override_with_same_agent_flag() {
     let import_path = tempdir.path().join("override-import.toml");
     fs::write(&import_path, placebo_config_with_adapter_override()).expect("write import");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -421,8 +407,7 @@ fn init_from_toml_imports_config_and_continues() {
     let modified =
         VALID_PLACEBO_CONFIG.replace(r#"bind = "127.0.0.1:7700""#, r#"bind = "127.0.0.1:7793""#);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -446,8 +431,7 @@ fn init_from_toml_imports_config_and_continues() {
 fn init_from_base64_rejects_invalid_base64() {
     let tempdir = tempfile::tempdir().expect("tempdir");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -481,8 +465,7 @@ fn config_import_requires_admin_key() {
     let import_path = tempdir.path().join("rotated.toml");
     fs::write(&import_path, &modified).expect("write rotated");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["config", "import", import_path.to_str().unwrap(), "--force"])
         .assert()
         .failure()
@@ -506,8 +489,7 @@ admin_key_ref = "ACP_STACK_ADMIN_KEY"
     let import_path = tempdir.path().join("rotated-session.toml");
     fs::write(&import_path, &modified).expect("write rotated session");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "config",
             "import",
@@ -530,8 +512,7 @@ admin_key_ref = "ACP_STACK_ADMIN_KEY"
 #[test]
 fn config_import_rejects_invalid_base64() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["config", "import", "--base64", "!!!not-base64!!!"])
         .assert()
         .failure()
@@ -549,8 +530,7 @@ fn config_import_dry_run_with_path() {
     let import_path = tempdir.path().join("import.toml");
     fs::write(&import_path, VALID_PLACEBO_CONFIG).expect("write config");
 
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args([
             "config",
             "import",
@@ -590,8 +570,7 @@ fn config_import_kilo_seeds_key_declaration_and_records_empty_placeholder() {
     let import_path = tempdir.path().join("kilo.toml");
     fs::write(&import_path, &kilo_config).expect("write kilo config");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "config",
             "import",
@@ -627,8 +606,7 @@ fn config_import_dry_run_with_base64() {
 
     let encoded = base64::engine::general_purpose::STANDARD.encode(VALID_PLACEBO_CONFIG);
 
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args(["config", "import", "--base64", &encoded, "--dry-run"])
         .assert()
         .success()
@@ -651,8 +629,7 @@ fn config_import_rejects_oversized_path_input() {
     let import_path = tempdir.path().join("big.toml");
     fs::write(&import_path, &big_config).expect("write big config");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["config", "import", import_path.to_str().unwrap()])
         .assert()
         .failure()

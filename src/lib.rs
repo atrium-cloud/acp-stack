@@ -13,6 +13,7 @@ pub mod error;
 pub mod events;
 pub mod extensions;
 pub mod fs_util;
+pub mod http_client;
 pub mod http_hardening;
 pub mod local_listener;
 pub mod ownership;

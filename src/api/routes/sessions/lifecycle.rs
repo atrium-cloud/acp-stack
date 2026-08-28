@@ -16,7 +16,7 @@ pub(crate) async fn sessions_create_handler(
 ) -> std::result::Result<ApiSuccess<SessionResponse>, StackError> {
     let Json(payload) = body.unwrap_or_default();
     let cwd = resolve_session_cwd(payload.cwd, &state.config.workspace.root)?;
-    let mcp_servers = open_mcp_servers(&state.config)?;
+    let mcp_servers = open_mcp_servers(&state.runtime_paths.home, &state.config)?;
     let target = state
         .session_agent_target(payload.target_id.as_deref())
         .await?;
@@ -84,7 +84,7 @@ pub(crate) async fn sessions_load_handler(
         .cwd
         .map(|raw| resolve_session_cwd(Some(raw), &state.config.workspace.root))
         .transpose()?;
-    let mcp_servers = open_mcp_servers(&state.config)?;
+    let mcp_servers = open_mcp_servers(&state.runtime_paths.home, &state.config)?;
     let outcome = target
         .supervisor
         .load_session(
@@ -111,7 +111,7 @@ pub(crate) async fn sessions_resume_handler(
         .cwd
         .map(|raw| resolve_session_cwd(Some(raw), &state.config.workspace.root))
         .transpose()?;
-    let mcp_servers = open_mcp_servers(&state.config)?;
+    let mcp_servers = open_mcp_servers(&state.runtime_paths.home, &state.config)?;
     let outcome = target
         .supervisor
         .resume_session(
@@ -148,7 +148,7 @@ pub(crate) async fn sessions_fork_handler(
         .cwd
         .map(|raw| resolve_session_cwd(Some(raw), &state.config.workspace.root))
         .transpose()?;
-    let mcp_servers = open_mcp_servers(&state.config)?;
+    let mcp_servers = open_mcp_servers(&state.runtime_paths.home, &state.config)?;
     let outcome = target
         .supervisor
         .fork_session(

@@ -6,7 +6,6 @@ use serde_json::Value;
 use super::super::core::AppState;
 use crate::envelope::ApiSuccess;
 use crate::error::StackError;
-use crate::fs_util::home_dir;
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct ConfigExportResponse {
@@ -146,9 +145,9 @@ pub(crate) struct SecretsDeleteResponse {
 }
 
 pub(crate) async fn secrets_list_handler(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<SecretsListResponse>, StackError> {
-    let home = home_dir()?;
+    let home = state.runtime_paths.home.clone();
     let store = crate::secrets::SecretStore::open(&home)?;
     let names = store.list_names().iter().map(|s| (*s).to_owned()).collect();
     Ok(ApiSuccess::new(SecretsListResponse { names }))
@@ -162,7 +161,7 @@ pub(crate) async fn secrets_set_handler(
     // Serialize with other secret-store writers: the store is a whole-file read-modify-write, so
     // an unlocked writer silently drops a concurrent mutation.
     let _mutation = state.lock_agent_config_mutation().await?;
-    let home = home_dir()?;
+    let home = state.runtime_paths.home.clone();
     let mut store = crate::secrets::SecretStore::open(&home)?;
     let action = if store.contains(&body.name) {
         "updated"
@@ -182,7 +181,7 @@ pub(crate) async fn secrets_delete_handler(
 ) -> std::result::Result<ApiSuccess<SecretsDeleteResponse>, StackError> {
     crate::secrets::reject_auth_ref_mutation(&name)?;
     let _mutation = state.lock_agent_config_mutation().await?;
-    let home = home_dir()?;
+    let home = state.runtime_paths.home.clone();
     let mut store = crate::secrets::SecretStore::open(&home)?;
     store.delete(&name)?;
     Ok(ApiSuccess::new(SecretsDeleteResponse {

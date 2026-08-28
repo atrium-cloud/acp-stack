@@ -84,6 +84,7 @@ fn finish_for_report(report: &DepsApplyReport) -> DepsApplyRunFinish<'static> {
 /// Run the apply with a durable `deps_apply_runs` row around it. The claim
 /// error propagates before any install snippet runs; row updates after the
 /// claim are best-effort so a row write cannot abort a half-run install.
+#[allow(clippy::too_many_arguments)]
 pub fn apply_dependencies_tracked(
     config: &Config,
     store: &StateStore,
@@ -91,6 +92,7 @@ pub fn apply_dependencies_tracked(
     feature: Option<&str>,
     shell_program: &str,
     escalation: &PrivilegeEscalation,
+    home: &Path,
     mut progress: impl FnMut(usize, usize, &str) -> Result<()>,
 ) -> Result<DepsApplyReport> {
     let is_live = deps_run_liveness();
@@ -141,6 +143,7 @@ pub fn apply_dependencies_tracked(
         Some(store),
         shell_program,
         escalation,
+        home,
         Some(&apply_run_id),
         |current, total, name| {
             if let Err(error) =

@@ -5,7 +5,6 @@ use reqwest::StatusCode;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use crate::common::HomeEnvGuard;
 use crate::common::agent::{
     AgentHarness, admin_bearer, http, session_bearer, shell_quote_path, test_config,
     websocket_request,
@@ -60,8 +59,8 @@ creates = "registry-agent"
         ),
     )
     .expect("override registry");
-    let _home_guard = HomeEnvGuard::set(tempdir.path());
-    let harness = AgentHarness::spawn_with_config(config).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(config, tempdir.path().to_path_buf()).await;
     let response = http()
         .await
         .post(format!("{}/v1/agent/install", harness.base_url))

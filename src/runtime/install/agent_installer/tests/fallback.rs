@@ -48,6 +48,7 @@ exit 9
         tempdir.path(),
         tempdir.path(),
         None,
+        tempdir.path(),
     );
 
     match result
@@ -139,6 +140,7 @@ exit 1
         &dest_dir,
         false,
         None,
+        tempdir.path(),
     );
 
     assert!(
@@ -179,6 +181,7 @@ fn shell_install_records_no_version() {
         tempdir.path(),
         tempdir.path(),
         None,
+        tempdir.path(),
     );
     result.outcome.expect("install ok");
     assert_eq!(result.rows.len(), 1);
@@ -214,6 +217,7 @@ fn missing_shell_required_tool_fails_when_no_fallback_is_runnable() {
         tempdir.path(),
         false,
         None,
+        tempdir.path(),
     );
 
     match chain.terminal_error.expect("missing prerequisite") {
@@ -270,6 +274,7 @@ exit 9
         tempdir.path(),
         false,
         None,
+        tempdir.path(),
     );
 
     match chain.terminal_error.expect("chain should fail") {
@@ -348,6 +353,7 @@ fn single_path_failure_keeps_its_typed_error() {
         tempdir.path(),
         false,
         None,
+        tempdir.path(),
     );
 
     assert!(

@@ -22,11 +22,7 @@ fn run_operator_init_with_home(home: &std::path::Path, extra: &[&str]) {
         workspace,
     ];
     args.extend_from_slice(extra);
-    acps_command()
-        .env("HOME", home)
-        .args(args)
-        .assert()
-        .success();
+    acps_command(home).args(args).assert().success();
 }
 
 fn write_supabase_init_registry(home: &std::path::Path) {
@@ -61,8 +57,7 @@ fn init_supabase_url_enables_config_and_env_secret() {
     fs::create_dir_all(&workspace).expect("workspace dir");
     let workspace = workspace.to_str().expect("workspace path utf8");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .env("ACP_STACK_SUPABASE_SECRET_KEY", "sb_secret_cli_test")
         .args([
             "init",
@@ -104,8 +99,7 @@ fn init_supabase_env_bootstrap_matches_init_flags() {
     fs::create_dir_all(&workspace).expect("workspace dir");
     let workspace = workspace.to_str().expect("workspace path utf8");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .env("ACP_STACK_SUPABASE_URL", "https://env-project.supabase.co")
         .env("ACP_STACK_SUPABASE_SCHEMA", "analytics")
         .env("ACP_STACK_SUPABASE_API_KEY_REF", "ENV_SUPABASE_SECRET")
@@ -144,8 +138,7 @@ fn init_supabase_non_interactive_requires_secret() {
     fs::create_dir_all(&workspace).expect("workspace dir");
     let workspace = workspace.to_str().expect("workspace path utf8");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "init",
             "--non-interactive",
@@ -172,8 +165,7 @@ fn logging_supabase_cli_edits_config_and_secret_store() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_operator_init_with_home(tempdir.path(), &[]);
 
-    let enable_output = acps_command()
-        .env("HOME", tempdir.path())
+    let enable_output = acps_command(tempdir.path())
         .args([
             "logging",
             "supabase",
@@ -196,8 +188,7 @@ fn logging_supabase_cli_edits_config_and_secret_store() {
     assert_eq!(enable_body["action"], "enabled");
     assert_eq!(enable_body["api_key_ref"], "CLI_SUPABASE_SECRET");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "logging",
             "supabase",
@@ -210,8 +201,7 @@ fn logging_supabase_cli_edits_config_and_secret_store() {
         .success()
         .stdout(predicates::str::contains("sb_secret_cli_value").not());
 
-    let status_output = acps_command()
-        .env("HOME", tempdir.path())
+    let status_output = acps_command(tempdir.path())
         .args(["logging", "supabase", "status", "--format", "json"])
         .assert()
         .success()
@@ -239,8 +229,7 @@ fn logging_supabase_cli_edits_config_and_secret_store() {
         "sb_secret_cli_value"
     );
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["logging", "supabase", "disable"])
         .assert()
         .success();
@@ -275,8 +264,7 @@ fn logging_supabase_setup_uses_cli_and_stores_writer_db_url() {
         std::env::var("PATH").unwrap_or_default()
     );
 
-    let setup_output = acps_command()
-        .env("HOME", tempdir.path())
+    let setup_output = acps_command(tempdir.path())
         .env("PATH", path)
         .env("FAKE_SUPABASE_LOG", &fake_log)
         .args([
@@ -333,8 +321,7 @@ fn logging_supabase_sql_prints_prefixed_public_ddl() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_operator_init_with_home(tempdir.path(), &[]);
 
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args([
             "logging",
             "supabase",
@@ -417,8 +404,7 @@ fn logging_supabase_sql_rejects_unsafe_schema() {
 
     // A single quote would break out of the PL/pgSQL `format()` string literal
     // in the generated revoke statements, so reject it up front.
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "logging",
             "supabase",
@@ -439,8 +425,7 @@ fn init_supabase_env_does_not_rewrite_existing_config() {
     let workspace = tempdir.path().join("workspace");
     let workspace = workspace.to_str().expect("workspace path utf8");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .env("ACP_STACK_SUPABASE_URL", "https://ambient.supabase.co")
         .env("ACP_STACK_SUPABASE_SECRET_KEY", "sb_secret_ambient")
         .args([
@@ -461,8 +446,7 @@ fn init_supabase_env_does_not_rewrite_existing_config() {
     assert!(!supabase.enabled);
     assert_eq!(supabase.url, "https://example.supabase.co");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "init",
             "--non-interactive",
@@ -487,8 +471,7 @@ fn logging_supabase_enable_rejects_invalid_url_before_writing() {
     let before = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
         .expect("config readable");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "logging",
             "supabase",

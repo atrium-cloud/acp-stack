@@ -188,7 +188,9 @@ async fn fetch_provider_models(
     models_url: &str,
 ) -> Result<Vec<ProviderModel>> {
     let api_key = resolve_provider_api_key(home, config, provider_id)?;
-    let client = reqwest::Client::new();
+    let client = crate::http_client::client_builder()
+        .build()
+        .map_err(|error| catalog_error(provider_id, format!("client build failed: {error}")))?;
     let response = client
         .get(models_url)
         .bearer_auth(api_key)

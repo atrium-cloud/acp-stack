@@ -64,7 +64,6 @@ pub struct AgentModelCatalogManager {
     state: Mutex<AgentModelCatalogState>,
     models_url: String,
     cache_path: PathBuf,
-    http_client: reqwest::Client,
 }
 
 #[derive(Debug, Default)]
@@ -85,7 +84,6 @@ impl AgentModelCatalogManager {
             state: Mutex::new(AgentModelCatalogState::default()),
             models_url: models_url.into(),
             cache_path,
-            http_client: reqwest::Client::new(),
         }
     }
 
@@ -152,7 +150,16 @@ impl AgentModelCatalogManager {
             return;
         }
 
-        match fetch_models_dev_catalog(&self.http_client, &self.models_url).await {
+        // Built per refresh: refreshes are hours apart and this keeps the manager's constructor
+        // infallible.
+        let client = match crate::http_client::client_builder().build() {
+            Ok(client) => client,
+            Err(error) => {
+                tracing::warn!(error = %error, "models.dev client build failed");
+                return;
+            }
+        };
+        match fetch_models_dev_catalog(&client, &self.models_url).await {
             Ok(fetched) => {
                 if let Err(error) =
                     write_cached_models_dev_catalog(&fetched, &self.models_url, &self.cache_path)

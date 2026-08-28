@@ -6,7 +6,8 @@ use crate::common::cli::*;
 
 #[test]
 fn prints_version() {
-    let mut command = acps_command();
+    let home = tempfile::tempdir().expect("home tempdir");
+    let mut command = acps_command(home.path());
 
     command
         .arg("--version")
@@ -17,7 +18,8 @@ fn prints_version() {
 
 #[test]
 fn security_check_is_listed_in_help() {
-    acps_command()
+    let home = tempfile::tempdir().expect("home tempdir");
+    acps_command(home.path())
         .args(["security", "--help"])
         .assert()
         .success()
@@ -27,7 +29,8 @@ fn security_check_is_listed_in_help() {
 
 #[test]
 fn top_level_help_describes_common_subcommands() {
-    acps_command()
+    let home = tempfile::tempdir().expect("home tempdir");
+    acps_command(home.path())
         .arg("--help")
         .assert()
         .success()
@@ -65,7 +68,8 @@ fn top_level_help_describes_common_subcommands() {
 
 #[test]
 fn config_help_uses_positional_import_path() {
-    acps_command()
+    let home = tempfile::tempdir().expect("home tempdir");
+    acps_command(home.path())
         .args(["config", "--help"])
         .assert()
         .success()
@@ -77,7 +81,8 @@ fn config_help_uses_positional_import_path() {
 
 #[test]
 fn validates_explicit_config_path() {
-    let mut command = acps_command();
+    let home = tempfile::tempdir().expect("home tempdir");
+    let mut command = acps_command(home.path());
 
     command
         .args([
@@ -100,7 +105,7 @@ fn validate_failure_exits_nonzero_with_specific_error() {
     )
     .expect("invalid config should be written");
 
-    let mut command = acps_command();
+    let mut command = acps_command(tempdir.path());
 
     command
         .args([
@@ -125,10 +130,9 @@ fn exports_default_home_config_to_stdout() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
 
-    let mut command = acps_command();
+    let mut command = acps_command(tempdir.path());
 
     command
-        .env("HOME", tempdir.path())
         .args(["config", "export"])
         .assert()
         .success()
@@ -146,9 +150,8 @@ fn exports_base64_default_home_config() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
 
-    let mut command = acps_command();
+    let mut command = acps_command(tempdir.path());
     let output = command
-        .env("HOME", tempdir.path())
         .args(["config", "export", "--base64"])
         .assert()
         .success()
@@ -174,10 +177,9 @@ fn exports_default_home_config_to_output_path() {
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
     let output_path = tempdir.path().join("exported.toml");
 
-    let mut command = acps_command();
+    let mut command = acps_command(tempdir.path());
 
     command
-        .env("HOME", tempdir.path())
         .args([
             "config",
             "export",

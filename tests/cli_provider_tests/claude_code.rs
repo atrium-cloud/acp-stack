@@ -65,8 +65,7 @@ fn agent_provider_use_claude_code_native_provider_presets_write_headless_config(
             seed_init_secrets(tempdir.path(), &values);
         }
 
-        let output = acps_command()
-            .env("HOME", tempdir.path())
+        let output = acps_command(tempdir.path())
             .args([
                 "agent",
                 "provider",
@@ -222,8 +221,7 @@ fn agent_provider_use_claude_code_third_party_presets_write_profiled_endpoints()
             .expect("config should be written");
         seed_provider_credential(tempdir.path(), case.provider, &[case.api_key_ref]);
 
-        acps_command()
-            .env("HOME", tempdir.path())
+        acps_command(tempdir.path())
             .args([
                 "agent",
                 "provider",
@@ -438,8 +436,7 @@ fn agent_provider_use_claude_code_third_party_provider_without_model_uses_profil
             .expect("config should be written");
         seed_provider_credential(tempdir.path(), case.provider, &[case.api_key_ref]);
 
-        let output = acps_command()
-            .env("HOME", tempdir.path())
+        let output = acps_command(tempdir.path())
             .args(["agent", "provider", "use", case.provider])
             .assert()
             .success()
@@ -511,8 +508,7 @@ fn agent_set_claude_code_custom_provider_defaults_to_anthropic_messages() {
     fs::write(config_dir.join("acps-config.toml"), claude_code_config())
         .expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "agent",
             "set",
@@ -566,8 +562,7 @@ fn agent_set_claude_code_rejects_non_anthropic_messages_custom_provider() {
     fs::write(config_dir.join("acps-config.toml"), claude_code_config())
         .expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "agent",
             "set",
@@ -608,8 +603,7 @@ fn claude_code_provider_use_writes_available_models_from_live_catalog() {
         ]
     }));
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .env("ACP_STACK_PROVIDER_MODELS_BASE", &base)
         .args([
             "agent",
@@ -654,8 +648,7 @@ fn claude_code_provider_use_succeeds_and_omits_available_models_when_catalog_off
 
     // A dead endpoint must degrade to a warning, never failing the command or
     // leaving a stale availableModels list behind.
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .env("ACP_STACK_PROVIDER_MODELS_BASE", "http://127.0.0.1:1")
         .args([
             "agent",

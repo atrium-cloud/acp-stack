@@ -25,8 +25,7 @@ creates = "opencode"
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
     let options_path = write_acp_config_options(tempdir.path(), &[], &["default", "bypass"]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args(["agent", "set", "--mode", "bypass"])
         .assert()
@@ -51,8 +50,7 @@ fn agent_set_opencode_accepts_mode_only() {
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
     let options_path = write_acp_config_options(tempdir.path(), &[], &["build", "plan"]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args(["agent", "set", "--mode", "plan"])
         .assert()
@@ -79,8 +77,7 @@ fn agent_set_codex_accepts_mode_only() {
     let options_path =
         write_acp_config_options(tempdir.path(), &[], &["read-only", "auto", "full-access"]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args(["agent", "set", "--mode", "full-access"])
         .assert()
@@ -118,8 +115,7 @@ creates = "opencode"
         );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["agent", "set", "--mode", "plan"])
         .assert()
         .failure()

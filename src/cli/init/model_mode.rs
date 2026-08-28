@@ -338,6 +338,7 @@ pub(super) fn configure_model_and_mode_for_init(
         && crate::runtime::agent::acp_bridge::resolve_command_path(
             &config.agent.command,
             &spawn_cwd,
+            home,
         )
         .is_none();
     let cwd_missing = !fixture_discovery && !spawn_cwd.is_dir();
@@ -576,7 +577,11 @@ pub(super) enum AgentSpawnPreflight {
     BinaryMissing,
 }
 
-pub(super) fn agent_spawn_preflight(config: &Config, fixture_envs: &[&str]) -> AgentSpawnPreflight {
+pub(super) fn agent_spawn_preflight(
+    home: &Path,
+    config: &Config,
+    fixture_envs: &[&str],
+) -> AgentSpawnPreflight {
     // `fixture_enabled` rather than a raw env read: in a build without
     // `test-fixtures` a stray fixture var must not skip the preflight while the
     // consumer ignores the fixture and really spawns.
@@ -595,8 +600,12 @@ pub(super) fn agent_spawn_preflight(config: &Config, fixture_envs: &[&str]) -> A
     if !spawn_cwd.is_dir() {
         return AgentSpawnPreflight::CwdMissing(spawn_cwd);
     }
-    if crate::runtime::agent::acp_bridge::resolve_command_path(&config.agent.command, &spawn_cwd)
-        .is_none()
+    if crate::runtime::agent::acp_bridge::resolve_command_path(
+        &config.agent.command,
+        &spawn_cwd,
+        home,
+    )
+    .is_none()
     {
         return AgentSpawnPreflight::BinaryMissing;
     }
@@ -611,6 +620,7 @@ pub(super) fn verify_agent_acp_connection(
     print_progress: bool,
 ) -> Result<()> {
     match agent_spawn_preflight(
+        home,
         config,
         &[FIXTURE_CONFIG_OPTIONS_ENV, FIXTURE_NEW_SESSION_RESPONSE_ENV],
     ) {
@@ -663,7 +673,11 @@ pub(super) fn probe_agent_capabilities_for_init(
     home: &Path,
     config: &Config,
 ) -> CapabilityProbeOutcome {
-    match agent_spawn_preflight(config, &[crate::dev_gates::FIXTURE_AGENT_CAPABILITIES_ENV]) {
+    match agent_spawn_preflight(
+        home,
+        config,
+        &[crate::dev_gates::FIXTURE_AGENT_CAPABILITIES_ENV],
+    ) {
         AgentSpawnPreflight::Ready | AgentSpawnPreflight::Fixture => {}
         AgentSpawnPreflight::CwdMissing(spawn_cwd) => {
             return CapabilityProbeOutcome::Unavailable {

@@ -71,6 +71,7 @@ flowchart LR
 
 ### Dev-only
 
+- HTTP client — single outbound-client constructor (`src/http_client.rs`); `test-fixtures` builds route every non-loopback request to a dead loopback proxy, and `fs_util::home_dir` refuses a HOME outside the temp dir, unless `ACP_STACK_TEST_DISPOSABLE_HOST=1` marks the host as throwaway (docker test image, CI).
 - Schema export — `dev-tools`-only (`src/schema_export.rs`): derives the published `/v1` JSON Schema from the wire DTOs with a coverage check; regenerated via the `generate-api-schema` bin.
 
 ## Boundaries

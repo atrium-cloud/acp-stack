@@ -125,6 +125,9 @@ pub fn parse_worker_args(args: &[String]) -> Result<WorkerArgs> {
 
 /// Entry point for the hidden subcommand.
 pub fn run_worker(args: Vec<String>) -> Result<()> {
+    // Resolved once at entry: the worker inherits the spawning process's HOME, and every
+    // install shell it runs must see that same value for the worker's whole lifetime.
+    let home = crate::fs_util::home_dir()?;
     let args = parse_worker_args(&args)?;
     let config = Config::load_from_path(&args.config_path)?;
     let store = StateStore::open(&args.state_path)?;
@@ -147,6 +150,7 @@ pub fn run_worker(args: Vec<String>) -> Result<()> {
         args.feature.as_deref(),
         &config.workspace.default_shell,
         &args.escalation,
+        &home,
         |current, total, name| {
             // Diagnostic only — machine-readable progress lives on the run row, so a broken log
             // pipe must not abort the install.

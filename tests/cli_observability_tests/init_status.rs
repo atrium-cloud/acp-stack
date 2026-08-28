@@ -11,8 +11,7 @@ use crate::support::*;
 fn init_creates_owner_only_config_and_state_paths() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .success();
@@ -36,10 +35,9 @@ fn init_does_not_overwrite_existing_config() {
     let config_path = config_dir.join("acps-config.toml");
     fs::write(&config_path, VALID_PLACEBO_CONFIG).expect("config should be written");
 
-    let mut command = acps_command();
+    let mut command = acps_command(tempdir.path());
 
     command
-        .env("HOME", tempdir.path())
         .args(["dev", "init", "--skip-workspace-init"])
         .assert()
         .success()
@@ -60,10 +58,9 @@ fn init_fails_when_existing_config_is_invalid() {
     )
     .expect("invalid config should be written");
 
-    let mut command = acps_command();
+    let mut command = acps_command(tempdir.path());
 
     command
-        .env("HOME", tempdir.path())
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .failure()
@@ -82,8 +79,7 @@ fn status_reports_config_state_workspace_agent_sink_and_deps() {
     let uploads_dir = workspace_dir.join("uploads");
     std::fs::create_dir_all(&uploads_dir).expect("uploads dir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .arg("--workspace-root")
         .arg(&workspace_dir)
@@ -93,9 +89,8 @@ fn status_reports_config_state_workspace_agent_sink_and_deps() {
         .success();
 
     let workspace_str = workspace_dir.display().to_string();
-    let mut command = acps_command();
+    let mut command = acps_command(tempdir.path());
     command
-        .env("HOME", tempdir.path())
         .arg("status")
         .assert()
         .success()
@@ -120,8 +115,7 @@ fn status_format_json_reports_same_top_level_sections() {
     let uploads_dir = workspace_dir.join("uploads");
     std::fs::create_dir_all(&uploads_dir).expect("uploads dir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .arg("--workspace-root")
         .arg(&workspace_dir)
@@ -130,8 +124,7 @@ fn status_format_json_reports_same_top_level_sections() {
         .assert()
         .success();
 
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args(["status", "--format", "json"])
         .assert()
         .success()
@@ -188,8 +181,7 @@ fn status_reports_sink_open_failures_when_supabase_configured() {
         .expect("mark outbox failure");
     drop(store);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .arg("status")
         .assert()
         .success()
@@ -219,8 +211,7 @@ async fn status_reports_ready_daemon_when_health_probe_is_healthy() {
         Some(&probe.socket_path),
     );
 
-    acps_command()
-        .env("HOME", home.path())
+    acps_command(home.path())
         .arg("status")
         .assert()
         .success()
@@ -248,8 +239,7 @@ async fn status_reports_degraded_daemon_without_failing_command() {
         Some(&probe.socket_path),
     );
 
-    acps_command()
-        .env("HOME", home.path())
+    acps_command(home.path())
         .arg("status")
         .assert()
         .success()
@@ -261,8 +251,7 @@ async fn status_reports_unavailable_daemon_without_failing_command() {
     let home = tempfile::tempdir().expect("tempdir should be created");
     write_cli_home(home.path(), "http://127.0.0.1:9", ADMIN_KEY);
 
-    acps_command()
-        .env("HOME", home.path())
+    acps_command(home.path())
         .arg("status")
         .assert()
         .success()

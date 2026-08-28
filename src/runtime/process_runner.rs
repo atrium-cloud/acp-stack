@@ -25,13 +25,6 @@ pub fn forward_host_env(command: &mut Command, name: &str) {
     }
 }
 
-/// Same as [`forward_host_env`] but for a `tokio::process::Command`.
-pub fn forward_host_env_tokio(command: &mut tokio::process::Command, name: &str) {
-    if let Some(value) = std::env::var_os(name) {
-        command.env(name, value);
-    }
-}
-
 /// Prepend `extra_path_dirs` (in order) to the daemon's PATH, joined for `Command::env("PATH", _)`.
 pub fn path_env_with_extra_dirs(extra_path_dirs: &[&Path]) -> Option<OsString> {
     let existing = std::env::var_os("PATH").unwrap_or_default();

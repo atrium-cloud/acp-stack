@@ -39,7 +39,7 @@ pub(super) async fn apply_stored_operation_locked(
             record.prior_was_running,
         )
     };
-    let home = home_dir()?;
+    let home = state.runtime_paths.home.clone();
     validate_native_config_secret_refs_read_only(&prepared, &home)?;
     let resuming_apply = phase == NativeConfigOperationPhase::Applying;
     let prior_config = if resuming_apply {
@@ -255,7 +255,11 @@ pub(super) async fn apply_files_and_runtime(
     prepared: &PreparedNativeConfigImport,
     restart: bool,
 ) -> Result<()> {
-    write_native_config_files(prepared, &state.runtime_paths.config_path, &home_dir()?)?;
+    write_native_config_files(
+        prepared,
+        &state.runtime_paths.config_path,
+        &state.runtime_paths.home,
+    )?;
     if prepared.imported_model
         && !model_value_is_explicit_without_discovery(&prepared.canonical_config.agent)
     {
@@ -263,7 +267,7 @@ pub(super) async fn apply_files_and_runtime(
             .model
             .ok_or_else(|| native_error("agent.native_config_model_invalid"))?;
         let response = fetch_session_config_with_timeout(
-            &home_dir()?,
+            &state.runtime_paths.home,
             &prepared.canonical_config,
             DEFAULT_MODELS_DISCOVERY_TIMEOUT,
         )
@@ -284,7 +288,7 @@ pub(super) async fn start_agent_for_config(state: &AppState, config: &Config) ->
     let target_id = config.array.primary_target.clone();
     ensure_array_process_start_allowed(config, &target_id)?;
     let target = state.agent_target(&target_id)?;
-    let environment = open_agent_environment(config)?;
+    let environment = open_agent_environment(&state.runtime_paths.home, config)?;
     *target.live_agent_config.lock().await = config.agent.clone();
     target
         .supervisor
@@ -292,6 +296,7 @@ pub(super) async fn start_agent_for_config(state: &AppState, config: &Config) ->
             target_id: &target_id,
             agent: &config.agent,
             workspace_root: &config.workspace.root,
+            home: state.runtime_paths.home.clone(),
             env: environment.env,
             providers: environment.providers,
             state: &state.state,

@@ -42,7 +42,7 @@ pub struct S3Client {
 
 impl S3Client {
     pub fn new(region: String, credentials: Credentials) -> Result<Self> {
-        let http = Client::builder()
+        let http = crate::http_client::blocking_client_builder()
             .user_agent(USER_AGENT)
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
             .build()

@@ -225,13 +225,17 @@ impl AgentTargetRegistry {
 pub struct RuntimePaths {
     pub config_path: PathBuf,
     pub state_path: PathBuf,
+    /// Resolved once at daemon boot; routes read this instead of the process env so an in-process
+    /// test server never touches the developer's real HOME.
+    pub home: PathBuf,
 }
 
 impl RuntimePaths {
-    pub fn new(config_path: PathBuf, state_path: PathBuf) -> Self {
+    pub fn new(config_path: PathBuf, state_path: PathBuf, home: PathBuf) -> Self {
         Self {
             config_path,
             state_path,
+            home,
         }
     }
 
@@ -239,10 +243,17 @@ impl RuntimePaths {
         AgentModelCatalogManager::cache_path_for_state_path(&self.state_path)
     }
 
+    /// Only the runtime-paths-less `AppState` constructors use this, and those exist for tests:
+    /// the state file's directory doubles as HOME so nothing resolves the process env.
     fn from_state_defaults(state: &StateStore) -> Self {
+        let state_path = state.path().to_path_buf();
+        let home = state_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
         let config_path = crate::config::default_config_path()
             .unwrap_or_else(|_| PathBuf::from(".config/acp-stack/acps-config.toml"));
-        Self::new(config_path, state.path().to_path_buf())
+        Self::new(config_path, state_path, home)
     }
 }
 
@@ -285,7 +296,10 @@ impl AppState {
     }
 
     pub(crate) async fn refresh_array_runtime_from_disk(&self) -> Result<Config> {
-        let config = load_runtime_config_from_disk(&self.runtime_paths.config_path)?;
+        let config = load_runtime_config_from_disk(
+            &self.runtime_paths.config_path,
+            &self.runtime_paths.home,
+        )?;
         self.agent_targets.sync_targets_from_config(&config);
         self.array_enabled
             .store(config.array.enabled, Ordering::Relaxed);
@@ -394,7 +408,7 @@ impl AppState {
         }
         // Resolved once here so every handler reading `config.agent.adapter` agrees.
         // Non-fatal: an agent unknown to the registry simply has no adapter metadata.
-        if let Ok(registry) = load_active_registry() {
+        if let Ok(registry) = load_active_registry_for_home(&runtime_paths.home) {
             populate_agent_adapter_from_registry(&mut config, &registry);
         }
         let api_cap = config.api.max_request_bytes;
@@ -418,6 +432,7 @@ impl AppState {
             event_hub.clone(),
             config_arc.clone(),
             permissions.clone(),
+            runtime_paths.home.clone(),
         );
         let auth_failure_blocker = Arc::new(
             crate::http_hardening::AuthFailureBlocker::from_config(&config_arc.security.http),
@@ -465,28 +480,21 @@ impl AppState {
     }
 }
 
-pub(crate) fn load_active_registry() -> Result<RegistryCatalog> {
-    match operator_registry_override_path() {
-        Some(path) => RegistryCatalog::load_with_override(&path),
-        None => RegistryCatalog::load_embedded(),
-    }
+/// Registry load for callers that carry a resolved HOME (every `AppState`-backed
+/// route, via `state.runtime_paths.home`).
+pub(crate) fn load_active_registry_for_home(home: &Path) -> Result<RegistryCatalog> {
+    RegistryCatalog::load_with_override(&registry_override_path(home))
 }
 
 /// Fresh config read from disk with registry-derived adapter metadata filled
 /// in — the read half of `refresh_array_runtime_from_disk`, shared with the
 /// bootstrap init server, which serves `GET /v1/models` without an `AppState`.
-pub(crate) fn load_runtime_config_from_disk(config_path: &Path) -> Result<Config> {
+pub(crate) fn load_runtime_config_from_disk(config_path: &Path, home: &Path) -> Result<Config> {
     let mut config = crate::config::load_for_runtime_reload(config_path)?;
-    if let Ok(registry) = load_active_registry() {
+    if let Ok(registry) = load_active_registry_for_home(home) {
         populate_agent_adapter_from_registry(&mut config, &registry);
     }
     Ok(config)
-}
-
-fn operator_registry_override_path() -> Option<PathBuf> {
-    crate::fs_util::home_dir()
-        .ok()
-        .map(|home| registry_override_path(&home))
 }
 
 fn registry_override_path(home: &Path) -> PathBuf {

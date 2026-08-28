@@ -132,6 +132,9 @@ fn acps_init(home: &Path, workspace_root: &Path, extra: &[&str]) -> assert_cmd::
     write_test_agent_registry(home);
     let mut cmd = Command::cargo_bin("acps").expect("acps");
     cmd.env("HOME", home)
+        // Keep the fixture guards on in the spawned binary even if the developer shell exports
+        // the disposable-host opt-out (see tests/common/cli.rs).
+        .env_remove("ACP_STACK_TEST_DISPOSABLE_HOST")
         .arg("init")
         .arg("--agent")
         .arg("workspace-test")

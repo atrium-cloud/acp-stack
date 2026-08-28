@@ -8,8 +8,7 @@ use crate::common::cli::*;
 fn init_resume_restores_recorded_edge_request_before_edge_step_exists() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -41,8 +40,7 @@ fn init_resume_restores_recorded_edge_request_before_edge_step_exists() {
 
     seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["init", "--resume", "--run-id", run_id])
         .assert()
         .success()
@@ -67,8 +65,7 @@ fn init_resume_restores_recorded_edge_request_before_edge_step_exists() {
 fn init_resume_with_nothing_to_resume_writes_no_placeholder_config() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["init", "--resume"])
         .assert()
         .failure()
@@ -120,8 +117,7 @@ creates = {}
     )
     .expect("agents override");
 
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -192,8 +188,7 @@ creates = "opencode"
         &[("MY_PROVIDER_API_KEY", "test-provider-key")],
     );
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["init", "--resume", "--run-id", run_id])
         .assert()
         .success()
@@ -216,8 +211,7 @@ creates = "opencode"
 fn init_resume_restores_recorded_skip_testflight_before_testflight_step_exists() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -242,8 +236,7 @@ fn init_resume_restores_recorded_skip_testflight_before_testflight_step_exists()
 
     seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["init", "--resume", "--run-id", run_id])
         .assert()
         .success()
@@ -262,8 +255,7 @@ fn init_resume_restores_recorded_skip_testflight_before_testflight_step_exists()
 fn init_resume_restores_recorded_testflight_before_testflight_step_exists() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -288,8 +280,7 @@ fn init_resume_restores_recorded_testflight_before_testflight_step_exists() {
 
     seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
 
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args(["init", "--resume", "--run-id", run_id])
         .assert()
         .get_output()

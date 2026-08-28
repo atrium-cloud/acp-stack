@@ -26,6 +26,7 @@ pub struct ServerHarness {
     pub local_session_auth: Arc<tokio::sync::RwLock<LocalSessionAuth>>,
     pub config_path: PathBuf,
     pub state_path: PathBuf,
+    pub home: PathBuf,
     // Public so a test needing a bespoke `AppState` can build a harness by
     // struct literal instead of through the `spawn*` helpers.
     pub join: JoinHandle<acp_stack::error::Result<()>>,
@@ -37,7 +38,20 @@ impl ServerHarness {
         Self::spawn_with_config(test_config()).await
     }
 
-    pub async fn spawn_with_config(mut config: Config) -> Self {
+    pub async fn spawn_with_config(config: Config) -> Self {
+        Self::spawn_with_config_and_optional_home(config, None).await
+    }
+
+    /// Spawn against a caller-owned HOME, for tests that seed files into it
+    /// before the routes read them.
+    pub async fn spawn_with_config_and_home(config: Config, home: PathBuf) -> Self {
+        Self::spawn_with_config_and_optional_home(config, Some(home)).await
+    }
+
+    async fn spawn_with_config_and_optional_home(
+        mut config: Config,
+        home: Option<PathBuf>,
+    ) -> Self {
         let tempdir = tempfile::tempdir().expect("tempdir");
         // Repoint workspace.root at the tempdir so the writability probe sees a
         // real directory instead of the fixture placeholder.
@@ -54,7 +68,7 @@ impl ServerHarness {
             config.workspace.runtime_user = user;
         }
         std::fs::create_dir_all(workspace_root.join("uploads")).expect("create uploads");
-        Self::spawn_with_prepared_config(config, tempdir).await
+        Self::spawn_with_prepared_config_inner(config, tempdir, home).await
     }
 
     /// Like `spawn_with_config` but keeps the passed-in `workspace.root`, for
@@ -65,6 +79,16 @@ impl ServerHarness {
     }
 
     pub async fn spawn_with_prepared_config(config: Config, tempdir: TempDir) -> Self {
+        Self::spawn_with_prepared_config_inner(config, tempdir, None).await
+    }
+
+    async fn spawn_with_prepared_config_inner(
+        config: Config,
+        tempdir: TempDir,
+        home: Option<PathBuf>,
+    ) -> Self {
+        let home = home.unwrap_or_else(|| tempdir.path().to_path_buf());
+        std::fs::create_dir_all(&home).expect("create harness home");
         let path = tempdir.path().join("state.sqlite");
         let store = StateStore::open(&path).expect("state open");
         store.migrate().expect("migrate");
@@ -77,7 +101,7 @@ impl ServerHarness {
             config.to_canonical_toml().expect("canonical test config"),
         )
         .expect("write runtime config");
-        let runtime_paths = RuntimePaths::new(config_path.clone(), path.clone());
+        let runtime_paths = RuntimePaths::new(config_path.clone(), path.clone(), home.clone());
         let effective_bind = config.api.bind.clone();
         let app_state = AppState::with_effective_bind_and_runtime_paths(
             config,
@@ -98,6 +122,7 @@ impl ServerHarness {
             local_session_auth,
             config_path,
             state_path: path,
+            home,
             join,
             _tempdir: tempdir,
         }

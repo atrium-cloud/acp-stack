@@ -13,8 +13,7 @@ async fn array_status_overlays_daemon_state_when_session_access_is_available() {
         Some(&harness.socket_path),
     );
 
-    acps_command()
-        .env("HOME", home.path())
+    acps_command(home.path())
         .env("ACP_STACK_SESSION_KEY", SESSION_KEY)
         .args(["array", "status"])
         .assert()
@@ -38,8 +37,7 @@ fn sessions_mutating_commands_require_explicit_session_key() {
         vec!["sessions", "cancel", "sess_test"],
         vec!["sessions", "close", "sess_test"],
     ] {
-        acps_command()
-            .env("HOME", home.path())
+        acps_command(home.path())
             .env_remove("ACP_STACK_SESSION_KEY")
             .args(args)
             .assert()
@@ -61,8 +59,7 @@ async fn auth_local_session_access_enable_and_disable_call_daemon() {
         Some(&harness.socket_path),
     );
 
-    acps_command()
-        .env("HOME", home.path())
+    acps_command(home.path())
         .args([
             "auth",
             "local-session-access",
@@ -77,8 +74,7 @@ async fn auth_local_session_access_enable_and_disable_call_daemon() {
     let daemon_config = fs::read_to_string(&harness.config_path).expect("daemon config");
     assert!(daemon_config.contains("session_auth = \"keyless\""));
 
-    acps_command()
-        .env("HOME", home.path())
+    acps_command(home.path())
         .args([
             "auth",
             "local-session-access",
@@ -104,8 +100,7 @@ fn auth_local_session_access_status_reports_config() {
         Some("keyless"),
     );
 
-    acps_command()
-        .env("HOME", home.path())
+    acps_command(home.path())
         .args(["auth", "local-session-access", "status"])
         .assert()
         .success()
@@ -124,8 +119,7 @@ async fn sessions_new_uses_local_socket_without_key_when_enabled() {
         Some("keyless"),
     );
 
-    acps_command()
-        .env("HOME", home.path())
+    acps_command(home.path())
         .args([
             "auth",
             "local-session-access",
@@ -136,22 +130,19 @@ async fn sessions_new_uses_local_socket_without_key_when_enabled() {
         .assert()
         .success();
 
-    acps_command()
-        .env("HOME", home.path())
+    acps_command(home.path())
         .args(["agent", "start", "--admin-key", ADMIN_KEY])
         .assert()
         .success();
 
-    acps_command()
-        .env("HOME", home.path())
+    acps_command(home.path())
         .env_remove("ACP_STACK_SESSION_KEY")
         .args(["sessions", "new"])
         .assert()
         .success()
         .stdout(predicates::str::contains("session: "));
 
-    acps_command()
-        .env("HOME", home.path())
+    acps_command(home.path())
         .args([
             "auth",
             "local-session-access",
@@ -168,8 +159,7 @@ async fn sessions_new_uses_local_socket_without_key_when_enabled() {
         Some(&harness.socket_path),
     );
 
-    acps_command()
-        .env("HOME", home.path())
+    acps_command(home.path())
         .env_remove("ACP_STACK_SESSION_KEY")
         .args(["sessions", "new"])
         .assert()
@@ -192,14 +182,12 @@ async fn sessions_new_explicit_key_uses_public_api_even_when_local_keyless() {
         Some("keyless"),
     );
 
-    acps_command()
-        .env("HOME", home.path())
+    acps_command(home.path())
         .args(["agent", "start", "--admin-key", ADMIN_KEY])
         .assert()
         .success();
 
-    acps_command()
-        .env("HOME", home.path())
+    acps_command(home.path())
         .args(["sessions", "new", "--session-key", SESSION_KEY])
         .assert()
         .success()
@@ -216,8 +204,7 @@ async fn agent_start_reports_daemon_auth_failure() {
         "acps_admin_wrongwrongwrongwrongwrongwrongwrongwrongwrong",
     );
 
-    acps_command()
-        .env("HOME", home.path())
+    acps_command(home.path())
         .args([
             "agent",
             "start",

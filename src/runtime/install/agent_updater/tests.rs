@@ -29,6 +29,7 @@ fn command_step_runs_with_null_stdin() {
             workspace_root: tempdir.path(),
             dest_dir: tempdir.path(),
             timeout: std::time::Duration::from_secs(5),
+            home: tempdir.path(),
         },
     );
     assert_eq!(row.status, "ran");
@@ -200,6 +201,7 @@ fn native_update_runs_detected_update_subcommand() {
         &dest,
         None,
         AgentUpdateOptions::default(),
+        tempdir.path(),
     )
     .expect("update");
     assert!(report.updated, "{report:?}");
@@ -294,9 +296,13 @@ fn native_probe_failure_detail_includes_status_exit_and_output() {
     permissions.set_mode(0o755);
     fs::set_permissions(&command_path, permissions).expect("chmod");
 
-    let failure =
-        super::probe_native_update_subcommand(&command_path, tempdir.path(), tempdir.path())
-            .expect_err("probe should fail");
+    let failure = super::probe_native_update_subcommand(
+        &command_path,
+        tempdir.path(),
+        tempdir.path(),
+        tempdir.path(),
+    )
+    .expect_err("probe should fail");
 
     assert!(failure.command_ran);
     let detail = failure.detail;
@@ -314,9 +320,13 @@ fn native_probe_spawn_error_is_visible_in_detail() {
     // Not executable, so the spawn itself fails rather than the command.
     fs::write(&command_path, "#!/bin/sh\nexit 0\n").expect("fake command");
 
-    let failure =
-        super::probe_native_update_subcommand(&command_path, tempdir.path(), tempdir.path())
-            .expect_err("probe should fail");
+    let failure = super::probe_native_update_subcommand(
+        &command_path,
+        tempdir.path(),
+        tempdir.path(),
+        tempdir.path(),
+    )
+    .expect_err("probe should fail");
 
     assert!(!failure.command_ran);
     let detail = failure.detail;
@@ -356,6 +366,7 @@ fn update_plan_reports_up_to_date_at_pin() {
         state: &state,
         log_base: None,
         force: false,
+        home: tempdir.path(),
     };
 
     let report =
@@ -544,6 +555,7 @@ shell_rerun = true
         &dest,
         None,
         AgentUpdateOptions::default(),
+        tempdir.path(),
     )
     .expect("update");
 
@@ -747,6 +759,7 @@ fn spawn_update_worker(
             &dest,
             None,
             AgentUpdateOptions::default(),
+            &dest,
         )
     })
 }

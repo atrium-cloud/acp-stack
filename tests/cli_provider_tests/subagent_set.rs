@@ -24,8 +24,7 @@ fn subagent_set_updates_config_and_generated_opencode_small_model() {
         &[],
     );
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "subagent",
@@ -70,8 +69,7 @@ fn subagent_set_rejects_anthropic_messages_custom_provider() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "subagent",
             "set",
@@ -106,8 +104,7 @@ fn subagent_status_prints_provider_model_and_key_ref() {
     );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["subagent", "status"])
         .assert()
         .success()
@@ -129,8 +126,7 @@ fn subagent_status_prints_inherited_main_model() {
     );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["subagent", "status"])
         .assert()
         .success()
@@ -157,8 +153,7 @@ fn subagent_match_clears_explicit_provider_and_uses_main_model() {
     );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["subagent", "match"])
         .assert()
         .success()
@@ -199,8 +194,7 @@ fn subagent_match_reenables_inherit_after_disable() {
     );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["subagent", "match"])
         .assert()
         .success()
@@ -231,8 +225,7 @@ fn subagent_match_rejects_unsupported_agents() {
         fs::create_dir_all(&config_dir).expect("config dir should be created");
         fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
-        acps_command()
-            .env("HOME", tempdir.path())
+        acps_command(tempdir.path())
             .args(["subagent", "match"])
             .assert()
             .failure()
@@ -251,8 +244,7 @@ fn subagent_match_requires_configured_main_model_without_mutating_config() {
     fs::write(&config_path, VALID_CONFIG).expect("config should be written");
     let before = fs::read_to_string(&config_path).expect("config should be readable");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["subagent", "match"])
         .assert()
         .failure()
@@ -278,8 +270,7 @@ fn subagent_disable_writes_invalid_opencode_small_model() {
     );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["subagent", "disable"])
         .assert()
         .success()
@@ -325,8 +316,7 @@ fn subagent_set_inherits_provider_and_api_key_ref_from_main_when_omitted() {
         &[],
     );
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args(["subagent", "set", "--model", "openai/gpt-5.5-mini"])
         .assert()
@@ -350,8 +340,7 @@ fn subagent_set_requires_main_provider_when_provider_omitted() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["subagent", "set", "--model", "openai/gpt-5.5-mini"])
         .assert()
         .failure()
@@ -371,8 +360,7 @@ fn subagent_set_rejects_unsupported_agents() {
         .replace(r#"command = "opencode""#, r#"command = "kimi""#);
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "subagent",
             "set",
@@ -398,8 +386,7 @@ fn subagent_set_rejects_codex_and_goose() {
         fs::create_dir_all(&config_dir).expect("config dir should be created");
         fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
-        acps_command()
-            .env("HOME", tempdir.path())
+        acps_command(tempdir.path())
             .args([
                 "subagent",
                 "set",
@@ -426,8 +413,7 @@ fn subagent_status_rejects_codex_and_goose() {
         fs::create_dir_all(&config_dir).expect("config dir should be created");
         fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
-        acps_command()
-            .env("HOME", tempdir.path())
+        acps_command(tempdir.path())
             .args(["subagent", "status"])
             .assert()
             .failure()
@@ -474,8 +460,7 @@ creates = "goose"
     )
     .expect("registry override should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "subagent",
             "set",

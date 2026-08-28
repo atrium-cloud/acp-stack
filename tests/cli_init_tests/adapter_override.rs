@@ -5,8 +5,7 @@ use std::fs;
 const CONFIG_RELATIVE_PATH: &str = ".config/acp-stack/acps-config.toml";
 
 fn init_placebo_with_override(tempdir: &tempfile::TempDir) {
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -67,8 +66,7 @@ fn init_rerun_same_agent_preserves_adapter_override() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     init_placebo_with_override(&tempdir);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -91,8 +89,7 @@ fn init_agent_change_clears_adapter_override() {
     init_placebo_with_override(&tempdir);
     seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -117,8 +114,7 @@ fn init_adapter_override_clear_removes_block() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     init_placebo_with_override(&tempdir);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -137,8 +133,7 @@ fn init_adapter_override_clear_removes_block() {
 #[test]
 fn init_adapter_override_applies_without_agent_reselection() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -150,8 +145,7 @@ fn init_adapter_override_applies_without_agent_reselection() {
         .assert()
         .success();
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -177,8 +171,7 @@ fn init_adapter_override_clear_works_after_agent_leaves_the_registry() {
 
     // With `placebo` absent from the embedded catalog, clearing the stale
     // designation must still persist even though the run then fails at install.
-    acps_command_without_placebo()
-        .env("HOME", tempdir.path())
+    acps_command_without_placebo(tempdir.path())
         .args([
             "dev",
             "init",
@@ -200,8 +193,7 @@ fn init_adapter_override_clear_works_after_agent_leaves_the_registry() {
 fn init_adapter_override_requires_an_install_source() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -221,8 +213,7 @@ fn init_adapter_override_requires_an_install_source() {
 fn init_adapter_override_conflicts_with_custom_agent_flags() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -245,8 +236,7 @@ fn init_adapter_override_conflicts_with_custom_agent_flags() {
 #[test]
 fn init_adapter_override_rejects_custom_agent_config() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -262,8 +252,7 @@ fn init_adapter_override_rejects_custom_agent_config() {
         .assert()
         .success();
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -283,8 +272,7 @@ fn init_adapter_override_rejects_custom_agent_config() {
 fn init_adapter_override_shell_variant_writes_shell_install() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",

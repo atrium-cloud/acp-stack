@@ -101,7 +101,9 @@ pub(super) async fn post_agent_daemon(
     admin_key: &str,
 ) -> Result<serde_json::Value> {
     let url = format!("{}{}", base_url.trim_end_matches('/'), path);
-    let response = reqwest::Client::new()
+    let response = crate::http_client::client_builder()
+        .build()
+        .map_err(|source| StackError::AgentApiRequest { path, source })?
         .post(url)
         .bearer_auth(admin_key)
         .send()
@@ -156,6 +158,7 @@ pub(super) fn run_agent_install(args: AgentInstallArgs, output: OutputFormat) ->
             &workspace_root,
             &store,
             Some(&log_base),
+            &home,
         )?
     } else {
         if !output.is_json() {
@@ -175,6 +178,7 @@ pub(super) fn run_agent_install(args: AgentInstallArgs, output: OutputFormat) ->
             &dest,
             &store,
             Some(&log_base),
+            &home,
         )?
     };
 

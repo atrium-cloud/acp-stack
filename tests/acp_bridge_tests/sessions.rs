@@ -11,6 +11,7 @@ async fn new_session_round_trips_and_prompt_emits_notifications() {
     let sink = Arc::new(InMemorySink::default());
     let sink_dyn: Arc<dyn SessionEventSink> = sink.clone();
     let bridge = AcpBridge::spawn(
+        &std::env::temp_dir(),
         &fake_agent_config(),
         fake_env(),
         std::env::temp_dir(),
@@ -67,6 +68,7 @@ async fn prompt_rejects_unadvertised_image_content() {
     use agent_client_protocol::schema::v1::{ContentBlock, ImageContent, PromptRequest, SessionId};
 
     let bridge = AcpBridge::spawn(
+        &std::env::temp_dir(),
         &fake_agent_config(),
         fake_env(),
         std::env::temp_dir(),
@@ -123,6 +125,7 @@ async fn cancelled_permission_does_not_block_dispatch_and_is_persisted() {
     let mut config = fake_agent_config();
     config.args.push("--request-permission-then-cancel".into());
     let bridge = AcpBridge::spawn(
+        &std::env::temp_dir(),
         &config,
         fake_env(),
         std::env::temp_dir(),
@@ -171,6 +174,7 @@ async fn new_session_returns_custom_model_config_option_id() {
         "agent-model".into(),
     ]);
     let bridge = AcpBridge::spawn(
+        &std::env::temp_dir(),
         &config,
         fake_env(),
         std::env::temp_dir(),
@@ -204,6 +208,7 @@ async fn new_session_advertises_config_options_to_strict_agent() {
         "--require-client-config-options".into(),
     ]);
     let bridge = AcpBridge::spawn(
+        &std::env::temp_dir(),
         &config,
         fake_env(),
         std::env::temp_dir(),
@@ -239,6 +244,7 @@ async fn set_config_option_sends_boolean_values() {
         "fast@model_config=false".into(),
     ]);
     let bridge = AcpBridge::spawn(
+        &std::env::temp_dir(),
         &config,
         fake_env(),
         std::env::temp_dir(),

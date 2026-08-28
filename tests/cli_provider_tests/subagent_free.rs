@@ -17,8 +17,7 @@ fn subagent_free_infers_openrouter_from_main_provider() {
     );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["subagent", "free"])
         .assert()
         .success()
@@ -53,8 +52,7 @@ fn subagent_free_can_use_opencode_big_pickle() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["subagent", "free"])
         .assert()
         .success()
@@ -82,8 +80,7 @@ fn subagent_free_prefers_current_opencode_provider_over_stale_openrouter_env() {
     );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["subagent", "free"])
         .assert()
         .success()
@@ -110,8 +107,7 @@ fn subagent_free_rejects_provider_without_free_support() {
     );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["subagent", "free"])
         .assert()
         .failure()
@@ -134,8 +130,7 @@ fn subagent_free_rejects_unsupported_main_provider_despite_stale_free_env() {
     );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["subagent", "free"])
         .assert()
         .failure()
@@ -158,8 +153,7 @@ fn subagent_free_resolves_opencode_go_alias_with_custom_main_api_key_ref() {
     );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["subagent", "free"])
         .assert()
         .success()
@@ -186,8 +180,7 @@ fn subagent_free_preserves_custom_main_api_key_ref_when_provider_matches() {
     );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["subagent", "free"])
         .assert()
         .success()

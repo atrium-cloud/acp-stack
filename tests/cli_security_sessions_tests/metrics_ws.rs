@@ -14,8 +14,7 @@ async fn metrics_summary_format_json_returns_summary() {
         Some(&harness.socket_path),
     );
 
-    let output = acps_command()
-        .env("HOME", home.path())
+    let output = acps_command(home.path())
         .args(["metrics", "summary", "--format", "json"])
         .assert()
         .success()
@@ -38,8 +37,7 @@ async fn ws_common_commands_format_json() {
         Some(&harness.socket_path),
     );
 
-    let connections_output = acps_command()
-        .env("HOME", home.path())
+    let connections_output = acps_command(home.path())
         .args(["ws", "connections", "--format", "json"])
         .assert()
         .success()
@@ -53,8 +51,7 @@ async fn ws_common_commands_format_json() {
         "{connections_body}",
     );
 
-    let sessions_output = acps_command()
-        .env("HOME", home.path())
+    let sessions_output = acps_command(home.path())
         .args(["ws", "sessions", "--format", "json"])
         .assert()
         .success()
@@ -68,8 +65,7 @@ async fn ws_common_commands_format_json() {
         "{sessions_body}"
     );
 
-    let disconnect_output = acps_command()
-        .env("HOME", home.path())
+    let disconnect_output = acps_command(home.path())
         .args([
             "ws",
             "disconnect",
@@ -95,8 +91,7 @@ fn ws_disconnect_requires_target_before_admin_key() {
     let home = tempfile::tempdir().expect("tempdir should be created");
     write_cli_home(home.path(), "http://127.0.0.1:9", ADMIN_KEY);
 
-    acps_command()
-        .env("HOME", home.path())
+    acps_command(home.path())
         .args(["ws", "disconnect"])
         .assert()
         .failure()

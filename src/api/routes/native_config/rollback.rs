@@ -159,7 +159,7 @@ pub(super) async fn resume_pending_rollback_locked(
             return Ok(ApplyStoredOutcome::Blocked(blocked.operation));
         }
     }
-    let home = home_dir()?;
+    let home = state.runtime_paths.home.clone();
     if restore_transaction_and_agent(
         state,
         &marker.rollback_snapshots,

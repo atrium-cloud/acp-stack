@@ -3,6 +3,7 @@
 //! [`SecretStore`] so no endpoint can bypass them.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -146,6 +147,7 @@ pub struct ApplyResponse {
 /// agent-config mutation lock; the store persists the catalog swap and the
 /// namespace watermark atomically.
 pub fn apply(
+    home: &Path,
     store: &mut SecretStore,
     config: &Config,
     namespace: &str,
@@ -162,7 +164,7 @@ pub fn apply(
     }
     let DesiredState::ProviderCredential { selection } = request.desired;
     let selection = selection
-        .map(|selection| resolve_selection(store, config, selection))
+        .map(|selection| resolve_selection(home, store, config, selection))
         .transpose()?;
     let outcome = store.apply_managed_state_credential(
         namespace,
@@ -182,6 +184,7 @@ pub fn apply(
 /// orphaning the secrets a bare `set_many` would already have written. `source_refs` still resolve
 /// against the flat store, so a selection may reference a secret this same body deposits.
 pub fn deposit_and_apply<'a, I>(
+    home: &Path,
     store: &mut SecretStore,
     config: &Config,
     namespace: &str,
@@ -209,7 +212,7 @@ where
         revision,
         |store| {
             selection
-                .map(|selection| resolve_selection(store, config, selection))
+                .map(|selection| resolve_selection(home, store, config, selection))
                 .transpose()
         },
     )?;
@@ -232,6 +235,7 @@ where
 /// credential really did change, so the orchestrator must advance the
 /// revision.
 fn resolve_selection(
+    home: &Path,
     store: &SecretStore,
     config: &Config,
     selection: CredentialSelection,
@@ -320,7 +324,7 @@ fn resolve_selection(
     }
     if let Some(base_url) = selection.base_url.as_deref() {
         validate_base_url(base_url)?;
-        require_agent_supports_base_url(config)?;
+        require_agent_supports_base_url(home, config)?;
         require_provider_accepts_base_url(config, &selection.provider_id)?;
         require_single_endpoint_override(store, &selection.provider_id)?;
     }
@@ -363,8 +367,8 @@ fn validate_base_url(base_url: &str) -> Result<()> {
 /// Reject the endpoint override before any watermark or catalog persist when
 /// the configured agent has no native config surface to write it into —
 /// otherwise the revision applies and the endpoint silently never takes effect.
-fn require_agent_supports_base_url(config: &Config) -> Result<()> {
-    if crate::runtime::install::agent_supports_provider_base_url(&config.agent.id)? {
+fn require_agent_supports_base_url(home: &Path, config: &Config) -> Result<()> {
+    if crate::runtime::install::agent_supports_provider_base_url(home, &config.agent.id)? {
         return Ok(());
     }
     Err(StackError::InvalidParam {

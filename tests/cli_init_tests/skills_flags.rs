@@ -4,8 +4,7 @@ use crate::common::cli::*;
 fn init_no_skills_flag_skips_skill_install_prompt() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -24,8 +23,7 @@ fn init_no_skills_flag_skips_skill_install_prompt() {
 fn init_rejects_skills_without_source() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["init", "--skills", "repo-map"])
         .assert()
         .failure()
@@ -36,8 +34,7 @@ fn init_rejects_skills_without_source() {
 fn init_rejects_source_without_skills() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["init", "--skills-source", "openai"])
         .assert()
         .failure()
@@ -48,8 +45,7 @@ fn init_rejects_source_without_skills() {
 fn init_rejects_removed_plugins_flag() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["init", "--plugins", "cloudflare"])
         .assert()
         .failure()
@@ -60,8 +56,7 @@ fn init_rejects_removed_plugins_flag() {
 fn init_rejects_removed_plugins_source_flag() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["init", "--plugins-source", "openai"])
         .assert()
         .failure()
@@ -75,8 +70,7 @@ fn init_validates_skill_names_before_download() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",

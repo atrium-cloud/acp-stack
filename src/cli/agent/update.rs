@@ -236,6 +236,7 @@ fn update_agent_offline(
         &local_bin,
         Some(&log_base),
         options,
+        home,
     )
 }
 

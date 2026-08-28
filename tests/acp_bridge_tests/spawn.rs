@@ -5,6 +5,7 @@ use crate::support::{fake_agent_config, fake_env, null_sink};
 #[tokio::test]
 async fn spawn_completes_initialize_and_captures_capabilities() {
     let bridge = AcpBridge::spawn(
+        &std::env::temp_dir(),
         &fake_agent_config(),
         fake_env(),
         std::env::temp_dir(),
@@ -27,6 +28,7 @@ async fn spawn_sends_client_identity() {
     let mut config = fake_agent_config();
     config.args.push("--require-client-info".into());
     let bridge = AcpBridge::spawn(
+        &std::env::temp_dir(),
         &config,
         fake_env(),
         std::env::temp_dir(),
@@ -46,6 +48,7 @@ async fn spawn_rejects_an_incompatible_protocol_version() {
     let mut config = fake_agent_config();
     config.args.push("--initialize-protocol-v0".into());
     let error = match AcpBridge::spawn(
+        &std::env::temp_dir(),
         &config,
         fake_env(),
         std::env::temp_dir(),
@@ -75,6 +78,7 @@ async fn unadvertised_http_mcp_transport_is_skipped_not_fatal() {
     use agent_client_protocol::schema::v1::{McpServer, McpServerHttp};
 
     let bridge = AcpBridge::spawn(
+        &std::env::temp_dir(),
         &fake_agent_config(),
         fake_env(),
         std::env::temp_dir(),
@@ -108,6 +112,7 @@ async fn unadvertised_http_mcp_transport_is_skipped_not_fatal() {
 #[tokio::test]
 async fn shutdown_terminates_the_child() {
     let bridge = AcpBridge::spawn(
+        &std::env::temp_dir(),
         &fake_agent_config(),
         fake_env(),
         std::env::temp_dir(),
@@ -143,6 +148,7 @@ async fn shutdown_terminates_the_child() {
 #[tokio::test]
 async fn terminate_probe_terminates_the_child() {
     let bridge = AcpBridge::spawn(
+        &std::env::temp_dir(),
         &fake_agent_config(),
         fake_env(),
         std::env::temp_dir(),
@@ -173,7 +179,10 @@ async fn terminate_probe_terminates_the_child() {
 
 #[tokio::test]
 async fn spawn_forwards_only_reserved_runtime_context_and_explicit_env() {
-    let home = std::env::var("HOME").expect("HOME must be set for bridge runtime context test");
+    // The bridge forwards the caller-supplied home verbatim, so a temp path
+    // keeps the child away from the developer's real HOME.
+    let home_dir = tempfile::tempdir().expect("tempdir");
+    let home = home_dir.path().to_string_lossy().into_owned();
     let mut config = fake_agent_config();
     config.args.extend([
         "--assert-env-present".into(),
@@ -191,6 +200,7 @@ async fn spawn_forwards_only_reserved_runtime_context_and_explicit_env() {
     env.insert("ACP_STACK_EXPLICIT_ENV".into(), "present".into());
 
     let bridge = AcpBridge::spawn(
+        home_dir.path(),
         &config,
         env,
         std::env::temp_dir(),

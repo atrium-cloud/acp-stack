@@ -14,8 +14,7 @@ fn init_skips_opencode_config_without_configured_provider() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .success()
@@ -34,8 +33,7 @@ fn init_provider_sets_opencode_auth_config_without_model() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -80,9 +78,8 @@ fn init_provider_sets_opencode_auth_config_without_model() {
 fn init_provider_fails_noninteractive_when_default_secret_is_missing() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    let output = acps_command()
+    let output = acps_command(tempdir.path())
         .env_remove(TEST_SKIP_AGENT_INSTALL_ENV)
-        .env("HOME", tempdir.path())
         .args([
             "dev",
             "init",
@@ -128,8 +125,7 @@ fn init_existing_provider_requires_secret_before_model_discovery() {
     );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -157,8 +153,7 @@ fn init_existing_provider_requires_secret_without_model_flag() {
     );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["dev", "init", "--skip-workspace-init"])
         .assert()
         .failure()
@@ -181,8 +176,7 @@ fn init_existing_provider_repairs_env_before_model_discovery() {
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
     let options_path = write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &[]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "dev",
@@ -213,8 +207,7 @@ fn init_existing_provider_fills_default_api_key_ref_before_model_discovery() {
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
     let options_path = write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &[]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "dev",
@@ -245,8 +238,7 @@ fn init_rejects_imported_provider_that_agent_does_not_support() {
     );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["dev", "init", "--skip-workspace-init"])
         .assert()
         .failure()
@@ -272,8 +264,7 @@ fn init_rejects_stale_unsupported_provider_block_for_kimi() {
     );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["dev", "init", "--skip-workspace-init"])
         .assert()
         .failure()
@@ -299,8 +290,7 @@ fn init_skips_stale_provider_block_when_agent_cannot_set_provider() {
     );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["dev", "init", "--skip-workspace-init"])
         .assert()
         .success();
@@ -321,8 +311,7 @@ fn init_provider_succeeds_noninteractive_when_default_secret_exists() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",

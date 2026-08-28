@@ -22,6 +22,7 @@ pub const ADMIN_KEY: &str = "acps_admin_dddddddddddddddddddddddddddddddddddddddd
 pub struct AgentHarness {
     pub base_url: String,
     pub config_path: std::path::PathBuf,
+    pub home: std::path::PathBuf,
     // Option so `respawn` can move the dir out of this `Drop` type.
     tempdir: Option<TempDir>,
     pub state: Arc<TokioMutex<StateStore>>,
@@ -33,14 +34,28 @@ impl AgentHarness {
         Self::spawn_with_config(test_config()).await
     }
 
-    pub async fn spawn_with_config(mut config: Config) -> Self {
+    pub async fn spawn_with_config(config: Config) -> Self {
+        Self::spawn_with_config_and_optional_home(config, None).await
+    }
+
+    /// Spawn against a caller-owned HOME, for tests that seed files into it
+    /// before the routes read them.
+    pub async fn spawn_with_config_and_home(config: Config, home: std::path::PathBuf) -> Self {
+        Self::spawn_with_config_and_optional_home(config, Some(home)).await
+    }
+
+    async fn spawn_with_config_and_optional_home(
+        mut config: Config,
+        home: Option<std::path::PathBuf>,
+    ) -> Self {
         let tempdir = TempDir::new().expect("tempdir");
         if config.workspace.root == "/workspace" {
             let workspace = tempdir.path().join("workspace");
             config.workspace.root = workspace.to_string_lossy().into_owned();
             config.workspace.uploads = workspace.join("uploads").to_string_lossy().into_owned();
         }
-        Self::spawn_in_tempdir(tempdir, config, true).await
+        let home = home.unwrap_or_else(|| tempdir.path().to_path_buf());
+        Self::spawn_in_tempdir(tempdir, config, home, true).await
     }
 
     /// Boot a fresh server on the same tempdir, reloading config from disk as a restarted `acps`
@@ -51,10 +66,17 @@ impl AgentHarness {
         let config_path = tempdir.path().join("acps-config.toml");
         let content = std::fs::read_to_string(&config_path).expect("on-disk config read");
         let config = load_config_from_str(&content).expect("on-disk config parses");
-        Self::spawn_in_tempdir(tempdir, config, false).await
+        let home = self.home.clone();
+        Self::spawn_in_tempdir(tempdir, config, home, false).await
     }
 
-    async fn spawn_in_tempdir(tempdir: TempDir, config: Config, write_config: bool) -> Self {
+    async fn spawn_in_tempdir(
+        tempdir: TempDir,
+        config: Config,
+        home: std::path::PathBuf,
+        write_config: bool,
+    ) -> Self {
+        std::fs::create_dir_all(&home).expect("harness home");
         let path = tempdir.path().join("state.sqlite");
         let config_path = tempdir.path().join("acps-config.toml");
         if write_config {
@@ -67,7 +89,7 @@ impl AgentHarness {
         let store = StateStore::open(&path).expect("state open");
         store.migrate().expect("migrate");
         let effective_bind = config.api.bind.clone();
-        let runtime_paths = RuntimePaths::new(config_path.clone(), path);
+        let runtime_paths = RuntimePaths::new(config_path.clone(), path, home.clone());
         let app_state = AppState::with_effective_bind_and_runtime_paths(
             config,
             store,
@@ -83,6 +105,7 @@ impl AgentHarness {
         Self {
             base_url,
             config_path,
+            home,
             tempdir: Some(tempdir),
             state,
             join,

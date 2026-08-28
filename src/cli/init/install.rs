@@ -65,6 +65,7 @@ pub(super) fn install_configured_agent(
             &workspace_root,
             store,
             Some(&log_base),
+            home,
         );
     }
     let entry = registry.lookup_required(&config.agent.id)?;
@@ -76,6 +77,7 @@ pub(super) fn install_configured_agent(
         &local_bin_dir(home),
         store,
         Some(&log_base),
+        home,
     )
 }
 

@@ -189,7 +189,7 @@ pub fn install(
 /// Shared blocking-HTTP client factory for every GitHub Releases caller; `repo` only labels the
 /// construction failure.
 pub(crate) fn build_client(repo: &str) -> Result<reqwest::blocking::Client> {
-    reqwest::blocking::Client::builder()
+    crate::http_client::blocking_client_builder()
         .timeout(REQUEST_TIMEOUT)
         .user_agent(USER_AGENT)
         .build()

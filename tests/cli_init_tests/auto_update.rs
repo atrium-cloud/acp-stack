@@ -6,8 +6,7 @@ use std::fs;
 fn init_stack_update_off_sets_manual_policy() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -34,8 +33,7 @@ fn init_stack_update_off_sets_manual_policy() {
 fn init_stack_update_on_writes_compatible_policy_and_frequency() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -65,8 +63,7 @@ fn init_stack_update_on_writes_compatible_policy_and_frequency() {
 fn init_stack_update_rejects_sub_day_frequency() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -96,8 +93,7 @@ fn init_stack_update_rejects_sub_day_frequency() {
 fn init_stack_update_rejects_invalid_policy_before_config_creation() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -125,8 +121,7 @@ fn init_stack_update_rejects_invalid_policy_before_config_creation() {
 fn init_stack_update_existing_config_preserves_policy_without_flags() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -142,8 +137,7 @@ fn init_stack_update_existing_config_preserves_policy_without_flags() {
         .assert()
         .success();
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -169,8 +163,7 @@ fn init_stack_update_existing_config_preserves_policy_without_flags() {
 fn init_stack_update_default_preserved_non_interactive() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -197,8 +190,7 @@ fn init_stack_update_default_preserved_non_interactive() {
 fn init_agent_update_off_disables_auto_update() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -231,8 +223,7 @@ fn init_agent_update_off_disables_auto_update() {
 fn init_agent_update_on_writes_enabled_and_frequency() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -266,8 +257,7 @@ fn init_agent_update_on_accepts_hourly_frequency() {
 
     // Managed agent updates accept hour granularity, unlike the stack self-update's
     // day minimum.
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -299,8 +289,7 @@ fn init_agent_update_on_accepts_hourly_frequency() {
 fn init_agent_update_rejects_sub_hour_frequency() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -330,8 +319,7 @@ fn init_agent_update_rejects_sub_hour_frequency() {
 fn init_agent_update_rejects_invalid_choice_before_config_creation() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -359,8 +347,7 @@ fn init_agent_update_rejects_invalid_choice_before_config_creation() {
 fn init_agent_update_default_enabled_non_interactive() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -390,8 +377,7 @@ fn init_agent_update_on_rejected_for_custom_agent() {
 
     // Custom agents carry no [agent.auto_update] block because the managed updater
     // cannot drive them.
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -421,8 +407,7 @@ fn init_agent_update_on_rejected_for_custom_agent() {
 fn init_agent_update_off_noop_for_custom_agent() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -456,8 +441,7 @@ fn init_agent_update_off_strips_stale_block_for_custom_agent() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_path = tempdir.path().join(".config/acp-stack/acps-config.toml");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -486,8 +470,7 @@ fn init_agent_update_off_strips_stale_block_for_custom_agent() {
     )
     .expect("config should be writable");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -512,8 +495,7 @@ fn init_agent_update_seeds_block_for_registry_config_missing_it() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_path = tempdir.path().join(".config/acp-stack/acps-config.toml");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -552,8 +534,7 @@ fn init_agent_update_seeds_block_for_registry_config_missing_it() {
     fs::write(&config_path, &stripped).expect("stripped config should be writable");
 
     // `--agent-update on` must seed the block, not reject it as an escape-hatch install.
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",

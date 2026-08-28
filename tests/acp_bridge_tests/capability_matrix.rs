@@ -5,6 +5,7 @@ use crate::support::{fake_agent_config, fake_env, null_sink};
 #[tokio::test]
 async fn list_sessions_returns_agent_sessions() {
     let bridge = AcpBridge::spawn(
+        &std::env::temp_dir(),
         &fake_agent_config(),
         fake_env(),
         std::env::temp_dir(),
@@ -33,6 +34,7 @@ async fn list_sessions_follows_pagination() {
     let mut config = fake_agent_config();
     config.args.push("--session-list-paginated".into());
     let bridge = AcpBridge::spawn(
+        &std::env::temp_dir(),
         &config,
         fake_env(),
         std::env::temp_dir(),
@@ -59,6 +61,7 @@ async fn list_sessions_returns_unsupported_capability_when_agent_disables_flag()
     let mut config = fake_agent_config();
     config.args.push("--no-cap-list-session".into());
     let bridge = AcpBridge::spawn(
+        &std::env::temp_dir(),
         &config,
         fake_env(),
         std::env::temp_dir(),
@@ -90,6 +93,7 @@ async fn list_sessions_rejects_repeated_cursor() {
     let mut config = fake_agent_config();
     config.args.push("--session-list-repeated-cursor".into());
     let bridge = AcpBridge::spawn(
+        &std::env::temp_dir(),
         &config,
         fake_env(),
         std::env::temp_dir(),
@@ -122,6 +126,7 @@ async fn load_session_returns_unsupported_capability_when_agent_disables_flag() 
     let mut config = fake_agent_config();
     config.args.push("--no-cap-load-session".into());
     let bridge = AcpBridge::spawn(
+        &std::env::temp_dir(),
         &config,
         fake_env(),
         std::env::temp_dir(),
@@ -158,6 +163,7 @@ async fn resume_session_returns_unsupported_capability_when_agent_disables_flag(
     let mut config = fake_agent_config();
     config.args.push("--no-cap-resume-session".into());
     let bridge = AcpBridge::spawn(
+        &std::env::temp_dir(),
         &config,
         fake_env(),
         std::env::temp_dir(),
@@ -193,6 +199,7 @@ async fn close_session_returns_unsupported_capability_when_agent_disables_flag()
     let mut config = fake_agent_config();
     config.args.push("--no-cap-close-session".into());
     let bridge = AcpBridge::spawn(
+        &std::env::temp_dir(),
         &config,
         fake_env(),
         std::env::temp_dir(),
@@ -226,6 +233,7 @@ async fn delete_session_returns_unsupported_capability_when_agent_disables_flag(
     let mut config = fake_agent_config();
     config.args.push("--no-cap-delete-session".into());
     let bridge = AcpBridge::spawn(
+        &std::env::temp_dir(),
         &config,
         fake_env(),
         std::env::temp_dir(),
@@ -258,6 +266,7 @@ async fn delete_session_returns_unsupported_capability_when_agent_disables_flag(
 #[tokio::test]
 async fn delete_session_round_trips_when_the_agent_advertises_the_capability() {
     let bridge = AcpBridge::spawn(
+        &std::env::temp_dir(),
         &fake_agent_config(),
         fake_env(),
         std::env::temp_dir(),
@@ -284,6 +293,7 @@ async fn delete_session_round_trips_when_the_agent_advertises_the_capability() {
 #[tokio::test]
 async fn fork_session_returns_child_session() {
     let bridge = AcpBridge::spawn(
+        &std::env::temp_dir(),
         &fake_agent_config(),
         fake_env(),
         std::env::temp_dir(),
@@ -315,6 +325,7 @@ async fn fork_session_returns_unsupported_capability_when_agent_disables_flag() 
     let mut config = fake_agent_config();
     config.args.push("--no-cap-fork-session".into());
     let bridge = AcpBridge::spawn(
+        &std::env::temp_dir(),
         &config,
         fake_env(),
         std::env::temp_dir(),
@@ -353,6 +364,7 @@ async fn fork_session_sends_message_id_when_capability_is_present() {
         "00000000-0000-4000-8000-000000000001".into(),
     ]);
     let bridge = AcpBridge::spawn(
+        &std::env::temp_dir(),
         &config,
         fake_env(),
         std::env::temp_dir(),
@@ -384,6 +396,7 @@ async fn fork_session_rejects_message_id_when_capability_is_missing() {
     let mut config = fake_agent_config();
     config.args.push("--no-cap-fork-message-id".into());
     let bridge = AcpBridge::spawn(
+        &std::env::temp_dir(),
         &config,
         fake_env(),
         std::env::temp_dir(),

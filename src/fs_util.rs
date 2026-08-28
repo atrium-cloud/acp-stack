@@ -72,7 +72,37 @@ pub fn home_dir() -> Result<PathBuf> {
     let home = std::env::var_os("HOME")
         .filter(|value| !value.is_empty())
         .ok_or(StackError::HomeNotSet)?;
-    Ok(PathBuf::from(home))
+    let home = PathBuf::from(home);
+    ensure_home_isolated(&home)?;
+    Ok(home)
+}
+
+/// Fixture builds run inside the developer's test suite: a HOME outside the temp dir would let a
+/// test rewrite the developer's real agent configs, so refuse it unless the host is disposable.
+#[cfg(feature = "test-fixtures")]
+fn ensure_home_isolated(home: &Path) -> Result<()> {
+    if crate::dev_gates::disposable_host_enabled() || path_is_under_temp_dir(home) {
+        return Ok(());
+    }
+    Err(StackError::HomeNotIsolated {
+        path: home.to_path_buf(),
+    })
+}
+
+#[cfg(not(feature = "test-fixtures"))]
+fn ensure_home_isolated(_home: &Path) -> Result<()> {
+    Ok(())
+}
+
+/// Canonicalize both sides: macOS reports `$TMPDIR` under `/var` while the real path is
+/// `/private/var`, and tempfile hands out whichever form the caller resolved.
+#[cfg(feature = "test-fixtures")]
+fn path_is_under_temp_dir(path: &Path) -> bool {
+    let canonical = |candidate: &Path| candidate.canonicalize().ok();
+    match (canonical(&std::env::temp_dir()), canonical(path)) {
+        (Some(temp), Some(target)) => target.starts_with(&temp),
+        _ => false,
+    }
 }
 
 pub fn parent_dir(path: &Path) -> Result<&Path> {
@@ -388,6 +418,24 @@ fn sync_file(path: &Path, file: &std::fs::File) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "test-fixtures")]
+    #[test]
+    fn temp_home_passes_isolation_check() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        assert!(path_is_under_temp_dir(tempdir.path()));
+    }
+
+    #[cfg(feature = "test-fixtures")]
+    #[test]
+    fn non_temp_home_fails_isolation_check() {
+        // The crate root exists but is nowhere near the temp dir, like a developer's real HOME.
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert!(!path_is_under_temp_dir(repo_root));
+        assert!(!path_is_under_temp_dir(Path::new(
+            "/definitely/missing/home"
+        )));
+    }
 
     #[test]
     fn write_new_file_owner_only_persists_content() {

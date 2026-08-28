@@ -6,10 +6,9 @@ use std::fs;
 fn init_creates_config_and_state() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    let mut command = acps_command();
+    let mut command = acps_command(tempdir.path());
 
     command
-        .env("HOME", tempdir.path())
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .success()
@@ -37,8 +36,7 @@ fn init_creates_config_and_state() {
 fn init_writes_mcp_declarations_to_starter_config() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -116,8 +114,7 @@ fn init_writes_mcp_declarations_to_starter_config() {
 fn init_rejects_removed_startup_script_flag() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",

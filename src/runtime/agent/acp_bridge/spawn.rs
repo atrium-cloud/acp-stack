@@ -30,6 +30,7 @@ impl AcpBridge {
     /// context and explicitly resolved secrets ever reach the child.
     #[allow(clippy::too_many_arguments)]
     pub async fn spawn(
+        home: &Path,
         agent: &AgentConfig,
         env: HashMap<String, String>,
         cwd: PathBuf,
@@ -43,8 +44,8 @@ impl AcpBridge {
         // Last write wins, so the namespace owner's declaration overrides both
         // `[agent].env` and the runtime-managed rewrites above it.
         crate::extensions::apply_workload_env(&mut env, network_provider);
-        let wrapped = wrap_agent_command(agent, &cwd, sandbox, network_provider)?;
-        let command = build_agent_command(&wrapped, &cwd, &env);
+        let wrapped = wrap_agent_command(agent, &cwd, sandbox, network_provider, home)?;
+        let command = build_agent_command(&wrapped, &cwd, &env, home);
         let (mut child, stdin, stdout) =
             spawn_agent_child(command, &wrapped, sandbox, network_provider)?;
 
@@ -60,6 +61,7 @@ impl AcpBridge {
         let terminal_context = Arc::new(TerminalHandlerContext {
             registry: Arc::clone(&terminals),
             workspace_root: cwd.clone(),
+            home: home.to_path_buf(),
             sandbox: sandbox.clone(),
             network_provider: network_provider.cloned(),
             command_log,
@@ -108,14 +110,15 @@ fn wrap_agent_command(
     cwd: &Path,
     sandbox: &crate::config::SandboxConfig,
     network_provider: Option<&crate::extensions::NetworkProviderExtension>,
+    home: &Path,
 ) -> Result<crate::runtime::sandbox::WrappedCommand> {
-    let command_path = resolve_command_path(&agent.command, cwd).ok_or_else(|| {
+    let command_path = resolve_command_path(&agent.command, cwd, home).ok_or_else(|| {
         StackError::AgentInitializeFailed {
             reason: format!("agent command `{}` not found on PATH", agent.command),
         }
     })?;
-    // `off` is a verbatim passthrough so single-process behavior is unchanged
-    // and HOME need not be resolvable; other modes wrap the spawn.
+    // `off` is a verbatim passthrough so single-process behavior is unchanged;
+    // other modes wrap the spawn.
     if matches!(sandbox.mode, crate::config::SandboxMode::Off) {
         Ok(crate::runtime::sandbox::WrappedCommand {
             program: command_path,
@@ -127,7 +130,7 @@ fn wrap_agent_command(
             network_provider,
             &command_path,
             &agent.args,
-            &crate::fs_util::home_dir()?,
+            home,
             cwd,
             crate::ownership::process_euid(),
             crate::ownership::process_egid(),
@@ -139,6 +142,7 @@ fn build_agent_command(
     wrapped: &crate::runtime::sandbox::WrappedCommand,
     cwd: &Path,
     env: &HashMap<String, String>,
+    home: &Path,
 ) -> Command {
     let mut command = Command::new(&wrapped.program);
     command
@@ -152,10 +156,12 @@ fn build_agent_command(
         .env_clear();
     // Runtime context is deliberately narrow: managed PATH for
     // registry-installed harnesses, HOME for agent config/cache directories.
-    if let Some(path) = agent_process_path() {
+    // Both derive from the caller's boot-time home, never the process env at
+    // spawn time.
+    if let Some(path) = agent_process_path(home) {
         command.env("PATH", path);
     }
-    forward_host_env_tokio(&mut command, "HOME");
+    command.env("HOME", home);
     for (name, value) in env {
         if matches!(name.as_str(), "PATH" | "HOME") {
             tracing::warn!(
@@ -565,7 +571,7 @@ async fn fail_spawn(child: &mut Child, connection_task: JoinHandle<()>) {
 }
 
 /// Resolve a configured command path the same way process spawning will.
-pub(crate) fn resolve_command_path(command: &str, cwd: &Path) -> Option<PathBuf> {
+pub(crate) fn resolve_command_path(command: &str, cwd: &Path, home: &Path) -> Option<PathBuf> {
     if command.is_empty() {
         return None;
     }
@@ -585,7 +591,7 @@ pub(crate) fn resolve_command_path(command: &str, cwd: &Path) -> Option<PathBuf>
             None
         };
     }
-    for dir in command_search_paths() {
+    for dir in command_search_paths(home) {
         let candidate = dir.join(command);
         if candidate.is_file() {
             return Some(candidate);
@@ -594,8 +600,8 @@ pub(crate) fn resolve_command_path(command: &str, cwd: &Path) -> Option<PathBuf>
     None
 }
 
-pub(crate) fn agent_process_path() -> Option<std::ffi::OsString> {
-    let paths = command_search_paths();
+pub(crate) fn agent_process_path(home: &Path) -> Option<std::ffi::OsString> {
+    let paths = command_search_paths(home);
     if paths.is_empty() {
         None
     } else {
@@ -603,11 +609,9 @@ pub(crate) fn agent_process_path() -> Option<std::ffi::OsString> {
     }
 }
 
-fn command_search_paths() -> Vec<PathBuf> {
+fn command_search_paths(home: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    if let Some(home) = std::env::var_os("HOME") {
-        paths.push(PathBuf::from(home).join(".local").join("bin"));
-    }
+    paths.push(home.join(".local").join("bin"));
     paths.extend(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),
     ));

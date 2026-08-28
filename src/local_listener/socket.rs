@@ -9,8 +9,11 @@ use crate::fs_util::{create_dir_owner_only, home_dir, parent_dir, set_owner_only
 
 /// Default socket path: `~/.local/share/acp-stack/acps-local.sock`.
 pub fn default_socket_path() -> Result<PathBuf> {
-    let home = home_dir()?;
-    Ok(home.join(".local/share/acp-stack/acps-local.sock"))
+    Ok(socket_path_for_home(&home_dir()?))
+}
+
+fn socket_path_for_home(home: &Path) -> PathBuf {
+    home.join(".local/share/acp-stack/acps-local.sock")
 }
 
 /// Unlinks the socket file on drop, but only when the inode at the path still
@@ -289,7 +292,7 @@ mod tests {
 
     #[test]
     fn default_socket_path_is_under_local_share() {
-        let path = default_socket_path().expect("home resolves");
+        let path = socket_path_for_home(Path::new("/srv/home"));
         let display = path.display().to_string();
         assert!(
             display.ends_with("/.local/share/acp-stack/acps-local.sock"),

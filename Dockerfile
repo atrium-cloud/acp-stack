@@ -46,3 +46,5 @@ CMD ["sh", "-c", "acps serve --bind 0.0.0.0:${PORT:-7700}"]
 FROM runtime AS test-runtime
 COPY --from=builder-test /app/target/release/acps /usr/local/bin/acps
 COPY --from=builder-test /app/target/release/placebo-agent /usr/local/bin/placebo-agent
+# Fixture binaries refuse a non-temp HOME and non-loopback HTTP unless the host is disposable.
+ENV ACP_STACK_TEST_DISPOSABLE_HOST=1

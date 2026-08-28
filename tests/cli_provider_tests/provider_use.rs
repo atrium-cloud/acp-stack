@@ -29,8 +29,7 @@ fn agent_provider_use_updates_config_and_generated_opencode_provider() {
     seed_flat_secrets(tempdir.path(), &["OPENCODE_API_KEY"]);
     let options_path = write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &[]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "agent",
@@ -79,8 +78,7 @@ fn agent_provider_use_uses_agent_native_provider_id_for_collapsed_provider() {
     seed_flat_secrets(tempdir.path(), &["OPENCODE_API_KEY"]);
     let options_path = write_acp_config_options(tempdir.path(), &["vercel/test-model"], &[]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "agent",
@@ -123,8 +121,7 @@ fn agent_set_custom_opencode_provider_writes_generated_config() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "agent",
             "set",
@@ -181,8 +178,7 @@ fn agent_set_custom_provider_rejects_comma_token_limits() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "agent",
             "set",
@@ -234,8 +230,7 @@ creates = "opencode"
     let options_path =
         write_acp_config_options(tempdir.path(), &["deepseek/deepseek-v4-flash"], &[]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "agent",
@@ -281,8 +276,7 @@ fn agent_provider_use_rejects_api_key_ref_argument() {
         .expect("config should be written");
     SecretStore::open_or_create(tempdir.path()).expect("secret store should open");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "agent",
             "provider",
@@ -312,8 +306,7 @@ fn agent_provider_use_rejects_provider_not_supported_by_agent() {
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
     SecretStore::open_or_create(tempdir.path()).expect("secret store should open");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "agent",
             "provider",
@@ -341,8 +334,7 @@ fn agent_provider_use_rejects_providers_without_api_key_mapping() {
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
     SecretStore::open_or_create(tempdir.path()).expect("secret store should open");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "agent",
             "provider",
@@ -398,8 +390,7 @@ creates = "opencode"
         &[],
     );
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "agent",
@@ -442,8 +433,7 @@ fn agent_provider_use_opencode_cloudflare_gateway_uses_canonical_token_env() {
         &[],
     );
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "agent",
@@ -499,8 +489,7 @@ fn agent_provider_use_without_model_selects_provider_without_model() {
         &[],
     );
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args(["agent", "provider", "use", "cloudflare-workers-ai"])
         .assert()
@@ -533,8 +522,7 @@ fn agent_provider_use_does_not_partially_write_main_config_when_provisioning_fai
     fs::write(opencode_dir.join("opencode.json"), "[]")
         .expect("invalid opencode config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "agent",
@@ -565,8 +553,7 @@ fn agent_provider_use_validates_model_against_acp_config_options() {
     seed_provider_credential(tempdir.path(), "openai", &["OPENAI_API_KEY"]);
     let options_path = write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &[]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "agent",
@@ -617,8 +604,7 @@ creates = "opencode"
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
     SecretStore::open_or_create(tempdir.path()).expect("secret store should open");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "agent",
             "provider",

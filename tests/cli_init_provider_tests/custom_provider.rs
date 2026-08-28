@@ -10,8 +10,7 @@ fn init_custom_opencode_provider_writes_generated_config() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     seed_init_secrets(tempdir.path(), &[("CUSTOM_API_KEY", "test-custom-key")]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -68,8 +67,7 @@ fn init_custom_provider_succeeds_with_catalog_only_credential() {
         &[("CUSTOM_API_KEY", "catalog-secret")],
     );
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -122,8 +120,7 @@ fn init_custom_codex_provider_rejects_known_mapped_provider_id() {
         &[("ANTHROPIC_API_KEY", "test-anthropic-key")],
     );
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -170,7 +167,6 @@ fn init_custom_provider_rejects_anthropic_messages_for_non_claude_agent() {
     let tempdir = tempfile::tempdir().expect("tempdir");
 
     acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .args([
             "dev",
             "init",
@@ -218,8 +214,7 @@ fn init_goose_custom_provider_provision_failure_removes_sidecar() {
         .join("custom_providers")
         .join("myprovider.json");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -263,8 +258,7 @@ fn init_pi_custom_provider_provision_failure_removes_models_json() {
 
     let models_path = tempdir.path().join(".pi").join("agent").join("models.json");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",

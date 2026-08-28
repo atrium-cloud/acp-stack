@@ -36,6 +36,7 @@ pub(super) struct SupervisorTask {
     pub(super) sandbox: crate::config::SandboxConfig,
     pub(super) network_provider: Option<crate::extensions::NetworkProviderExtension>,
     pub(super) workspace_root: std::path::PathBuf,
+    pub(super) home: std::path::PathBuf,
     pub(super) cwd: ResolvedCommandCwd,
     pub(super) env: Option<HashMap<String, String>>,
     pub(super) timeout_duration: Duration,
@@ -323,6 +324,7 @@ impl SupervisorTask {
             &self.sandbox,
             self.network_provider.as_ref(),
             &self.workspace_root,
+            &self.home,
         )?;
         super::exec::spawn_child(
             &program,
@@ -621,6 +623,7 @@ mod tests {
             sandbox: Default::default(),
             network_provider: None,
             workspace_root: fixture.tempdir.path().to_path_buf(),
+            home: fixture.tempdir.path().to_path_buf(),
             cwd: resolve_cwd_under_workspace(
                 fixture.tempdir.path(),
                 &fixture.tempdir.path().to_string_lossy(),

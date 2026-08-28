@@ -8,8 +8,11 @@ use common::config::VALID_CONFIG;
 
 #[test]
 fn default_config_path_uses_acps_config_toml() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let _home = common::HomeEnvGuard::set(tempdir.path());
     let path = default_config_path().expect("default config path");
 
+    assert!(path.starts_with(tempdir.path()));
     assert!(path.ends_with(".config/acp-stack/acps-config.toml"));
 }
 

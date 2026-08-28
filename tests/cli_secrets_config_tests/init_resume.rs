@@ -42,8 +42,7 @@ fn init_records_workspace_before_provider_configure() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let workspace = tempdir.path().join("workspace");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -98,8 +97,7 @@ fn init_resume_targets_specific_pending_run_by_id() {
     let pending_id = pending.id.clone();
     drop(store);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -195,8 +193,7 @@ fn init_resume_retries_failed_agent_install_even_without_install_flag() {
     let failed_id = failed.id.clone();
     drop(store);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["init", "--resume", "--run-id", &failed_id])
         .assert()
         .failure();
@@ -222,7 +219,6 @@ fn init_resume_restores_recorded_agent_after_provider_secret_failure() {
     fs::create_dir_all(&workspace).expect("workspace");
 
     acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .args([
             "dev",
             "init",
@@ -251,7 +247,6 @@ fn init_resume_restores_recorded_agent_after_provider_secret_failure() {
     );
 
     acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .args(["init", "--resume"])
         .assert()
         .success()
@@ -273,7 +268,6 @@ fn init_resume_restores_recorded_custom_provider_args_after_secret_failure() {
     fs::create_dir_all(&workspace).expect("workspace");
 
     acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .args([
             "dev",
             "init",
@@ -313,7 +307,6 @@ fn init_resume_restores_recorded_custom_provider_args_after_secret_failure() {
     );
 
     acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .args(["init", "--resume"])
         .assert()
         .success()
@@ -337,8 +330,7 @@ fn init_resume_restores_recorded_custom_provider_args_after_secret_failure() {
 fn init_resume_without_prior_run_errors_clearly() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     // No prior `acps init` — the resume target doesn't exist.
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["init", "--resume"])
         .assert()
         .failure()

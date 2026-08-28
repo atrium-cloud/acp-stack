@@ -10,8 +10,7 @@ fn array_add_uses_canonical_agent_id_as_target() {
     let config_path = config_dir.join("acps-config.toml");
     fs::write(&config_path, VALID_CONFIG).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["array", "add", "codex"])
         .assert()
         .success()
@@ -36,8 +35,7 @@ fn array_add_rejects_noncanonical_agent_alias() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["array", "add", "claude"])
         .assert()
         .failure()
@@ -52,8 +50,7 @@ fn array_set_supports_target_custom_provider() {
     let config_path = config_dir.join("acps-config.toml");
     fs::write(&config_path, VALID_CONFIG).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "array",
             "set",
@@ -109,13 +106,11 @@ fn agent_default_set_updates_primary_target_only() {
     let config_path = config_dir.join("acps-config.toml");
     fs::write(&config_path, VALID_CONFIG).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["array", "add", "codex"])
         .assert()
         .success();
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["agent", "default", "set", "codex"])
         .assert()
         .success()
@@ -141,8 +136,7 @@ fn array_on_and_off_toggle_enabled_flag() {
     let config_path = config_dir.join("acps-config.toml");
     fs::write(&config_path, VALID_CONFIG).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["array", "on"])
         .assert()
         .success()
@@ -152,8 +146,7 @@ fn array_on_and_off_toggle_enabled_flag() {
             .expect("config should parse");
     assert_eq!(after_on["array"]["enabled"].as_bool(), Some(true));
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["array", "off"])
         .assert()
         .success()
@@ -172,13 +165,11 @@ fn array_start_rejects_non_default_target_when_array_is_off() {
     let config_path = config_dir.join("acps-config.toml");
     fs::write(&config_path, VALID_CONFIG).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["array", "add", "codex"])
         .assert()
         .success();
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["array", "start", "--target", "codex"])
         .assert()
         .failure()

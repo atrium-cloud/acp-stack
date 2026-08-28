@@ -70,6 +70,14 @@ fn require_real_agent_tests_enabled() {
     }
 }
 
+/// Real harnesses read config and caches under the developer's actual HOME, so
+/// these probes forward it verbatim instead of an isolated temp path.
+fn real_home() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .expect("real-agent tests require `HOME` in the environment")
+}
+
 async fn assert_real_agent_advertises_model(
     agent: AgentConfig,
     env: HashMap<String, String>,
@@ -78,6 +86,7 @@ async fn assert_real_agent_advertises_model(
 ) {
     let cwd = std::env::current_dir().expect("current dir");
     let bridge = AcpBridge::spawn(
+        &real_home(),
         &agent,
         env,
         cwd.clone(),
@@ -119,6 +128,7 @@ async fn print_real_agent_mode_values(agent: AgentConfig, env: HashMap<String, S
     let cwd = std::env::current_dir().expect("current dir");
     let agent_id = agent.id.clone();
     let bridge = AcpBridge::spawn(
+        &real_home(),
         &agent,
         env,
         cwd.clone(),
@@ -154,6 +164,7 @@ async fn send_real_agent_prompt(agent: AgentConfig, env: HashMap<String, String>
     let cwd = std::env::current_dir().expect("current dir");
     let agent_id = agent.id.clone();
     let bridge = AcpBridge::spawn(
+        &real_home(),
         &agent,
         env,
         cwd.clone(),
@@ -237,6 +248,7 @@ async fn real_terminal_uname_probe(agent: AgentConfig, env: HashMap<String, Stri
     let state = Arc::new(tokio::sync::Mutex::new(store));
 
     let bridge = AcpBridge::spawn(
+        &real_home(),
         &agent,
         env,
         cwd.clone(),

@@ -30,7 +30,6 @@ fn init_provider_change_without_model_clears_stale_opencode_model() {
     let options_path = write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &[]);
 
     acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "init",
@@ -62,7 +61,6 @@ fn init_same_provider_without_model_preserves_existing_model() {
         write_acp_config_options(tempdir.path(), &["openai/gpt-5.5", "openai/o4-mini"], &[]);
 
     acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "init",
@@ -79,7 +77,6 @@ fn init_same_provider_without_model_preserves_existing_model() {
         .success();
 
     acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "init",
@@ -107,7 +104,6 @@ fn init_claude_code_explicit_profile_model_skips_acp_discovery() {
     seed_init_secrets(tempdir.path(), &[("MOONSHOT_API_KEY", "test-moonshot-key")]);
 
     acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .args([
             "dev",
             "init",
@@ -149,8 +145,7 @@ fn init_kimi_explicit_model_skips_acp_discovery_and_persists_canonical_secret_re
     write_workspace_init_config(tempdir.path());
     seed_init_secrets(tempdir.path(), &[("KIMI_API_KEY", "test-kimi-key")]);
 
-    acps_command_without_placebo()
-        .env("HOME", tempdir.path())
+    acps_command_without_placebo(tempdir.path())
         .env(TEST_SKIP_AGENT_INSTALL_ENV, "1")
         .args([
             "dev",
@@ -186,8 +181,7 @@ fn init_kimi_moonshot_provider_selects_platform_lane_and_swaps_env_ref() {
     write_workspace_init_config(tempdir.path());
     seed_init_secrets(tempdir.path(), &[("MOONSHOT_API_KEY", "test-moonshot-key")]);
 
-    acps_command_without_placebo()
-        .env("HOME", tempdir.path())
+    acps_command_without_placebo(tempdir.path())
         .env(TEST_SKIP_AGENT_INSTALL_ENV, "1")
         .args([
             "dev",
@@ -222,8 +216,7 @@ fn init_kimi_global_subscription_provider_keeps_kimi_key_and_pins_subscription_m
     write_workspace_init_config(tempdir.path());
     seed_init_secrets(tempdir.path(), &[("KIMI_API_KEY", "test-kimi-key")]);
 
-    acps_command_without_placebo()
-        .env("HOME", tempdir.path())
+    acps_command_without_placebo(tempdir.path())
         .env(TEST_SKIP_AGENT_INSTALL_ENV, "1")
         .args([
             "dev",
@@ -254,8 +247,7 @@ fn init_kimi_without_provider_fails_non_interactively() {
     write_workspace_init_config(tempdir.path());
     seed_init_secrets(tempdir.path(), &[("KIMI_API_KEY", "test-kimi-key")]);
 
-    acps_command_without_placebo()
-        .env("HOME", tempdir.path())
+    acps_command_without_placebo(tempdir.path())
         .env(TEST_SKIP_AGENT_INSTALL_ENV, "1")
         .args([
             "dev",
@@ -277,8 +269,7 @@ fn init_kilo_writes_env_scoped_config_and_persists_canonical_secret_ref() {
     seed_init_secrets(tempdir.path(), &[("KILO_API_KEY", "test-kilo-key")]);
     let options_path = write_acp_config_options(tempdir.path(), &["kilo/auto"], &[]);
 
-    acps_command_without_placebo()
-        .env("HOME", tempdir.path())
+    acps_command_without_placebo(tempdir.path())
         .env(TEST_SKIP_AGENT_INSTALL_ENV, "1")
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
@@ -317,8 +308,7 @@ fn init_kilo_records_empty_placeholder_when_provider_native_credential_declared(
     );
     let options_path = write_acp_config_options(tempdir.path(), &["openrouter/auto"], &[]);
 
-    acps_command_without_placebo()
-        .env("HOME", tempdir.path())
+    acps_command_without_placebo(tempdir.path())
         .env(TEST_SKIP_AGENT_INSTALL_ENV, "1")
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
@@ -362,8 +352,7 @@ fn init_hermes_writes_provider_backed_config_and_hermes_yaml() {
         &[("OPENROUTER_API_KEY", "test-openrouter-key")],
     );
 
-    acps_command_without_placebo()
-        .env("HOME", tempdir.path())
+    acps_command_without_placebo(tempdir.path())
         .env(TEST_SKIP_AGENT_INSTALL_ENV, "1")
         .args([
             "dev",
@@ -425,8 +414,7 @@ fn init_kimi_without_model_pins_default_and_keeps_operator_selection_on_rerun() 
         "--skip-workspace-init",
         "--skip-testflight",
     ];
-    acps_command_without_placebo()
-        .env("HOME", tempdir.path())
+    acps_command_without_placebo(tempdir.path())
         .env(TEST_SKIP_AGENT_INSTALL_ENV, "1")
         .args(init_args)
         .assert()
@@ -443,8 +431,7 @@ fn init_kimi_without_model_pins_default_and_keeps_operator_selection_on_rerun() 
         r#"model = "kimi-for-coding-highspeed""#,
     );
     fs::write(&config_path, selected).expect("config should be writable");
-    acps_command_without_placebo()
-        .env("HOME", tempdir.path())
+    acps_command_without_placebo(tempdir.path())
         .env(TEST_SKIP_AGENT_INSTALL_ENV, "1")
         .args(init_args)
         .assert()
@@ -464,7 +451,6 @@ fn init_claude_code_profile_provider_filters_builtin_model_aliases() {
     );
 
     acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "dev",
@@ -510,7 +496,6 @@ fn init_codex_openrouter_lists_provider_catalog_models() {
     }));
 
     acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .env("ACP_STACK_PROVIDER_MODELS_BASE", &base)
         .args([
@@ -546,7 +531,6 @@ fn init_codex_openai_takes_an_api_key_ref() {
     let options_path = write_acp_config_options(tempdir.path(), &["gpt-5.5"], &[]);
 
     acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "dev",
@@ -589,7 +573,6 @@ fn init_hermes_openrouter_lists_provider_catalog_models() {
     }));
 
     acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .env("ACP_STACK_PROVIDER_MODELS_BASE", &base)
         .args([
@@ -631,7 +614,6 @@ fn init_hermes_openrouter_without_catalog_skips_model_list() {
     // Dead endpoint: the catalog refresh degrades to a warning instead of
     // failing the whole init.
     acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .env("ACP_STACK_PROVIDER_MODELS_BASE", "http://127.0.0.1:1")
         .args([
@@ -663,7 +645,6 @@ fn init_codex_openrouter_without_catalog_skips_model_list() {
     // Dead endpoint: the catalog refresh degrades to a warning, and the
     // model lane must not fall back to codex-acp's OpenAI presets.
     acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .env("ACP_STACK_PROVIDER_MODELS_BASE", "http://127.0.0.1:1")
         .args([

@@ -9,8 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 fn init_dep_flag_writes_user_scope_dependency() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -45,8 +44,7 @@ fn init_dep_flag_writes_user_scope_dependency() {
 fn init_dep_system_flag_writes_system_scope() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -77,8 +75,7 @@ fn init_dep_system_flag_writes_system_scope() {
 fn init_deps_apply_requires_yes_noninteractive() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -101,8 +98,7 @@ fn init_deps_apply_runs_pending_action_and_surfaces_failure() {
 
     // The tool is not on PATH, so the apply step runs its shell, which exits
     // non-zero.
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -154,8 +150,7 @@ fn init_deps_apply_skips_system_scope_without_sudo_and_continues() {
 
     // The system-scope action would succeed if it ran; it must instead be
     // skipped on privilege while init still completes.
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .env("PATH", path_with_fake_sudo)
         .args([
             "dev",

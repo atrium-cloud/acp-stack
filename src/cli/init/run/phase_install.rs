@@ -13,6 +13,7 @@ pub(super) fn run_agent_install_step(flow: &mut InitFlow) -> Result<()> {
     let verify_config = flow.config.clone();
     let verify_workspace_root = PathBuf::from(flow.config.workspace.root.clone());
     let verify_local_bin_dir = local_bin_dir(&flow.home);
+    let verify_home = flow.home.clone();
     let store = &flow.store;
     let home = &flow.home;
     let config = &flow.config;
@@ -29,6 +30,7 @@ pub(super) fn run_agent_install_step(flow: &mut InitFlow) -> Result<()> {
                 &verify_config,
                 &verify_workspace_root,
                 &verify_local_bin_dir,
+                &verify_home,
             ))
         },
         || {

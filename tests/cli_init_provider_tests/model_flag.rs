@@ -13,7 +13,6 @@ fn init_explicit_model_validates_against_acp_advertised_values() {
     let options_path = write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &[]);
 
     acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "init",
@@ -62,7 +61,6 @@ fn init_explicit_model_accepts_provider_model_shorthand() {
     );
 
     acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "init",
@@ -112,7 +110,6 @@ fn init_explicit_model_shorthand_prefers_selected_provider() {
     );
 
     acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "init",
@@ -153,7 +150,6 @@ fn init_rejected_model_restores_prior_headless_config() {
     let options_path = write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &[]);
 
     acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "init",
@@ -184,7 +180,6 @@ fn init_explicit_model_rejects_value_not_in_advertised_list() {
     let options_path = write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &[]);
 
     acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "init",
@@ -220,7 +215,6 @@ fn init_noninteractive_missing_model_prints_advertised_values_without_mutating_c
         write_acp_config_options(tempdir.path(), &["openai/gpt-5.5", "openai/o4-mini"], &[]);
 
     acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "init",

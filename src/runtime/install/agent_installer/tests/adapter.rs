@@ -32,6 +32,7 @@ fn adapter_entry_installs_harness_then_adapter_and_verifies_adapter_command() {
         tempdir.path(),
         &dest_dir,
         None,
+        tempdir.path(),
     );
 
     let outcome = result.outcome.expect("adapter should install");
@@ -82,6 +83,7 @@ fn adapter_entry_runs_harness_and_adapter_install_steps_concurrently() {
         tempdir.path(),
         &dest_dir,
         None,
+        tempdir.path(),
     );
     let elapsed = started.elapsed();
 
@@ -120,6 +122,7 @@ fn adapter_entry_skips_harness_step_when_harness_is_provided_by_adapter() {
         tempdir.path(),
         &dest_dir,
         None,
+        tempdir.path(),
     );
 
     let outcome = result.outcome.expect("adapter should install");
@@ -157,6 +160,7 @@ fn adapter_entry_runs_adapter_even_when_harness_fails() {
         tempdir.path(),
         &dest_dir,
         None,
+        tempdir.path(),
     );
 
     assert!(matches!(

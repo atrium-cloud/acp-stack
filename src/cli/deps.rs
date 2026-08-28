@@ -105,11 +105,12 @@ fn run_apply(args: DepsApplyArgs, output: OutputFormat) -> Result<()> {
     }
 
     let shell = &config.workspace.default_shell;
+    let home = home_dir()?;
     let system_candidates = pending_system_candidates(&config, args.feature.as_deref());
     let escalation = if system_candidates.is_empty() {
         PrivilegeEscalation::NotNeeded
     } else {
-        probe_privilege_escalation()
+        probe_privilege_escalation(&home)
     };
     if !output.is_json() {
         let count = candidates.len();
@@ -131,7 +132,6 @@ fn run_apply(args: DepsApplyArgs, output: OutputFormat) -> Result<()> {
         return Ok(());
     }
 
-    let home = home_dir()?;
     let state_path = default_state_path(&home);
     if !state_path.exists() {
         // Fail fast rather than downgrade to "audit off": side-effectful installs must
@@ -159,6 +159,7 @@ fn run_apply(args: DepsApplyArgs, output: OutputFormat) -> Result<()> {
             args.feature.as_deref(),
             shell,
             &escalation,
+            &home,
             |_, _, _| Ok(()),
         )?
     } else {
@@ -173,6 +174,7 @@ fn run_apply(args: DepsApplyArgs, output: OutputFormat) -> Result<()> {
             args.feature.as_deref(),
             shell,
             &escalation,
+            &home,
             |current, total, name| {
                 writeln!(
                     stdout,

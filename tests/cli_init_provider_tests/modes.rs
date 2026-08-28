@@ -13,8 +13,7 @@ fn init_rejects_mode_flag_for_agents_without_set_mode() {
     for agent in ["pi", "hermes"] {
         let tempdir = tempfile::tempdir().expect("tempdir");
 
-        acps_command()
-            .env("HOME", tempdir.path())
+        acps_command(tempdir.path())
             .args(["init", "--agent", agent, "--mode", "plan"])
             .assert()
             .failure()
@@ -28,8 +27,7 @@ fn init_rejects_mode_flag_for_agents_without_set_mode() {
 fn init_rejects_mode_flag_for_custom_agents() {
     let tempdir = tempfile::tempdir().expect("tempdir");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "init",
             "--custom-agent-id",
@@ -57,7 +55,6 @@ fn init_model_setup_does_not_write_agent_mode() {
         write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &["build", "plan"]);
 
     acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "init",
@@ -109,7 +106,6 @@ fn init_explicit_mode_writes_agent_mode() {
         write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &["build", "plan"]);
 
     acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "init",
@@ -151,7 +147,6 @@ fn init_rejects_mode_not_advertised_by_the_agent() {
         write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &["build", "plan"]);
 
     acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "init",
@@ -183,7 +178,6 @@ fn init_mode_lane_runs_for_an_agent_without_an_explicit_model() {
     let options_path = write_acp_config_options(tempdir.path(), &[], &["default", "bypass"]);
 
     acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args(["init", "--agent", "amp", "--mode", "bypass"])
         .assert()
@@ -220,7 +214,6 @@ fn init_resume_reapplies_a_recorded_mode_instead_of_replaying_provider_configure
         "external",
     ];
     let output = acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args(["init", "--agent", "amp", "--mode", "bypass"])
         .args(edge_args)
@@ -238,7 +231,6 @@ fn init_resume_reapplies_a_recorded_mode_instead_of_replaying_provider_configure
 
     fs::remove_file(&cloudflared_dir).expect("clear the edge path collision");
     acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args(["init", "--resume", "--run-id", run_id])
         .assert()
@@ -276,7 +268,6 @@ fn init_codex_openrouter_writes_both_explicit_model_and_mode() {
     );
 
     acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "init",
@@ -314,7 +305,6 @@ fn init_kimi_pins_its_model_once_and_still_reaches_the_mode_lane() {
     let options_path = write_acp_config_options(tempdir.path(), &[], &["default", "plan"]);
 
     acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "init",
@@ -351,7 +341,6 @@ fn init_without_mode_flag_never_enters_the_mode_lane() {
     seed_init_secrets(tempdir.path(), &[("AMP_API_KEY", "test-amp-key")]);
 
     acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .args(["init", "--agent", "amp"])
         .assert()
         .success()

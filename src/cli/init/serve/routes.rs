@@ -287,7 +287,12 @@ async fn bootstrap_models_handler(Query(query): Query<ModelsParams>) -> Response
             "init has not written the runtime config yet; retry once setup progresses past config staging",
         );
     }
-    let config = match load_runtime_config_from_disk(&config_path) {
+    // The bootstrap init server runs without an `AppState`, so HOME is resolved here.
+    let home = match home_dir() {
+        Ok(home) => home,
+        Err(error) => return error.into_response(),
+    };
+    let config = match load_runtime_config_from_disk(&config_path, &home) {
         Ok(config) => config,
         Err(error) => return error.into_response(),
     };
@@ -295,7 +300,7 @@ async fn bootstrap_models_handler(Query(query): Query<ModelsParams>) -> Response
         Ok(config) => config,
         Err(error) => return error.into_response(),
     };
-    match models_response_for_config(&config).await {
+    match models_response_for_config(&home, &config).await {
         Ok(models) => ApiSuccess::new(models).into_response(),
         Err(error) => error.into_response(),
     }
@@ -328,7 +333,11 @@ async fn deposit_credential_handler(
             "init has not written the runtime config yet; retry once setup progresses past config staging",
         );
     }
-    let runtime_config = match load_runtime_config_from_disk(&config_path) {
+    let home = match home_dir() {
+        Ok(home) => home,
+        Err(error) => return error.into_response(),
+    };
+    let runtime_config = match load_runtime_config_from_disk(&config_path, &home) {
         Ok(config) => config,
         Err(error) => return error.into_response(),
     };
@@ -354,6 +363,7 @@ async fn deposit_credential_handler(
             // validation failure (stale revision, ownership, invalid selection) cannot leave the
             // deposited secrets orphaned. `source_refs` still see the just-deposited secrets.
             crate::extensions::managed_state::deposit_and_apply(
+                &home,
                 &mut guard,
                 &runtime_config,
                 &request.namespace,
@@ -367,9 +377,7 @@ async fn deposit_credential_handler(
         // A picker call that raced the deposit may have cached a failed model
         // listing; drop it for the outgoing and incoming provider, mirroring
         // the admin-tier apply route.
-        if response.outcome != "noop"
-            && let Ok(home) = home_dir()
-        {
+        if response.outcome != "noop" {
             let new_provider_id = lock_shared_secret_store(&store)
                 .managed_state_record(&request.namespace)
                 .and_then(|record| record.provider_id.clone());

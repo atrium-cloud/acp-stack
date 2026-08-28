@@ -267,6 +267,7 @@ fn install_resolved_two_step_flow_against_mocked_github_api() {
         dest_dir.path(),
         dest_dir.path(),
         None,
+        dest_dir.path(),
     );
 
     let outcome = result
@@ -383,6 +384,7 @@ fn install_resolved_runs_adapter_step_for_native_entry_with_override() {
         dest_dir.path(),
         dest_dir.path(),
         None,
+        dest_dir.path(),
     );
 
     result
@@ -423,6 +425,7 @@ fn install_resolved_records_failure_when_release_endpoint_missing() {
         dest_dir.path(),
         dest_dir.path(),
         None,
+        dest_dir.path(),
     );
 
     assert!(

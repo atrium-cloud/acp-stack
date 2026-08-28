@@ -66,8 +66,7 @@ creates = "cli-registry-agent"
     )
     .expect("registry should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["agent", "install", "--yes", "--admin-key", ADMIN_KEY])
         .assert()
         .success()

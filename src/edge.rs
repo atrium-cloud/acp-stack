@@ -101,7 +101,7 @@ fn ensure_managed_cloudflare_tunnel_with_base(
     account_id: &str,
     api_base_url: &str,
 ) -> Result<bool> {
-    let client = reqwest::blocking::Client::builder()
+    let client = crate::http_client::blocking_client_builder()
         .timeout(CLOUDFLARE_HTTP_TIMEOUT)
         .build()
         .map_err(|source| StackError::CloudflareManagedProvision {
@@ -146,7 +146,7 @@ fn finish_managed_cloudflare_provisioning_with_base(
     account_id: &str,
     api_base_url: &str,
 ) -> Result<Vec<GeneratedCloudflareArtifact>> {
-    let client = reqwest::blocking::Client::builder()
+    let client = crate::http_client::blocking_client_builder()
         .timeout(CLOUDFLARE_HTTP_TIMEOUT)
         .build()
         .map_err(|source| StackError::CloudflareManagedProvision {

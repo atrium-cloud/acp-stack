@@ -378,7 +378,8 @@ async fn models_serves_provider_catalog_for_codex_openrouter() {
     }));
     let _guards = catalog_fixture_env(&home, &base, fixture_path);
 
-    let harness = AgentHarness::spawn_with_config(codex_openrouter_config()).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(codex_openrouter_config(), home.clone()).await;
     let response = http()
         .await
         .get(format!("{}/v1/models", harness.base_url))
@@ -431,7 +432,8 @@ async fn models_falls_back_to_acp_with_catalog_error() {
     // Dead port forces the catalog fetch to fail.
     let _guards = catalog_fixture_env(&home, "http://127.0.0.1:1", fixture_path);
 
-    let harness = AgentHarness::spawn_with_config(codex_openrouter_config()).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(codex_openrouter_config(), home.clone()).await;
     let response = http()
         .await
         .get(format!("{}/v1/models", harness.base_url))
@@ -510,7 +512,8 @@ async fn models_degrades_to_empty_for_hermes_on_catalog_outage() {
     .expect("write fixture");
     let _guards = catalog_fixture_env(&home, "http://127.0.0.1:1", fixture_path);
 
-    let harness = AgentHarness::spawn_with_config(hermes_openrouter_config()).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(hermes_openrouter_config(), home.clone()).await;
     let response = http()
         .await
         .get(format!("{}/v1/models", harness.base_url))
@@ -576,7 +579,8 @@ async fn models_serves_stale_cache_without_catalog_error() {
     let fixture_path = write_models_mode_fixture(tempdir.path());
     let _guards = catalog_fixture_env(&home, "http://127.0.0.1:1", fixture_path);
 
-    let harness = AgentHarness::spawn_with_config(codex_openrouter_config()).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(codex_openrouter_config(), home.clone()).await;
     let response = http()
         .await
         .get(format!("{}/v1/models", harness.base_url))

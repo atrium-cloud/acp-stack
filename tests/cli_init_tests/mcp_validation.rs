@@ -168,8 +168,7 @@ fn init_rejects_invalid_mcp_declarations() {
 fn init_rejects_mcp_declarations_when_config_exists() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -202,8 +201,7 @@ fn init_rejects_mcp_declarations_when_config_exists() {
 }
 
 fn assert_init_mcp_failure(home: &std::path::Path, extra_args: &[&str], expected: &str) {
-    acps_command()
-        .env("HOME", home)
+    acps_command(home)
         .args([
             "dev",
             "init",
@@ -222,8 +220,7 @@ fn assert_init_mcp_failure(home: &std::path::Path, extra_args: &[&str], expected
 fn init_rejects_mcp_secret_ref_duplicates_after_registry_defaults() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -252,8 +249,7 @@ fn init_rejects_mcp_secret_ref_duplicates_after_registry_defaults() {
 fn init_rejects_private_drive_file_viewer_url_as_data_source() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "init",
             "--agent",
@@ -270,8 +266,7 @@ fn init_rejects_private_drive_file_viewer_url_as_data_source() {
 #[test]
 fn init_accepts_drive_uc_export_download_url_as_data_source() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -290,8 +285,7 @@ fn init_accepts_drive_uc_export_download_url_as_data_source() {
 fn init_rejects_drive_folder_url_as_data_source() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "init",
             "--agent",
@@ -309,8 +303,7 @@ fn init_rejects_drive_folder_url_as_data_source() {
 fn init_rejects_dropbox_preview_url_without_dl_flag() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "init",
             "--agent",
@@ -328,8 +321,7 @@ fn init_rejects_dropbox_preview_url_without_dl_flag() {
 fn init_accepts_dropbox_url_with_dl_one() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -379,8 +371,7 @@ fn init_reports_unsupported_mcp_transport_as_ignored() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let fixture = write_capabilities_fixture(tempdir.path(), serde_json::json!({}));
 
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .env(
             acp_stack::dev_gates::FIXTURE_AGENT_CAPABILITIES_ENV,
             &fixture,
@@ -449,8 +440,7 @@ fn init_reports_no_ignores_when_transport_is_advertised() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let fixture = write_capabilities_fixture(tempdir.path(), serde_json::json!({ "http": true }));
 
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .env(
             acp_stack::dev_gates::FIXTURE_AGENT_CAPABILITIES_ENV,
             &fixture,
@@ -485,8 +475,7 @@ fn init_probe_unavailable_never_fails_init() {
 
     // No capabilities fixture plus `--skip-workspace-init` leaves the spawn cwd unprovisioned, so
     // the probe cannot run and init must succeed anyway.
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",

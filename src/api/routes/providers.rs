@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use crate::config::Config;
 use crate::envelope::ApiSuccess;
 use crate::error::{Result, StackError};
-use crate::fs_util::home_dir;
 use crate::runtime::agent::acp_bridge::AgentSessionConfigCategory;
 use crate::runtime::agent::model_discovery::{
     DEFAULT_MODELS_DISCOVERY_TIMEOUT, advertised_values_for_category,
@@ -151,7 +150,7 @@ pub(crate) async fn models_handler(
     // and Array config edits are visible without a daemon restart.
     let config = state.refresh_array_runtime_from_disk().await?;
     let config = resolve_models_target_config(config, query.target_id.as_deref())?;
-    models_response_for_config(&config)
+    models_response_for_config(&state.runtime_paths.home, &config)
         .await
         .map(ApiSuccess::new)
 }
@@ -159,9 +158,11 @@ pub(crate) async fn models_handler(
 /// Discovery behind `GET /v1/models`, shared by the session-tier handler and
 /// the init-tier handler in `cli::init::serve`, which resolves the same
 /// fresh config from disk without an `AppState`.
-pub(crate) async fn models_response_for_config(config: &Config) -> Result<ModelsResponse> {
+pub(crate) async fn models_response_for_config(
+    home: &std::path::Path,
+    config: &Config,
+) -> Result<ModelsResponse> {
     let agent_id = config.agent.id.clone();
-    let home = home_dir()?;
 
     // The provider catalog only serves agents whose harness takes the model
     // verbatim from its on-disk config; agents with real ACP discovery
@@ -179,7 +180,7 @@ pub(crate) async fn models_response_for_config(config: &Config) -> Result<Models
         .is_some_and(|id| models_url_for_provider_id(id).is_some());
     let mut catalog_error = None;
     let catalog = if provider_declares_catalog {
-        match refresh_provider_models(&home, config).await {
+        match refresh_provider_models(home, config).await {
             Ok(models) => models,
             Err(error) => {
                 let reason = error.to_string();
@@ -188,7 +189,7 @@ pub(crate) async fn models_response_for_config(config: &Config) -> Result<Models
                 // A stale cache entry still serves through a provider outage.
                 provider_id
                     .as_deref()
-                    .and_then(|id| cached_models(&home, id))
+                    .and_then(|id| cached_models(home, id))
             }
         }
     } else {
@@ -199,7 +200,7 @@ pub(crate) async fn models_response_for_config(config: &Config) -> Result<Models
         // A discovery failure must not take down a response the catalog can
         // serve on its own.
         let (modes, efforts) = match fetch_session_config_with_timeout(
-            &home,
+            home,
             config,
             DEFAULT_MODELS_DISCOVERY_TIMEOUT,
         )
@@ -233,7 +234,7 @@ pub(crate) async fn models_response_for_config(config: &Config) -> Result<Models
     }
 
     let response =
-        fetch_session_config_with_timeout(&home, config, DEFAULT_MODELS_DISCOVERY_TIMEOUT).await?;
+        fetch_session_config_with_timeout(home, config, DEFAULT_MODELS_DISCOVERY_TIMEOUT).await?;
     // A missing `model` advertisement is an error for discovery-backed agents,
     // so the operator learns discovery failed instead of seeing an empty picker.
     let models = match advertised_values_for_category(&response, AgentSessionConfigCategory::Model)

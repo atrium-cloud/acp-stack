@@ -13,7 +13,6 @@ use acp_stack::config::{
 };
 use acp_stack::secrets::SecretStore;
 use acp_stack::state::{NewPromptRecord, NewSessionRecord};
-use common::HomeEnvGuard;
 use common::sessions::{Harness, admin_bearer, create_session, http, session_bearer};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -755,12 +754,14 @@ fn declared_mcp_servers() -> Vec<McpServerConfig> {
 async fn no_mcp_advertisement_skips_every_server_including_stdio() {
     // With no MCP capability advertised, even the stdio server is skipped.
     let home = tempfile::tempdir().expect("home tempdir");
-    let _home_guard = HomeEnvGuard::set(home.path());
     SecretStore::open_or_create(home.path()).expect("secret store initializes");
 
-    let harness = Harness::spawn_with(|config| {
-        config.mcp.servers = declared_mcp_servers();
-    })
+    let harness = Harness::spawn_with_and_home(
+        |config| {
+            config.mcp.servers = declared_mcp_servers();
+        },
+        home.path().to_path_buf(),
+    )
     .await;
 
     let session_id = create_session(&harness).await;
@@ -794,13 +795,15 @@ async fn attached_mcp_event_lists_servers_for_an_mcp_capable_agent() {
     // With `mcpCapabilities.http` advertised, both the stdio baseline and the
     // HTTP server are sent.
     let home = tempfile::tempdir().expect("home tempdir");
-    let _home_guard = HomeEnvGuard::set(home.path());
     SecretStore::open_or_create(home.path()).expect("secret store initializes");
 
-    let harness = Harness::spawn_with(|config| {
-        config.agent.args.push("--cap-mcp-http".to_owned());
-        config.mcp.servers = declared_mcp_servers();
-    })
+    let harness = Harness::spawn_with_and_home(
+        |config| {
+            config.agent.args.push("--cap-mcp-http".to_owned());
+            config.mcp.servers = declared_mcp_servers();
+        },
+        home.path().to_path_buf(),
+    )
     .await;
 
     let session_id = create_session(&harness).await;

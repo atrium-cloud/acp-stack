@@ -42,7 +42,7 @@ use crate::runtime::agent::acp_terminal::{
 };
 use crate::runtime::agent::inference_failure::{self, Classified};
 use crate::runtime::mediation::permissions::PermissionService;
-use crate::runtime::process_runner::{forward_host_env_tokio, kill_tokio_process_group};
+use crate::runtime::process_runner::kill_tokio_process_group;
 use crate::state::FailureClass;
 
 mod capabilities;

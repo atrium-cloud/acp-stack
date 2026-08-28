@@ -10,11 +10,11 @@ use axum::Json;
 use axum::extract::{Query, State};
 use serde::{Deserialize, Serialize};
 
-use super::super::core::{AppState, load_active_registry};
+use super::super::core::{AppState, load_active_registry_for_home};
 use crate::config::{Config, DEFAULT_SKILL_SOURCE_BRANCH, UserSkillSource};
 use crate::envelope::ApiSuccess;
 use crate::error::StackError;
-use crate::fs_util::{atomic_write_owner_only, home_dir};
+use crate::fs_util::atomic_write_owner_only;
 use crate::runtime::install::agent_registry::RegistryEntry;
 use crate::runtime::install::skill_installer::{
     InstalledSkill, SkillInstallReport, SkillLinkReport, SkillMetadata, SkillRemoveReport,
@@ -39,9 +39,9 @@ pub(crate) struct SkillsListResponse {
 pub(crate) async fn skills_list_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<SkillsListResponse>, StackError> {
-    let home = home_dir()?;
+    let home = state.runtime_paths.home.clone();
     let config = Config::load_lenient_from_path(&state.runtime_paths.config_path)?;
-    let registry = load_active_registry()?;
+    let registry = load_active_registry_for_home(&state.runtime_paths.home)?;
     let entry = registry.lookup_required(&config.agent.id)?;
     let install_dir = agent_install_dir(entry);
     let skills = list_installed_skills(&home, entry)?;
@@ -138,9 +138,9 @@ pub(crate) async fn skills_add_handler(
     State(state): State<AppState>,
     Json(body): Json<SkillsAddRequest>,
 ) -> std::result::Result<ApiSuccess<SkillsAddResponse>, StackError> {
-    let home = home_dir()?;
+    let home = state.runtime_paths.home.clone();
     let config = Config::load_lenient_from_path(&state.runtime_paths.config_path)?;
-    let registry = load_active_registry()?;
+    let registry = load_active_registry_for_home(&state.runtime_paths.home)?;
     let entry = registry.lookup_required(&config.agent.id)?;
     // Fail fast before spending a download; the install destination itself is
     // re-resolved under the mutation lock below.
@@ -170,7 +170,7 @@ pub(crate) async fn skills_add_handler(
     let (agent_id, entry, install) = {
         let _mutation = state.lock_agent_config_mutation().await?;
         let config = Config::load_lenient_from_path(&state.runtime_paths.config_path)?;
-        let registry = load_active_registry()?;
+        let registry = load_active_registry_for_home(&state.runtime_paths.home)?;
         let entry = registry.lookup_required(&config.agent.id)?;
         let install_dir = agent_install_dir(entry)
             .ok_or_else(|| unsupported_skills_agent_error(&config.agent.id))?;
@@ -247,9 +247,9 @@ pub(crate) async fn skills_remove_handler(
         field: "skill",
         reason: format!("`{}` is not a valid skill install name", body.skill),
     })?;
-    let home = home_dir()?;
+    let home = state.runtime_paths.home.clone();
     let config = Config::load_lenient_from_path(&state.runtime_paths.config_path)?;
-    let registry = load_active_registry()?;
+    let registry = load_active_registry_for_home(&state.runtime_paths.home)?;
     let entry = registry.lookup_required(&config.agent.id)?;
     if agent_install_dir(entry).is_none() {
         return Err(unsupported_skills_agent_error(&config.agent.id));
@@ -258,7 +258,7 @@ pub(crate) async fn skills_remove_handler(
         let _mutation = state.lock_agent_config_mutation().await?;
         // Re-check under the lock: the active agent may have changed.
         let config = Config::load_lenient_from_path(&state.runtime_paths.config_path)?;
-        let registry = load_active_registry()?;
+        let registry = load_active_registry_for_home(&state.runtime_paths.home)?;
         let entry = registry.lookup_required(&config.agent.id)?;
         if agent_install_dir(entry).is_none() {
             return Err(unsupported_skills_agent_error(&config.agent.id));

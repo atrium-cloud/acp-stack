@@ -12,7 +12,6 @@ use crate::api::core::AppState;
 use crate::config::Config;
 use crate::envelope::ApiSuccess;
 use crate::error::{Result, StackError};
-use crate::fs_util::home_dir;
 use crate::runtime::agent::acp_bridge::AgentSessionConfigCategory;
 use crate::runtime::agent::model_discovery::{
     DEFAULT_MODELS_DISCOVERY_TIMEOUT, fetch_session_config_with_timeout,
@@ -69,7 +68,7 @@ pub(crate) async fn native_config_import_handler(
     Json(request): Json<NativeConfigImportRequest>,
 ) -> std::result::Result<ApiSuccess<NativeConfigOperation>, StackError> {
     let selection = request.selection();
-    let home = home_dir()?;
+    let home = state.runtime_paths.home.clone();
     let current = state.refresh_array_runtime_from_disk().await?;
     let prepared = state
         .native_config_imports
@@ -236,7 +235,10 @@ pub(crate) async fn native_config_cancel_handler(
 
     if validate_applied_files {
         ensure_latest_applied_operation(&state, &operation_id).await?;
-        validate_native_config_file_digests(&original.applied_file_digests, &home_dir()?)?;
+        validate_native_config_file_digests(
+            &original.applied_file_digests,
+            &state.runtime_paths.home,
+        )?;
     }
     let rollback_marker = mutate_operation_record(&state, &operation_id, |record| {
         record.cancelled = true;
@@ -296,7 +298,7 @@ pub(crate) async fn recover_native_config_imports(state: &AppState) -> Result<()
     let records = load_native_config_operation_journal(
         &state.runtime_paths.state_path,
         &state.runtime_paths.config_path,
-        &home_dir()?,
+        &state.runtime_paths.home,
     )?;
     let pending = records
         .iter()

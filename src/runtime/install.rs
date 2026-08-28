@@ -24,10 +24,9 @@ pub fn local_bin_dir(home: &Path) -> PathBuf {
 
 /// Whether `agent_id`'s registry entry declares a per-provider endpoint field acp-stack can
 /// write, resolved through embedded-plus-override so an operator entry adding it is honored.
-pub fn agent_supports_provider_base_url(agent_id: &str) -> crate::error::Result<bool> {
-    let home = crate::fs_util::home_dir()?;
+pub fn agent_supports_provider_base_url(home: &Path, agent_id: &str) -> crate::error::Result<bool> {
     Ok(
-        agent_registry::RegistryCatalog::load_with_override(&operator_registry_override(&home))?
+        agent_registry::RegistryCatalog::load_with_override(&operator_registry_override(home))?
             .supports_provider_base_url(agent_id),
     )
 }

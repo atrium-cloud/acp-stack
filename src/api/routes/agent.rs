@@ -5,11 +5,10 @@ use axum::extract::{Path, Query, State};
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::super::core::{AgentTargetRuntime, AppState, load_active_registry};
+use super::super::core::{AgentTargetRuntime, AppState, load_active_registry_for_home};
 use crate::config::{AgentAdapterConfig, Config, LocalSessionAuth};
 use crate::envelope::ApiSuccess;
 use crate::error::{Result, StackError};
-use crate::fs_util::home_dir;
 use crate::runtime::agent::acp_bridge::{AgentCapabilitiesDto, AgentSessionConfigCategory};
 use crate::runtime::agent::agent_headless_config::{
     CleanedAgentConfig, ProvisionedAgentConfig, cleanup_agent_headless_config,
@@ -113,7 +112,10 @@ pub(crate) async fn array_status_handler(
         let mut resolved_config = config.clone();
         resolved_config.agent = target_config.agent.clone();
         let (configured_provider_snapshot, provider_error) =
-            super::status::configured_providers_or_error(open_agent_environment(&resolved_config));
+            super::status::configured_providers_or_error(open_agent_environment(
+                &state.runtime_paths.home,
+                &resolved_config,
+            ));
         let provider_restart_required = super::status::provider_restart_required_for_status(
             provider_error.is_some(),
             snapshot.state,
@@ -175,14 +177,14 @@ async fn install_agent_for_config(
 ) -> Result<AgentInstallResponse> {
     prepare_workspace_base_dirs(&config.workspace)?;
     let workspace_root = std::path::PathBuf::from(config.workspace.root.clone());
-    let home = home_dir()?;
+    let home = state.runtime_paths.home.clone();
     let local_bin = home.join(".local").join("bin");
     let log_base = crate::state::default_installer_log_base(&home);
 
     let outcome = if let Some(install) = config.agent.install.clone() {
         // Escape-hatch shell recipe. The `running` row is finalized in place on exit, so polling
         // readers see the in-flight install; rows the sink never finalized are appended after.
-        let env = open_agent_env(config)?;
+        let env = open_agent_env(&home, config)?;
         let expected_sha256 = config.agent.expected_sha256.clone();
         let agent_id = config.agent.id.clone();
         let store_handle = state.state.clone();
@@ -201,6 +203,7 @@ async fn install_agent_for_config(
                 env,
                 &workspace_root,
                 Some(&progress),
+                &home,
             )
         })
         .await
@@ -242,6 +245,7 @@ async fn install_agent_for_config(
                 &workspace_root,
                 &local_bin,
                 Some(&progress),
+                &home,
             )
         })
         .await
@@ -273,16 +277,21 @@ async fn install_agent_for_config(
     })
 }
 
-pub(crate) fn open_agent_env(config: &Config) -> Result<std::collections::HashMap<String, String>> {
-    Ok(open_agent_environment(config)?.env)
+pub(crate) fn open_agent_env(
+    home: &std::path::Path,
+    config: &Config,
+) -> Result<std::collections::HashMap<String, String>> {
+    Ok(open_agent_environment(home, config)?.env)
 }
 
-pub(crate) fn open_agent_environment(config: &Config) -> Result<ResolvedAgentEnvironment> {
+pub(crate) fn open_agent_environment(
+    home: &std::path::Path,
+    config: &Config,
+) -> Result<ResolvedAgentEnvironment> {
     if let Some(environment) = resolve_agent_environment_without_secrets(config) {
         return Ok(environment);
     }
-    let home = home_dir()?;
-    let store = SecretStore::open(&home)?;
+    let store = SecretStore::open(home)?;
     resolve_agent_environment(config, &store)
 }
 
@@ -308,13 +317,13 @@ async fn load_fresh_config_for_target(
 
 /// Resolve every configured `[mcp.servers]` entry into the SDK `McpServer` type.
 pub(super) fn open_mcp_servers(
+    home: &std::path::Path,
     config: &Config,
 ) -> Result<Vec<agent_client_protocol::schema::v1::McpServer>> {
     if config.mcp.servers.is_empty() {
         return Ok(Vec::new());
     }
-    let home = home_dir()?;
-    let store = SecretStore::open(&home)?;
+    let store = SecretStore::open(home)?;
     crate::runtime::agent::mcp::resolve_mcp_servers(&config.mcp, &store)
 }
 

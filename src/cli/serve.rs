@@ -266,7 +266,7 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
         // cannot leave a dangling lifecycle row.
         let bound_local = crate::local_listener::bind_local(&socket_path, parent_policy).await?;
         let lifecycle = ServerLifecycle::starting(&store, &local)?;
-        let runtime_paths = RuntimePaths::new(config_path, state_path);
+        let runtime_paths = RuntimePaths::new(config_path, state_path, home.clone());
         let app_state = AppState::with_auth_verifiers_and_runtime_paths(
             config,
             store,

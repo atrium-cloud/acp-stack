@@ -198,7 +198,12 @@ pub(crate) async fn daemon_request(
     let url = format!("{}{}", base_url.trim_end_matches('/'), path);
     // Bucketing to a static label keeps path params out of logged errors.
     let path_label: &'static str = static_path_label(path);
-    let client = reqwest::Client::new();
+    let client = crate::http_client::client_builder()
+        .build()
+        .map_err(|source| StackError::AgentApiRequest {
+            path: path_label,
+            source,
+        })?;
     let request = match method {
         CliMethod::Get => client.get(&url),
         CliMethod::Post => client.post(&url),

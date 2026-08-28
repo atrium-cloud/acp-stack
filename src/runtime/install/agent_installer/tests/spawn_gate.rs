@@ -27,6 +27,7 @@ fn spawn_gate_fails_step_on_unrunnable_binary() {
         tempdir.path(),
         &dest_dir,
         None,
+        tempdir.path(),
     );
 
     let err = result
@@ -98,6 +99,7 @@ exit 99
         tempdir.path(),
         &dest_dir,
         None,
+        tempdir.path(),
     );
 
     result
@@ -141,7 +143,14 @@ fn escape_hatch_reinstalls_over_unrunnable_existing_binary() {
     );
     let install = install_config(&script, binary.to_str().expect("utf8 tempdir path"));
 
-    let result = run_installer_capture(&install, None, HashMap::new(), tempdir.path(), None);
+    let result = run_installer_capture(
+        &install,
+        None,
+        HashMap::new(),
+        tempdir.path(),
+        None,
+        tempdir.path(),
+    );
 
     match result
         .outcome
@@ -162,7 +171,13 @@ fn init_resume_verifier_rejects_unrunnable_binary() {
     std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod stub");
 
     assert_eq!(
-        resolve_creates_for_init_resume("bin/stub-agent", &workspace_root, &[], None),
+        resolve_creates_for_init_resume(
+            "bin/stub-agent",
+            &workspace_root,
+            &[],
+            None,
+            tempdir.path()
+        ),
         None,
         "a resolvable but unspawnable binary must read as absent so resume re-installs",
     );
@@ -178,13 +193,25 @@ fn init_resume_verifier_enforces_pin_before_probing() {
     std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod");
 
     assert_eq!(
-        resolve_creates_for_init_resume("bin/pinned-agent", &workspace_root, &[], Some("deadbeef"),),
+        resolve_creates_for_init_resume(
+            "bin/pinned-agent",
+            &workspace_root,
+            &[],
+            Some("deadbeef"),
+            tempdir.path()
+        ),
         None,
         "a binary failing the operator's pin must read as absent so resume re-installs",
     );
     let sha256 = sha256_of_file(&binary).expect("hash binary");
     assert_eq!(
-        resolve_creates_for_init_resume("bin/pinned-agent", &workspace_root, &[], Some(&sha256)),
+        resolve_creates_for_init_resume(
+            "bin/pinned-agent",
+            &workspace_root,
+            &[],
+            Some(&sha256),
+            tempdir.path()
+        ),
         Some(binary),
         "a binary matching its pin is probed and accepted",
     );
@@ -219,6 +246,7 @@ fn declared_pin_keeps_step_gate_from_executing_binary() {
         tempdir.path(),
         &dest_dir,
         None,
+        tempdir.path(),
     );
 
     let err = result
@@ -255,6 +283,7 @@ fn declared_pin_step_gate_still_rejects_shebang_less_stub() {
         tempdir.path(),
         &dest_dir,
         None,
+        tempdir.path(),
     );
 
     let err = result
@@ -280,7 +309,7 @@ fn spawn_gate_probe_fails_on_missing_interpreter() {
     std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
         .expect("chmod bad-interpreter script");
 
-    let err = verify_binary_spawns(&binary, tempdir.path(), &[])
+    let err = verify_binary_spawns(&binary, tempdir.path(), &[], tempdir.path())
         .expect_err("a script whose interpreter is missing cannot spawn");
     assert!(
         matches!(err, StackError::AgentInstallerBinaryUnrunnable { .. }),
@@ -300,6 +329,6 @@ fn spawn_gate_probe_runs_exec_only_binary_when_header_read_is_denied() {
         return;
     }
 
-    verify_binary_spawns(&binary, tempdir.path(), &[])
+    verify_binary_spawns(&binary, tempdir.path(), &[], tempdir.path())
         .expect("an unreadable-but-executable script must pass via the spawn probe");
 }

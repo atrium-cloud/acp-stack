@@ -135,13 +135,14 @@ pub(super) fn prepare_init_base(
         // endpoint override survives the agent being written.
         if let Some(spec) = &custom_agent_spec {
             crate::runtime::agent::switch::ensure_endpoint_override_survives_target(
-                &spec.id, false, None,
+                &home, &spec.id, false, None,
             )?;
             apply_custom_agent_to_config(&mut new_config, spec);
         } else if let Some(agent_id) = args.agent.as_deref() {
             let entry = registry.lookup_required(agent_id)?;
             entry.ensure_supported()?;
             crate::runtime::agent::switch::ensure_endpoint_override_survives_target(
+                &home,
                 &entry.id,
                 entry.set_provider_base_url,
                 None,

@@ -151,7 +151,7 @@ fn build_client(opts: &DownloadOpts) -> Result<reqwest::blocking::Client> {
         })
     };
 
-    let mut builder = reqwest::blocking::Client::builder()
+    let mut builder = crate::http_client::blocking_client_builder()
         .user_agent(USER_AGENT)
         .connect_timeout(opts.connect_timeout)
         .timeout(opts.read_timeout)

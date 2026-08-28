@@ -87,6 +87,7 @@ pub(crate) async fn run_terminal_probe(
     let sink = Arc::new(InMemorySink::default());
     let sink_dyn: Arc<dyn SessionEventSink> = sink.clone();
     let bridge = AcpBridge::spawn(
+        &std::env::temp_dir(),
         &config,
         fake_env(),
         std::env::temp_dir(),

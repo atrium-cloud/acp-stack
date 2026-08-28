@@ -5,7 +5,6 @@ use tempfile::TempDir;
 use acp_stack::runtime::agent::switch_journal::switch_journal_path;
 use acp_stack::secrets::{ManagedCredentialSelection, SecretStore};
 
-use crate::common::HomeEnvGuard;
 use crate::common::agent::{
     AgentHarness, add_codex_placebo_target, add_hermes_placebo_target, add_kimi_placebo_target,
     admin_bearer, http, session_bearer, test_config,
@@ -36,11 +35,11 @@ fn stage_endpoint_override(home: &std::path::Path, provider_id: &str) {
 #[tokio::test]
 async fn agent_switch_selects_existing_array_target_config() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     let mut config = test_config();
     config.array.enabled = true;
     add_codex_placebo_target(&mut config);
-    let harness = AgentHarness::spawn_with_config(config).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(config, tempdir.path().to_path_buf()).await;
     let client = http().await;
 
     let primary_start = client
@@ -93,8 +92,8 @@ async fn agent_switch_selects_existing_array_target_config() {
 #[tokio::test]
 async fn agent_switch_same_target_bare_body_is_noop() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
-    let harness = AgentHarness::spawn().await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
     let client = http().await;
     let config_before = std::fs::read_to_string(&harness.config_path).expect("config before");
 
@@ -123,8 +122,8 @@ async fn agent_switch_same_target_bare_body_is_noop() {
 #[tokio::test]
 async fn agent_switch_same_target_with_provider_flag_is_rejected() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
-    let harness = AgentHarness::spawn().await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
     let client = http().await;
 
     let response = client
@@ -143,8 +142,8 @@ async fn agent_switch_same_target_with_provider_flag_is_rejected() {
 #[tokio::test]
 async fn agent_switch_same_target_with_api_key_ref_flag_is_rejected() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
-    let harness = AgentHarness::spawn().await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
     let client = http().await;
 
     let response = client
@@ -163,8 +162,8 @@ async fn agent_switch_same_target_with_api_key_ref_flag_is_rejected() {
 #[tokio::test]
 async fn agent_switch_same_target_with_drop_is_rejected() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
-    let harness = AgentHarness::spawn().await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
     let client = http().await;
 
     let response = client
@@ -183,7 +182,6 @@ async fn agent_switch_same_target_with_drop_is_rejected() {
 #[tokio::test]
 async fn agent_switch_existing_kimi_target_reports_canonical_secret_ref() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     let mut secrets =
         acp_stack::secrets::SecretStore::open_or_create(tempdir.path()).expect("secret store");
     secrets
@@ -193,7 +191,8 @@ async fn agent_switch_existing_kimi_target_reports_canonical_secret_ref() {
     let mut config = test_config();
     config.array.enabled = true;
     add_kimi_placebo_target(&mut config);
-    let harness = AgentHarness::spawn_with_config(config).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(config, tempdir.path().to_path_buf()).await;
 
     let response = http()
         .await
@@ -215,7 +214,6 @@ async fn agent_switch_existing_kimi_target_reports_canonical_secret_ref() {
 #[tokio::test]
 async fn agent_switch_existing_hermes_target_reports_required_env_refs() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     let mut secrets =
         acp_stack::secrets::SecretStore::open_or_create(tempdir.path()).expect("secret store");
     secrets
@@ -225,7 +223,8 @@ async fn agent_switch_existing_hermes_target_reports_required_env_refs() {
     let mut config = test_config();
     config.array.enabled = true;
     add_hermes_placebo_target(&mut config);
-    let harness = AgentHarness::spawn_with_config(config).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(config, tempdir.path().to_path_buf()).await;
 
     let response = http()
         .await
@@ -250,11 +249,11 @@ async fn agent_switch_existing_hermes_target_reports_required_env_refs() {
 #[tokio::test]
 async fn agent_switch_to_existing_running_target_keeps_it_running() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     let mut config = test_config();
     config.array.enabled = true;
     add_codex_placebo_target(&mut config);
-    let harness = AgentHarness::spawn_with_config(config).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(config, tempdir.path().to_path_buf()).await;
     let client = http().await;
 
     let primary_start = client
@@ -318,12 +317,12 @@ async fn agent_switch_to_existing_running_target_keeps_it_running() {
 #[tokio::test]
 async fn agent_switch_to_array_target_without_endpoint_field_is_rejected_with_override() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     stage_endpoint_override(tempdir.path(), "openai");
     let mut config = test_config();
     config.array.enabled = true;
     add_kimi_placebo_target(&mut config);
-    let harness = AgentHarness::spawn_with_config(config).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(config, tempdir.path().to_path_buf()).await;
     let config_before = std::fs::read_to_string(&harness.config_path).expect("config before");
 
     let response = http()
@@ -362,7 +361,6 @@ async fn agent_switch_to_array_target_without_endpoint_field_is_rejected_with_ov
 #[tokio::test]
 async fn agent_switch_to_codex_target_reusing_overridden_openai_is_rejected() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     stage_endpoint_override(tempdir.path(), "openai");
     let mut config = test_config();
     config.array.enabled = true;
@@ -374,7 +372,8 @@ async fn agent_switch_to_codex_target_reusing_overridden_openai_is_rejected() {
         api_key_ref: None,
         custom: None,
     });
-    let harness = AgentHarness::spawn_with_config(config).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(config, tempdir.path().to_path_buf()).await;
     let config_before = std::fs::read_to_string(&harness.config_path).expect("config before");
 
     let response = http()

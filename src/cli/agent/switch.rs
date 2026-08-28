@@ -25,6 +25,7 @@ pub(super) fn run_agent_switch(args: AgentSwitchArgs) -> Result<()> {
         print_existing_target_switch_plan(&config, target)?;
     } else {
         let plan = plan_agent_switch(
+            &home,
             &config,
             &registry,
             PlannedAgentSwitchRequest {

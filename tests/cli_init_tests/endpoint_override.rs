@@ -28,8 +28,7 @@ fn init_rejects_an_agent_without_an_endpoint_field_while_an_override_is_stored()
     let config_path = tempdir.path().join(".config/acp-stack/acps-config.toml");
 
     // Lay down a config before the override exists.
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -46,8 +45,7 @@ fn init_rejects_an_agent_without_an_endpoint_field_while_an_override_is_stored()
 
     // The placebo agent declares no `set_provider_base_url`, so re-applying it
     // would strand the stored override.
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -97,8 +95,7 @@ creates = "{placebo_path}"
     )
     .expect("registry override should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -112,8 +109,7 @@ creates = "{placebo_path}"
 
     stage_endpoint_override(tempdir.path(), "openrouter");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",

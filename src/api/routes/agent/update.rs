@@ -31,7 +31,7 @@ pub(crate) async fn agent_update_handler(
     let agent_id = config.agent.id.clone();
     // Everything fallible happens before `try_begin_update`; a `?` between
     // begin and finish would leave the supervisor stuck in `Updating`.
-    let home = home_dir()?;
+    let home = state.runtime_paths.home.clone();
     let state_path = state.runtime_paths.state_path.clone();
 
     if !target.supervisor.try_begin_update().await {
@@ -179,7 +179,7 @@ pub(crate) async fn agent_update_status_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<AgentUpdateStatusResponse>, StackError> {
     let config = Config::load_lenient_from_path(&state.runtime_paths.config_path)?;
-    let registry = load_active_registry()?;
+    let registry = load_active_registry_for_home(&state.runtime_paths.home)?;
     let agent_id = config.agent.id.clone();
     let pinned = config.agent.harness_version.clone();
     // An absent `[agent.auto_update]` section means disabled, matching the

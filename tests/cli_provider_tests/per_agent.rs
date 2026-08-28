@@ -11,8 +11,7 @@ fn agent_set_kimi_accepts_exact_model_without_acp_discovery() {
         .expect("config should be written");
     seed_init_secrets(tempdir.path(), &[("KIMI_API_KEY", "test-kimi-key")]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "agent",
             "provider",
@@ -25,14 +24,12 @@ fn agent_set_kimi_accepts_exact_model_without_acp_discovery() {
         .assert()
         .success();
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["agent", "provider", "use", "kimi-code"])
         .assert()
         .success();
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["agent", "set", "--model", "kimi-for-coding-highspeed"])
         .assert()
         .success()
@@ -64,8 +61,7 @@ fn agent_provider_use_kimi_moonshot_swaps_lane_and_sets_platform_model() {
         ],
     );
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "agent",
             "provider",
@@ -78,14 +74,12 @@ fn agent_provider_use_kimi_moonshot_swaps_lane_and_sets_platform_model() {
         .assert()
         .success();
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["agent", "provider", "use", "moonshotai"])
         .assert()
         .success();
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["agent", "set", "--model", "kimi-k2.5"])
         .assert()
         .success()
@@ -108,8 +102,7 @@ fn agent_set_kimi_accepts_anthropic_messages_custom_provider() {
         .expect("config should be written");
     seed_init_secrets(tempdir.path(), &[("KIMI_API_KEY", "test-kimi-key")]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "agent",
             "set",
@@ -161,8 +154,7 @@ creates = "opencode"
         );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "agent",
             "set",
@@ -195,8 +187,7 @@ fn agent_set_kilo_accepts_advertised_model_and_keeps_env_scoped_auth() {
     seed_init_secrets(tempdir.path(), &[("KILO_API_KEY", "test-kilo-key")]);
     let options_path = write_acp_config_options(tempdir.path(), &["kilo/auto"], &[]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args(["agent", "set", "--model", "kilo/auto"])
         .assert()
@@ -222,8 +213,7 @@ fn agent_set_opencode_rejects_model_without_provider() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["agent", "set", "--model", "gpt-5.5"])
         .assert()
         .failure()
@@ -253,8 +243,7 @@ api_key_ref = "OPENAI_API_KEY""#,
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
     let options_path = write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &[]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args(["agent", "set", "--model", "gpt-5.5"])
         .assert()
@@ -282,8 +271,7 @@ fn agent_set_hermes_accepts_exact_model_and_updates_hermes_yaml() {
 
     // No ACP config-options fixture: Hermes advertises only the pre-1.0 models/modes session state,
     // so the model is taken verbatim and the command must succeed without spawning the agent.
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["agent", "set", "--model", "z-ai/glm-5.1"])
         .assert()
         .success()

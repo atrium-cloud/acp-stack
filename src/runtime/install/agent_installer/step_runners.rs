@@ -139,6 +139,7 @@ pub(super) fn run_install_step(
     workspace_root: &Path,
     dest_dir: &Path,
     pin_declared: bool,
+    home: &Path,
 ) -> StepResult {
     let started_at = current_timestamp();
     match spec {
@@ -148,8 +149,14 @@ pub(super) fn run_install_step(
             required_tools: _,
             timeout,
         } => {
-            let result =
-                run_shell_install(&script, agent_env, workspace_root, &[dest_dir], timeout);
+            let result = run_shell_install(
+                &script,
+                agent_env,
+                workspace_root,
+                &[dest_dir],
+                timeout,
+                home,
+            );
             shell_step_with_creates(
                 step_label,
                 started_at,
@@ -162,6 +169,7 @@ pub(super) fn run_install_step(
                 },
                 Some(INSTALL_METHOD_SHELL.to_owned()),
                 None,
+                home,
             )
         }
         ResolvedInstallSpec::Npm {
@@ -179,12 +187,14 @@ pub(super) fn run_install_step(
                     agent_env,
                     workspace_root,
                     dest_dir,
+                    home,
                 ) {
                     Ok(version) => (npm_package_with_version(&package, &version), version),
                     Err(step) => return *step,
                 },
             };
-            let result = run_npm_install(&package, &name, agent_env, workspace_root, dest_dir);
+            let result =
+                run_npm_install(&package, &name, agent_env, workspace_root, dest_dir, home);
             shell_step_with_creates(
                 step_label,
                 started_at,
@@ -197,6 +207,7 @@ pub(super) fn run_install_step(
                 },
                 Some(INSTALL_METHOD_NPM.to_owned()),
                 Some(version),
+                home,
             )
         }
         ResolvedInstallSpec::GithubRelease {
@@ -225,6 +236,7 @@ pub(super) fn run_install_step(
                 workspace_root,
                 dest_dir,
                 pin_declared,
+                home,
             )
         }
     }
@@ -244,6 +256,7 @@ pub(super) fn shell_step_with_creates(
     creates_check: CreatesCheck<'_>,
     method: Option<String>,
     version: Option<String>,
+    home: &Path,
 ) -> StepResult {
     let finished_at = current_timestamp();
     match run_result {
@@ -304,6 +317,7 @@ pub(super) fn shell_step_with_creates(
                         &path,
                         creates_check.workspace_root,
                         creates_check.extra_path_dirs,
+                        home,
                     )
                 }
             });
@@ -342,6 +356,7 @@ pub(super) fn github_release_step(
     workspace_root: &Path,
     dest_dir: &Path,
     pin_declared: bool,
+    home: &Path,
 ) -> StepResult {
     let binary_path = dest_dir.join(install.binary_name);
     let result = github_release::install(install, version_pin, dest_dir, agent_env);
@@ -356,7 +371,7 @@ pub(super) fn github_release_step(
             let gate = if pin_declared {
                 verify_executable_header(&binary_path)
             } else {
-                verify_binary_spawns(&binary_path, workspace_root, &[dest_dir])
+                verify_binary_spawns(&binary_path, workspace_root, &[dest_dir], home)
             };
             let mut row = InstallerRowDraft {
                 started_at,
@@ -406,6 +421,7 @@ pub(super) fn finalize_shell_step(
     creates: &str,
     expected_sha256: Option<&str>,
     workspace_root: &Path,
+    home: &Path,
 ) -> InstallerResult {
     let finished_at = current_timestamp();
     match run_result {
@@ -455,7 +471,7 @@ pub(super) fn finalize_shell_step(
                 })?;
                 let sha256 = sha256_of_file(&resolved)?;
                 verify_expected_sha256(expected_sha256, &sha256)?;
-                verify_binary_spawns(&resolved, workspace_root, &[])?;
+                verify_binary_spawns(&resolved, workspace_root, &[], home)?;
                 Ok(InstallerOutcome::Installed {
                     path: resolved,
                     sha256,
@@ -502,6 +518,7 @@ pub(super) fn run_shell_install(
     workspace_root: &Path,
     extra_path_dirs: &[&Path],
     timeout: Duration,
+    home: &Path,
 ) -> Result<CapturedOutput> {
     run_program_install(
         "/bin/sh",
@@ -510,6 +527,7 @@ pub(super) fn run_shell_install(
         workspace_root,
         extra_path_dirs,
         timeout,
+        home,
     )
 }
 
@@ -524,6 +542,7 @@ fn run_npm_install(
     agent_env: &HashMap<String, String>,
     workspace_root: &Path,
     dest_dir: &Path,
+    home: &Path,
 ) -> Result<CapturedOutput> {
     let prefix = dest_dir.parent().ok_or_else(|| StackError::RegistryLoad {
         reason: format!(
@@ -549,6 +568,7 @@ fn run_npm_install(
         workspace_root,
         &[dest_dir],
         DEFAULT_INSTALLER_TIMEOUT,
+        home,
     )
 }
 
@@ -559,6 +579,7 @@ fn resolve_npm_package_version(
     agent_env: &HashMap<String, String>,
     workspace_root: &Path,
     dest_dir: &Path,
+    home: &Path,
 ) -> std::result::Result<String, Box<StepResult>> {
     let args = vec![
         "view".to_owned(),
@@ -573,6 +594,7 @@ fn resolve_npm_package_version(
         workspace_root,
         &[dest_dir],
         DEFAULT_INSTALLER_TIMEOUT,
+        home,
     );
     match result {
         Ok(captured) if captured.exit_status == Some(0) => {
@@ -743,6 +765,7 @@ fn run_program_install(
     workspace_root: &Path,
     extra_path_dirs: &[&Path],
     timeout: Duration,
+    home: &Path,
 ) -> Result<CapturedOutput> {
     if !workspace_root.is_dir() {
         return Err(StackError::AgentInstallerWorkingDirectoryMissing {
@@ -758,7 +781,11 @@ fn run_program_install(
     if let Some(path) = &path_env {
         command.env("PATH", path);
     }
-    forward_host_env(&mut command, "HOME");
+    // HOME comes from the boot-time runtime home threaded down by the entry
+    // point, not the daemon's process env: a test running the installer
+    // in-process must not send recipes or the npm cache into the developer's
+    // real home.
+    command.env("HOME", home);
     forward_host_env(&mut command, "LANG");
     apply_non_interactive_env(&mut command);
     // Point node-gyp at the interpreter binary rather than whatever wrapper

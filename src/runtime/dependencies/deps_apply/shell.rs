@@ -11,6 +11,7 @@ pub(crate) fn run_shell(
     script: &str,
     timeout: Duration,
     sudo: Option<&Path>,
+    home: &Path,
 ) -> Result<(Option<i32>, String, String, bool, String)> {
     let mut command = match sudo {
         Some(sudo_path) => {
@@ -28,7 +29,7 @@ pub(crate) fn run_shell(
             command
         }
     };
-    command.env_clear().envs(scrubbed_env());
+    command.env_clear().envs(scrubbed_env(home));
     apply_non_interactive_env(&mut command);
 
     // `run_captured` owns the piped stdio, session detachment, capped reader threads and bounded
@@ -105,14 +106,15 @@ pub(crate) fn cap_stream(value: &str) -> String {
     value[..cutoff].to_owned()
 }
 
-pub(crate) fn scrubbed_env() -> HashMap<String, String> {
+/// Minimal env for install shells. `home` is resolved once by the caller at
+/// process entry and threaded down, so a mutated process HOME cannot leak a
+/// different value into an installer that runs much later.
+pub(crate) fn scrubbed_env(home: &Path) -> HashMap<String, String> {
     let mut env = HashMap::new();
     if let Ok(value) = std::env::var("PATH") {
         env.insert("PATH".to_owned(), value);
     }
-    if let Ok(value) = std::env::var("HOME") {
-        env.insert("HOME".to_owned(), value);
-    }
+    env.insert("HOME".to_owned(), home.to_string_lossy().into_owned());
     if let Ok(value) = std::env::var("LANG") {
         env.insert("LANG".to_owned(), value);
     }

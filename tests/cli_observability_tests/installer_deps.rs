@@ -18,8 +18,7 @@ fn agent_check_reports_no_runs_when_state_is_empty() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
 
-    acps_command_without_placebo()
-        .env("HOME", tempdir.path())
+    acps_command_without_placebo(tempdir.path())
         .args(["agent", "check"])
         .assert()
         .failure()
@@ -33,8 +32,7 @@ fn agent_check_format_json_reports_steps() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
 
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args(["agent", "check", "--format", "json"])
         .assert()
         .failure()
@@ -79,8 +77,7 @@ fn agent_check_reports_missing_adapter_step() {
         .expect("seed harness row");
     drop(store);
 
-    acps_command_without_placebo()
-        .env("HOME", tempdir.path())
+    acps_command_without_placebo(tempdir.path())
         .args(["agent", "check"])
         .assert()
         .failure()
@@ -99,8 +96,7 @@ fn installer_history_reports_empty_state_when_nothing_recorded() {
     )
     .expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["installer", "history"])
         .assert()
         .success()
@@ -159,8 +155,7 @@ fn installer_history_renders_rows_with_filter() {
         .expect("seed adapter row");
     drop(store);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["installer", "history"])
         .assert()
         .success()
@@ -170,8 +165,7 @@ fn installer_history_renders_rows_with_filter() {
         .stdout(predicates::str::contains("v1.0.0"))
         .stdout(predicates::str::contains("failed"));
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["installer", "history", "--agent", "opencode"])
         .assert()
         .success()
@@ -215,8 +209,7 @@ fn installer_history_format_json_renders_runs() {
         .expect("seed row");
     drop(store);
 
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args(["installer", "history", "--format", "json"])
         .assert()
         .success()
@@ -265,8 +258,7 @@ fn installer_history_renders_log_dir_continuation_line() {
         .expect("seed row with log_dir");
     drop(store);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["installer", "history"])
         .assert()
         .success()
@@ -286,8 +278,7 @@ fn installer_history_rejects_zero_limit() {
     )
     .expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["installer", "history", "--limit", "0"])
         .assert()
         .failure()
@@ -351,8 +342,7 @@ fn deps_apply_prints_before_and_after_status() {
     drop(store);
     seed_auth_verifiers(tempdir.path(), SESSION_KEY, ADMIN_KEY);
 
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args([
             "deps",
             "apply",
@@ -459,8 +449,7 @@ fn deps_apply_exits_nonzero_and_prints_manual_commands_on_privilege_skip() {
 
     // Unlike init (which skips and continues), the explicit imperative
     // command must exit non-zero and hand the operator the manual commands.
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .env("PATH", path_with_fake_sudo)
         .args(["deps", "apply", "--yes", "--admin-key", ADMIN_KEY])
         .assert()
@@ -486,8 +475,7 @@ fn deps_apply_exits_nonzero_and_prints_manual_commands_on_privilege_skip() {
 fn deps_apply_requires_admin_key() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["deps", "apply", "--yes"])
         .assert()
         .failure()
@@ -510,8 +498,7 @@ required = true
     );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args(["deps", "check", "--format", "json"])
         .assert()
         .success()
@@ -558,8 +545,7 @@ creates = {}
     drop(store);
     seed_auth_verifiers(tempdir.path(), SESSION_KEY, ADMIN_KEY);
 
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args([
             "deps",
             "apply",
@@ -643,8 +629,7 @@ creates = {}
     drop(store);
     seed_auth_verifiers(tempdir.path(), SESSION_KEY, ADMIN_KEY);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["deps", "apply", "--yes", "--admin-key", ADMIN_KEY])
         .assert()
         .success();

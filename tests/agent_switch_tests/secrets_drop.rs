@@ -5,7 +5,6 @@ use reqwest::StatusCode;
 use serde_json::Value;
 use tempfile::TempDir;
 
-use crate::common::HomeEnvGuard;
 use crate::common::agent::{
     AgentHarness, EnvVarGuard, admin_bearer, http, test_config, write_config_options_fixture,
     write_kimi_registry_override, write_pi_registry_override,
@@ -14,7 +13,6 @@ use crate::common::agent::{
 #[tokio::test]
 async fn agent_switch_copies_provider_secret_to_target_default_ref() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     let config_dir = tempdir.path().join(".config/acp-stack");
     std::fs::create_dir_all(&config_dir).expect("config dir");
     write_pi_registry_override(&config_dir);
@@ -50,7 +48,8 @@ async fn agent_switch_copies_provider_secret_to_target_default_ref() {
     );
     let _fixture_guard = EnvVarGuard::set("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &fixture_path);
 
-    let harness = AgentHarness::spawn_with_config(config).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(config, tempdir.path().to_path_buf()).await;
     let client = http().await;
     let response = client
         .post(format!("{}/v1/agent/switch", harness.base_url))
@@ -87,7 +86,6 @@ async fn agent_switch_copies_provider_secret_to_target_default_ref() {
 #[tokio::test]
 async fn agent_switch_drop_cleans_source_config_and_preserves_secrets() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     let config_dir = tempdir.path().join(".config/acp-stack");
     std::fs::create_dir_all(&config_dir).expect("config dir");
     write_kimi_registry_override(&config_dir);
@@ -127,7 +125,8 @@ async fn agent_switch_drop_cleans_source_config_and_preserves_secrets() {
     let fixture_path = write_config_options_fixture(tempdir.path(), &["kimi/kimi-k3"]);
     let _fixture_guard = EnvVarGuard::set("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &fixture_path);
 
-    let harness = AgentHarness::spawn_with_config(config).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(config, tempdir.path().to_path_buf()).await;
     let client = http().await;
     let response = client
         .post(format!("{}/v1/agent/switch", harness.base_url))
@@ -168,7 +167,6 @@ async fn agent_switch_drop_cleans_source_config_and_preserves_secrets() {
 #[tokio::test]
 async fn agent_switch_drop_reports_cleanup_failure_without_failing_switch() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     let config_dir = tempdir.path().join(".config/acp-stack");
     std::fs::create_dir_all(&config_dir).expect("config dir");
     write_kimi_registry_override(&config_dir);
@@ -194,7 +192,8 @@ async fn agent_switch_drop_reports_cleanup_failure_without_failing_switch() {
     let fixture_path = write_config_options_fixture(tempdir.path(), &["kimi/kimi-k3"]);
     let _fixture_guard = EnvVarGuard::set("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &fixture_path);
 
-    let harness = AgentHarness::spawn_with_config(config).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(config, tempdir.path().to_path_buf()).await;
     let client = http().await;
     let response = client
         .post(format!("{}/v1/agent/switch", harness.base_url))

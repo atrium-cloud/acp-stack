@@ -1,7 +1,6 @@
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
-use crate::common::HomeEnvGuard;
 use crate::common::agent::{AgentHarness, admin_bearer, http, session_bearer};
 
 // Between the 1 MiB per-file content cap and the ~6 MiB whole-request cap, so
@@ -13,12 +12,6 @@ const OVER_CONTENT_UNDER_REQUEST_BYTES: usize = 2 * 1_048_576;
 #[tokio::test]
 async fn native_config_inspect_request_layer_defers_to_content_cap() {
     let harness = AgentHarness::spawn().await;
-    let home = harness
-        .config_path
-        .parent()
-        .expect("config path has parent")
-        .to_path_buf();
-    let _home = HomeEnvGuard::set(&home);
     let client = http().await;
 
     let over_content = "x".repeat(OVER_CONTENT_UNDER_REQUEST_BYTES);
@@ -90,12 +83,7 @@ async fn native_config_inspect_request_layer_defers_to_content_cap() {
 #[tokio::test]
 async fn native_config_cancel_rolls_back_and_guards_digest() {
     let harness = AgentHarness::spawn().await;
-    let home = harness
-        .config_path
-        .parent()
-        .expect("config path has parent")
-        .to_path_buf();
-    let _home = HomeEnvGuard::set(&home);
+    let home = harness.home.clone();
     // The import prepare path opens the secret store read-only, so it must
     // exist under HOME even with no secret refs in play.
     acp_stack::secrets::SecretStore::open_or_create(&home).expect("secret store");
@@ -181,12 +169,7 @@ async fn native_config_cancel_rolls_back_and_guards_digest() {
 #[tokio::test]
 async fn native_config_import_serializes_with_agent_config_mutation_lock() {
     let harness = AgentHarness::spawn().await;
-    let home = harness
-        .config_path
-        .parent()
-        .expect("config path has parent")
-        .to_path_buf();
-    let _home = HomeEnvGuard::set(&home);
+    let home = harness.home.clone();
     acp_stack::secrets::SecretStore::open_or_create(&home).expect("secret store");
     let client = http().await;
 

@@ -66,6 +66,7 @@ pub(super) fn stage_init_config(
                 None
             };
             crate::runtime::agent::switch::ensure_endpoint_override_survives_target(
+                &home,
                 &entry.id,
                 entry.set_provider_base_url,
                 kept_provider_id.as_deref(),
@@ -80,7 +81,7 @@ pub(super) fn stage_init_config(
         Some(AgentSelection::Custom(spec)) => {
             // A custom agent has no registry-managed native config surface for an endpoint override.
             crate::runtime::agent::switch::ensure_endpoint_override_survives_target(
-                &spec.id, false, None,
+                &home, &spec.id, false, None,
             )
             .or_else(|error| finalize_failure(&store, &init_run, error))?;
             apply_custom_agent_to_config(&mut config, spec);

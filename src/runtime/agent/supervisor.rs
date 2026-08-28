@@ -8,7 +8,7 @@ mod sessions;
 
 use std::collections::HashMap;
 use std::mem;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -380,6 +380,7 @@ struct RestartContext {
     target_id: String,
     agent: AgentConfig,
     workspace_root: String,
+    home: PathBuf,
     env: HashMap<String, String>,
     providers: Vec<ResolvedProviderSnapshot>,
     state_store: Arc<TokioMutex<StateStore>>,
@@ -394,6 +395,9 @@ pub struct AgentStartRequest<'a> {
     pub target_id: &'a str,
     pub agent: &'a AgentConfig,
     pub workspace_root: &'a str,
+    /// Boot-time home of the daemon; the agent child and its terminals inherit
+    /// this as HOME rather than re-reading the process env at spawn time.
+    pub home: PathBuf,
     pub env: HashMap<String, String>,
     pub providers: Vec<ResolvedProviderSnapshot>,
     pub state: &'a Arc<TokioMutex<StateStore>>,
@@ -474,6 +478,7 @@ impl AgentSupervisor {
             target_id: request.target_id.to_owned(),
             agent: request.agent.clone(),
             workspace_root: request.workspace_root.to_owned(),
+            home: request.home.clone(),
             env: request.env.clone(),
             providers: request.providers.clone(),
             state_store: request.state.clone(),
@@ -519,6 +524,7 @@ impl AgentSupervisor {
         request: AgentStartRequest<'_>,
     ) -> Result<(AgentCapabilitiesDto, AcpBridge)> {
         spawn_agent_bridge(
+            &request.home,
             request.target_id,
             request.agent,
             request.workspace_root,

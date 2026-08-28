@@ -332,6 +332,7 @@ pub struct InstallerSequenceResult {
 
 /// Run the escape-hatch installer and persist its row, publishing progress
 /// through a [`ReconnectingInstallerSink`].
+#[allow(clippy::too_many_arguments)]
 pub fn run_installer(
     agent_id: &str,
     install: &AgentInstallConfig,
@@ -340,6 +341,7 @@ pub fn run_installer(
     workspace_root: &Path,
     state: &StateStore,
     log_base: Option<&Path>,
+    home: &Path,
 ) -> Result<InstallerOutcome> {
     let sink = ReconnectingInstallerSink::new(state.path().to_path_buf());
     let progress = InstallProgress {
@@ -354,6 +356,7 @@ pub fn run_installer(
         agent_env,
         workspace_root,
         Some(&progress),
+        home,
     );
     persist_untracked_installer_row(
         state,
@@ -373,6 +376,7 @@ pub fn run_installer_capture(
     agent_env: HashMap<String, String>,
     workspace_root: &Path,
     progress: Option<&InstallProgress<'_>>,
+    home: &Path,
 ) -> InstallerResult {
     if install.install_type.as_str() != "shell" {
         return InstallerResult {
@@ -407,7 +411,7 @@ pub fn run_installer_capture(
                     row: InstallerRowDraft::skipped(STEP_INSTALL, &started_at),
                 };
             }
-            Ok(sha256) => match verify_binary_spawns(&path, workspace_root, &[]) {
+            Ok(sha256) => match verify_binary_spawns(&path, workspace_root, &[], home) {
                 Ok(()) => {
                     return InstallerResult {
                         outcome: Ok(InstallerOutcome::AlreadyPresent {
@@ -433,6 +437,7 @@ pub fn run_installer_capture(
         workspace_root,
         &[],
         DEFAULT_INSTALLER_TIMEOUT,
+        home,
     );
     let mut result = finalize_shell_step(
         STEP_INSTALL,
@@ -441,6 +446,7 @@ pub fn run_installer_capture(
         &install.creates,
         expected_sha256,
         workspace_root,
+        home,
     );
     if let Some(progress) = progress {
         finalize_tracked_step(progress, run_id, &mut result.row);
@@ -454,6 +460,7 @@ pub fn run_installer_capture(
 
 /// Run the resolved-registry installer and persist every row; the HTTP path
 /// uses [`install_resolved_capture`] with its own sink instead.
+#[allow(clippy::too_many_arguments)]
 pub fn install_resolved(
     agent: &AgentConfig,
     entry: &RegistryEntry,
@@ -462,6 +469,7 @@ pub fn install_resolved(
     dest_dir: &Path,
     state: &StateStore,
     log_base: Option<&Path>,
+    home: &Path,
 ) -> Result<InstallerOutcome> {
     let sink = ReconnectingInstallerSink::new(state.path().to_path_buf());
     let progress = InstallProgress {
@@ -477,6 +485,7 @@ pub fn install_resolved(
         workspace_root,
         dest_dir,
         Some(&progress),
+        home,
     );
     for row in result.rows.iter_mut() {
         persist_untracked_installer_row(
@@ -495,6 +504,7 @@ pub(super) fn final_verification(
     workspace_root: &Path,
     dest_dir: &Path,
     rows: Vec<InstallerRowDraft>,
+    home: &Path,
 ) -> InstallerSequenceResult {
     let outcome = (|| {
         let path =
@@ -505,7 +515,7 @@ pub(super) fn final_verification(
             })?;
         let sha256 = sha256_of_file(&path)?;
         verify_expected_sha256(agent.expected_sha256.as_deref(), &sha256)?;
-        verify_binary_spawns(&path, workspace_root, &[dest_dir])?;
+        verify_binary_spawns(&path, workspace_root, &[dest_dir], home)?;
         Ok(InstallerOutcome::Installed { path, sha256 })
     })();
 
@@ -553,6 +563,7 @@ pub fn resolve_creates_for_init_resume(
     workspace_root: &Path,
     extra_path_dirs: &[&Path],
     expected_sha256: Option<&str>,
+    home: &Path,
 ) -> Option<PathBuf> {
     let path = resolve_creates(name, workspace_root, extra_path_dirs)?;
     if expected_sha256.is_some() {
@@ -563,7 +574,7 @@ pub fn resolve_creates_for_init_resume(
             return None;
         }
     }
-    if let Err(error) = verify_binary_spawns(&path, workspace_root, extra_path_dirs) {
+    if let Err(error) = verify_binary_spawns(&path, workspace_root, extra_path_dirs, home) {
         tracing::warn!(%error, "installed agent binary failed the spawn gate; re-running installer");
         return None;
     }
@@ -577,6 +588,7 @@ pub(crate) fn verify_binary_spawns(
     path: &Path,
     workspace_root: &Path,
     extra_path_dirs: &[&Path],
+    home: &Path,
 ) -> Result<()> {
     use crate::runtime::process_runner::{
         apply_non_interactive_env, detach_into_new_session, forward_host_env, kill_process_group,
@@ -599,7 +611,9 @@ pub(crate) fn verify_binary_spawns(
     if let Some(path_env) = path_env_with_extra_dirs(extra_path_dirs) {
         command.env("PATH", path_env);
     }
-    forward_host_env(&mut command, "HOME");
+    // HOME is the boot-time runtime home, not the daemon's process env, for
+    // the same test-isolation reason as the install steps.
+    command.env("HOME", home);
     forward_host_env(&mut command, "LANG");
     apply_non_interactive_env(&mut command);
     detach_into_new_session(&mut command);

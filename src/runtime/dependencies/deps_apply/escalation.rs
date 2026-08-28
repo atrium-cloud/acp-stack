@@ -50,8 +50,8 @@ impl PrivilegeEscalation {
 /// Probe how system-scope actions can reach root; environment facts collapse
 /// to `Unavailable` rather than Err. Deliberately uncached, so a long-lived
 /// daemon cannot pin stale sudoers state across a config change.
-pub fn probe_privilege_escalation() -> PrivilegeEscalation {
-    probe_privilege_escalation_with(current_uid(), resolve_command(SUDO_PROGRAM))
+pub fn probe_privilege_escalation(home: &Path) -> PrivilegeEscalation {
+    probe_privilege_escalation_with(current_uid(), resolve_command(SUDO_PROGRAM), home)
 }
 
 /// Testable core of [`probe_privilege_escalation`]; uid and sudo path are
@@ -59,6 +59,7 @@ pub fn probe_privilege_escalation() -> PrivilegeEscalation {
 pub(crate) fn probe_privilege_escalation_with(
     uid: u32,
     sudo_path: Option<PathBuf>,
+    home: &Path,
 ) -> PrivilegeEscalation {
     if uid == 0 {
         return PrivilegeEscalation::NotNeeded;
@@ -74,7 +75,7 @@ pub(crate) fn probe_privilege_escalation_with(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .env_clear()
-        .envs(scrubbed_env());
+        .envs(scrubbed_env(home));
     apply_non_interactive_env(&mut command);
     detach_into_new_session(&mut command);
     let Ok(mut child) = command.spawn() else {
@@ -100,11 +101,15 @@ pub(crate) fn probe_privilege_escalation_with(
 
 /// Probe only when a pending system-scope action exists, so a satisfied
 /// config never shells out to sudo.
-pub(crate) fn escalation_for(config: &Config, feature: Option<&str>) -> PrivilegeEscalation {
+pub(crate) fn escalation_for(
+    config: &Config,
+    feature: Option<&str>,
+    home: &Path,
+) -> PrivilegeEscalation {
     if pending_system_candidates(config, feature).is_empty() {
         PrivilegeEscalation::NotNeeded
     } else {
-        probe_privilege_escalation()
+        probe_privilege_escalation(home)
     }
 }
 

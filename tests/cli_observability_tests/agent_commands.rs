@@ -82,8 +82,7 @@ fn agent_status_surfaces_installed_versions_from_state() {
         .expect("adapter row should append");
     drop(store);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["agent", "status"])
         .assert()
         .success()
@@ -116,8 +115,7 @@ fn agent_status_format_json_omits_lifecycle_payloads() {
         .expect("lifecycle row should append");
     drop(store);
 
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args(["agent", "status", "--format", "json"])
         .assert()
         .success()
@@ -138,8 +136,7 @@ fn agent_test_succeeds_with_prompt() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     write_fake_agent_home(tempdir.path(), &[]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["agent", "test", "--prompt", "hello from cli"])
         .assert()
         .success()
@@ -156,8 +153,7 @@ fn agent_test_uses_default_prompt_when_omitted() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     write_fake_agent_home(tempdir.path(), &[]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["agent", "test"])
         .assert()
         .success()
@@ -190,8 +186,7 @@ fn agent_test_applies_configured_model_before_prompt() {
     )
     .expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["agent", "test", "--prompt", "hello"])
         .assert()
         .success()
@@ -203,8 +198,7 @@ fn agent_test_reports_initialize_failure_stage() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     write_fake_agent_home(tempdir.path(), &["--initialize-error"]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["agent", "test", "--prompt", "hello"])
         .assert()
         .failure()
@@ -219,8 +213,7 @@ fn agent_test_reports_session_creation_failure_stage() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     write_fake_agent_home(tempdir.path(), &["--session-new-error"]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["agent", "test", "--prompt", "hello"])
         .assert()
         .failure()
@@ -237,8 +230,7 @@ fn agent_test_reports_prompt_failure_stage() {
 
     // The prompt-failure path drops the raw upstream message, which could embed URLs, headers, or
     // secrets, in favor of a fixed string.
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["agent", "test", "--prompt", "hello"])
         .assert()
         .failure()
@@ -253,8 +245,7 @@ fn agent_test_reports_progress_timeout_after_stall() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     write_fake_agent_home(tempdir.path(), &["--prompt-stall-after-update"]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "agent",
             "test",
@@ -278,9 +269,8 @@ fn agent_test_reports_progress_timeout_after_stall() {
 /// Run `agent test --format json` and return the parsed stdout document. `expect_success` pins the
 /// exit status: a failing run still prints its document to stdout.
 fn agent_test_json(home: &std::path::Path, extra_args: &[&str], expect_success: bool) -> Value {
-    let mut command = acps_command();
+    let mut command = acps_command(home);
     command
-        .env("HOME", home)
         .args(["agent", "test", "--format", "json"])
         .args(extra_args);
     let assert = command.assert();
@@ -484,8 +474,7 @@ fn agent_test_writes_no_session_row() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     write_fake_agent_home(tempdir.path(), &[]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["agent", "test", "--prompt", "hello"])
         .assert()
         .success();
@@ -507,8 +496,7 @@ fn agent_status_reports_provider_with_unset_model_mode_and_effort() {
     let config = format!("{}\n[agent.provider]\nid = \"openai\"\n", codex_config());
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["agent", "status"])
         .assert()
         .success()
@@ -536,8 +524,7 @@ api_key_ref = "OPENCODE_API_KEY""#,
     );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["agent", "status"])
         .assert()
         .success()
@@ -576,8 +563,7 @@ creates = "opencode"
         );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["agent", "status"])
         .assert()
         .success()
@@ -615,8 +601,7 @@ creates = "opencode"
         );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["agent", "status"])
         .assert()
         .success()
@@ -633,8 +618,7 @@ fn agent_status_reports_all_supported_params_unset() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["agent", "status"])
         .assert()
         .success()
@@ -656,16 +640,14 @@ async fn agent_start_and_stop_call_running_daemon() {
         Some(&harness.socket_path),
     );
 
-    acps_command()
-        .env("HOME", home.path())
+    acps_command(home.path())
         .args(["agent", "start", "--admin-key", ADMIN_KEY])
         .assert()
         .success()
         .stdout(predicates::str::contains("agent start: running"))
         .stdout(predicates::str::contains("pid: "));
 
-    let output = acps_command()
-        .env("HOME", home.path())
+    let output = acps_command(home.path())
         .args([
             "agent",
             "restart",
@@ -684,8 +666,7 @@ async fn agent_start_and_stop_call_running_daemon() {
     assert!(body["stopped_at"].as_str().is_some(), "{body}");
     assert!(body["capabilities"].is_object(), "{body}");
 
-    acps_command()
-        .env("HOME", home.path())
+    acps_command(home.path())
         .args(["agent", "stop", "--admin-key", ADMIN_KEY])
         .assert()
         .success()
@@ -694,7 +675,8 @@ async fn agent_start_and_stop_call_running_daemon() {
 
 #[test]
 fn agent_switch_noninteractive_requires_admin_key() {
-    acps_command()
+    let home = tempfile::tempdir().expect("home tempdir");
+    acps_command(home.path())
         .args(["agent", "switch", "opencode"])
         .assert()
         .failure()
@@ -703,7 +685,8 @@ fn agent_switch_noninteractive_requires_admin_key() {
 
 #[test]
 fn agent_switch_accepts_drop_flag() {
-    acps_command()
+    let home = tempfile::tempdir().expect("home tempdir");
+    acps_command(home.path())
         .args(["agent", "switch", "opencode", "--drop"])
         .assert()
         .failure()

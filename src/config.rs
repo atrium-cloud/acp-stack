@@ -7,7 +7,6 @@ mod validate;
 
 use crate::error::{Result, StackError};
 use serde::Deserialize;
-use std::env;
 use std::path::{Path, PathBuf};
 
 pub use self::schema::{
@@ -290,10 +289,7 @@ fn has_removed_sandbox_network_table(input: &str) -> bool {
 }
 
 pub fn default_config_path() -> Result<PathBuf> {
-    let home = env::var_os("HOME")
-        .filter(|value| !value.is_empty())
-        .ok_or(StackError::HomeNotSet)?;
-    Ok(PathBuf::from(home)
+    Ok(crate::fs_util::home_dir()?
         .join(".config")
         .join("acp-stack")
         .join("acps-config.toml"))

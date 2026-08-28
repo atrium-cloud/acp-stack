@@ -35,6 +35,7 @@ fn an_install_step_sees_a_resolved_python_interpreter() {
         tempdir.path(),
         tempdir.path(),
         None,
+        tempdir.path(),
     );
 
     let stdout = &result.rows[0].stdout;

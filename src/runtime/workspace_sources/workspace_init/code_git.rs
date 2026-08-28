@@ -160,6 +160,26 @@ pub(super) fn run_git_clone(
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     scrub_repo_scope_env(&mut cmd);
 
+    // Clone inherits the daemon env, so pin HOME through the fixture guard: in a test build on
+    // a developer machine the real ~/.gitconfig (url.insteadOf rewrites) and ~/.ssh must not
+    // steer or serve a fixture clone. On refusal, omit HOME rather than inherit it.
+    match crate::fs_util::home_dir() {
+        Ok(home) => {
+            cmd.env("HOME", home);
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "HOME omitted from git clone env");
+            cmd.env_remove("HOME");
+        }
+    }
+    if crate::dev_gates::fixture_guards_active() {
+        cmd.env("GIT_CONFIG_NOSYSTEM", "1");
+        cmd.env(
+            "GIT_CONFIG_GLOBAL",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+        );
+    }
+
     // A credential travels via GIT_ASKPASS so the token never lands in process args,
     // where ps and audit logs would expose it.
     cmd.env("GIT_TERMINAL_PROMPT", "0");

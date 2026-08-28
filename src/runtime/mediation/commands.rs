@@ -8,7 +8,7 @@ pub(crate) mod process;
 mod supervisor;
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::json;
@@ -53,6 +53,9 @@ pub struct CommandGateway {
     state: Arc<TokioMutex<StateStore>>,
     event_hub: EventHub,
     config: Arc<Config>,
+    /// Boot-time home handed to every mediated child; resolved once so spawns
+    /// never re-read the process env.
+    home: PathBuf,
     running: Arc<TokioMutex<HashMap<String, RunningCommand>>>,
     permissions: PermissionService,
     /// Command id → pending permission id, so `cancel` can settle the
@@ -66,11 +69,13 @@ impl CommandGateway {
         event_hub: EventHub,
         config: Arc<Config>,
         permissions: PermissionService,
+        home: PathBuf,
     ) -> Self {
         Self {
             state,
             event_hub,
             config,
+            home,
             running: Arc::new(TokioMutex::new(HashMap::new())),
             permissions,
             awaiting_permission: Arc::new(TokioMutex::new(HashMap::new())),
@@ -219,6 +224,7 @@ impl CommandGateway {
             sandbox: self.config.workspace.sandbox.clone(),
             network_provider: crate::extensions::resolve_network_provider(&self.config),
             workspace_root: std::path::PathBuf::from(&self.config.workspace.root),
+            home: self.home.clone(),
             cwd: execution_cwd,
             env: request.env.clone(),
             timeout_duration,

@@ -79,7 +79,7 @@ pub(super) fn run_deps_apply_step(flow: &mut InitFlow) -> Result<()> {
     let deps_escalation = if pending_system_candidates(&flow.config, None).is_empty() {
         PrivilegeEscalation::NotNeeded
     } else {
-        probe_privilege_escalation()
+        probe_privilege_escalation(&flow.home)
     };
     // finalize_with_error so a confirmation error marks the run terminal instead of leaving it pending.
     let deps_apply_requested = match should_apply_deps_for_init(
@@ -99,6 +99,7 @@ pub(super) fn run_deps_apply_step(flow: &mut InitFlow) -> Result<()> {
     init_println!(output_mode, "progress: applying dependencies");
     let store = &flow.store;
     let config = &flow.config;
+    let home = &flow.home;
     let init_run_id = flow.init_run.id.clone();
     let deps_apply_async = flow.args.deps_apply_async;
     let background_apply_run_id: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
@@ -130,6 +131,7 @@ pub(super) fn run_deps_apply_step(flow: &mut InitFlow) -> Result<()> {
                 None,
                 &config.workspace.default_shell,
                 &deps_escalation,
+                home,
                 |current, total, name| {
                     init_println!(
                         output_mode,

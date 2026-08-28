@@ -53,8 +53,7 @@ fn init_deps_apply_async_exits_while_the_install_keeps_running() {
         "sleep {SLOW_INSTALL_SECONDS}; printf '#!/bin/sh\\nexit 0\\n' > {marker_str} && chmod 755 {marker_str}"
     );
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .env("PATH", &path_with_bin)
         .args([
             "dev",
@@ -119,8 +118,7 @@ fn init_deps_apply_async_failure_settles_retryable_without_failing_init() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
     // The same action fails init synchronously; async moves the failure onto the run row.
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -164,8 +162,7 @@ fn init_deps_apply_async_failure_handoff_carries_the_background_run_id() {
 
     // Launch the async worker at the deps step, then fail a later step (the managed Cloudflare
     // step resolves a ref that was never stored) so the handoff frame must still name the run.
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -226,8 +223,7 @@ fn init_deps_apply_async_pre_spawn_setup_failure_settles_the_claimed_row() {
     fs::create_dir_all(&log_base).expect("installer-logs base");
     fs::write(log_base.join("deps_apply"), b"not a directory").expect("plant blocker file");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -291,8 +287,7 @@ fn init_deps_apply_async_rejects_a_foreign_live_background_install() {
         .expect("seed claim");
     drop(seeded);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",

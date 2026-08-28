@@ -12,8 +12,7 @@ fn agent_set_codex_accepts_effort_only() {
     let options_path =
         write_acp_config_options_with_efforts(tempdir.path(), &[], &[], &["low", "medium", "high"]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args(["agent", "set", "--effort", "high"])
         .assert()
@@ -36,8 +35,7 @@ fn agent_set_codex_rejects_unadvertised_effort() {
     let options_path =
         write_acp_config_options_with_efforts(tempdir.path(), &[], &[], &["low", "medium", "high"]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args(["agent", "set", "--effort", "bogus"])
         .assert()
@@ -70,8 +68,7 @@ creates = "opencode"
         );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["agent", "set", "--effort", "high"])
         .assert()
         .failure()
@@ -88,8 +85,7 @@ fn agent_set_rejects_mode_combined_with_effort() {
     fs::write(config_dir.join("acps-config.toml"), codex_config())
         .expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["agent", "set", "--mode", "auto", "--effort", "high"])
         .assert()
         .failure()

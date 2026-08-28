@@ -11,8 +11,7 @@ fn init_rejects_model_for_agents_without_set_model_before_discovery() {
     crate::common::agent::write_amp_registry_override(&config_dir);
     seed_init_secrets(tempdir.path(), &[("AMP_API_KEY", "test")]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["init", "--agent", "amp", "--model", "anything"])
         .assert()
         .failure()
@@ -29,8 +28,7 @@ fn init_custom_codex_provider_rejects_openai_provider_id() {
         &[("CUSTOM_OPENAI_API_KEY", "test-custom-openai-key")],
     );
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -61,8 +59,7 @@ fn init_custom_codex_provider_rejects_openai_provider_id() {
 fn init_custom_provider_fails_noninteractive_when_required_fields_are_missing() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "init",
             "--agent",
@@ -85,8 +82,7 @@ fn init_provider_failure_persists_selected_agent_for_resume() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["init", "--agent", "amp", "--provider", "openai"])
         .assert()
         .failure()
@@ -122,8 +118,7 @@ creates = "opencode"
         );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["dev", "init", "--agent", "pi", "--skip-workspace-init"])
         .assert()
         .failure()

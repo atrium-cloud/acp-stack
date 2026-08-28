@@ -7,15 +7,13 @@ use crate::common::cli::*;
 fn logs_query_shows_init_event() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .success();
 
-    let mut command = acps_command();
+    let mut command = acps_command(tempdir.path());
     command
-        .env("HOME", tempdir.path())
         .args(["logs", "query"])
         .assert()
         .success()
@@ -29,8 +27,7 @@ fn logs_query_shows_init_event() {
 fn logs_query_creates_owner_only_empty_state_when_missing() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["logs", "query"])
         .assert()
         .success()
@@ -46,28 +43,24 @@ fn logs_query_creates_owner_only_empty_state_when_missing() {
 fn logs_query_supports_limit_and_level_filter() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .success();
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .arg("status")
         .assert()
         .success();
 
-    let mut limit_command = acps_command();
+    let mut limit_command = acps_command(tempdir.path());
     limit_command
-        .env("HOME", tempdir.path())
         .args(["logs", "query", "--limit", "1"])
         .assert()
         .success()
         .stdout(predicates::str::contains("status.checked").count(1));
 
-    let mut level_command = acps_command();
+    let mut level_command = acps_command(tempdir.path());
     level_command
-        .env("HOME", tempdir.path())
         .args(["logs", "query", "--level", "error"])
         .assert()
         .success()
@@ -78,19 +71,16 @@ fn logs_query_supports_limit_and_level_filter() {
 fn logs_query_json_emits_envelope_with_cursor() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .success();
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .arg("status")
         .assert()
         .success();
 
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args(["logs", "query", "--limit", "1", "--json"])
         .output()
         .expect("acps logs query --json should execute");
@@ -145,14 +135,12 @@ fn logs_query_json_emits_envelope_with_cursor() {
 fn logs_query_global_format_json_matches_json_alias() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .success();
 
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args(["logs", "query", "--limit", "1", "--format", "json"])
         .assert()
         .success()
@@ -166,7 +154,8 @@ fn logs_query_global_format_json_matches_json_alias() {
 
 #[test]
 fn logs_query_json_alias_conflicts_with_explicit_text_format() {
-    acps_command()
+    let home = tempfile::tempdir().expect("home tempdir");
+    acps_command(home.path())
         .args(["logs", "query", "--json", "--format", "text"])
         .assert()
         .failure()
@@ -177,7 +166,8 @@ fn logs_query_json_alias_conflicts_with_explicit_text_format() {
 
 #[test]
 fn logs_tail_rejects_format_json_before_loading_config() {
-    acps_command()
+    let home = tempfile::tempdir().expect("home tempdir");
+    acps_command(home.path())
         .args(["logs", "tail", "--format", "json"])
         .assert()
         .failure()
@@ -188,7 +178,8 @@ fn logs_tail_rejects_format_json_before_loading_config() {
 
 #[test]
 fn text_only_commands_reject_format_json_before_loading_config() {
-    acps_command()
+    let home = tempfile::tempdir().expect("home tempdir");
+    acps_command(home.path())
         .args(["subagent", "status", "--format", "json"])
         .assert()
         .failure()
@@ -199,8 +190,9 @@ fn text_only_commands_reject_format_json_before_loading_config() {
 
 #[test]
 fn completion_scripts_include_root_and_common_commands() {
+    let home = tempfile::tempdir().expect("home tempdir");
     for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
-        let output = acps_command()
+        let output = acps_command(home.path())
             .args(["completion", shell])
             .assert()
             .success()
@@ -225,7 +217,8 @@ fn completion_scripts_include_root_and_common_commands() {
 
 #[test]
 fn completion_rejects_format_json() {
-    acps_command()
+    let home = tempfile::tempdir().expect("home tempdir");
+    acps_command(home.path())
         .args(["completion", "bash", "--format", "json"])
         .assert()
         .failure()
@@ -238,8 +231,7 @@ fn completion_rejects_format_json() {
 fn failed_cli_command_records_error_after_state_exists() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .success();
@@ -251,15 +243,13 @@ fn failed_cli_command_records_error_after_state_exists() {
     )
     .expect("invalid config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .arg("status")
         .assert()
         .failure();
 
-    let mut logs_command = acps_command();
+    let mut logs_command = acps_command(tempdir.path());
     logs_command
-        .env("HOME", tempdir.path())
         .args(["logs", "query", "--level", "error"])
         .assert()
         .success()
@@ -272,21 +262,18 @@ fn failed_cli_command_records_error_after_state_exists() {
 fn parse_failure_records_error_after_state_exists() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .success();
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .arg("unknown-command")
         .assert()
         .failure();
 
-    let mut logs_command = acps_command();
+    let mut logs_command = acps_command(tempdir.path());
     logs_command
-        .env("HOME", tempdir.path())
         .args(["logs", "query", "--level", "error"])
         .assert()
         .success()
@@ -299,38 +286,32 @@ fn parse_failure_records_error_after_state_exists() {
 fn help_invocations_do_not_record_error_events() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .success();
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .arg("--help")
         .assert()
         .success();
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .arg("--version")
         .assert()
         .success();
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["logs", "--help"])
         .assert()
         .success();
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["logs", "query", "--help"])
         .assert()
         .success();
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["logs", "query", "--level", "error"])
         .assert()
         .success()
@@ -345,8 +326,7 @@ fn cli_error_payload_handles_control_bytes_in_argument() {
 
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .success();
@@ -355,15 +335,13 @@ fn cli_error_payload_handles_control_bytes_in_argument() {
     // still produce a payload that survives SQLite's json_valid().
     let bad_path = OsString::from_vec(b"/tmp/acp\x1b[31m-missing\x07\x08-file.toml".to_vec());
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["config", "validate"])
         .arg(&bad_path)
         .assert()
         .failure();
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["logs", "query", "--level", "error"])
         .assert()
         .success()

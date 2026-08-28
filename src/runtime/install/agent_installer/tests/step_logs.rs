@@ -92,6 +92,7 @@ fn installer_log_persist_failure_prevents_history_row() {
         tempdir.path(),
         &store,
         Some(&log_base_file),
+        tempdir.path(),
     )
     .expect_err("log persistence failure must fail install wrapper");
 

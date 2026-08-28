@@ -23,6 +23,7 @@ pub struct Harness {
     pub base_url: String,
     pub config_path: std::path::PathBuf,
     pub workspace_root: std::path::PathBuf,
+    pub home: std::path::PathBuf,
     pub _tempdir: TempDir,
     pub state: Arc<TokioMutex<StateStore>>,
     pub join: JoinHandle<acp_stack::error::Result<()>>,
@@ -34,22 +35,32 @@ impl Harness {
     }
 
     pub async fn spawn_with(mutate: impl FnOnce(&mut Config)) -> Self {
-        Self::spawn_inner(mutate, None, true).await
+        Self::spawn_inner(mutate, None, true, None).await
+    }
+
+    /// Spawn against a caller-owned HOME, for tests that seed files into it
+    /// before the routes read them.
+    pub async fn spawn_with_and_home(
+        mutate: impl FnOnce(&mut Config),
+        home: std::path::PathBuf,
+    ) -> Self {
+        Self::spawn_inner(mutate, None, true, Some(home)).await
     }
 
     /// Harness that never calls `POST /v1/agent/start`, mirroring a freshly initialized host.
     pub async fn spawn_without_agent_start(mutate: impl FnOnce(&mut Config)) -> Self {
-        Self::spawn_inner(mutate, None, false).await
+        Self::spawn_inner(mutate, None, false, None).await
     }
 
     pub async fn spawn_with_models_cache(mutate: impl FnOnce(&mut Config), models: Value) -> Self {
-        Self::spawn_inner(mutate, Some(models), true).await
+        Self::spawn_inner(mutate, Some(models), true, None).await
     }
 
     async fn spawn_inner(
         mutate: impl FnOnce(&mut Config),
         models: Option<Value>,
         start_agent: bool,
+        home: Option<std::path::PathBuf>,
     ) -> Self {
         let tempdir = TempDir::new().expect("tempdir");
         let path = tempdir.path().join("state.sqlite");
@@ -78,7 +89,9 @@ impl Harness {
         )
         .expect("test config write");
         let effective_bind = config.api.bind.clone();
-        let runtime_paths = RuntimePaths::new(config_path.clone(), path);
+        let home = home.unwrap_or_else(|| tempdir.path().to_path_buf());
+        std::fs::create_dir_all(&home).expect("harness home");
+        let runtime_paths = RuntimePaths::new(config_path.clone(), path, home.clone());
         let app_state = AppState::with_effective_bind_and_runtime_paths(
             config,
             store,
@@ -95,6 +108,7 @@ impl Harness {
             base_url,
             config_path,
             workspace_root,
+            home,
             _tempdir: tempdir,
             state,
             join,

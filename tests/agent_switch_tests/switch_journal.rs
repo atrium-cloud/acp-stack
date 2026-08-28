@@ -15,7 +15,6 @@ use acp_stack::runtime::agent::switch_journal::{
 };
 use acp_stack::state::NewSessionRecord;
 
-use crate::common::HomeEnvGuard;
 use crate::common::agent::{
     AgentHarness, EnvVarGuard, admin_bearer, http, session_bearer, test_config,
     write_config_options_fixture, write_gated_placebo_shim, write_kimi_registry_override,
@@ -88,7 +87,7 @@ async fn spawn_kimi_switch_fixture(tempdir: &TempDir, shim_path: &std::path::Pat
     config.workspace.root = workspace.to_string_lossy().into_owned();
     config.workspace.uploads = workspace.join("uploads").to_string_lossy().into_owned();
     config.agent.cwd = Some(config.workspace.root.clone());
-    AgentHarness::spawn_with_config(config).await
+    AgentHarness::spawn_with_config_and_home(config, tempdir.path().to_path_buf()).await
 }
 
 fn set_kimi_secret(tempdir: &TempDir) {
@@ -102,7 +101,6 @@ fn set_kimi_secret(tempdir: &TempDir) {
 #[tokio::test]
 async fn agent_switch_retry_after_post_commit_start_failure_converges() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     let shim_path = tempdir.path().join("kimi-shim");
     let marker_path = tempdir.path().join("kimi-ready");
     let fixture_path = write_config_options_fixture(tempdir.path(), &["kimi/kimi-k3"]);
@@ -144,7 +142,6 @@ async fn agent_switch_retry_after_post_commit_start_failure_converges() {
 #[tokio::test]
 async fn agent_switch_resume_survives_process_restart() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     let shim_path = tempdir.path().join("kimi-shim");
     let marker_path = tempdir.path().join("kimi-ready");
     let fixture_path = write_config_options_fixture(tempdir.path(), &["kimi/kimi-k3"]);
@@ -176,7 +173,6 @@ async fn agent_switch_resume_survives_process_restart() {
 #[tokio::test]
 async fn agent_switch_existing_target_resume_stops_old_target_left_running() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     let config_dir = tempdir.path().join(".config/acp-stack");
     std::fs::create_dir_all(&config_dir).expect("config dir");
     write_kimi_registry_override(&config_dir);
@@ -197,7 +193,8 @@ async fn agent_switch_existing_target_resume_stops_old_target_left_running() {
         id: "kimi".to_owned(),
         agent: kimi,
     });
-    let harness = AgentHarness::spawn_with_config(config).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(config, tempdir.path().to_path_buf()).await;
     start_primary(&harness).await;
 
     let (status, body) = switch_request(&harness, "kimi").await;
@@ -241,7 +238,6 @@ async fn agent_switch_existing_target_resume_stops_old_target_left_running() {
 #[tokio::test]
 async fn agent_switch_rename_collision_clears_journal_and_unblocks_retry() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     let shim_path = tempdir.path().join("kimi-shim");
     let fixture_path = write_config_options_fixture(tempdir.path(), &["kimi/kimi-k3"]);
     let _fixture_guard = EnvVarGuard::set("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &fixture_path);
@@ -306,7 +302,6 @@ async fn agent_switch_rename_collision_clears_journal_and_unblocks_retry() {
 #[tokio::test]
 async fn agent_switch_conflicting_target_is_rejected_while_journal_incomplete() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     let shim_path = tempdir.path().join("kimi-shim");
     let marker_path = tempdir.path().join("kimi-ready");
     let fixture_path = write_config_options_fixture(tempdir.path(), &["kimi/kimi-k3"]);
@@ -333,8 +328,8 @@ async fn agent_switch_conflicting_target_is_rejected_while_journal_incomplete() 
 #[tokio::test]
 async fn agent_switch_same_primary_still_conflicts_while_foreign_journal_incomplete() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
-    let harness = AgentHarness::spawn().await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
     let journal = SwitchJournal {
         old_target_id: "opencode".to_owned(),
         new_target_id: "kimi".to_owned(),
@@ -353,8 +348,8 @@ async fn agent_switch_same_primary_still_conflicts_while_foreign_journal_incompl
 #[tokio::test]
 async fn agent_switch_stale_completed_journal_still_noops_same_target() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
-    let harness = AgentHarness::spawn().await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
     let journal = SwitchJournal {
         old_target_id: "opencode".to_owned(),
         new_target_id: "kimi".to_owned(),
@@ -377,7 +372,6 @@ async fn agent_switch_stale_completed_journal_still_noops_same_target() {
 #[tokio::test]
 async fn agent_switch_conflicts_when_resumed_candidate_differs() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     let shim_path = tempdir.path().join("kimi-shim");
     let fixture_path = write_config_options_fixture(tempdir.path(), &["kimi/kimi-k3"]);
     let _fixture_guard = EnvVarGuard::set("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &fixture_path);
@@ -408,7 +402,6 @@ async fn agent_switch_conflicts_when_resumed_candidate_differs() {
 #[tokio::test]
 async fn agent_switch_while_stopped_completes_and_same_target_retry_is_noop() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     let shim_path = tempdir.path().join("kimi-shim");
     let fixture_path = write_config_options_fixture(tempdir.path(), &["kimi/kimi-k3"]);
     let _fixture_guard = EnvVarGuard::set("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &fixture_path);
@@ -443,7 +436,6 @@ async fn agent_switch_while_stopped_completes_and_same_target_retry_is_noop() {
 #[tokio::test]
 async fn agent_switch_completed_retry_leaves_running_agent_untouched() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     let shim_path = tempdir.path().join("kimi-shim");
     let fixture_path = write_config_options_fixture(tempdir.path(), &["kimi/kimi-k3"]);
     let _fixture_guard = EnvVarGuard::set("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &fixture_path);
@@ -476,8 +468,8 @@ async fn agent_switch_completed_retry_leaves_running_agent_untouched() {
 #[tokio::test]
 async fn agent_switch_corrupt_journal_is_a_hard_error() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
-    let harness = AgentHarness::spawn().await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
     let journal_path = switch_journal_path(&harness.config_path).expect("journal path");
     std::fs::write(&journal_path, b"{not json").expect("write corrupt journal");
 
@@ -489,7 +481,6 @@ async fn agent_switch_corrupt_journal_is_a_hard_error() {
 #[tokio::test]
 async fn agent_switch_without_journal_converges_same_target_as_noop() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     let shim_path = tempdir.path().join("kimi-shim");
     let fixture_path = write_config_options_fixture(tempdir.path(), &["kimi/kimi-k3"]);
     let _fixture_guard = EnvVarGuard::set("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &fixture_path);

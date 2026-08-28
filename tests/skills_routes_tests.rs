@@ -8,7 +8,6 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 mod common;
-use common::HomeEnvGuard;
 use common::agent::{
     AgentHarness, admin_bearer, http, session_bearer, test_config, write_installed_skill,
 };
@@ -98,12 +97,12 @@ async fn skills_remove_requires_admin_key() {
 #[tokio::test]
 async fn skills_list_returns_installed_skills_sorted() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     let install_root = tempdir.path().join(".agents/skills");
     write_installed_skill(&install_root, "repo-map", "# Repo Map\n");
     write_installed_skill(&install_root, "code-review", "# Code Review\n");
 
-    let harness = AgentHarness::spawn_with_config(test_config()).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
     let response = http()
         .await
         .get(format!("{}/v1/agent/skills", harness.base_url))
@@ -132,12 +131,12 @@ async fn skills_list_returns_installed_skills_sorted() {
 #[tokio::test]
 async fn skills_list_omits_source_for_unmanaged_skill() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     let skill_dir = tempdir.path().join(".agents/skills/hand-made");
     std::fs::create_dir_all(&skill_dir).expect("skill dir");
     std::fs::write(skill_dir.join("SKILL.md"), "# Mine\n").expect("descriptor");
 
-    let harness = AgentHarness::spawn_with_config(test_config()).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
     let response = http()
         .await
         .get(format!("{}/v1/agent/skills", harness.base_url))
@@ -175,12 +174,12 @@ async fn skills_list_rejects_admin_key() {
 #[tokio::test]
 async fn skills_list_reports_unsupported_agent() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     let config_dir = tempdir.path().join(".config/acp-stack");
     std::fs::create_dir_all(&config_dir).expect("config dir");
     write_opencode_no_skills_override(&config_dir);
 
-    let harness = AgentHarness::spawn_with_config(test_config()).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
     let response = http()
         .await
         .get(format!("{}/v1/agent/skills", harness.base_url))
@@ -234,9 +233,9 @@ async fn skills_catalog_lists_builtin_sources() {
 #[tokio::test]
 async fn skills_add_rejects_unknown_source() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
 
-    let harness = AgentHarness::spawn_with_config(test_config()).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
     let response = http()
         .await
         .post(format!("{}/v1/agent/skills/add", harness.base_url))
@@ -255,9 +254,9 @@ async fn skills_add_rejects_unknown_source() {
 #[tokio::test]
 async fn skills_add_rejects_empty_skills() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
 
-    let harness = AgentHarness::spawn_with_config(test_config()).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
     let response = http()
         .await
         .post(format!("{}/v1/agent/skills/add", harness.base_url))
@@ -276,12 +275,12 @@ async fn skills_add_rejects_empty_skills() {
 #[tokio::test]
 async fn skills_add_rejects_unsupported_agent() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     let config_dir = tempdir.path().join(".config/acp-stack");
     std::fs::create_dir_all(&config_dir).expect("config dir");
     write_opencode_no_skills_override(&config_dir);
 
-    let harness = AgentHarness::spawn_with_config(test_config()).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
     let response = http()
         .await
         .post(format!("{}/v1/agent/skills/add", harness.base_url))
@@ -300,12 +299,12 @@ async fn skills_add_rejects_unsupported_agent() {
 #[tokio::test]
 async fn skills_remove_rejects_unsupported_agent() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     let config_dir = tempdir.path().join(".config/acp-stack");
     std::fs::create_dir_all(&config_dir).expect("config dir");
     write_opencode_no_skills_override(&config_dir);
 
-    let harness = AgentHarness::spawn_with_config(test_config()).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
     let response = http()
         .await
         .post(format!("{}/v1/agent/skills/remove", harness.base_url))
@@ -342,10 +341,10 @@ async fn skills_remove_rejects_malformed_skill_name() {
 #[tokio::test]
 async fn skills_remove_missing_skill_is_not_found() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     std::fs::create_dir_all(tempdir.path().join(".agents/skills")).expect("install root");
 
-    let harness = AgentHarness::spawn_with_config(test_config()).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
     let response = http()
         .await
         .post(format!("{}/v1/agent/skills/remove", harness.base_url))
@@ -365,12 +364,12 @@ async fn skills_remove_missing_skill_is_not_found() {
 async fn skills_remove_refuses_skill_not_installed_by_acp_stack() {
     // A hand-placed folder has a SKILL.md but no managed marker.
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     let skill_dir = tempdir.path().join(".agents/skills/my-skill");
     std::fs::create_dir_all(&skill_dir).expect("skill dir");
     std::fs::write(skill_dir.join("SKILL.md"), "# Mine\n").expect("descriptor");
 
-    let harness = AgentHarness::spawn_with_config(test_config()).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
     let response = http()
         .await
         .post(format!("{}/v1/agent/skills/remove", harness.base_url))
@@ -632,7 +631,6 @@ async fn skills_source_get_rejects_unknown_source() {
 #[tokio::test]
 async fn skills_remove_uninstalls_and_prunes_link() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     let config_dir = tempdir.path().join(".config/acp-stack");
     std::fs::create_dir_all(&config_dir).expect("config dir");
     write_opencode_linked_skills_override(&config_dir);
@@ -647,7 +645,8 @@ async fn skills_remove_uninstalls_and_prunes_link() {
     std::os::unix::fs::symlink(install_root.join("repo-map"), link_root.join("repo-map"))
         .expect("pre-existing mirror link");
 
-    let harness = AgentHarness::spawn_with_config(test_config()).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
     let response = http()
         .await
         .post(format!("{}/v1/agent/skills/remove", harness.base_url))

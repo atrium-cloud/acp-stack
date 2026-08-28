@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use crate::config::{AgentAdapterConfig, AgentProviderConfig, AgentProvidersConfig, Config};
 use crate::error::{Result, StackError};
@@ -76,12 +77,12 @@ impl AgentSwitchProviderStatus {
 /// override lives in the agent's native config, and a target that cannot carry
 /// it would silently send protected traffic back to the vendor.
 pub fn ensure_endpoint_override_survives_target(
+    home: &Path,
     target_agent_id: &str,
     target_supports_base_url: bool,
     target_provider_id: Option<&str>,
 ) -> Result<()> {
-    let home = crate::fs_util::home_dir()?;
-    let Some(endpoint) = crate::secrets::managed_provider_endpoint_override_for_home(&home)? else {
+    let Some(endpoint) = crate::secrets::managed_provider_endpoint_override_for_home(home)? else {
         return Ok(());
     };
     if !target_supports_base_url {
@@ -112,6 +113,7 @@ pub fn ensure_endpoint_override_survives_target(
 }
 
 pub fn plan_agent_switch(
+    home: &Path,
     current: &Config,
     registry: &RegistryCatalog,
     request: AgentSwitchRequest,
@@ -133,6 +135,7 @@ pub fn plan_agent_switch(
     // MUST run after provider resolution so the pair-level refusal sees the
     // provider the target would actually run.
     ensure_endpoint_override_survives_target(
+        home,
         &entry.id,
         entry.set_provider_base_url,
         provider_status.provider_id(),
@@ -1042,10 +1045,9 @@ mod tests {
         assert!(error.to_string().contains("custom provider migration"));
     }
 
-    // Serializes every test that can observe a staged endpoint override: the
-    // guard resolves the secret store through `$HOME`, so every
-    // `plan_agent_switch` call here must hold this lock or its outcome depends
-    // on test scheduling.
+    // Serializes the tests that stage an override through `HomeEnvGuard`: that
+    // guard mutates the process `HOME`, which is global, so the mutation must
+    // not race another test in this module.
     static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -1054,13 +1056,16 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// An empty tempdir as HOME: these cases stage no override, so the guard is a
+    /// no-op and their outcome cannot depend on the developer's real secret store.
     fn plan_agent_switch_locked(
         current: &Config,
         registry: &RegistryCatalog,
         request: AgentSwitchRequest,
     ) -> Result<AgentSwitchPlan> {
         let _env_lock = env_lock();
-        super::plan_agent_switch(current, registry, request)
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        super::plan_agent_switch(tempdir.path(), current, registry, request)
     }
 
     struct HomeEnvGuard {
@@ -1121,7 +1126,7 @@ mod tests {
         let _home = HomeEnvGuard::set(tempdir.path());
         stage_endpoint_override(tempdir.path(), "openai");
 
-        let error = ensure_endpoint_override_survives_target("kimi", false, None)
+        let error = ensure_endpoint_override_survives_target(tempdir.path(), "kimi", false, None)
             .expect_err("a target with no endpoint field must be rejected");
         assert!(
             matches!(error, StackError::InvalidParam { field: "agent", .. }),
@@ -1140,7 +1145,7 @@ mod tests {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let _home = HomeEnvGuard::set(tempdir.path());
 
-        ensure_endpoint_override_survives_target("kimi", false, None)
+        ensure_endpoint_override_survives_target(tempdir.path(), "kimi", false, None)
             .expect("no override stored means any target passes");
     }
 
@@ -1160,6 +1165,7 @@ mod tests {
 
         // `super::` because HOME_LOCK is already held and must not re-acquire.
         let error = super::plan_agent_switch(
+            tempdir.path(),
             &config,
             &registry,
             AgentSwitchRequest {
@@ -1192,6 +1198,7 @@ mod tests {
         let registry = RegistryCatalog::load_embedded().expect("registry loads");
 
         let error = super::plan_agent_switch(
+            tempdir.path(),
             &config,
             &registry,
             AgentSwitchRequest {
@@ -1224,6 +1231,7 @@ mod tests {
         let registry = RegistryCatalog::load_embedded().expect("registry loads");
 
         let plan = super::plan_agent_switch(
+            tempdir.path(),
             &config,
             &registry,
             AgentSwitchRequest {

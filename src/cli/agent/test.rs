@@ -577,6 +577,7 @@ fn execute_agent_test(
     let network_provider = crate::extensions::resolve_network_provider(config);
     let report = runtime.block_on(async move {
         run_agent_test_inner(
+            home,
             agent,
             env,
             cwd,
@@ -873,6 +874,7 @@ struct AgentTestInnerReport {
 
 #[allow(clippy::too_many_arguments)]
 async fn run_agent_test_inner(
+    home: &Path,
     agent: crate::config::AgentConfig,
     env: HashMap<String, String>,
     cwd: PathBuf,
@@ -884,6 +886,7 @@ async fn run_agent_test_inner(
 ) -> AgentTestInnerReport {
     let sink = Arc::new(AgentTestSessionEventSink::new());
     let bridge = match AcpBridge::spawn(
+        home,
         &agent,
         env,
         cwd.clone(),

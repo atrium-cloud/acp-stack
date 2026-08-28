@@ -752,7 +752,7 @@ async fn check_postgrest_tables_and_canary(
     supabase: &SupabaseLoggingConfig,
     api_key: &str,
 ) -> Result<()> {
-    let client = reqwest::Client::builder()
+    let client = crate::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|err| StackError::SupabaseSinkHttp {

@@ -17,8 +17,7 @@ async fn security_check_calls_running_daemon_without_auth_key() {
         Some(&harness.socket_path),
     );
 
-    acps_command()
-        .env("HOME", home.path())
+    acps_command(home.path())
         .args(["security", "check"])
         .assert()
         .success()
@@ -39,8 +38,7 @@ async fn security_check_renders_hint_line_for_each_finding() {
         Some(&harness.socket_path),
     );
 
-    acps_command()
-        .env("HOME", home.path())
+    acps_command(home.path())
         .args(["security", "check"])
         .assert()
         .success()
@@ -53,7 +51,8 @@ async fn security_check_renders_hint_line_for_each_finding() {
 
 #[test]
 fn security_check_does_not_accept_admin_key_flag() {
-    acps_command()
+    let home = tempfile::tempdir().expect("home tempdir");
+    acps_command(home.path())
         .args(["security", "check", "--admin-key", SESSION_KEY])
         .assert()
         .failure()
@@ -75,8 +74,7 @@ async fn security_history_renders_table_and_next_page_cursor() {
     let _first_run_id = run_security_check_and_extract_run_id(home.path());
     let second_run_id = run_security_check_and_extract_run_id(home.path());
 
-    acps_command()
-        .env("HOME", home.path())
+    acps_command(home.path())
         .args([
             "security",
             "history",
@@ -113,8 +111,7 @@ async fn security_history_json_renders_runs_and_cursor() {
     let _first_run_id = run_security_check_and_extract_run_id(home.path());
     let second_run_id = run_security_check_and_extract_run_id(home.path());
 
-    let output = acps_command()
-        .env("HOME", home.path())
+    let output = acps_command(home.path())
         .args([
             "security",
             "history",
@@ -152,8 +149,7 @@ async fn security_history_global_format_json_matches_json_alias() {
 
     let run_id = run_security_check_and_extract_run_id(home.path());
 
-    let output = acps_command()
-        .env("HOME", home.path())
+    let output = acps_command(home.path())
         .args([
             "security",
             "history",
@@ -183,8 +179,7 @@ async fn security_history_json_alias_conflicts_with_explicit_text_format() {
         Some(&harness.socket_path),
     );
 
-    acps_command()
-        .env("HOME", home.path())
+    acps_command(home.path())
         .args(["security", "history", "--json", "--format", "text"])
         .assert()
         .failure()
@@ -197,8 +192,7 @@ async fn security_history_json_alias_conflicts_with_explicit_text_format() {
 fn security_history_json_alias_conflict_precedes_config_load() {
     let home = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", home.path())
+    acps_command(home.path())
         .args(["security", "history", "--json", "--format", "text"])
         .assert()
         .failure()
@@ -223,8 +217,7 @@ async fn security_show_renders_run_findings_hints_and_details() {
 
     let run_id = run_security_check_and_extract_run_id(home.path());
 
-    acps_command()
-        .env("HOME", home.path())
+    acps_command(home.path())
         .args(["security", "show", &run_id, "--admin-key", ADMIN_KEY])
         .assert()
         .success()
@@ -246,8 +239,7 @@ fn security_show_rejects_invalid_run_id_before_daemon_request() {
     let home = tempfile::tempdir().expect("tempdir should be created");
     write_cli_home(home.path(), "http://127.0.0.1:9", ADMIN_KEY);
 
-    acps_command()
-        .env("HOME", home.path())
+    acps_command(home.path())
         .args(["security", "show", "srun/not-safe"])
         .assert()
         .failure()
@@ -261,8 +253,7 @@ fn security_history_rejects_invalid_limit_before_admin_key() {
     let home = tempfile::tempdir().expect("tempdir should be created");
     write_cli_home(home.path(), "http://127.0.0.1:9", ADMIN_KEY);
 
-    acps_command()
-        .env("HOME", home.path())
+    acps_command(home.path())
         .args(["security", "history", "--limit", "0"])
         .assert()
         .failure()
@@ -282,8 +273,7 @@ async fn security_history_uses_admin_key_not_session_key() {
         Some(&harness.socket_path),
     );
 
-    acps_command()
-        .env("HOME", home.path())
+    acps_command(home.path())
         .args(["security", "history", "--admin-key", SESSION_KEY])
         .assert()
         .failure()
@@ -302,8 +292,7 @@ async fn security_show_uses_admin_key_not_session_key() {
         Some(&harness.socket_path),
     );
 
-    acps_command()
-        .env("HOME", home.path())
+    acps_command(home.path())
         .args([
             "security",
             "show",
@@ -318,8 +307,7 @@ async fn security_show_uses_admin_key_not_session_key() {
 }
 
 fn run_security_check_and_extract_run_id(home: &std::path::Path) -> String {
-    let output = acps_command()
-        .env("HOME", home)
+    let output = acps_command(home)
         .args(["security", "check"])
         .assert()
         .success()

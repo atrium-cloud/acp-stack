@@ -30,6 +30,16 @@ pub enum StackError {
     #[error("HOME is not set; cannot resolve default config path")]
     HomeNotSet,
 
+    #[error(
+        "fixture build refuses HOME {path}: it is outside the temp dir; set ACP_STACK_TEST_DISPOSABLE_HOST=1 only on a throwaway host"
+    )]
+    HomeNotIsolated { path: PathBuf },
+
+    #[error(
+        "fixture build refuses non-loopback URL {url}; set ACP_STACK_TEST_DISPOSABLE_HOST=1 only on a throwaway host"
+    )]
+    FixtureEgressRefused { url: String },
+
     #[error("failed to read config at {path}: {source}")]
     ConfigRead {
         path: PathBuf,

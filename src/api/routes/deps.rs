@@ -107,6 +107,9 @@ pub(crate) async fn deps_apply_handler(
     let config = state.config.clone();
     let feature = payload.feature.clone();
     let store_handle = state.state.clone();
+    // Boot-time home, moved into the blocking task so the apply shell env uses the
+    // same HOME the daemon resolved at startup rather than re-reading the process env.
+    let home = state.runtime_paths.home.clone();
     let report = tokio::task::spawn_blocking(
         move || -> std::result::Result<DepsApplyReport, StackError> {
             // The guard travels into the blocking task, not the handler future: a
@@ -135,7 +138,7 @@ pub(crate) async fn deps_apply_handler(
                 );
             }
             let shell = &config.workspace.default_shell;
-            let escalation = escalation_for(&config, feature.as_deref());
+            let escalation = escalation_for(&config, feature.as_deref(), &home);
             apply_dependencies_tracked(
                 &config,
                 &apply_store,
@@ -146,6 +149,7 @@ pub(crate) async fn deps_apply_handler(
                 feature.as_deref(),
                 shell,
                 &escalation,
+                &home,
                 |_, _, _| Ok(()),
             )
         },

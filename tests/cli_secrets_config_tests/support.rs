@@ -17,8 +17,7 @@ fn parse_init_keys(stdout: &str) -> (String, String) {
 }
 
 pub(crate) fn run_init_with_home(home: &std::path::Path) -> (String, String) {
-    let stdout = acps_command()
-        .env("HOME", home)
+    let stdout = acps_command(home)
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .success()

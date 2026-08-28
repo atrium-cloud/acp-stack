@@ -5,6 +5,7 @@ use super::*;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn spawn_agent_bridge(
+    home: &Path,
     target_id: &str,
     agent: &AgentConfig,
     workspace_root: &str,
@@ -21,7 +22,7 @@ pub(super) async fn spawn_agent_bridge(
     // The integrity guard MUST run before spawning: `[agent].command` can
     // resolve to a different binary than the one the installer hashed.
     if let Some(expected) = agent.expected_sha256.as_deref() {
-        verify_agent_binary_sha256(&agent.command, &cwd, expected)?;
+        verify_agent_binary_sha256(&agent.command, &cwd, expected, home)?;
     }
 
     append_and_publish_agent_lifecycle(
@@ -44,6 +45,7 @@ pub(super) async fn spawn_agent_bridge(
         session_changes.clone(),
     ));
     let bridge = match AcpBridge::spawn(
+        home,
         agent,
         env,
         cwd,
@@ -235,6 +237,7 @@ async fn monitor_bridge_exit(
     }
 
     match spawn_agent_bridge(
+        &restart_context.home,
         &restart_context.target_id,
         &restart_context.agent,
         &restart_context.workspace_root,

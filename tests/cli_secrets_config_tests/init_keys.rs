@@ -53,9 +53,8 @@ creates = "init-test-agent"
     )
     .expect("agents override");
 
-    acps_command()
+    acps_command(tempdir.path())
         .env_remove(TEST_SKIP_AGENT_INSTALL_ENV)
-        .env("HOME", tempdir.path())
         .args(["init", "--agent", "init-test"])
         .assert()
         .success()
@@ -97,8 +96,7 @@ fn init_age_key_and_store_are_owner_only() {
 #[test]
 fn init_prints_session_and_admin_keys_on_first_run() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .success()
@@ -117,8 +115,7 @@ fn init_text_rerun_prints_next_step_hint_without_keys() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_init_with_home(tempdir.path());
 
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .success()
@@ -134,8 +131,7 @@ fn init_text_rerun_prints_next_step_hint_without_keys() {
 #[test]
 fn init_text_failure_prints_keys_without_next_step_hint() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -159,8 +155,7 @@ fn init_text_failure_prints_keys_without_next_step_hint() {
 #[test]
 fn init_handoff_json_prints_fresh_keys_once() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -261,7 +256,6 @@ fn init_handoff_json_reports_the_settled_selection() {
     );
 
     let output = acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "init",
@@ -310,8 +304,7 @@ fn init_handoff_json_preserves_keys_without_reprinting_material() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let (session_key, admin_key) = run_init_with_home(tempdir.path());
 
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -344,8 +337,7 @@ fn init_handoff_json_rotate_keys_reissues_plaintext_over_existing_state() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let (old_session_key, old_admin_key) = run_init_with_home(tempdir.path());
 
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -381,8 +373,7 @@ fn init_handoff_json_rotate_keys_reissues_plaintext_over_existing_state() {
 #[test]
 fn init_handoff_json_failure_reports_fresh_keys_once() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -435,8 +426,7 @@ fn init_handoff_json_failure_reports_preserved_keys_without_reprinting_material(
     )
     .expect("config writable");
 
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -466,7 +456,8 @@ fn init_handoff_json_failure_reports_preserved_keys_without_reprinting_material(
 
 #[test]
 fn init_handoff_json_does_not_enable_global_format_json() {
-    acps_command()
+    let home = tempfile::tempdir().expect("home tempdir");
+    acps_command(home.path())
         .args(["init", "--handoff-json", "--format", "json"])
         .assert()
         .failure()
@@ -483,8 +474,7 @@ fn init_is_idempotent_and_preserves_keys() {
     let store = tempdir.path().join(".local/share/acp-stack/secrets.age");
     let first = fs::read(&store).expect("ciphertext readable");
 
-    let stdout = acps_command()
-        .env("HOME", tempdir.path())
+    let stdout = acps_command(tempdir.path())
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .success()
@@ -530,8 +520,7 @@ admin_key_ref = "ACP_STACK_ADMIN_KEY"
         ])
         .expect("legacy auth secrets");
 
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .success()
@@ -570,8 +559,7 @@ fn init_fails_fast_when_only_one_auth_verifier_exists() {
         )
         .expect("admin verifier should replace pair");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .failure()
@@ -592,8 +580,7 @@ fn init_fails_fast_when_auth_verifier_is_malformed() {
         )
         .expect("auth verifier should be corruptible");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .failure()
@@ -616,8 +603,7 @@ fn init_fails_fast_when_admin_verifier_missing() {
         )
         .expect("session verifier should be stored");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .failure()

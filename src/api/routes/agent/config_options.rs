@@ -4,7 +4,6 @@ use serde::Serialize;
 use crate::api::core::AppState;
 use crate::envelope::ApiSuccess;
 use crate::error::StackError;
-use crate::fs_util::home_dir;
 use crate::runtime::agent::config_options::{SessionConfigOptionSnapshot, project_config_options};
 use crate::runtime::agent::model_discovery::{
     DEFAULT_MODELS_DISCOVERY_TIMEOUT, fetch_session_config_with_timeout,
@@ -27,7 +26,7 @@ pub(crate) async fn agent_config_options_handler(
 ) -> std::result::Result<ApiSuccess<AgentConfigOptionsResponse>, StackError> {
     let (config, _) = state.default_agent_target().await?;
     let agent_id = config.agent.id.clone();
-    let home = home_dir()?;
+    let home = state.runtime_paths.home.clone();
     let response =
         fetch_session_config_with_timeout(&home, &config, DEFAULT_MODELS_DISCOVERY_TIMEOUT).await?;
     let config_options = project_config_options(response.config_options.as_deref().unwrap_or(&[]));

@@ -24,47 +24,6 @@ const ADMIN_KEY: &str = "acps_admin_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 const NAMESPACE: &str = "platform-state";
 const PEER_NAMESPACE: &str = "peer-state";
 
-/// Serializes HOME mutations across the parallel `#[tokio::test]` functions
-/// here. Sound only while EVERY HOME read in this binary holds this guard: a
-/// test or helper that reads HOME without `HomeEnvGuard::set` races the unsafe
-/// `set_var` below and is undefined behavior on multi-threaded runs.
-static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-struct HomeEnvGuard<'a> {
-    _lock: std::sync::MutexGuard<'a, ()>,
-    previous: Option<std::ffi::OsString>,
-}
-
-impl HomeEnvGuard<'_> {
-    fn set(home: &std::path::Path) -> Self {
-        let lock = HOME_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let previous = std::env::var_os("HOME");
-        // SAFETY: HOME_LOCK is held, and every HOME read in this binary routes
-        // through this guard, so no read races the mutation.
-        unsafe {
-            std::env::set_var("HOME", home);
-        }
-        Self {
-            _lock: lock,
-            previous,
-        }
-    }
-}
-
-impl Drop for HomeEnvGuard<'_> {
-    fn drop(&mut self) {
-        // SAFETY: lock still held while the prior HOME is restored.
-        unsafe {
-            match self.previous.take() {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-        }
-    }
-}
-
 struct ServerHarness {
     base_url: String,
     home: PathBuf,
@@ -72,13 +31,11 @@ struct ServerHarness {
     join: JoinHandle<acp_stack::error::Result<()>>,
     _tempdir: TempDir,
     state: Arc<TokioMutex<StateStore>>,
-    _home_guard: HomeEnvGuard<'static>,
 }
 
 impl ServerHarness {
     async fn spawn() -> Self {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let home_guard = HomeEnvGuard::set(tempdir.path());
         // The handler's SecretStore::open requires an existing store.
         SecretStore::open_or_create(tempdir.path()).expect("create secret store");
 
@@ -97,7 +54,8 @@ impl ServerHarness {
         )
         .expect("write runtime config");
 
-        let runtime_paths = RuntimePaths::new(config_path, state_path);
+        let runtime_paths =
+            RuntimePaths::new(config_path, state_path, tempdir.path().to_path_buf());
         let app_state = AppState::with_effective_bind_and_runtime_paths(
             config,
             store,
@@ -117,7 +75,6 @@ impl ServerHarness {
             join,
             _tempdir: tempdir,
             state,
-            _home_guard: home_guard,
         }
     }
 

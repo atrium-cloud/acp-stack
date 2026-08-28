@@ -49,6 +49,7 @@ async fn shutdown_waits_for_connection_task_before_flushing_sink() {
     let sink_dyn: Arc<dyn SessionEventSink> = sink.clone();
     let bridge = Arc::new(
         AcpBridge::spawn(
+            &std::env::temp_dir(),
             &fake_agent_config(),
             fake_env(),
             std::env::temp_dir(),
@@ -153,6 +154,7 @@ async fn shutdown_drains_notification_queued_before_capture_blocks() {
     let sink_dyn: Arc<dyn SessionEventSink> = sink.clone();
     let bridge = Arc::new(
         AcpBridge::spawn(
+            &std::env::temp_dir(),
             &fake_agent_config(),
             fake_env(),
             std::env::temp_dir(),
@@ -209,6 +211,7 @@ async fn shutdown_drains_notification_queued_before_capture_blocks() {
 async fn cancel_session_settles_prompt_with_cancelled_stop_reason() {
     use agent_client_protocol::schema::v1::{ContentBlock, PromptRequest, StopReason, TextContent};
     let bridge = AcpBridge::spawn(
+        &std::env::temp_dir(),
         &fake_agent_config(),
         fake_env(),
         std::env::temp_dir(),

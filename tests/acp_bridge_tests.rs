@@ -3,6 +3,7 @@
 //! Drives `AcpBridge::spawn` against the placebo ACP fixture so the spawn and
 //! handshake path is exercised without a third-party agent.
 
+mod common;
 #[path = "acp_bridge_tests/support.rs"]
 mod support;
 

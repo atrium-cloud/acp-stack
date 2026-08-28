@@ -104,6 +104,7 @@ pub async fn fetch_session_config_with_timeout(
         .unwrap_or_else(|| PathBuf::from(&config.workspace.root));
 
     let bridge = AcpBridge::spawn(
+        home,
         &config.agent,
         env,
         cwd.clone(),
@@ -173,6 +174,7 @@ pub async fn fetch_agent_capabilities_async(
         .unwrap_or_else(|| PathBuf::from(&config.workspace.root));
 
     let bridge = AcpBridge::spawn(
+        home,
         &config.agent,
         env,
         cwd,

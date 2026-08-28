@@ -10,8 +10,7 @@ fn init_custom_agent_writes_install_config() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
     // Completing init at all proves the registry-only gates were bypassed.
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -58,8 +57,7 @@ fn init_custom_agent_writes_install_config() {
 fn init_custom_agent_rejects_placeholder_id() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -89,8 +87,7 @@ fn init_custom_agent_rejects_placeholder_id() {
 fn init_custom_agent_rejects_registry_id() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -120,8 +117,7 @@ fn init_custom_agent_rejects_registry_id() {
 fn init_custom_agent_requires_command() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -141,8 +137,7 @@ fn init_custom_agent_requires_command() {
 fn init_custom_agent_rejects_blank_command() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -164,8 +159,7 @@ fn init_custom_agent_rejects_blank_command() {
 fn init_custom_agent_rejects_explicit_model_flag_on_rerun() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -181,8 +175,7 @@ fn init_custom_agent_rejects_explicit_model_flag_on_rerun() {
         .assert()
         .success();
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -200,8 +193,7 @@ fn init_custom_agent_rejects_explicit_model_flag_on_rerun() {
 fn init_custom_agent_rejects_explicit_mode_flag_on_rerun() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -217,8 +209,7 @@ fn init_custom_agent_rejects_explicit_mode_flag_on_rerun() {
         .assert()
         .success();
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -236,8 +227,7 @@ fn init_custom_agent_rejects_explicit_mode_flag_on_rerun() {
 fn init_custom_agent_allows_explicit_registry_agent_switch_on_rerun() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -253,8 +243,7 @@ fn init_custom_agent_allows_explicit_registry_agent_switch_on_rerun() {
         .assert()
         .success();
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -290,8 +279,7 @@ fn init_custom_agent_fails_when_installed_command_is_absent() {
     permissions.set_mode(0o755);
     fs::set_permissions(&creates, permissions).expect("creates marker should be executable");
 
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .env_remove(TEST_SKIP_AGENT_INSTALL_ENV)
         .args([
             "dev",
@@ -334,8 +322,7 @@ fn init_custom_agent_acp_gate_skips_when_spawn_cwd_absent() {
     permissions.set_mode(0o755);
     fs::set_permissions(&creates, permissions).expect("creates marker should be executable");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .env_remove(TEST_SKIP_AGENT_INSTALL_ENV)
         .args([
             "dev",
@@ -364,8 +351,7 @@ fn init_agent_env_ref_appends_to_config() {
     // `--agent-env-ref` references an existing secret and fails fast otherwise.
     seed_init_secrets(tempdir.path(), &[("MY_AGENT_TOKEN", "token-value")]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -393,8 +379,7 @@ fn init_agent_env_ref_appends_to_config() {
 fn init_agent_env_ref_missing_secret_fails_fast() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -433,8 +418,7 @@ fn init_agent_env_ref_missing_secret_fails_fast() {
 fn init_agent_env_ref_rejected_for_existing_config() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -446,8 +430,7 @@ fn init_agent_env_ref_rejected_for_existing_config() {
         .assert()
         .success();
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -468,8 +451,7 @@ fn init_custom_agent_acp_gate_skips_when_binary_absent() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
     // The custom binary is not on PATH, so the connection gate skips cleanly.
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -494,8 +476,7 @@ fn init_custom_agent_acp_gate_fails_for_non_acp_binary() {
     std::fs::create_dir_all(&workspace).expect("workspace dir should be created");
 
     // `true` is a real binary on PATH but does not speak ACP, so the gate runs.
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -531,8 +512,7 @@ fn init_staging_failure_finalizes_run_for_resume() {
 
     // The failure lands after the run row exists, so it must finalize the run instead
     // of leaving a pending row for a later `--resume` to adopt.
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args([
             "dev",
             "init",

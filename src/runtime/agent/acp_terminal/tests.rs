@@ -51,7 +51,7 @@ fn buffer_append_trims_to_cap_during_accumulation() {
 #[test]
 fn terminal_environment_excludes_provider_keys() {
     let agent_env = vec![EnvVariable::new("MY_FLAG", "1")];
-    let env = terminal_environment(&agent_env);
+    let env = terminal_environment(Path::new("/home/acp-terminal-test"), &agent_env);
     assert_eq!(env.get("MY_FLAG").map(String::as_str), Some("1"));
     // Composition starts from an empty map, never the agent process env,
     // which carries provider API keys.
@@ -173,6 +173,7 @@ async fn create_terminal_defaults_cwd_to_session_cwd() {
     let context = TerminalHandlerContext {
         registry: Arc::new(TerminalRegistry::default()),
         workspace_root: root.path().to_path_buf(),
+        home: root.path().to_path_buf(),
         sandbox: crate::config::SandboxConfig::default(),
         network_provider: None,
         command_log: None,
@@ -235,6 +236,7 @@ async fn create_terminal_start_failure_finalizes_command_row() {
     let context = TerminalHandlerContext {
         registry: Arc::new(TerminalRegistry::default()),
         workspace_root: std::env::temp_dir(),
+        home: std::env::temp_dir(),
         sandbox: crate::config::SandboxConfig::default(),
         network_provider: None,
         command_log: Some(TerminalCommandLog {
@@ -274,6 +276,7 @@ async fn kill_finalizes_command_row_as_canceled() {
     let context = TerminalHandlerContext {
         registry: Arc::new(TerminalRegistry::default()),
         workspace_root: std::env::temp_dir(),
+        home: std::env::temp_dir(),
         sandbox: crate::config::SandboxConfig::default(),
         network_provider: None,
         command_log: Some(TerminalCommandLog {

@@ -17,8 +17,7 @@ fn status_creates_owner_only_state_when_config_exists_without_state() {
     fs::set_permissions(&config_path, fs::Permissions::from_mode(0o644))
         .expect("config file permissions should be set");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .arg("status")
         .assert()
         .success();
@@ -48,8 +47,7 @@ fn status_repairs_config_permissions_before_validation_failure() {
     fs::set_permissions(&config_path, fs::Permissions::from_mode(0o644))
         .expect("config file permissions should be set");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .arg("status")
         .assert()
         .failure()
@@ -63,8 +61,7 @@ fn status_repairs_config_permissions_before_validation_failure() {
 
 #[test]
 fn empty_home_is_treated_as_unset() {
-    acps_command()
-        .env("HOME", "")
+    acps_command(std::path::Path::new(""))
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .failure()
@@ -88,8 +85,7 @@ fn init_repairs_config_permissions_before_validation_failure() {
     fs::set_permissions(&config_path, fs::Permissions::from_mode(0o644))
         .expect("config file perms should set");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .failure()
@@ -113,8 +109,7 @@ fn init_repairs_existing_permissive_state_file() {
         .expect("permissive perms should set");
     assert_eq!(mode(&state_path), 0o644);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .success();
@@ -138,8 +133,7 @@ fn status_repairs_existing_permissive_state_file() {
     fs::set_permissions(&state_path, fs::Permissions::from_mode(0o644))
         .expect("permissive perms should set");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .arg("status")
         .assert()
         .success();
@@ -158,8 +152,7 @@ fn logs_query_repairs_existing_permissive_state_file() {
     fs::set_permissions(&state_path, fs::Permissions::from_mode(0o644))
         .expect("permissive perms should set");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["logs", "query"])
         .assert()
         .success();
@@ -172,8 +165,7 @@ fn logs_query_repairs_existing_permissive_state_file() {
 fn error_recording_path_repairs_permissive_state_file() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .success();
@@ -191,8 +183,7 @@ fn error_recording_path_repairs_permissive_state_file() {
     )
     .expect("invalid config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .arg("status")
         .assert()
         .failure();
@@ -203,8 +194,7 @@ fn error_recording_path_repairs_permissive_state_file() {
         "record_cli_error_message must repair permissive perms before writing the error row",
     );
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["logs", "query", "--level", "error"])
         .assert()
         .success()

@@ -6,8 +6,7 @@ use reqwest::StatusCode;
 use serde_json::Value;
 
 mod common;
-use common::HomeEnvGuard;
-use common::api::{ADMIN_KEY, SESSION_KEY, ServerHarness};
+use common::api::{ADMIN_KEY, SESSION_KEY, ServerHarness, test_config};
 
 #[tokio::test]
 async fn config_export_returns_canonical_toml() {
@@ -307,9 +306,9 @@ async fn config_import_oversized_body_returns_413() {
 async fn concurrent_secret_mutations_do_not_drop_writes() {
     let home_dir = tempfile::tempdir().expect("home tempdir");
     SecretStore::open_or_create(home_dir.path()).expect("create home secret store");
-    let _home = HomeEnvGuard::set(home_dir.path());
-
-    let harness = ServerHarness::spawn().await;
+    let harness =
+        ServerHarness::spawn_with_config_and_home(test_config(), home_dir.path().to_path_buf())
+            .await;
     let client = reqwest::Client::new();
 
     let seed = client

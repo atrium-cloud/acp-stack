@@ -486,6 +486,10 @@ async fn publish_lifecycle_event(
 pub(crate) struct TerminalHandlerContext {
     pub(crate) registry: Arc<TerminalRegistry>,
     pub(crate) workspace_root: PathBuf,
+    /// Boot-time home captured at bridge spawn: terminal children must see the
+    /// daemon's resolved HOME, not whatever the process env holds at request
+    /// time.
+    pub(crate) home: PathBuf,
     pub(crate) sandbox: crate::config::SandboxConfig,
     pub(crate) network_provider: Option<crate::extensions::NetworkProviderExtension>,
     /// `None` (e.g. discovery probes) means terminals work but leave no
@@ -527,13 +531,14 @@ pub(crate) async fn handle_create_terminal(
             }))
         })?;
 
-    let env = terminal_environment(&request.env);
+    let env = terminal_environment(&context.home, &request.env);
     let (program, args) = sandboxed_program(
         Path::new(&request.command),
         &request.args,
         &context.sandbox,
         context.network_provider.as_ref(),
         &context.workspace_root,
+        &context.home,
     )
     .map_err(AcpError::into_internal_error)?;
 
@@ -717,9 +722,12 @@ fn env_names_json(env: &[EnvVariable]) -> Option<String> {
 /// the vars the agent supplied. Never the `[agent].env` secrets injected into
 /// the agent process itself — a client terminal must not expose provider API
 /// keys to arbitrary shell commands.
-pub(crate) fn terminal_environment(agent_env: &[EnvVariable]) -> HashMap<String, String> {
+pub(crate) fn terminal_environment(
+    home: &Path,
+    agent_env: &[EnvVariable],
+) -> HashMap<String, String> {
     let mut env = HashMap::new();
-    if let Some(path) = agent_process_path() {
+    if let Some(path) = agent_process_path(home) {
         match path.into_string() {
             Ok(path) => {
                 env.insert("PATH".to_owned(), path);
@@ -729,9 +737,7 @@ pub(crate) fn terminal_environment(agent_env: &[EnvVariable]) -> HashMap<String,
             }
         }
     }
-    if let Ok(home) = std::env::var("HOME") {
-        env.insert("HOME".to_owned(), home);
-    }
+    env.insert("HOME".to_owned(), home.to_string_lossy().into_owned());
     // Agent-provided vars win over the managed defaults; the spec gives the
     // agent control of the child env.
     for variable in agent_env {

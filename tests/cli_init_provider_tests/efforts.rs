@@ -14,8 +14,7 @@ fn init_rejects_effort_flag_for_agents_without_set_effort() {
     for agent in ["amp", "hermes"] {
         let tempdir = tempfile::tempdir().expect("tempdir");
 
-        acps_command()
-            .env("HOME", tempdir.path())
+        acps_command(tempdir.path())
             .args(["init", "--agent", agent, "--effort", "high"])
             .assert()
             .failure()
@@ -29,8 +28,7 @@ fn init_rejects_effort_flag_for_agents_without_set_effort() {
 fn init_rejects_effort_flag_for_custom_agents() {
     let tempdir = tempfile::tempdir().expect("tempdir");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "init",
             "--custom-agent-id",
@@ -81,7 +79,6 @@ fn init_explicit_effort_writes_agent_effort() {
     );
 
     acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "init",
@@ -123,7 +120,6 @@ fn init_rejects_effort_not_advertised_by_the_agent() {
     );
 
     acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "init",
@@ -157,7 +153,6 @@ fn init_without_effort_flag_never_enters_the_effort_lane() {
     seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
 
     acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
         .args([
             "init",
             "--agent",

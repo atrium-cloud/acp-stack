@@ -24,17 +24,17 @@ pub(crate) fn sandboxed_program(
     sandbox: &crate::config::SandboxConfig,
     network: Option<&crate::extensions::NetworkProviderExtension>,
     workspace_root: &Path,
+    home: &Path,
 ) -> std::io::Result<(PathBuf, Vec<String>)> {
     if matches!(sandbox.mode, crate::config::SandboxMode::Off) {
         return Ok((program.to_path_buf(), args.to_vec()));
     }
-    let home = crate::fs_util::home_dir().map_err(std::io::Error::other)?;
     let wrapped = crate::runtime::sandbox::wrap(
         sandbox,
         network,
         program,
         args,
-        &home,
+        home,
         workspace_root,
         crate::ownership::process_euid(),
         crate::ownership::process_egid(),

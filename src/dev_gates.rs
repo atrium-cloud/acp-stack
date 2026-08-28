@@ -12,6 +12,9 @@ pub const INSTALL_BINARY_DIR_ENV: &str = "ACP_STACK_INSTALL_BINARY_DIR";
 pub const S3_ENDPOINT_OVERRIDE_ENV: &str = "ACP_STACK_S3_ENDPOINT_OVERRIDE";
 pub const TEST_INSECURE_HTTPS_ENV: &str = "ACP_STACK_TEST_INSECURE_HTTPS";
 pub const TEST_SKIP_AGENT_INSTALL_ENV: &str = "ACP_STACK_TEST_SKIP_AGENT_INSTALL";
+/// A fixture build on a throwaway host (docker test image, CI runner) may use the real HOME and
+/// the real network; unset, `fs_util::home_dir` and `http_client` refuse both.
+pub const TEST_DISPOSABLE_HOST_ENV: &str = "ACP_STACK_TEST_DISPOSABLE_HOST";
 
 #[cfg(feature = "test-fixtures")]
 pub fn fixture_path(name: &str) -> Option<PathBuf> {
@@ -46,6 +49,52 @@ pub fn fixture_enabled(name: &str) -> bool {
 pub fn fixture_enabled(name: &str) -> bool {
     let _ = name;
     false
+}
+
+/// The disposable-host opt-out demands an exact "1": with presence semantics a stray `VAR=0`
+/// or empty assignment in a developer shell would silently disable every fixture guard.
+#[cfg(feature = "test-fixtures")]
+pub fn disposable_host_enabled() -> bool {
+    value_marks_host_disposable(std::env::var_os(TEST_DISPOSABLE_HOST_ENV).as_deref())
+}
+
+#[cfg(not(feature = "test-fixtures"))]
+pub fn disposable_host_enabled() -> bool {
+    false
+}
+
+/// Single decision point for every fixture guard (HOME isolation, egress proxy, websocket and
+/// git restrictions) so a guard added later cannot drift from the disposable-host opt-out.
+#[cfg(feature = "test-fixtures")]
+pub fn fixture_guards_active() -> bool {
+    !disposable_host_enabled()
+}
+
+#[cfg(not(feature = "test-fixtures"))]
+pub fn fixture_guards_active() -> bool {
+    false
+}
+
+#[cfg(feature = "test-fixtures")]
+fn value_marks_host_disposable(value: Option<&std::ffi::OsStr>) -> bool {
+    value == Some(std::ffi::OsStr::new("1"))
+}
+
+#[cfg(all(test, feature = "test-fixtures"))]
+mod guard_value_tests {
+    use super::*;
+
+    #[test]
+    fn only_exact_one_marks_host_disposable() {
+        assert!(value_marks_host_disposable(Some(std::ffi::OsStr::new("1"))));
+        for rejected in ["0", "", "true", " 1", "1 "] {
+            assert!(
+                !value_marks_host_disposable(Some(std::ffi::OsStr::new(rejected))),
+                "{rejected}"
+            );
+        }
+        assert!(!value_marks_host_disposable(None));
+    }
 }
 
 #[cfg(all(test, not(feature = "test-fixtures")))]

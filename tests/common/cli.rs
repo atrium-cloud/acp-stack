@@ -26,8 +26,8 @@ pub const SESSION_KEY: &str = "acps_session_cccccccccccccccccccccccccccccccccccc
 
 pub const ADMIN_KEY: &str = "acps_admin_dddddddddddddddddddddddddddddddddddddddddddd";
 
-pub fn acps_command() -> Command {
-    let mut command = Command::cargo_bin("acps").expect("binary should build");
+pub fn acps_command(home: &std::path::Path) -> Command {
+    let mut command = acps_command_without_placebo(home);
     command.env(
         "ACP_STACK_DEV_PLACEBO_REGISTRY",
         env!("CARGO_BIN_EXE_placebo-agent"),
@@ -36,8 +36,13 @@ pub fn acps_command() -> Command {
     command
 }
 
-pub fn acps_command_without_placebo() -> Command {
-    Command::cargo_bin("acps").expect("binary should build")
+pub fn acps_command_without_placebo(home: &std::path::Path) -> Command {
+    let mut command = Command::cargo_bin("acps").expect("binary should build");
+    command.env("HOME", home);
+    // An exported disposable-host var (e.g. copied from CI config) would silently disable the
+    // fixture guards in the spawned binary; the developer suite must always run guarded.
+    command.env_remove("ACP_STACK_TEST_DISPOSABLE_HOST");
+    command
 }
 
 pub fn primary_array_agent_value(config: &toml::Value) -> &toml::Value {
@@ -49,6 +54,7 @@ pub struct AgentCliHarness {
     pub socket_path: std::path::PathBuf,
     pub config_path: std::path::PathBuf,
     pub state_path: std::path::PathBuf,
+    pub home: std::path::PathBuf,
     pub join: JoinHandle<acp_stack::error::Result<()>>,
     pub local_join: JoinHandle<acp_stack::error::Result<()>>,
     _tempdir: TempDir,
@@ -71,7 +77,9 @@ impl AgentCliHarness {
         let store = StateStore::open(&path).expect("state open");
         store.migrate().expect("migrate");
         let config_path = create_runtime_files(tempdir.path(), &path);
-        let runtime_paths = RuntimePaths::new(config_path.clone(), path.clone());
+        let home = tempdir.path().to_path_buf();
+        fs::create_dir_all(&home).expect("harness home should be created");
+        let runtime_paths = RuntimePaths::new(config_path.clone(), path.clone(), home.clone());
         let mut config = load_config_from_str(VALID_PLACEBO_CONFIG).expect("config parses");
         let socket_path = tempdir.path().join("acp-stack").join("acps-local.sock");
         let workspace = tempdir.path().join("workspace");
@@ -126,6 +134,7 @@ impl AgentCliHarness {
             socket_path,
             config_path,
             state_path: path,
+            home,
             join,
             local_join,
             _tempdir: tempdir,
@@ -286,7 +295,7 @@ pub fn toml_string(value: &str) -> String {
 pub fn acps_with_empty_path(home: &std::path::Path) -> Command {
     let empty_bin = home.join("empty-bin");
     fs::create_dir_all(&empty_bin).expect("empty PATH dir");
-    let mut command = acps_command();
+    let mut command = acps_command(home);
     command.env("PATH", empty_bin);
     command
 }

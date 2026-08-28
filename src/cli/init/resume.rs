@@ -326,6 +326,7 @@ pub(super) fn installer_postcondition_holds(
     config: &Config,
     workspace_root: &Path,
     local_bin_dir: &Path,
+    home: &Path,
 ) -> bool {
     let (target, extra_path_dirs): (&str, Vec<&Path>) =
         if let Some(install) = config.agent.install.as_ref() {
@@ -338,6 +339,7 @@ pub(super) fn installer_postcondition_holds(
         workspace_root,
         &extra_path_dirs,
         config.agent.expected_sha256.as_deref(),
+        home,
     )
     .is_some()
 }

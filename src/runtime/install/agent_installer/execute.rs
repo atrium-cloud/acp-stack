@@ -10,6 +10,7 @@ pub fn install_resolved_capture(
     workspace_root: &Path,
     dest_dir: &Path,
     progress: Option<&InstallProgress<'_>>,
+    home: &Path,
 ) -> InstallerSequenceResult {
     let mut rows = Vec::new();
     let installer_env = HashMap::new();
@@ -77,6 +78,7 @@ pub fn install_resolved_capture(
                 dest_dir,
                 pin_declared,
                 progress,
+                home,
             );
             rows.extend(adapter_chain.rows);
             if let Some(err) = adapter_chain.terminal_error {
@@ -86,7 +88,7 @@ pub fn install_resolved_capture(
                 };
             }
 
-            return final_verification(agent, workspace_root, dest_dir, rows);
+            return final_verification(agent, workspace_root, dest_dir, rows, home);
         }
 
         // Harness and adapter install in parallel, each walking its own priority chain.
@@ -103,6 +105,10 @@ pub fn install_resolved_capture(
         let adapter_install = adapter.install.clone();
         let adapter_github = adapter.github.clone();
         let adapter_id = entry.id.clone();
+        // A `&Path` is `Copy`, so each scoped thread gets its own copy of the
+        // borrow alongside the cloned path buffers above.
+        let harness_home = home;
+        let adapter_home = home;
         // Scoped threads so the borrowed `progress` sink can cross, and both handles are joined
         // manually inside the scope so a panicking installer thread lands in `unwrap_or_else`
         // rather than propagating at scope exit.
@@ -120,6 +126,7 @@ pub fn install_resolved_capture(
                     &harness_dest,
                     pin_declared,
                     progress,
+                    harness_home,
                 )
             });
             let adapter_thread = scope.spawn(move || {
@@ -135,6 +142,7 @@ pub fn install_resolved_capture(
                     &adapter_dest,
                     pin_declared,
                     progress,
+                    adapter_home,
                 )
             });
             let harness_chain = harness_thread.join().unwrap_or_else(|_| FallbackChain {
@@ -166,7 +174,7 @@ pub fn install_resolved_capture(
             };
         }
 
-        return final_verification(agent, workspace_root, dest_dir, rows);
+        return final_verification(agent, workspace_root, dest_dir, rows, home);
     }
 
     let chain = install_one_with_fallback(
@@ -181,6 +189,7 @@ pub fn install_resolved_capture(
         dest_dir,
         pin_declared,
         progress,
+        home,
     );
     rows.extend(chain.rows);
     if let Some(err) = chain.terminal_error {
@@ -190,7 +199,7 @@ pub fn install_resolved_capture(
         };
     }
 
-    final_verification(agent, workspace_root, dest_dir, rows)
+    final_verification(agent, workspace_root, dest_dir, rows, home)
 }
 
 /// Result of walking the `[shell, npm, github]` chain for one install field; `terminal_error` is `None` when any path succeeded.
@@ -235,6 +244,7 @@ pub(crate) fn install_one_with_fallback(
     dest_dir: &Path,
     pin_declared: bool,
     progress: Option<&InstallProgress<'_>>,
+    home: &Path,
 ) -> FallbackChain {
     let mut remaining = install.clone();
     let mut rows = Vec::new();
@@ -306,6 +316,7 @@ pub(crate) fn install_one_with_fallback(
                 workspace_root,
                 dest_dir,
                 pin_declared,
+                home,
             )
         });
         rows.push(step.row);

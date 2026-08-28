@@ -8,8 +8,7 @@ use std::fs;
 fn init_default_skips_testflight_under_non_interactive_runs() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .success()
@@ -22,8 +21,7 @@ fn init_default_skips_testflight_under_non_interactive_runs() {
 fn init_skip_testflight_flag_is_acknowledged_in_output() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -44,8 +42,7 @@ fn init_creates_workspace_root_and_uploads_without_sources() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let workspace_root = tempdir.path().join("workspace");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "init",
             "--agent",
@@ -108,8 +105,7 @@ creates = "cwd-agent"
     )
     .expect("agents override should be written");
 
-    acps_command_without_placebo()
-        .env("HOME", tempdir.path())
+    acps_command_without_placebo(tempdir.path())
         .args([
             "init",
             "--agent",
@@ -141,8 +137,7 @@ creates = "cwd-agent"
 fn init_edge_profile_prints_edge_artifact_progress() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -184,8 +179,7 @@ fn init_skip_workspace_init_is_acknowledged_in_output() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let workspace_root = tempdir.path().join("workspace");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -211,8 +205,7 @@ fn init_skip_workspace_init_is_acknowledged_in_output() {
 fn init_rejects_skip_workspace_init_outside_dev_mode() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["init", "--skip-workspace-init"])
         .assert()
         .failure()
@@ -226,8 +219,7 @@ fn init_rejects_skip_workspace_init_outside_dev_mode() {
 fn init_noninteractive_without_agent_fails_before_writing_config() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["init", "--non-interactive"])
         .assert()
         .failure()
@@ -246,7 +238,8 @@ fn init_noninteractive_without_agent_fails_before_writing_config() {
 
 #[test]
 fn init_help_hides_dev_only_workspace_skip() {
-    acps_command()
+    let home = tempfile::tempdir().expect("home tempdir");
+    acps_command(home.path())
         .args(["init", "--help"])
         .assert()
         .success()
@@ -255,7 +248,8 @@ fn init_help_hides_dev_only_workspace_skip() {
 
 #[test]
 fn dev_init_help_shows_workspace_skip() {
-    acps_command()
+    let home = tempfile::tempdir().expect("home tempdir");
+    acps_command(home.path())
         .args(["dev", "init", "--help"])
         .assert()
         .success()
@@ -264,7 +258,8 @@ fn dev_init_help_shows_workspace_skip() {
 
 #[test]
 fn serve_help_hides_allow_root_outside_dev_command() {
-    acps_command()
+    let home = tempfile::tempdir().expect("home tempdir");
+    acps_command(home.path())
         .args(["serve", "--help"])
         .assert()
         .success()
@@ -273,7 +268,8 @@ fn serve_help_hides_allow_root_outside_dev_command() {
 
 #[test]
 fn dev_serve_help_shows_allow_root() {
-    acps_command()
+    let home = tempfile::tempdir().expect("home tempdir");
+    acps_command(home.path())
         .args(["dev", "serve", "--help"])
         .assert()
         .success()
@@ -284,8 +280,7 @@ fn dev_serve_help_shows_allow_root() {
 fn serve_rejects_dev_only_root_overrides() {
     let tempdir = tempfile::tempdir().expect("tempdir");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["serve", "--allow-root"])
         .assert()
         .failure()
@@ -293,8 +288,7 @@ fn serve_rejects_dev_only_root_overrides() {
             "development-only flag; use `acps dev serve --allow-root`",
         ));
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .env("ACP_STACK_ALLOW_ROOT", "1")
         .args(["serve"])
         .assert()
@@ -308,8 +302,7 @@ fn serve_rejects_dev_only_root_overrides() {
 fn init_rejects_combining_testflight_and_skip_testflight() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["init", "--testflight", "--skip-testflight"])
         .assert()
         .failure();
@@ -320,8 +313,7 @@ fn init_explicit_testflight_prints_provider_credit_warning() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -343,8 +335,7 @@ fn init_explicit_testflight_prints_provider_credit_warning() {
 fn init_writes_deployment_controlled_workspace_defaults() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -374,14 +365,12 @@ fn init_writes_deployment_controlled_workspace_defaults() {
 fn init_rejects_conflicting_deployment_overrides_for_existing_config() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .success();
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["init", "--workspace-root", "/srv/acp"])
         .assert()
         .failure()

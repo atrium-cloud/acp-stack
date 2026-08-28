@@ -602,6 +602,9 @@ async fn open_ws_stream(base_url: &str, session_key: &str) -> Result<(WsWriter, 
 
     let ws_url = http_to_ws_url(base_url)?;
     let url = format!("{ws_url}/v1/ws");
+    // Tungstenite dials directly, bypassing the reqwest proxy guard; refuse remote URLs in
+    // fixture builds before any packet leaves.
+    crate::http_client::ensure_url_allowed(&url)?;
     let mut request = url
         .as_str()
         .into_client_request()

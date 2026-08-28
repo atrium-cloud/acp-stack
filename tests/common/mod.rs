@@ -1,6 +1,12 @@
 #![allow(dead_code)]
 
 //! Shared helpers for the integration-test binaries.
+//!
+//! The suite is designed to run on a developer machine with the fixture guards active:
+//! `ACP_STACK_TEST_DISPOSABLE_HOST` must stay unset locally (CI/docker set it to `1`). The
+//! command helpers in `cli.rs` strip it from spawned `acps` processes so an accidental export
+//! cannot unguard them; in-process harnesses get their isolation from the injected
+//! `runtime_paths.home` instead.
 
 pub mod agent;
 pub mod api;
@@ -13,8 +19,9 @@ pub mod state;
 use std::path::Path;
 
 /// Serializes HOME mutations across the parallel `#[tokio::test]` functions in a test binary.
-/// Every HOME read in the binary MUST go through `HomeEnvGuard::set`; one that does not races the
-/// unsafe `set_var` below and is undefined behavior on multi-threaded runs.
+/// Routes read the harness-injected `runtime_paths.home`, so this guard is only for tests that
+/// drive code resolving HOME from the process env in-process; every such test in a binary MUST use
+/// it, since an unguarded read races the unsafe `set_var` below on multi-threaded runs.
 static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub struct HomeEnvGuard<'a> {

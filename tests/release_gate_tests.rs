@@ -6,8 +6,10 @@ use predicates::prelude::*;
 #[cfg(not(feature = "dev-tools"))]
 #[test]
 fn production_help_hides_dev_command() {
+    let home = tempfile::tempdir().expect("home tempdir");
     let mut cmd = Command::cargo_bin("acps").expect("acps binary");
-    cmd.arg("--help")
+    cmd.env("HOME", home.path())
+        .arg("--help")
         .assert()
         .success()
         .stdout(predicate::str::contains(" dev ").not())
@@ -17,8 +19,10 @@ fn production_help_hides_dev_command() {
 #[cfg(not(feature = "dev-tools"))]
 #[test]
 fn production_dev_command_is_unknown() {
+    let home = tempfile::tempdir().expect("home tempdir");
     let mut cmd = Command::cargo_bin("acps").expect("acps binary");
-    cmd.arg("dev")
+    cmd.env("HOME", home.path())
+        .arg("dev")
         .assert()
         .failure()
         .stderr(predicate::str::contains("unrecognized subcommand 'dev'"));

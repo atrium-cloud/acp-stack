@@ -483,13 +483,15 @@ async fn security_check_uses_effective_bind_and_recent_auth_failures_only() {
     store.migrate().expect("migrate");
     seed_auth_failure(&path, "af_old", "2000-01-01T00:00:00.000000000Z", "invalid");
     let config_path = create_runtime_files(tempdir.path(), &path);
+    let home = tempdir.path().to_path_buf();
+    std::fs::create_dir_all(&home).expect("create harness home");
     let app_state = AppState::with_effective_bind_and_runtime_paths(
         config,
         store,
         SESSION_KEY.to_owned(),
         ADMIN_KEY.to_owned(),
         "0.0.0.0:7700".to_owned(),
-        RuntimePaths::new(config_path.clone(), path.clone()),
+        RuntimePaths::new(config_path.clone(), path.clone(), home.clone()),
     );
     let state = app_state.state.clone();
     let local_session_auth = app_state.local_session_auth.clone();
@@ -502,6 +504,7 @@ async fn security_check_uses_effective_bind_and_recent_auth_failures_only() {
         local_session_auth,
         config_path,
         state_path: path,
+        home,
         join,
         _tempdir: tempdir,
     };

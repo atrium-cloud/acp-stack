@@ -98,7 +98,7 @@ pub(crate) async fn agent_switch_handler(
     Json(body): Json<AgentSwitchRequest>,
 ) -> std::result::Result<ApiSuccess<AgentSwitchResponse>, StackError> {
     let _mutation = state.lock_agent_config_mutation().await?;
-    let home = home_dir()?;
+    let home = state.runtime_paths.home.clone();
     let fresh_config = Config::load_from_path(&state.runtime_paths.config_path)?;
     let registry = RegistryCatalog::load_with_override(
         &home.join(".config").join("acp-stack").join("agents.toml"),
@@ -153,6 +153,7 @@ pub(crate) async fn agent_switch_handler(
         .await;
     }
     let plan = plan_agent_switch(
+        &home,
         &fresh_config,
         &registry,
         PlannedAgentSwitchRequest {
@@ -174,7 +175,7 @@ pub(crate) async fn agent_switch_handler(
     let mut candidate_config = crate::config::load_config_from_str(&canonical)?;
     candidate_config.agent.adapter = adapter_from_registry_entry(target_entry);
     let secret_migrations = apply_switch_secret_migrations(&home, &plan.secret_migrations)?;
-    let _env = open_agent_env(&candidate_config)?;
+    let _env = open_agent_env(&state.runtime_paths.home, &candidate_config)?;
 
     let install = install_agent_for_config(&state, &candidate_config).await?;
     crate::runtime::agent::provider_model_catalog::refresh_provider_models_best_effort(
@@ -331,6 +332,7 @@ async fn switch_to_existing_array_target(
     candidate_config.agent.adapter = adapter_from_registry_entry(target_entry);
     // Selecting an existing target repoints the native config the override lives in, so it faces the same survival check as a planned switch.
     crate::runtime::agent::switch::ensure_endpoint_override_survives_target(
+        &state.runtime_paths.home,
         &target_entry.id,
         target_entry.set_provider_base_url,
         candidate_config
@@ -339,7 +341,7 @@ async fn switch_to_existing_array_target(
             .as_ref()
             .map(|provider| provider.id.as_str()),
     )?;
-    let _env = open_agent_env(&candidate_config)?;
+    let _env = open_agent_env(&state.runtime_paths.home, &candidate_config)?;
     let required_env_refs = candidate_config.agent.env.clone();
 
     let install = install_agent_for_config(state, &candidate_config).await?;
@@ -744,13 +746,14 @@ async fn start_agent_with_config(
     target: &AgentTargetRuntime,
     config: &Config,
 ) -> Result<()> {
-    let environment = open_agent_environment(config)?;
+    let environment = open_agent_environment(&state.runtime_paths.home, config)?;
     target
         .supervisor
         .start(AgentStartRequest {
             target_id: &target.target_id,
             agent: &config.agent,
             workspace_root: &config.workspace.root,
+            home: state.runtime_paths.home.clone(),
             env: environment.env,
             providers: environment.providers,
             state: &state.state,

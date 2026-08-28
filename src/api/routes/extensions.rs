@@ -9,7 +9,6 @@ use super::super::core::AppState;
 use crate::envelope::ApiSuccess;
 use crate::error::StackError;
 use crate::extensions::managed_state::{ApplyRequest, ApplyResponse};
-use crate::fs_util::home_dir;
 
 pub(crate) async fn extension_managed_state_apply_handler(
     Path(name): Path<String>,
@@ -25,7 +24,7 @@ pub(crate) async fn extension_managed_state_apply_handler(
     // any provider written by a later init.
     let runtime_config =
         crate::config::Config::load_lenient_from_path(&state.runtime_paths.config_path)?;
-    let home = home_dir()?;
+    let home = state.runtime_paths.home.clone();
     let mut store = crate::secrets::SecretStore::open(&home)?;
     let revision = body.revision;
     // Captured before the apply so the model-catalog cache can be invalidated for
@@ -34,7 +33,7 @@ pub(crate) async fn extension_managed_state_apply_handler(
         .managed_state_record(&name)
         .and_then(|record| record.provider_id.clone());
     let response =
-        crate::extensions::managed_state::apply(&mut store, &runtime_config, &name, body)?;
+        crate::extensions::managed_state::apply(&home, &mut store, &runtime_config, &name, body)?;
     let new_provider_id = store
         .managed_state_record(&name)
         .and_then(|record| record.provider_id.clone());

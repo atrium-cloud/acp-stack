@@ -61,7 +61,7 @@ impl SupabaseSink {
         credential: SupabaseSinkCredential,
         event_hub: EventHub,
     ) -> Result<Self> {
-        let client = reqwest::Client::builder()
+        let client = crate::http_client::client_builder()
             .timeout(HTTP_TIMEOUT)
             .pool_max_idle_per_host(4)
             .tcp_keepalive(Duration::from_secs(60))

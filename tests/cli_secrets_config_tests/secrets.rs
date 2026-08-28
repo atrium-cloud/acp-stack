@@ -8,8 +8,7 @@ fn secrets_set_only_captures_first_line_of_stdin() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let (_, admin_key) = run_init_with_home(tempdir.path());
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "secrets",
             "set",
@@ -30,8 +29,7 @@ fn secrets_set_requires_admin_key() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_init_with_home(tempdir.path());
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["secrets", "set", "OPENCODE_API_KEY"])
         .write_stdin("attacker-supplied")
         .assert()
@@ -44,8 +42,7 @@ fn secrets_set_allows_old_auth_ref_names_with_admin_key() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let (_, admin_key) = run_init_with_home(tempdir.path());
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "secrets",
             "set",
@@ -66,8 +63,7 @@ fn secrets_delete_requires_admin_key() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let (_, admin_key) = run_init_with_home(tempdir.path());
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "secrets",
             "set",
@@ -79,8 +75,7 @@ fn secrets_delete_requires_admin_key() {
         .assert()
         .success();
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["secrets", "delete", "TEMP_VALUE"])
         .assert()
         .failure()
@@ -92,8 +87,7 @@ fn secrets_list_shows_session_and_admin_names_only_after_init() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_init_with_home(tempdir.path());
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["secrets", "list"])
         .assert()
         .success()
@@ -107,8 +101,7 @@ fn secrets_commands_format_json_never_print_values() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let (_, admin_key) = run_init_with_home(tempdir.path());
 
-    let set_output = acps_command()
-        .env("HOME", tempdir.path())
+    let set_output = acps_command(tempdir.path())
         .args([
             "secrets",
             "set",
@@ -129,8 +122,7 @@ fn secrets_commands_format_json_never_print_values() {
     assert_eq!(set_body["name"], "OPENCODE_API_KEY");
     assert!(!String::from_utf8_lossy(&set_output).contains("super-secret-value"));
 
-    let list_output = acps_command()
-        .env("HOME", tempdir.path())
+    let list_output = acps_command(tempdir.path())
         .args(["secrets", "list", "--format", "json"])
         .assert()
         .success()
@@ -144,8 +136,7 @@ fn secrets_commands_format_json_never_print_values() {
     assert!(names.iter().any(|name| name == "OPENCODE_API_KEY"));
     assert!(!String::from_utf8_lossy(&list_output).contains("super-secret-value"));
 
-    let delete_output = acps_command()
-        .env("HOME", tempdir.path())
+    let delete_output = acps_command(tempdir.path())
         .args([
             "secrets",
             "delete",
@@ -170,8 +161,7 @@ fn secrets_set_reads_value_from_stdin() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let (_, admin_key) = run_init_with_home(tempdir.path());
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "secrets",
             "set",
@@ -184,8 +174,7 @@ fn secrets_set_reads_value_from_stdin() {
         .success()
         .stdout(predicates::str::contains("set secret: OPENCODE_API_KEY"));
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["secrets", "list"])
         .assert()
         .success()
@@ -197,8 +186,7 @@ fn secrets_set_accepts_name_and_value_flags() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let (_, admin_key) = run_init_with_home(tempdir.path());
 
-    let output = acps_command()
-        .env("HOME", tempdir.path())
+    let output = acps_command(tempdir.path())
         .args([
             "secrets",
             "set",
@@ -217,8 +205,7 @@ fn secrets_set_accepts_name_and_value_flags() {
         .clone();
     assert!(!String::from_utf8_lossy(&output).contains("super-secret-value"));
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["secrets", "list"])
         .assert()
         .success()
@@ -229,8 +216,7 @@ fn secrets_set_accepts_name_and_value_flags() {
 fn secrets_set_rejects_positional_name_with_name_flag() {
     let tempdir = tempfile::tempdir().expect("tempdir");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "secrets",
             "set",
@@ -254,8 +240,7 @@ fn secrets_delete_removes_named_secret() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let (_, admin_key) = run_init_with_home(tempdir.path());
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "secrets",
             "set",
@@ -267,8 +252,7 @@ fn secrets_delete_removes_named_secret() {
         .assert()
         .success();
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "secrets",
             "delete",
@@ -280,8 +264,7 @@ fn secrets_delete_removes_named_secret() {
         .success()
         .stdout(predicates::str::contains("deleted secret: TEMP_VALUE"));
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "secrets",
             "delete",
@@ -299,8 +282,7 @@ fn auth_regenerate_session_key_requires_admin_key() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_init_with_home(tempdir.path());
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["auth", "regenerate-session-key"])
         .assert()
         .failure()
@@ -312,8 +294,7 @@ fn reset_without_yes_lists_targets_and_keeps_files() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_init_with_home(tempdir.path());
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .arg("reset")
         .assert()
         .failure()
@@ -338,16 +319,11 @@ fn reset_dry_run_does_not_write_cli_error_event() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_init_with_home(tempdir.path());
 
-    acps_command()
-        .env("HOME", tempdir.path())
-        .arg("reset")
-        .assert()
-        .failure();
+    acps_command(tempdir.path()).arg("reset").assert().failure();
 
     // A dry run must not touch the filesystem, and a `cli.error` row would
     // write to state.sqlite.
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["logs", "query", "--level", "error"])
         .assert()
         .success()
@@ -359,8 +335,7 @@ fn reset_with_yes_wipes_config_state_age_key_and_secret_store() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_init_with_home(tempdir.path());
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["reset", "--yes"])
         .assert()
         .success()
@@ -386,14 +361,12 @@ fn reset_with_yes_wipes_config_state_age_key_and_secret_store() {
             .exists()
     );
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["reset", "--yes"])
         .assert()
         .success();
 
-    let init_after = acps_command()
-        .env("HOME", tempdir.path())
+    let init_after = acps_command(tempdir.path())
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .success()

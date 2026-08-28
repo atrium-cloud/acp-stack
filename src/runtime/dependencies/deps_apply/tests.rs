@@ -79,7 +79,7 @@ fn apply_skips_when_creates_already_resolves() {
             timeout_secs: None,
         }),
     });
-    let report = apply_dependencies(&config, None, None, "/bin/sh").expect("apply");
+    let report = apply_dependencies(&config, None, None, "/bin/sh", Path::new("/")).expect("apply");
     assert_eq!(report.results.len(), 1);
     assert!(
         matches!(report.results[0].outcome, DepApplyOutcome::AlreadyPresent),
@@ -104,7 +104,7 @@ fn apply_runs_shell_and_verifies_creates_postcheck() {
             timeout_secs: None,
         }),
     });
-    let report = apply_dependencies(&config, None, None, "/bin/sh").expect("apply");
+    let report = apply_dependencies(&config, None, None, "/bin/sh", tempdir.path()).expect("apply");
     assert_eq!(report.results.len(), 1);
     assert!(
         matches!(report.results[0].outcome, DepApplyOutcome::Installed),
@@ -127,7 +127,7 @@ fn apply_marks_failed_when_shell_exits_nonzero() {
             timeout_secs: None,
         }),
     });
-    let report = apply_dependencies(&config, None, None, "/bin/sh").expect("apply");
+    let report = apply_dependencies(&config, None, None, "/bin/sh", Path::new("/")).expect("apply");
     match &report.results[0].outcome {
         DepApplyOutcome::Failed {
             exit_code,
@@ -170,6 +170,7 @@ fn escalation_unavailable_still_refuses_system_scope() {
         None,
         "/bin/sh",
         &PrivilegeEscalation::Unavailable { uid: 1001 },
+        Path::new("/"),
         None,
         |_, _, _| Ok(()),
     )
@@ -227,6 +228,7 @@ fn not_needed_escalation_is_revalidated_against_euid_at_apply_time() {
         None,
         "/bin/sh",
         &PrivilegeEscalation::NotNeeded,
+        tempdir.path(),
         None,
         |_, _, _| Ok(()),
     )
@@ -285,6 +287,7 @@ fn sudo_escalation_wraps_shell_invocation() {
             sudo_path: fake_sudo,
             uid: 1001,
         },
+        tempdir.path(),
         None,
         |_, _, _| Ok(()),
     )
@@ -331,6 +334,7 @@ fn escalated_run_records_sudo_marker_in_stdout() {
             sudo_path: fake_sudo,
             uid: 1001,
         },
+        tempdir.path(),
         None,
         |_, _, _| Ok(()),
     )
@@ -394,24 +398,25 @@ fn write_exit_stub(dir: &Path, name: &str, code: i32) -> PathBuf {
 fn probe_collapses_missing_and_denied_sudo_to_unavailable() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     assert_eq!(
-        probe_privilege_escalation_with(1001, None),
+        probe_privilege_escalation_with(1001, None, tempdir.path()),
         PrivilegeEscalation::Unavailable { uid: 1001 },
     );
     let denied_sudo = write_exit_stub(tempdir.path(), "sudo-denied", 1);
     assert_eq!(
-        probe_privilege_escalation_with(1001, Some(denied_sudo)),
+        probe_privilege_escalation_with(1001, Some(denied_sudo), tempdir.path()),
         PrivilegeEscalation::Unavailable { uid: 1001 },
     );
     // The probe collapses transient spawn errors (fork EAGAIN under a parallel
     // suite) to Unavailable, so retry the granted case before failing.
     let granted_sudo = write_exit_stub(tempdir.path(), "sudo-granted", 0);
-    let mut granted = probe_privilege_escalation_with(1001, Some(granted_sudo.clone()));
+    let mut granted =
+        probe_privilege_escalation_with(1001, Some(granted_sudo.clone()), tempdir.path());
     for _ in 0..2 {
         if matches!(granted, PrivilegeEscalation::Sudo { .. }) {
             break;
         }
         std::thread::sleep(Duration::from_millis(100));
-        granted = probe_privilege_escalation_with(1001, Some(granted_sudo.clone()));
+        granted = probe_privilege_escalation_with(1001, Some(granted_sudo.clone()), tempdir.path());
     }
     assert_eq!(
         granted,
@@ -421,7 +426,7 @@ fn probe_collapses_missing_and_denied_sudo_to_unavailable() {
         },
     );
     assert_eq!(
-        probe_privilege_escalation_with(0, None),
+        probe_privilege_escalation_with(0, None, tempdir.path()),
         PrivilegeEscalation::NotNeeded,
     );
 }
@@ -541,7 +546,7 @@ fn before_after_status_honors_absolute_creates_path() {
             timeout_secs: None,
         }),
     });
-    let report = apply_dependencies(&config, None, None, "/bin/sh").expect("apply");
+    let report = apply_dependencies(&config, None, None, "/bin/sh", tempdir.path()).expect("apply");
     let after_entry = report
         .after
         .iter()
@@ -569,7 +574,7 @@ fn timeout_kills_entire_process_group() {
         }),
     });
     let started = std::time::Instant::now();
-    let report = apply_dependencies(&config, None, None, "/bin/sh").expect("apply");
+    let report = apply_dependencies(&config, None, None, "/bin/sh", Path::new("/")).expect("apply");
     let elapsed = started.elapsed();
     assert!(
         elapsed < std::time::Duration::from_secs(15),
@@ -606,7 +611,7 @@ fn stderr_tail_captures_actual_tail_when_stream_blows_past_cap() {
             timeout_secs: Some(30),
         }),
     });
-    let report = apply_dependencies(&config, None, None, "/bin/sh").expect("apply");
+    let report = apply_dependencies(&config, None, None, "/bin/sh", Path::new("/")).expect("apply");
     match &report.results[0].outcome {
         DepApplyOutcome::Failed { stderr_tail, .. } => {
             assert!(
@@ -647,8 +652,10 @@ fn finish_failure_does_not_abort_apply() {
         }),
     });
 
-    let worker =
-        std::thread::spawn(move || apply_dependencies(&config, None, Some(&store), "/bin/sh"));
+    let home = tempdir.path().to_path_buf();
+    let worker = std::thread::spawn(move || {
+        apply_dependencies(&config, None, Some(&store), "/bin/sh", &home)
+    });
 
     let reader = StateStore::open(&path).expect("reader connection");
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -734,6 +741,7 @@ fn tracked_apply_settles_succeeded_with_matching_run_and_action_ids() {
         None,
         "/bin/sh",
         &PrivilegeEscalation::NotNeeded,
+        tempdir.path(),
         |_, _, _| Ok(()),
     )
     .expect("tracked apply");
@@ -772,6 +780,7 @@ fn tracked_apply_settles_failed_and_privilege_blocked() {
         None,
         "/bin/sh",
         &PrivilegeEscalation::NotNeeded,
+        tempdir.path(),
         |_, _, _| Ok(()),
     )
     .expect("apply itself returns a report");
@@ -798,6 +807,7 @@ fn tracked_apply_settles_failed_and_privilege_blocked() {
         None,
         "/bin/sh",
         &PrivilegeEscalation::Unavailable { uid: 1001 },
+        tempdir.path(),
         |_, _, _| Ok(()),
     )
     .expect("apply");
@@ -849,6 +859,7 @@ fn tracked_apply_adopts_a_preclaimed_row() {
         None,
         "/bin/sh",
         &PrivilegeEscalation::NotNeeded,
+        tempdir.path(),
         |_, _, _| Ok(()),
     )
     .expect("adopted apply");
@@ -876,6 +887,7 @@ fn tracked_apply_rejects_adopting_a_settled_row() {
         None,
         "/bin/sh",
         &PrivilegeEscalation::NotNeeded,
+        tempdir.path(),
         |_, _, _| Ok(()),
     )
     .expect_err("adopting a missing row must fail");
@@ -912,6 +924,7 @@ fn tracked_claim_is_rejected_while_another_apply_is_live() {
         None,
         "/bin/sh",
         &PrivilegeEscalation::NotNeeded,
+        tempdir.path(),
         |_, _, _| Ok(()),
     )
     .expect_err("claim while live must be rejected");

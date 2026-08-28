@@ -7,8 +7,7 @@ fn init_agent_flag_updates_config_non_interactively() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     seed_init_secrets(tempdir.path(), &[("KIMI_API_KEY", "test-kimi-key")]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "dev",
             "init",
@@ -46,8 +45,7 @@ fn agent_update_set_edits_auto_update_config() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["agent", "update", "set", "--auto-on", "--frequency", "3d"])
         .assert()
         .success()
@@ -61,8 +59,7 @@ fn agent_update_set_edits_auto_update_config() {
     assert!(auto_update.enabled);
     assert_eq!(auto_update.frequency, "3d");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["agent", "update", "set", "--auto-off"])
         .assert()
         .success()
@@ -83,8 +80,7 @@ fn agent_update_set_rejects_invalid_frequency() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["agent", "update", "set", "--frequency", "0d"])
         .assert()
         .failure()
@@ -99,8 +95,7 @@ fn agent_update_set_accepts_sub_day_frequency() {
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
 
     // Unlike the stack self-update's day minimum, agent updates accept hours.
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["agent", "update", "set", "--frequency", "12h"])
         .assert()
         .success()
@@ -122,8 +117,7 @@ fn agent_update_set_rejects_sub_hour_frequency() {
 
     // Minutes are finer than the agent updater's smallest unit (an hour), so
     // they are rejected and the config is left untouched.
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["agent", "update", "set", "--frequency", "30m"])
         .assert()
         .failure()
@@ -144,8 +138,7 @@ fn stack_update_set_edits_update_config() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "update",
             "set",
@@ -178,8 +171,7 @@ fn stack_update_set_rejects_sub_day_frequency() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["update", "set", "--frequency", "12h"])
         .assert()
         .failure()
@@ -206,8 +198,7 @@ fn agent_update_set_rejects_non_registry_agent() {
         &["--auto-off"][..],
         &["--frequency", "3d"][..],
     ] {
-        acps_command()
-            .env("HOME", tempdir.path())
+        acps_command(tempdir.path())
             .args(["agent", "update", "set"])
             .args(extra)
             .assert()
@@ -239,8 +230,7 @@ fn agent_check_and_update_still_error_for_placeholder_agent() {
         &["agent", "update"][..],
         &["agent", "update", "set", "--auto-on"][..],
     ] {
-        acps_command()
-            .env("HOME", tempdir.path())
+        acps_command(tempdir.path())
             .args(command)
             .assert()
             .failure()
@@ -258,8 +248,7 @@ fn agent_check_skips_non_registry_agent() {
 
     // `acps agent check` has no managed steps to inspect for an escape-hatch
     // agent, so it reports a skip and exits 0 rather than erroring.
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["agent", "check"])
         .assert()
         .success()
@@ -277,8 +266,7 @@ fn agent_update_execute_skips_non_registry_agent() {
 
     // A one-shot update for an escape-hatch agent reports the skip and exits 0
     // rather than erroring on a missing entry.
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["agent", "update"])
         .assert()
         .success()

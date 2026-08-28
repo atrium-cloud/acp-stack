@@ -143,14 +143,16 @@ pub fn apply_dependencies(
     feature: Option<&str>,
     state: Option<&StateStore>,
     shell_program: &str,
+    home: &Path,
 ) -> Result<DepsApplyReport> {
-    let escalation = escalation_for(config, feature);
+    let escalation = escalation_for(config, feature, home);
     apply_dependencies_with_escalation(
         config,
         feature,
         state,
         shell_program,
         &escalation,
+        home,
         None,
         |_, _, _| Ok(()),
     )
@@ -160,12 +162,14 @@ pub fn apply_dependencies(
 /// confirmation prompt (init's preflight, `acps deps apply`) pass the
 /// decision in so one invocation performs exactly one probe; it is also
 /// the seam that lets tests inject a fake escalation.
+#[allow(clippy::too_many_arguments)]
 pub fn apply_dependencies_with_escalation(
     config: &Config,
     feature: Option<&str>,
     state: Option<&StateStore>,
     shell_program: &str,
     escalation: &PrivilegeEscalation,
+    home: &Path,
     apply_run_id: Option<&str>,
     mut progress: impl FnMut(usize, usize, &str) -> Result<()>,
 ) -> Result<DepsApplyReport> {
@@ -200,6 +204,7 @@ pub fn apply_dependencies_with_escalation(
             shell_program,
             &apply_run_id,
             escalation,
+            home,
         )?);
     }
     let after = compute_before_after_report(config);
@@ -333,6 +338,7 @@ fn apply_one(
     shell_program: &str,
     apply_run_id: &str,
     escalation: &PrivilegeEscalation,
+    home: &Path,
 ) -> Result<DepApplyResult> {
     let creates = install
         .creates
@@ -419,7 +425,7 @@ fn apply_one(
         .map(Duration::from_secs)
         .unwrap_or(DEFAULT_TIMEOUT);
     let running_run_id = begin_deps_run(state, apply_run_id, &started_at)?;
-    let shell_result = run_shell(shell_program, &install.shell, timeout, sudo);
+    let shell_result = run_shell(shell_program, &install.shell, timeout, sudo, home);
     let (exit_code, stdout, stderr, timed_out, stderr_tail) = match shell_result {
         Ok(captured) => captured,
         Err(error) => {

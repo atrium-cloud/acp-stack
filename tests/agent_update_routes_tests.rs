@@ -8,7 +8,6 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 mod common;
-use common::HomeEnvGuard;
 use common::agent::{
     AgentHarness, EnvVarGuard, admin_bearer, http, session_bearer, spawn_provider_models_server,
     test_config,
@@ -183,9 +182,12 @@ async fn update_status_rejects_admin_key() {
 #[tokio::test]
 async fn update_skips_non_registry_agent() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
 
-    let harness = AgentHarness::spawn_with_config(custom_agent_config()).await;
+    let harness = AgentHarness::spawn_with_config_and_home(
+        custom_agent_config(),
+        tempdir.path().to_path_buf(),
+    )
+    .await;
     let response = http()
         .await
         .post(format!("{}/v1/agent/update", harness.base_url))
@@ -206,12 +208,12 @@ async fn update_skips_non_registry_agent() {
 #[tokio::test]
 async fn update_reports_up_to_date_at_pinned_version() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     write_opencode_github_override(&registry_config_dir(tempdir.path()));
     let mut config = test_config();
     config.agent.harness_version = Some(PINNED_TAG.to_owned());
 
-    let harness = AgentHarness::spawn_with_config(config).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(config, tempdir.path().to_path_buf()).await;
     seed_installed_row(&harness, "install", "github", "1.2.3").await;
     // The mock advertises a different latest release; the pin must win.
     let mock_base = spawn_provider_models_server(serde_json::json!({
@@ -251,9 +253,12 @@ async fn update_reports_up_to_date_at_pinned_version() {
 #[tokio::test]
 async fn update_skips_while_agent_running_and_releases_lock_on_stop() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
 
-    let harness = AgentHarness::spawn_with_config(custom_agent_config()).await;
+    let harness = AgentHarness::spawn_with_config_and_home(
+        custom_agent_config(),
+        tempdir.path().to_path_buf(),
+    )
+    .await;
     let client = http().await;
     let start = client
         .post(format!("{}/v1/agent/start", harness.base_url))
@@ -331,12 +336,12 @@ async fn update_skips_while_agent_running_and_releases_lock_on_stop() {
 #[tokio::test]
 async fn update_status_reports_installed_latest_pin_and_policy() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     write_opencode_github_override(&registry_config_dir(tempdir.path()));
     let mut config = test_config();
     config.agent.harness_version = Some(PINNED_TAG.to_owned());
 
-    let harness = AgentHarness::spawn_with_config(config).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(config, tempdir.path().to_path_buf()).await;
     seed_installed_row(&harness, "install", "github", "0.1.0").await;
     let mock_base = spawn_provider_models_server(serde_json::json!({
         "tag_name": MOCK_LATEST_TAG,
@@ -375,10 +380,10 @@ async fn update_status_reports_installed_latest_pin_and_policy() {
 #[tokio::test]
 async fn update_status_degrades_to_unknown_on_upstream_failure() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     write_opencode_github_override(&registry_config_dir(tempdir.path()));
 
-    let harness = AgentHarness::spawn_with_config(test_config()).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
     seed_installed_row(&harness, "install", "github", "0.1.0").await;
     let _env = EnvVarGuard::set_many(vec![(
         GITHUB_API_BASE_ENV,
@@ -409,9 +414,12 @@ async fn update_status_degrades_to_unknown_on_upstream_failure() {
 #[tokio::test]
 async fn update_status_reports_unmanaged_for_non_registry_agent() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
 
-    let harness = AgentHarness::spawn_with_config(custom_agent_config()).await;
+    let harness = AgentHarness::spawn_with_config_and_home(
+        custom_agent_config(),
+        tempdir.path().to_path_buf(),
+    )
+    .await;
     let response = http()
         .await
         .get(format!("{}/v1/agent/update/status", harness.base_url))
@@ -432,10 +440,10 @@ async fn update_status_reports_unmanaged_for_non_registry_agent() {
 #[tokio::test]
 async fn update_force_reinstalls_when_version_matches() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     write_opencode_github_override(&registry_config_dir(tempdir.path()));
 
-    let harness = AgentHarness::spawn_with_config(test_config()).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
     // Installed already matches the mock's latest: without `force` this
     // update would short-circuit as up_to_date.
     seed_installed_row(&harness, "install", "github", "0.4.2").await;
@@ -482,10 +490,10 @@ async fn update_force_reinstalls_when_version_matches() {
 #[tokio::test]
 async fn update_returns_ok_with_failed_step_when_asset_missing() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     write_opencode_github_override(&registry_config_dir(tempdir.path()));
 
-    let harness = AgentHarness::spawn_with_config(test_config()).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
     seed_installed_row(&harness, "install", "github", "0.1.0").await;
     // No asset matches `asset_pattern`, so the step must degrade to `failed`
     // while the route still answers 200.
@@ -524,10 +532,10 @@ async fn update_returns_ok_with_failed_step_when_asset_missing() {
 #[tokio::test]
 async fn update_skips_while_another_update_is_in_flight() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     write_opencode_github_override(&registry_config_dir(tempdir.path()));
 
-    let harness = AgentHarness::spawn_with_config(test_config()).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
     seed_installed_row(&harness, "install", "github", "0.1.0").await;
     // Once the gated fixture reports a hit, the first update provably holds
     // the supervisor's update lock.

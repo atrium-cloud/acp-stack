@@ -14,8 +14,7 @@ fn agent_provider_use_codex_openrouter_writes_responses_provider_config() {
     let options_path =
         write_acp_config_options(tempdir.path(), &["deepseek/deepseek-v4-flash"], &[]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "agent",
@@ -104,8 +103,7 @@ wire_api = "responses"
         .expect("existing backup should be written");
     let options_path = write_acp_config_options(tempdir.path(), &["gpt-5.5"], &[]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args(["agent", "provider", "use", "openai", "--model", "gpt-5.5"])
         .assert()
@@ -153,8 +151,7 @@ fn agent_provider_use_codex_openai_allows_omitting_model() {
         .expect("config should be written");
     seed_provider_credential(tempdir.path(), "openai", &["OPENAI_API_KEY"]);
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args(["agent", "provider", "use", "openai"])
         .assert()
         .success()
@@ -177,8 +174,7 @@ fn agent_provider_use_codex_rejects_unsupported_provider() {
         .expect("config should be written");
     SecretStore::open_or_create(tempdir.path()).expect("secret store should open");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "agent",
             "provider",
@@ -202,8 +198,7 @@ fn agent_set_codex_custom_provider_defaults_to_responses() {
     fs::write(config_dir.join("acps-config.toml"), codex_config())
         .expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "agent",
             "set",
@@ -246,8 +241,7 @@ fn agent_set_codex_rejects_chat_completions_custom_provider() {
     fs::write(config_dir.join("acps-config.toml"), codex_config())
         .expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "agent",
             "set",
@@ -279,8 +273,7 @@ fn agent_set_opencode_rejects_anthropic_messages_custom_provider() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
 
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .args([
             "agent",
             "set",
@@ -316,8 +309,7 @@ fn agent_provider_use_codex_openrouter_accepts_custom_model_without_discovery() 
 
     // Codex takes the model verbatim for OpenRouter, so no ACP fixture is
     // needed; the dead-port base keeps the catalog refresh off the network.
-    acps_command()
-        .env("HOME", tempdir.path())
+    acps_command(tempdir.path())
         .env("ACP_STACK_PROVIDER_MODELS_BASE", "http://127.0.0.1:1")
         .args([
             "agent",

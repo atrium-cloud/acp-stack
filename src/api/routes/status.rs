@@ -236,8 +236,9 @@ pub(crate) async fn status_agent_handler(
         })?
         .agent
         .clone();
-    let (configured_provider_snapshot, provider_error) =
-        configured_providers_or_error(open_agent_environment(&target_config));
+    let (configured_provider_snapshot, provider_error) = configured_providers_or_error(
+        open_agent_environment(&state.runtime_paths.home, &target_config),
+    );
     let provider_restart_required = provider_restart_required_for_status(
         provider_error.is_some(),
         snapshot.state,

@@ -2,7 +2,6 @@ use reqwest::StatusCode;
 use serde_json::Value;
 use tempfile::TempDir;
 
-use crate::common::HomeEnvGuard;
 use crate::common::agent::{
     AgentHarness, EnvVarGuard, admin_bearer, http, test_config,
     write_amp_linked_skills_registry_override, write_amp_registry_override,
@@ -12,7 +11,6 @@ use crate::common::agent::{
 #[tokio::test]
 async fn agent_switch_ports_skills_to_target_install_dir() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     let config_dir = tempdir.path().join(".config/acp-stack");
     std::fs::create_dir_all(&config_dir).expect("config dir");
     write_amp_registry_override(&config_dir);
@@ -33,7 +31,8 @@ async fn agent_switch_ports_skills_to_target_install_dir() {
     config.workspace.root = workspace.to_string_lossy().into_owned();
     config.workspace.uploads = workspace.join("uploads").to_string_lossy().into_owned();
     config.agent.cwd = Some(config.workspace.root.clone());
-    let harness = AgentHarness::spawn_with_config(config).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(config, tempdir.path().to_path_buf()).await;
     let response = http()
         .await
         .post(format!("{}/v1/agent/switch", harness.base_url))
@@ -61,7 +60,6 @@ async fn agent_switch_ports_skills_to_target_install_dir() {
 #[tokio::test]
 async fn agent_switch_links_skills_into_target_link_dir() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     let config_dir = tempdir.path().join(".config/acp-stack");
     std::fs::create_dir_all(&config_dir).expect("config dir");
     write_amp_linked_skills_registry_override(&config_dir);
@@ -82,7 +80,8 @@ async fn agent_switch_links_skills_into_target_link_dir() {
     config.workspace.root = workspace.to_string_lossy().into_owned();
     config.workspace.uploads = workspace.join("uploads").to_string_lossy().into_owned();
     config.agent.cwd = Some(config.workspace.root.clone());
-    let harness = AgentHarness::spawn_with_config(config).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(config, tempdir.path().to_path_buf()).await;
     let response = http()
         .await
         .post(format!("{}/v1/agent/switch", harness.base_url))
@@ -109,7 +108,6 @@ async fn agent_switch_links_skills_into_target_link_dir() {
 #[tokio::test]
 async fn agent_switch_reports_skills_link_error_without_failing() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     let config_dir = tempdir.path().join(".config/acp-stack");
     std::fs::create_dir_all(&config_dir).expect("config dir");
     write_amp_linked_skills_registry_override(&config_dir);
@@ -133,7 +131,8 @@ async fn agent_switch_reports_skills_link_error_without_failing() {
     config.workspace.root = workspace.to_string_lossy().into_owned();
     config.workspace.uploads = workspace.join("uploads").to_string_lossy().into_owned();
     config.agent.cwd = Some(config.workspace.root.clone());
-    let harness = AgentHarness::spawn_with_config(config).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(config, tempdir.path().to_path_buf()).await;
     let response = http()
         .await
         .post(format!("{}/v1/agent/switch", harness.base_url))
@@ -158,7 +157,6 @@ async fn agent_switch_reports_skills_link_error_without_failing() {
 #[tokio::test]
 async fn agent_switch_reports_shared_skills_dir_without_copying() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     let config_dir = tempdir.path().join(".config/acp-stack");
     std::fs::create_dir_all(&config_dir).expect("config dir");
     write_kimi_registry_override(&config_dir);
@@ -181,7 +179,8 @@ async fn agent_switch_reports_shared_skills_dir_without_copying() {
     config.workspace.root = workspace.to_string_lossy().into_owned();
     config.workspace.uploads = workspace.join("uploads").to_string_lossy().into_owned();
     config.agent.cwd = Some(config.workspace.root.clone());
-    let harness = AgentHarness::spawn_with_config(config).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(config, tempdir.path().to_path_buf()).await;
     let response = http()
         .await
         .post(format!("{}/v1/agent/switch", harness.base_url))
@@ -208,7 +207,6 @@ async fn agent_switch_reports_shared_skills_dir_without_copying() {
 #[tokio::test]
 async fn agent_switch_skill_port_failure_aborts_config_write() {
     let tempdir = TempDir::new().expect("tempdir");
-    let _home = HomeEnvGuard::set(tempdir.path());
     let config_dir = tempdir.path().join(".config/acp-stack");
     std::fs::create_dir_all(&config_dir).expect("config dir");
     write_amp_registry_override(&config_dir);
@@ -235,7 +233,8 @@ async fn agent_switch_skill_port_failure_aborts_config_write() {
     config.workspace.root = workspace.to_string_lossy().into_owned();
     config.workspace.uploads = workspace.join("uploads").to_string_lossy().into_owned();
     config.agent.cwd = Some(config.workspace.root.clone());
-    let harness = AgentHarness::spawn_with_config(config).await;
+    let harness =
+        AgentHarness::spawn_with_config_and_home(config, tempdir.path().to_path_buf()).await;
     let response = http()
         .await
         .post(format!("{}/v1/agent/switch", harness.base_url))
