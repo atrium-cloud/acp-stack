@@ -86,6 +86,65 @@ async fn create_session_applies_model_with_custom_config_option_id() {
 }
 
 #[tokio::test]
+async fn create_session_applies_native_mode_via_set_mode() {
+    // A mode advertised only in the native `modes` field (not a config option) is
+    // applied through `session/set_mode`, so it must land applied, not `ignored`.
+    // The placebo rejects an unadvertised mode id, so a wrong id on the wire would
+    // fail the create instead of passing silently.
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.extend([
+            "--session-mode".to_owned(),
+            "default".to_owned(),
+            "--session-mode".to_owned(),
+            "dont_ask".to_owned(),
+            "--session-mode-current".to_owned(),
+            "default".to_owned(),
+            // The placebo rejects a prompt unless this mode was applied through
+            // session/set_mode first, so a silent no-op in the NativeMode arm
+            // fails the prompt below instead of passing on an empty `ignored`.
+            "--expect-mode".to_owned(),
+            "dont_ask".to_owned(),
+        ]);
+        config.agent.mode = Some("dont_ask".to_owned());
+    })
+    .await;
+
+    let response = http()
+        .post(format!("{}/v1/sessions", harness.base_url))
+        .header("Authorization", session_bearer())
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("create");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    // Empty `ignored` is omitted from the JSON, so absent means nothing was
+    // ignored; a softened mode would appear here as an `agent.mode` entry.
+    let applied = body["data"]["ignored"]
+        .as_array()
+        .is_none_or(|entries| entries.is_empty());
+    assert!(
+        applied,
+        "native mode must apply via session/set_mode, not be ignored: {body}"
+    );
+
+    // Prove the mode was actually applied on the wire, not merely resolved: the
+    // placebo fails this prompt unless `dont_ask` reached it via session/set_mode.
+    let session_id = body["data"]["id"].as_str().expect("session id").to_owned();
+    let prompt = http()
+        .post(format!(
+            "{}/v1/sessions/{}/prompt",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .json(&json!({ "prompt": "mode should already be set" }))
+        .send()
+        .await
+        .expect("prompt");
+    assert_eq!(prompt.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn full_lifecycle_create_list_get_prompt_poll_close() {
     let harness = Harness::spawn().await;
     let client = http();

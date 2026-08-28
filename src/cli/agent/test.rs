@@ -13,8 +13,9 @@ use crate::config::{self, Config};
 use crate::error::{Result, StackError};
 use crate::fs_util::home_dir;
 use crate::runtime::agent::acp_bridge::{
-    AcpBridge, AcpPermissionPolicy, AgentSessionConfigCategory, AgentSessionModelSelection,
-    SessionEventSink, session_config_id_for_value, session_model_selection_for_value,
+    AcpBridge, AcpPermissionPolicy, AgentSessionConfigCategory, AgentSessionModeSelection,
+    AgentSessionModelSelection, SessionEventSink, session_config_id_for_value,
+    session_mode_selection_for_value, session_model_selection_for_value,
 };
 use crate::runtime::agent::model_discovery::model_value_is_explicit_without_discovery;
 use crate::runtime::install::agent_registry::RegistryCatalog;
@@ -1073,14 +1074,18 @@ async fn apply_agent_test_session_config(
     response: &agent_client_protocol::schema::v1::NewSessionResponse,
 ) -> Result<()> {
     if let Some(mode) = agent.mode.as_deref() {
-        let config_id = session_config_id_for_value(
-            response.config_options.as_deref(),
-            AgentSessionConfigCategory::Mode,
-            mode,
-        )?;
-        bridge
-            .set_session_config_option(response.session_id.clone(), &config_id, mode)
-            .await?;
+        match session_mode_selection_for_value(response, mode)? {
+            AgentSessionModeSelection::ConfigOption { config_id } => {
+                bridge
+                    .set_session_config_option(response.session_id.clone(), &config_id, mode)
+                    .await?;
+            }
+            AgentSessionModeSelection::NativeMode { mode_id } => {
+                bridge
+                    .set_session_mode(response.session_id.clone(), &mode_id)
+                    .await?;
+            }
+        }
     }
     if let Some(model) = agent.model.as_deref().or_else(|| {
         agent

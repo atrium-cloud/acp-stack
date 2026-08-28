@@ -86,9 +86,34 @@ pub(crate) async fn handle_new_session(
         id: session_id.clone(),
         cwd: request.cwd,
     });
-    let response = NewSessionResponse::new(session_id.clone())
+    let mut response = NewSessionResponse::new(session_id.clone())
         .config_options(state.config_options(&session_id));
+    if let Some(modes) = state.session_modes() {
+        response = response.modes(modes);
+    }
     responder.respond(response)
+}
+
+pub(crate) async fn handle_set_mode(
+    state: SharedState,
+    request: SetSessionModeRequest,
+    responder: Responder<SetSessionModeResponse>,
+    _connection: ConnectionTo<Client>,
+) -> agent_client_protocol::Result<()> {
+    let mut state = state.lock().await;
+    let mode_id = request.mode_id.0.to_string();
+    // Reject a mode the agent never advertised, so a mis-wired native lane
+    // (wrong id on the wire) surfaces as an error rather than a silent pass.
+    if !state.args.session_mode.iter().any(|id| id == &mode_id) {
+        return responder.respond_with_error(Error::new(
+            -32000,
+            format!("unknown session mode {mode_id}"),
+        ));
+    }
+    if state.args.expect_mode.as_deref() == Some(mode_id.as_str()) {
+        state.mode_configured = true;
+    }
+    responder.respond(SetSessionModeResponse::new())
 }
 
 pub(crate) async fn handle_list_sessions(

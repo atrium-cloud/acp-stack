@@ -18,9 +18,10 @@ use agent_client_protocol::schema::v1::{
     PromptRequest, PromptResponse, ReadTextFileRequest, ReleaseTerminalRequest,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     ResumeSessionRequest, SessionConfigOptionCategory, SessionConfigOptionValue,
-    SessionConfigOptionsCapabilities, SessionConfigValueId, SessionId, SessionInfo,
-    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, TerminalOutputRequest,
-    WaitForTerminalExitRequest, WriteTextFileRequest,
+    SessionConfigOptionsCapabilities, SessionConfigValueId, SessionId, SessionInfo, SessionModeId,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
+    SetSessionModeResponse, TerminalOutputRequest, WaitForTerminalExitRequest,
+    WriteTextFileRequest,
 };
 use agent_client_protocol::{Agent, Client, ConnectionTo};
 use tokio::process::{Child, Command};
@@ -64,7 +65,8 @@ pub(crate) use self::spawn::resolve_command_path;
 
 pub use crate::runtime::agent::acp_codec::{
     meta_message_id, prompt_message_id_meta, session_config_id_for_value, session_config_values,
-    session_model_selection_for_value, session_model_values,
+    session_mode_selection_for_value, session_mode_values, session_model_selection_for_value,
+    session_model_values,
 };
 pub use crate::runtime::agent::acp_terminal::TerminalCommandLog;
 pub use crate::runtime::agent::session_changes::SessionChangesHandle;
@@ -112,6 +114,16 @@ pub enum AgentSessionConfigCategory {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentSessionModelSelection {
     ConfigOption { config_id: String },
+}
+
+/// How a resolved mode value must be applied. `config_options` is authoritative;
+/// the native `modes` lane is used only when no mode config option is advertised.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentSessionModeSelection {
+    /// Advertised as a `config_options` select; applied via `session/set_config_option`.
+    ConfigOption { config_id: String },
+    /// Advertised in `NewSessionResponse.modes`; applied via `session/set_mode`.
+    NativeMode { mode_id: String },
 }
 
 impl AgentSessionConfigCategory {

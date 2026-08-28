@@ -14,7 +14,9 @@ use agent_client_protocol::schema::v1::{
 use tokio::sync::{Mutex as TokioMutex, mpsc};
 
 use crate::error::{Result, StackError};
-use crate::runtime::agent::acp_bridge::{AgentSessionConfigCategory, AgentSessionModelSelection};
+use crate::runtime::agent::acp_bridge::{
+    AgentSessionConfigCategory, AgentSessionModeSelection, AgentSessionModelSelection,
+};
 use crate::runtime::agent::session_sink::SessionEventSink;
 use crate::runtime::mediation::permissions::{
     NewPermission, PermissionOutcome, PermissionService, PermissionSource,
@@ -192,6 +194,74 @@ pub fn session_model_values(response: &NewSessionResponse) -> Result<Vec<String>
     session_config_values(
         response.config_options.as_deref(),
         AgentSessionConfigCategory::Model,
+    )
+}
+
+/// Resolve a mode `value` to how it must be applied. `config_options` is
+/// authoritative; the native `modes` field is consulted only when no mode
+/// config option is advertised, so an agent shipping both keeps config_options
+/// behavior unchanged.
+pub fn session_mode_selection_for_value(
+    response: &NewSessionResponse,
+    value: &str,
+) -> Result<AgentSessionModeSelection> {
+    // config_options is authoritative: when a mode config option is advertised,
+    // resolve strictly against it (native modes are ignored), matching
+    // `session_mode_values`. An unlisted value is then a softenable miss, not a
+    // silent jump to the native lane.
+    if session_config_values(
+        response.config_options.as_deref(),
+        AgentSessionConfigCategory::Mode,
+    )
+    .is_ok()
+    {
+        let config_id = session_config_id_for_value(
+            response.config_options.as_deref(),
+            AgentSessionConfigCategory::Mode,
+            value,
+        )?;
+        return Ok(AgentSessionModeSelection::ConfigOption { config_id });
+    }
+    if let Some(modes) = response.modes.as_ref()
+        && modes
+            .available_modes
+            .iter()
+            .any(|mode| mode.id.0.as_ref() == value)
+    {
+        return Ok(AgentSessionModeSelection::NativeMode {
+            mode_id: value.to_owned(),
+        });
+    }
+    Err(StackError::AgentConfigProvision {
+        path: PathBuf::from("ACP session config options"),
+        reason: format!("agent did not advertise `{value}` as an available `mode`"),
+    })
+}
+
+/// Advertised mode ids: the `config_options` mode values when present, else the
+/// native `modes` field's available mode ids.
+pub fn session_mode_values(response: &NewSessionResponse) -> Result<Vec<String>> {
+    if let Ok(values) = session_config_values(
+        response.config_options.as_deref(),
+        AgentSessionConfigCategory::Mode,
+    ) {
+        return Ok(values);
+    }
+    if let Some(modes) = response.modes.as_ref() {
+        let mut values: Vec<String> = modes
+            .available_modes
+            .iter()
+            .map(|mode| mode.id.0.to_string())
+            .collect();
+        values.sort();
+        values.dedup();
+        return Ok(values);
+    }
+    // No config option and no native modes: reuse the canonical "did not
+    // advertise a `mode` option" error.
+    session_config_values(
+        response.config_options.as_deref(),
+        AgentSessionConfigCategory::Mode,
     )
 }
 

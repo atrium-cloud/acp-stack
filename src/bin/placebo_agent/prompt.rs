@@ -57,6 +57,10 @@ pub(crate) async fn handle_prompt(
             return responder
                 .respond_with_error(Error::new(-32000, "expected model config before prompt"));
         }
+        if state.args.expect_mode.is_some() && !state.mode_configured {
+            return responder
+                .respond_with_error(Error::new(-32000, "expected session mode before prompt"));
+        }
     }
     if prompt_contains_testflight_marker(&request) {
         tokio::fs::write(TESTFLIGHT_MARKER, TESTFLIGHT_CONTENT)

@@ -25,6 +25,9 @@ pub(crate) struct PlaceboState {
     /// Values applied via `session/set_config_option`, keyed by `(session_id, config_id)` so a set
     /// on one session never leaks into another's advertised currents.
     pub(crate) config_option_values: BTreeMap<(String, String), SessionConfigOptionValue>,
+    /// Set once a `session/set_mode` applies the `--expect-mode` value, mirroring
+    /// `model_configured` so a test can prove the native mode lane actually fired.
+    pub(crate) mode_configured: bool,
 }
 
 impl PlaceboState {
@@ -40,7 +43,31 @@ impl PlaceboState {
             model_configured: false,
             client_capabilities: None,
             config_option_values: BTreeMap::new(),
+            mode_configured: false,
         }
+    }
+
+    /// The native `modes` block advertised on `session/new`, or `None` when no
+    /// `--session-mode` was configured.
+    pub(crate) fn session_modes(&self) -> Option<SessionModeState> {
+        if self.args.session_mode.is_empty() {
+            return None;
+        }
+        // A current id absent from the available set would advertise invalid
+        // state, so an unknown `--session-mode-current` falls back to the first.
+        let current = self
+            .args
+            .session_mode_current
+            .clone()
+            .filter(|current| self.args.session_mode.contains(current))
+            .unwrap_or_else(|| self.args.session_mode[0].clone());
+        let available = self
+            .args
+            .session_mode
+            .iter()
+            .map(|id| SessionMode::new(id.clone(), id.clone()))
+            .collect();
+        Some(SessionModeState::new(current, available))
     }
 
     /// The session's current `session/cancel` count, captured by a turn when it

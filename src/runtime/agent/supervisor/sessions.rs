@@ -121,23 +121,45 @@ impl AgentSupervisor {
         // The snapshot must reflect what was applied, not the pre-provisioning
         // `session/new` state.
         let mut latest_options: Option<Vec<SessionConfigOption>> = None;
-        if let Some(mode) = agent.mode.as_deref()
-            && let Some(refreshed) = provision_session_option(
-                &bridge,
-                &response.session_id,
-                session_config_id_for_value(
-                    response.config_options.as_deref(),
-                    AgentSessionConfigCategory::Mode,
-                    mode,
-                ),
-                mode,
-                IGNORED_FEATURE_AGENT_MODE,
-                "sessionConfig.mode",
-                &mut ignored,
-            )
-            .await?
-        {
-            latest_options = Some(refreshed);
+        if let Some(mode) = agent.mode.as_deref() {
+            match session_mode_selection_for_value(&response, mode) {
+                Ok(AgentSessionModeSelection::ConfigOption { config_id }) => {
+                    if let Some(refreshed) = provision_session_option(
+                        &bridge,
+                        &response.session_id,
+                        Ok(config_id),
+                        mode,
+                        IGNORED_FEATURE_AGENT_MODE,
+                        "sessionConfig.mode",
+                        &mut ignored,
+                    )
+                    .await?
+                    {
+                        latest_options = Some(refreshed);
+                    }
+                }
+                Ok(AgentSessionModeSelection::NativeMode { mode_id }) => {
+                    // `session/set_mode` returns no config options, so the
+                    // snapshot the model/effort lanes read stays untouched.
+                    bridge
+                        .set_session_mode(response.session_id.clone(), &mode_id)
+                        .await?;
+                }
+                // Same softened-miss contract as the config-option lanes: an
+                // unadvertised mode lands in `ignored`, a real error propagates.
+                Err(error) => {
+                    provision_session_option(
+                        &bridge,
+                        &response.session_id,
+                        Err(error),
+                        mode,
+                        IGNORED_FEATURE_AGENT_MODE,
+                        "sessionConfig.mode",
+                        &mut ignored,
+                    )
+                    .await?;
+                }
+            }
         }
         if let Some(model) = agent.model.as_deref().or_else(|| {
             agent

@@ -8,7 +8,7 @@ use crate::error::{Result, StackError};
 use crate::fs_util::{acquire_agent_config_mutation_file_lock, atomic_write_owner_only, home_dir};
 use crate::runtime::agent::acp_bridge::{
     AgentSessionConfigCategory, KIMI_CODE_AGENT_ID, session_config_id_for_value,
-    session_model_selection_for_value,
+    session_mode_selection_for_value, session_model_selection_for_value,
 };
 use crate::runtime::agent::agent_headless_config::provision_agent_headless_config_transition;
 use crate::runtime::agent::model_discovery::{
@@ -656,7 +656,10 @@ pub(in crate::cli) fn validate_agent_session_config_value(
         AgentSessionConfigCategory::Model => {
             session_model_selection_for_value(&response, value).map(|_| ())
         }
-        AgentSessionConfigCategory::Mode | AgentSessionConfigCategory::Effort => {
+        AgentSessionConfigCategory::Mode => {
+            session_mode_selection_for_value(&response, value).map(|_| ())
+        }
+        AgentSessionConfigCategory::Effort => {
             session_config_id_for_value(response.config_options.as_deref(), category, value)
                 .map(|_| ())
         }

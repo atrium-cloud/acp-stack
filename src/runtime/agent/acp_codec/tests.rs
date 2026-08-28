@@ -42,6 +42,106 @@ fn model_lookup_only_constructs_agent_config_provision() {
     ));
 }
 
+fn response_with_native_modes_only() -> agent_client_protocol::schema::v1::NewSessionResponse {
+    use agent_client_protocol::schema::v1::{NewSessionResponse, SessionMode, SessionModeState};
+    NewSessionResponse::new("session").modes(SessionModeState::new(
+        "default",
+        vec![
+            SessionMode::new("default", "Default"),
+            SessionMode::new("dont_ask", "Don't ask"),
+        ],
+    ))
+}
+
+fn response_with_config_mode_and_native() -> agent_client_protocol::schema::v1::NewSessionResponse {
+    use agent_client_protocol::schema::v1::{
+        NewSessionResponse, SessionConfigOption, SessionConfigOptionCategory,
+        SessionConfigSelectOption, SessionMode, SessionModeState,
+    };
+    let mode_option = SessionConfigOption::select(
+        "mode",
+        "Mode",
+        "default",
+        vec![
+            SessionConfigSelectOption::new("default", "Default"),
+            SessionConfigSelectOption::new("plan", "Plan"),
+        ],
+    )
+    .category(SessionConfigOptionCategory::Mode);
+    NewSessionResponse::new("session")
+        .config_options(vec![mode_option])
+        .modes(SessionModeState::new(
+            "default",
+            vec![
+                SessionMode::new("default", "Default"),
+                SessionMode::new("dont_ask", "Don't ask"),
+            ],
+        ))
+}
+
+// config_options is authoritative: an agent advertising both a mode config
+// option and native modes resolves via config_options, unchanged.
+#[test]
+fn session_mode_selection_prefers_config_option_over_native() {
+    let response = response_with_config_mode_and_native();
+    assert_eq!(
+        session_mode_selection_for_value(&response, "default").expect("resolved"),
+        AgentSessionModeSelection::ConfigOption {
+            config_id: "mode".to_owned()
+        }
+    );
+}
+
+// With a mode config option present, a value that exists only in the native
+// modes lane is rejected, not silently applied: config_options is authoritative
+// at the option level, so discovery and resolution never disagree.
+#[test]
+fn session_mode_selection_ignores_native_when_config_option_present() {
+    let response = response_with_config_mode_and_native();
+    assert!(matches!(
+        session_mode_selection_for_value(&response, "dont_ask"),
+        Err(crate::error::StackError::AgentConfigProvision { .. })
+    ));
+}
+
+#[test]
+fn session_mode_selection_falls_back_to_native_modes() {
+    let response = response_with_native_modes_only();
+    assert_eq!(
+        session_mode_selection_for_value(&response, "dont_ask").expect("resolved"),
+        AgentSessionModeSelection::NativeMode {
+            mode_id: "dont_ask".to_owned()
+        }
+    );
+}
+
+#[test]
+fn session_mode_selection_rejects_unknown_native_mode() {
+    let response = response_with_native_modes_only();
+    assert!(matches!(
+        session_mode_selection_for_value(&response, "ghost"),
+        Err(crate::error::StackError::AgentConfigProvision { .. })
+    ));
+}
+
+#[test]
+fn session_mode_values_uses_native_when_no_config_option() {
+    let response = response_with_native_modes_only();
+    assert_eq!(
+        session_mode_values(&response).expect("values"),
+        vec!["default".to_owned(), "dont_ask".to_owned()]
+    );
+}
+
+#[test]
+fn session_mode_values_prefers_config_option_over_native() {
+    let response = response_with_config_mode_and_native();
+    assert_eq!(
+        session_mode_values(&response).expect("values"),
+        vec!["default".to_owned(), "plan".to_owned()]
+    );
+}
+
 #[derive(Default)]
 struct RecordingSink {
     events: Mutex<Vec<(String, String, String)>>,

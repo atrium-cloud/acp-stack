@@ -135,6 +135,26 @@ impl AcpBridge {
             })
     }
 
+    /// `session/set_mode`. The native modes lane, used when a mode is advertised
+    /// in `NewSessionResponse.modes` rather than as a `config_options` select.
+    pub async fn set_session_mode(
+        &self,
+        session_id: SessionId,
+        mode_id: &str,
+    ) -> Result<SetSessionModeResponse> {
+        let connection = self.connection().await?;
+        let request =
+            SetSessionModeRequest::new(session_id, SessionModeId::new(mode_id.to_owned()));
+        connection
+            .send_request(request)
+            .block_task()
+            .await
+            .map_err(|err| StackError::AgentRequestFailed {
+                method: "session/set_mode",
+                message: err.to_string(),
+            })
+    }
+
     /// `session/load`. Requires the `loadSession` capability.
     pub async fn load_session(
         &self,

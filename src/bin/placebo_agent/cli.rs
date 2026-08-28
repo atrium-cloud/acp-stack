@@ -129,6 +129,18 @@ pub(crate) struct AcpArgs {
     /// Extra boolean config option: `<id>[@<category>]=<true|false>`. Repeatable.
     #[arg(long)]
     pub(crate) config_option_boolean: Vec<String>,
+    /// Advertise native session modes on `session/new`: repeatable mode id. When
+    /// any is given, the response carries a `modes` (SessionModeState) instead of
+    /// a mode config option, exercising the native `session/set_mode` lane.
+    #[arg(long)]
+    pub(crate) session_mode: Vec<String>,
+    /// Current native mode id (defaults to the first `--session-mode`).
+    #[arg(long)]
+    pub(crate) session_mode_current: Option<String>,
+    /// Fail `session/prompt` unless this mode id was applied via `session/set_mode`
+    /// first, proving the native mode lane fired (mirrors `--expect-model-config`).
+    #[arg(long)]
+    pub(crate) expect_mode: Option<String>,
     /// After each `session/set_config_option`, also emit a
     /// `config_option_update` session notification carrying the full list.
     #[arg(long)]

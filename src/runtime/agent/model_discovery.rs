@@ -17,7 +17,8 @@ use crate::error::{Result, StackError};
 use crate::runtime::agent::acp_bridge::{
     AcpBridge, AcpPermissionPolicy, AgentCapabilitiesDto, AgentSessionConfigCategory,
     KIMI_CODE_AGENT_ID, SessionEventSink, session_config_id_for_value, session_config_values,
-    session_model_selection_for_value, session_model_values,
+    session_mode_selection_for_value, session_mode_values, session_model_selection_for_value,
+    session_model_values,
 };
 use crate::runtime::agent::agent_headless_config::{CODEX_OPENROUTER_PROVIDER_ID, HERMES_AGENT_ID};
 use crate::runtime::agent::provider_keys::{
@@ -200,7 +201,8 @@ pub fn advertised_values_for_category(
 ) -> Result<Vec<String>> {
     match category {
         AgentSessionConfigCategory::Model => session_model_values(response),
-        AgentSessionConfigCategory::Mode | AgentSessionConfigCategory::Effort => {
+        AgentSessionConfigCategory::Mode => session_mode_values(response),
+        AgentSessionConfigCategory::Effort => {
             session_config_values(response.config_options.as_deref(), category)
         }
     }
@@ -218,7 +220,10 @@ pub fn validate_advertised_value(
         AgentSessionConfigCategory::Model => {
             session_model_selection_for_value(response, value).map(|_| ())
         }
-        AgentSessionConfigCategory::Mode | AgentSessionConfigCategory::Effort => {
+        AgentSessionConfigCategory::Mode => {
+            session_mode_selection_for_value(response, value).map(|_| ())
+        }
+        AgentSessionConfigCategory::Effort => {
             session_config_id_for_value(response.config_options.as_deref(), category, value)
                 .map(|_| ())
         }

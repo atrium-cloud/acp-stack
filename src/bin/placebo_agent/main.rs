@@ -15,8 +15,9 @@ use agent_client_protocol::schema::v1::{
     ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities, SessionCloseCapabilities,
     SessionConfigOption, SessionConfigOptionCategory, SessionConfigOptionValue,
     SessionConfigSelectOption, SessionDeleteCapabilities, SessionForkCapabilities, SessionId,
-    SessionInfo, SessionListCapabilities, SessionNotification, SessionResumeCapabilities,
-    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
+    SessionInfo, SessionListCapabilities, SessionMode, SessionModeState, SessionNotification,
+    SessionResumeCapabilities, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse, StopReason,
     TerminalId, TerminalOutputRequest, TextContent, ToolCallUpdate, ToolCallUpdateFields,
     WaitForTerminalExitRequest, WriteTextFileRequest,
 };
@@ -114,6 +115,15 @@ async fn run_acp(args: AcpArgs) -> agent_client_protocol::Result<()> {
                 async move |request, responder, connection| {
                     handle_set_config_option(Arc::clone(&state), request, responder, connection)
                         .await
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let state = Arc::clone(&state);
+                async move |request, responder, connection| {
+                    handle_set_mode(Arc::clone(&state), request, responder, connection).await
                 }
             },
             agent_client_protocol::on_receive_request!(),

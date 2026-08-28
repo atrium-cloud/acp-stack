@@ -71,10 +71,11 @@ use crate::error::{Result, StackError};
 use crate::events::EventHub;
 use crate::runtime::agent::acp_bridge::{
     AcpBridge, AcpBridgeExit, AcpBridgeExitReason, AgentCapabilitiesDto,
-    AgentSessionConfigCategory, IGNORED_FEATURE_AGENT_CONFIG_OPTION, IGNORED_FEATURE_AGENT_EFFORT,
-    IGNORED_FEATURE_AGENT_MODE, IGNORED_FEATURE_AGENT_MODEL, IgnoredFeature, PartitionedMcpServers,
-    SessionEventSink, SkippedMcpServer, StateStoreSessionSink, meta_message_id,
-    prompt_message_id_meta, resolve_command_path, session_config_id_for_value,
+    AgentSessionConfigCategory, AgentSessionModeSelection, IGNORED_FEATURE_AGENT_CONFIG_OPTION,
+    IGNORED_FEATURE_AGENT_EFFORT, IGNORED_FEATURE_AGENT_MODE, IGNORED_FEATURE_AGENT_MODEL,
+    IgnoredFeature, PartitionedMcpServers, SessionEventSink, SkippedMcpServer,
+    StateStoreSessionSink, meta_message_id, prompt_message_id_meta, resolve_command_path,
+    session_config_id_for_value, session_mode_selection_for_value,
 };
 use crate::runtime::agent::model_discovery::model_value_is_explicit_without_discovery;
 use crate::runtime::agent::provider_keys::ResolvedProviderSnapshot;
