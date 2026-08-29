@@ -349,6 +349,7 @@ pub(super) fn run_capability_probe_step(flow: &mut InitFlow) -> Result<()> {
     let store = &flow.store;
     let home = &flow.home;
     let config = &flow.config;
+    let registry = &flow.registry;
     let secret_store = flow.secret_store.clone();
     let probed_capabilities = &mut flow.probed_capabilities;
     let ignored_features = &mut flow.ignored_features;
@@ -364,7 +365,19 @@ pub(super) fn run_capability_probe_step(flow: &mut InitFlow) -> Result<()> {
             // The handshake is the only authority on MCP; it overrides the provisional verdict.
             prompt::emit_state_signal(|| mcp_applicability_from_probe(&outcome));
             match outcome {
-                CapabilityProbeOutcome::Probed(capabilities) => {
+                CapabilityProbeOutcome::Probed(mut capabilities) => {
+                    let installer_runs =
+                        store.latest_successful_installer_runs_for_agent(&config.agent.id)?;
+                    // `config.agent.adapter` is daemon-populated and always empty in init, so the
+                    // adapter id comes from the effective registry entry instead.
+                    capabilities.attach_installed_versions(
+                        &config.agent.id,
+                        &crate::runtime::install::agent_version_check::installed_components(
+                            registry,
+                            &config.agent,
+                        ),
+                        &installer_runs,
+                    );
                     store.upsert_agent_capabilities(&config.agent.id, &capabilities.to_json()?)?;
                     // Best-effort: an unresolvable MCP declaration surfaces at session time, not here.
                     match crate::runtime::agent::mcp::resolve_mcp_servers(
@@ -392,7 +405,7 @@ pub(super) fn run_capability_probe_step(flow: &mut InitFlow) -> Result<()> {
                         "agent_name": capabilities.agent_name,
                         "ignored": &*ignored_features,
                     });
-                    *probed_capabilities = Some(capabilities);
+                    *probed_capabilities = Some(*capabilities);
                     Ok(StepOutcome::with_payload(payload.to_string()))
                 }
                 CapabilityProbeOutcome::Unavailable { reason } => {

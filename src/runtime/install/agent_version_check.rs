@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::error::Result;
 use crate::runtime::install::agent_installer::{STEP_ADAPTER, STEP_HARNESS, STEP_INSTALL};
-use crate::runtime::install::agent_registry::{RegistryEntry, RegistryKind};
+use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry, RegistryKind};
 use crate::state::InstallerRun;
 
 /// Result of comparing the installed managed-agent version against upstream.
@@ -199,6 +199,65 @@ fn expected_agent_check_steps(entry: &RegistryEntry) -> Vec<&'static str> {
     }
 }
 
+/// The installed components an agent launch actually uses, resolved from the
+/// effective registry entry so stale installer rows from a previous install
+/// shape of the same agent id never leak into a version report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledComponents {
+    pub adapter_id: Option<String>,
+    pub steps: Vec<&'static str>,
+}
+
+impl InstalledComponents {
+    /// Registry-unavailable fallback: shape from the daemon-populated
+    /// `[agent].adapter` metadata alone. Only the registry knows whether the
+    /// adapter bundles its harness, so the harness step is left out rather
+    /// than risk pairing the launch with a stale split-harness row.
+    pub fn from_agent_config(agent: &crate::config::AgentConfig) -> Self {
+        match agent.adapter.as_ref() {
+            Some(adapter) => Self {
+                adapter_id: Some(adapter.id.clone()),
+                steps: vec![STEP_ADAPTER],
+            },
+            None => Self::native(),
+        }
+    }
+
+    fn native() -> Self {
+        Self {
+            adapter_id: None,
+            steps: vec![STEP_INSTALL],
+        }
+    }
+}
+
+pub fn installed_components(
+    registry: &RegistryCatalog,
+    agent: &crate::config::AgentConfig,
+) -> InstalledComponents {
+    // Escape-hatch custom agents are absent from the registry and install through the `install` step.
+    let Some(entry) = registry.lookup(&agent.id) else {
+        return InstalledComponents::native();
+    };
+    let entry = match crate::runtime::install::agent_registry::effective_registry_entry(
+        entry, agent,
+    ) {
+        Ok(entry) => entry,
+        Err(error) => {
+            tracing::warn!(agent = %agent.id, %error, "ignoring [agent.adapter_override] for installed component resolution");
+            std::borrow::Cow::Borrowed(entry)
+        }
+    };
+    let entry = entry.as_ref();
+    if entry.kind != RegistryKind::Adapter {
+        return InstalledComponents::native();
+    }
+    InstalledComponents {
+        adapter_id: entry.adapter.as_ref().map(|adapter| adapter.id.clone()),
+        steps: expected_agent_check_steps(entry),
+    }
+}
+
 pub fn agent_check_has_failure(report: &[(String, AgentVersionStatus)]) -> bool {
     report.iter().any(|(_, status)| {
         matches!(
@@ -206,4 +265,174 @@ pub fn agent_check_has_failure(report: &[(String, AgentVersionStatus)]) -> bool 
             AgentVersionStatus::Stale { .. } | AgentVersionStatus::NotInstalled
         )
     })
+}
+
+#[cfg(test)]
+mod installed_components_tests {
+    use super::*;
+
+    const REGISTRY: &str = r#"
+[[agents]]
+id = "native-agent"
+name = "Native Agent"
+kind = "native"
+headless_compatible = true
+support_doc = "docs/agents/native-agent.md"
+
+[agents.harness]
+id = "native-agent"
+
+[agents.harness.install.npm]
+package = "@example/native-agent"
+creates = "native-agent"
+
+[[agents]]
+id = "split-agent"
+name = "Split Adapter Agent"
+kind = "adapter"
+headless_compatible = true
+support_doc = "docs/agents/split-agent.md"
+
+[agents.adapter]
+id = "split-acp"
+github = "example/split-acp"
+
+[agents.adapter.install.npm]
+package = "@example/split-acp"
+creates = "split-acp"
+
+[agents.harness]
+id = "split-harness"
+
+[agents.harness.install.npm]
+package = "@example/split-harness"
+creates = "split-harness"
+
+[[agents]]
+id = "bundled-agent"
+name = "Bundled Adapter Agent"
+kind = "adapter"
+headless_compatible = true
+support_doc = "docs/agents/bundled-agent.md"
+
+[agents.adapter]
+id = "bundled-acp"
+github = "example/bundled-acp"
+
+[agents.adapter.install.npm]
+package = "@example/bundled-acp"
+creates = "bundled-acp"
+
+[agents.harness]
+id = "bundled-sdk"
+
+[agents.harness.install]
+provided_by = "adapter"
+"#;
+
+    fn registry() -> RegistryCatalog {
+        RegistryCatalog::from_toml(REGISTRY).expect("test registry parses")
+    }
+
+    fn agent(id: &str) -> crate::config::AgentConfig {
+        let mut config = crate::config::load_config_from_str(include_str!(
+            "../../../tests/fixtures/valid-opencode-stack.toml"
+        ))
+        .expect("fixture parses");
+        config.agent.id = id.to_owned();
+        config.agent.adapter = None;
+        config.agent.adapter_override = None;
+        config.agent
+    }
+
+    #[test]
+    fn native_entry_uses_the_install_step_only() {
+        let components = installed_components(&registry(), &agent("native-agent"));
+        assert_eq!(
+            components,
+            InstalledComponents {
+                adapter_id: None,
+                steps: vec![STEP_INSTALL],
+            }
+        );
+    }
+
+    #[test]
+    fn adapter_entry_with_separate_harness_uses_both_steps() {
+        let components = installed_components(&registry(), &agent("split-agent"));
+        assert_eq!(
+            components,
+            InstalledComponents {
+                adapter_id: Some("split-acp".to_owned()),
+                steps: vec![STEP_HARNESS, STEP_ADAPTER],
+            }
+        );
+    }
+
+    #[test]
+    fn adapter_entry_with_bundled_harness_uses_the_adapter_step_only() {
+        let components = installed_components(&registry(), &agent("bundled-agent"));
+        assert_eq!(
+            components,
+            InstalledComponents {
+                adapter_id: Some("bundled-acp".to_owned()),
+                steps: vec![STEP_ADAPTER],
+            }
+        );
+    }
+
+    #[test]
+    fn adapter_override_turns_a_native_entry_adapter_shaped() {
+        let mut agent = agent("native-agent");
+        agent.adapter_override = Some(crate::config::AgentAdapterOverrideConfig {
+            command: "custom-acp".to_owned(),
+            args: Vec::new(),
+            github: Some("example/custom-acp".to_owned()),
+            install: crate::config::AgentAdapterOverrideInstall {
+                shell: None,
+                npm: Some(crate::config::AgentAdapterOverrideNpmInstall {
+                    package: "custom-acp".to_owned(),
+                    creates: "custom-acp".to_owned(),
+                }),
+                github: None,
+            },
+            update: Default::default(),
+        });
+        let components = installed_components(&registry(), &agent);
+        assert_eq!(
+            components,
+            InstalledComponents {
+                adapter_id: Some("custom-acp".to_owned()),
+                steps: vec![STEP_HARNESS, STEP_ADAPTER],
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_agent_is_treated_as_native() {
+        let components = installed_components(&registry(), &agent("escape-hatch"));
+        assert_eq!(components, InstalledComponents::native());
+    }
+
+    #[test]
+    fn config_fallback_follows_the_populated_adapter_metadata() {
+        let mut agent = agent("split-agent");
+        assert_eq!(
+            InstalledComponents::from_agent_config(&agent),
+            InstalledComponents::native()
+        );
+        agent.adapter = Some(crate::config::AgentAdapterConfig {
+            id: "split-acp".to_owned(),
+            name: "Split Adapter Agent".to_owned(),
+            upstream_agent: "split-harness".to_owned(),
+            source_url: None,
+        });
+        assert_eq!(
+            InstalledComponents::from_agent_config(&agent),
+            InstalledComponents {
+                adapter_id: Some("split-acp".to_owned()),
+                steps: vec![STEP_ADAPTER],
+            }
+        );
+    }
 }

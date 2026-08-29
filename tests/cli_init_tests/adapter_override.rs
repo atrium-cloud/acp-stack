@@ -1,5 +1,6 @@
 use crate::common::cli::*;
 use acp_stack::config::load_config_from_str;
+use acp_stack::state::{StateStore, default_state_path};
 use std::fs;
 
 const CONFIG_RELATIVE_PATH: &str = ".config/acp-stack/acps-config.toml";
@@ -30,6 +31,55 @@ fn written_config(tempdir: &tempfile::TempDir) -> acp_stack::config::Config {
     let written = fs::read_to_string(tempdir.path().join(CONFIG_RELATIVE_PATH))
         .expect("config should be readable");
     load_config_from_str(&written).expect("config should validate")
+}
+
+#[test]
+fn init_capability_probe_records_the_override_adapter_id() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let fixture = tempdir.path().join("agent-capabilities.json");
+    fs::write(
+        &fixture,
+        serde_json::json!({
+            "protocol_version": 1,
+            "capabilities": {},
+            "agent_name": "placebo",
+            "agent_title": null,
+            "agent_version": null,
+        })
+        .to_string(),
+    )
+    .expect("capabilities fixture written");
+    acps_command(tempdir.path())
+        .env(
+            acp_stack::dev_gates::FIXTURE_AGENT_CAPABILITIES_ENV,
+            &fixture,
+        )
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "placebo",
+            "--adapter-override-command",
+            "placebo-acp",
+            "--adapter-override-github",
+            "example/placebo-acp",
+            "--adapter-override-install-npm",
+            "@example/placebo-acp",
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .success();
+
+    let store = StateStore::open(default_state_path(tempdir.path())).expect("state store");
+    let row = store
+        .latest_agent_capabilities("placebo")
+        .expect("capabilities query")
+        .expect("probe persisted a capabilities row");
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&row.capabilities_json).expect("snapshot parses");
+    assert_eq!(snapshot["agent_id"], "placebo");
+    assert_eq!(snapshot["adapter_id"], "placebo-acp");
 }
 
 #[test]

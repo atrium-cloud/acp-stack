@@ -78,7 +78,40 @@ creates = "registry-agent"
 
 #[tokio::test]
 async fn install_then_start_then_capabilities_then_stop() {
-    let harness = AgentHarness::spawn().await;
+    // The version capture resolves the launch shape from the registry, so the test agent must be
+    // adapter-kind there, matching the adapter metadata `test_config` hand-sets.
+    let tempdir = TempDir::new().expect("tempdir");
+    let override_dir = tempdir.path().join(".config").join("acp-stack");
+    std::fs::create_dir_all(&override_dir).expect("override dir");
+    std::fs::write(
+        override_dir.join("agents.toml"),
+        r#"
+[[agents]]
+id = "opencode"
+name = "OpenCode Test"
+kind = "adapter"
+headless_compatible = true
+support_doc = "docs/agents/opencode.md"
+
+[agents.adapter]
+id = "codex-acp"
+github = "agentclientprotocol/codex-acp"
+
+[agents.adapter.install.npm]
+package = "@agentclientprotocol/codex-acp"
+creates = "codex-acp"
+
+[agents.harness]
+id = "opencode"
+
+[agents.harness.install.npm]
+package = "opencode-ai"
+creates = "opencode"
+"#,
+    )
+    .expect("override registry");
+    let harness =
+        AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
     let client = http().await;
 
     // The fake config's `shell`/`creates` both resolve to /usr/bin/true on
@@ -94,6 +127,34 @@ async fn install_then_start_then_capabilities_then_stop() {
     assert_eq!(body["ok"], true);
     let outcome = body["data"]["outcome"].as_str().expect("outcome present");
     assert!(matches!(outcome, "installed" | "already_present"));
+
+    // The fake install records no versions (shell recipe); seed versioned rows so the
+    // capture at start has something to pair the handshake with.
+    {
+        let store = harness.state.lock().await;
+        for (started_at, step, version) in [
+            ("2026-05-21T00:00:00.000000000Z", "harness", "1.2.3"),
+            ("2026-05-21T00:00:01.000000000Z", "adapter", "0.4.0"),
+        ] {
+            store
+                .append_installer_run(acp_stack::state::InstallerRunInput {
+                    agent_id: "opencode",
+                    started_at,
+                    finished_at: Some(started_at),
+                    status: "ran",
+                    stdout: "",
+                    stderr: "",
+                    exit_status: Some(0),
+                    step,
+                    version: Some(version),
+                    operation: "install",
+                    method: None,
+                    log_dir: None,
+                    apply_run_id: None,
+                })
+                .expect("seed installer run");
+        }
+    }
 
     let start = client
         .post(format!("{}/v1/agent/start", harness.base_url))
@@ -119,6 +180,17 @@ async fn install_then_start_then_capabilities_then_stop() {
     assert_eq!(
         caps_body["data"]["adapter"]["source_url"],
         "https://github.com/agentclientprotocol/codex-acp"
+    );
+    assert_eq!(caps_body["data"]["capabilities"]["protocol_version"], 1);
+    assert_eq!(caps_body["data"]["capabilities"]["agent_id"], "opencode");
+    assert_eq!(
+        caps_body["data"]["capabilities"]["harness_version"],
+        "1.2.3"
+    );
+    assert_eq!(caps_body["data"]["capabilities"]["adapter_id"], "codex-acp");
+    assert_eq!(
+        caps_body["data"]["capabilities"]["adapter_version"],
+        "0.4.0"
     );
 
     let stop = client

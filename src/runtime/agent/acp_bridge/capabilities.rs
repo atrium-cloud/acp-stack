@@ -4,6 +4,10 @@ use agent_client_protocol::schema::v1::ContentBlock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::runtime::install::agent_installer::{STEP_ADAPTER, STEP_HARNESS, STEP_INSTALL};
+use crate::runtime::install::agent_version_check::InstalledComponents;
+use crate::state::InstallerRun;
+
 /// Our owned view of the `initialize` response. Mirrors the protocol shape
 /// but is independent of the SDK's `AgentCapabilities` type so our
 /// `GET /v1/agent/capabilities` JSON contract stays stable across SDK
@@ -22,6 +26,26 @@ pub struct AgentCapabilitiesDto {
     pub agent_name: Option<String>,
     pub agent_title: Option<String>,
     pub agent_version: Option<String>,
+    /// Registry id of the agent this snapshot was captured from (the
+    /// configured `[agent].id`), so a consumer holding only the start/restart
+    /// body can tell which agent advertised these capabilities.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    /// Installed version of the upstream harness (the `harness` installer
+    /// step, or the `install` step for a native agent), captured at the same
+    /// moment as the handshake so a consumer keying capabilities by version
+    /// never pairs one process's advertisement with another's install. Absent
+    /// when the installer recorded no version (shell recipes) or when the
+    /// harness is bundled by the adapter.
+    #[serde(default)]
+    pub harness_version: Option<String>,
+    /// Registry id of the ACP adapter the agent was launched through; absent
+    /// for native agents.
+    #[serde(default)]
+    pub adapter_id: Option<String>,
+    /// Installed version of that adapter (the `adapter` installer step).
+    #[serde(default)]
+    pub adapter_version: Option<String>,
 }
 
 /// A configured MCP server the running agent cannot be given, plus the
@@ -73,6 +97,31 @@ pub const IGNORED_FEATURE_AGENT_EFFORT: &str = "agent.effort";
 pub const IGNORED_FEATURE_AGENT_CONFIG_OPTION: &str = "agent.config_option";
 
 impl AgentCapabilitiesDto {
+    /// Pair the advertisement with the installed harness/adapter versions from
+    /// the latest successful installer rows. The effective registry entry
+    /// (`components`) decides which steps count; rows only supply versions, so
+    /// a stale row from a previous install shape of the same agent id is ignored.
+    pub fn attach_installed_versions(
+        &mut self,
+        agent_id: &str,
+        components: &InstalledComponents,
+        installer_runs: &[InstallerRun],
+    ) {
+        let version_for = |step: &str| -> Option<String> {
+            if !components.steps.contains(&step) {
+                return None;
+            }
+            installer_runs
+                .iter()
+                .find(|run| run.step == step)
+                .and_then(|run| run.version.clone())
+        };
+        self.agent_id = Some(agent_id.to_owned());
+        self.harness_version = version_for(STEP_HARNESS).or_else(|| version_for(STEP_INSTALL));
+        self.adapter_version = version_for(STEP_ADAPTER);
+        self.adapter_id = components.adapter_id.clone();
+    }
+
     pub fn to_json(&self) -> Result<String> {
         serde_json::to_string(self).map_err(|err| StackError::AgentInitializeFailed {
             reason: format!("failed to serialize agent capabilities: {err}"),
@@ -286,12 +335,17 @@ impl AgentCapabilitiesDto {
             }
             _ => (None, None, None),
         };
+        // Installed versions are attached by the capture site, which owns the store handle.
         Ok(Self {
             protocol_version,
             capabilities: raw_caps,
             agent_name,
             agent_title,
             agent_version,
+            agent_id: None,
+            harness_version: None,
+            adapter_id: None,
+            adapter_version: None,
         })
     }
 }
@@ -310,7 +364,132 @@ mod tests {
             agent_name: None,
             agent_title: None,
             agent_version: None,
+            agent_id: None,
+            harness_version: None,
+            adapter_id: None,
+            adapter_version: None,
         }
+    }
+
+    fn installer_run(step: &str, version: Option<&str>) -> InstallerRun {
+        InstallerRun {
+            id: format!("run-{step}"),
+            agent_id: Some("agent".to_owned()),
+            started_at: "2026-05-21T00:00:00.000000000Z".to_owned(),
+            finished_at: None,
+            status: "ran".to_owned(),
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_status: Some(0),
+            step: step.to_owned(),
+            version: version.map(str::to_owned),
+            operation: "install".to_owned(),
+            method: None,
+            log_dir: None,
+            apply_run_id: None,
+        }
+    }
+
+    fn adapter_components(adapter_id: &str, steps: &[&'static str]) -> InstalledComponents {
+        InstalledComponents {
+            adapter_id: Some(adapter_id.to_owned()),
+            steps: steps.to_vec(),
+        }
+    }
+
+    fn native_components() -> InstalledComponents {
+        InstalledComponents {
+            adapter_id: None,
+            steps: vec![STEP_INSTALL],
+        }
+    }
+
+    #[test]
+    fn attach_installed_versions_reads_harness_and_adapter_rows() {
+        let mut capabilities = capabilities_with(json!({}));
+        capabilities.attach_installed_versions(
+            "opencode",
+            &adapter_components("codex-acp", &[STEP_HARNESS, STEP_ADAPTER]),
+            &[
+                installer_run(STEP_HARNESS, Some("1.2.3")),
+                installer_run(STEP_ADAPTER, Some("0.4.0")),
+            ],
+        );
+        assert_eq!(capabilities.harness_version.as_deref(), Some("1.2.3"));
+        assert_eq!(capabilities.adapter_id.as_deref(), Some("codex-acp"));
+        assert_eq!(capabilities.adapter_version.as_deref(), Some("0.4.0"));
+    }
+
+    #[test]
+    fn attach_installed_versions_uses_the_install_row_for_native_agents() {
+        let mut capabilities = capabilities_with(json!({}));
+        capabilities.attach_installed_versions(
+            "codex",
+            &native_components(),
+            &[installer_run(STEP_INSTALL, Some("2.0.0"))],
+        );
+        assert_eq!(capabilities.harness_version.as_deref(), Some("2.0.0"));
+        assert_eq!(capabilities.adapter_id, None);
+        assert_eq!(capabilities.adapter_version, None);
+    }
+
+    #[test]
+    fn attach_installed_versions_leaves_unrecorded_versions_absent() {
+        let mut capabilities = capabilities_with(json!({}));
+        capabilities.attach_installed_versions(
+            "pi",
+            &adapter_components("pi-acp", &[STEP_ADAPTER]),
+            &[installer_run(STEP_ADAPTER, None)],
+        );
+        assert_eq!(capabilities.harness_version, None);
+        assert_eq!(capabilities.adapter_id.as_deref(), Some("pi-acp"));
+        assert_eq!(capabilities.adapter_version, None);
+    }
+
+    #[test]
+    fn attach_installed_versions_ignores_a_stale_install_row_for_adapter_shapes() {
+        let mut capabilities = capabilities_with(json!({}));
+        capabilities.attach_installed_versions(
+            "goose",
+            &adapter_components("custom-acp", &[STEP_HARNESS, STEP_ADAPTER]),
+            &[
+                installer_run(STEP_INSTALL, Some("9.9.9")),
+                installer_run(STEP_ADAPTER, Some("0.1.0")),
+            ],
+        );
+        assert_eq!(capabilities.harness_version, None);
+        assert_eq!(capabilities.adapter_version.as_deref(), Some("0.1.0"));
+    }
+
+    #[test]
+    fn attach_installed_versions_ignores_a_stale_adapter_row_for_native_shapes() {
+        let mut capabilities = capabilities_with(json!({}));
+        capabilities.attach_installed_versions(
+            "goose",
+            &native_components(),
+            &[
+                installer_run(STEP_INSTALL, Some("2.0.0")),
+                installer_run(STEP_ADAPTER, Some("0.1.0")),
+            ],
+        );
+        assert_eq!(capabilities.harness_version.as_deref(), Some("2.0.0"));
+        assert_eq!(capabilities.adapter_id, None);
+        assert_eq!(capabilities.adapter_version, None);
+    }
+
+    #[test]
+    fn attach_installed_versions_ignores_a_harness_row_when_the_adapter_bundles_it() {
+        let mut capabilities = capabilities_with(json!({}));
+        capabilities.attach_installed_versions(
+            "claude-code",
+            &adapter_components("claude-agent-acp", &[STEP_ADAPTER]),
+            &[
+                installer_run(STEP_HARNESS, Some("1.0.0")),
+                installer_run(STEP_ADAPTER, Some("0.5.0")),
+            ],
+        );
+        assert_eq!(capabilities.harness_version, None);
+        assert_eq!(capabilities.adapter_version.as_deref(), Some("0.5.0"));
     }
 
     fn http_server(name: &str) -> McpServer {
@@ -421,6 +600,10 @@ mod tests {
             agent_name: None,
             agent_title: None,
             agent_version: None,
+            agent_id: None,
+            harness_version: None,
+            adapter_id: None,
+            adapter_version: None,
         };
         assert!(!no_mcp_key.advertises_mcp_support());
     }

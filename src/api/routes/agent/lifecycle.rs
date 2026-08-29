@@ -181,7 +181,8 @@ pub(crate) struct AgentRestartQuery {
 #[derive(Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub(crate) enum AgentRestartResultResponse {
-    Restarted(AgentRestartResponse),
+    // Boxed to keep the variants balanced for clippy's `large_enum_variant`.
+    Restarted(Box<AgentRestartResponse>),
     Blocked(AgentRestartBlockedResponse),
     Queued(AgentRestartQueuedResponse),
 }
@@ -418,13 +419,13 @@ async fn restart_agent_target(
     let pid = target.supervisor.snapshot().await.pid;
 
     Ok(ApiSuccess::new(AgentRestartResultResponse::Restarted(
-        AgentRestartResponse {
+        Box::new(AgentRestartResponse {
             stopped_at,
             started_at,
             prior_exit_status,
             capabilities,
             pid,
-        },
+        }),
     )))
 }
 

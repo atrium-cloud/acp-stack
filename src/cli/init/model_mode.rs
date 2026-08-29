@@ -665,7 +665,8 @@ pub(super) fn verify_agent_acp_connection(
 /// Handshake-only capability probe for the `capability_probe` init step; never
 /// fails, so an unavailable probe simply makes no capability claims.
 pub(super) enum CapabilityProbeOutcome {
-    Probed(crate::runtime::agent::acp_bridge::AgentCapabilitiesDto),
+    // Boxed to keep the variants balanced for clippy's `large_enum_variant`.
+    Probed(Box<crate::runtime::agent::acp_bridge::AgentCapabilitiesDto>),
     Unavailable { reason: String },
 }
 
@@ -691,7 +692,7 @@ pub(super) fn probe_agent_capabilities_for_init(
         }
     }
     match crate::runtime::agent::model_discovery::fetch_agent_capabilities(home, config) {
-        Ok(capabilities) => CapabilityProbeOutcome::Probed(capabilities),
+        Ok(capabilities) => CapabilityProbeOutcome::Probed(Box::new(capabilities)),
         Err(error) => {
             tracing::warn!(
                 agent = %config.agent.id,

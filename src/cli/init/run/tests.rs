@@ -270,7 +270,7 @@ fn probe_rules_on_mcp_applicability() {
     // implementation uses would assert nothing.
     let advertised = capabilities_fixture(serde_json::json!({ "http": true }));
     assert_eq!(
-        mcp_applicability_from_probe(&CapabilityProbeOutcome::Probed(advertised)),
+        mcp_applicability_from_probe(&CapabilityProbeOutcome::Probed(Box::new(advertised))),
         InitStateSignal::CategoryApplicability {
             category: InitCategory::Mcp,
             applicable: true,
@@ -281,7 +281,7 @@ fn probe_rules_on_mcp_applicability() {
 
     let silent = capabilities_fixture(serde_json::json!({}));
     assert_eq!(
-        mcp_applicability_from_probe(&CapabilityProbeOutcome::Probed(silent)),
+        mcp_applicability_from_probe(&CapabilityProbeOutcome::Probed(Box::new(silent))),
         InitStateSignal::CategoryApplicability {
             category: InitCategory::Mcp,
             applicable: false,

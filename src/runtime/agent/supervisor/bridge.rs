@@ -82,9 +82,8 @@ pub(super) async fn spawn_agent_bridge(
         }
     };
 
-    let capabilities = bridge.capabilities().clone();
+    let mut capabilities = bridge.capabilities().clone();
     let pid = bridge.pid();
-    let caps_json = capabilities.to_json()?;
 
     let started_data = json!({
         "target_id": target_id,
@@ -92,10 +91,32 @@ pub(super) async fn spawn_agent_bridge(
         "pid": pid,
         "adapter": agent.adapter,
     });
+    let installed_components =
+        match crate::runtime::install::agent_registry::RegistryCatalog::load_with_override(
+            &crate::runtime::install::operator_registry_override(home),
+        ) {
+            Ok(registry) => {
+                crate::runtime::install::agent_version_check::installed_components(&registry, agent)
+            }
+            Err(error) => {
+                tracing::warn!(agent = %agent.id, %error, "registry unavailable; resolving installed components from agent config");
+                crate::runtime::install::agent_version_check::InstalledComponents::from_agent_config(
+                    agent,
+                )
+            }
+        };
     let started_row_result: Result<crate::state::AgentLifecycleEvent> = {
         let guard = state.lock().await;
         (|| {
-            guard.upsert_agent_capabilities(&agent.id, &caps_json)?;
+            // Versions are read under the same lock as the capability write so the stored
+            // snapshot pairs this process's advertisement with the install it launched from.
+            let installer_runs = guard.latest_successful_installer_runs_for_agent(&agent.id)?;
+            capabilities.attach_installed_versions(
+                &agent.id,
+                &installed_components,
+                &installer_runs,
+            );
+            guard.upsert_agent_capabilities(&agent.id, &capabilities.to_json()?)?;
             guard.append_agent_lifecycle(
                 "agent.started",
                 "agent initialized",

@@ -2062,8 +2062,8 @@
             "type": "string"
           },
           "capabilities": {
-            "description": "Raw ACP `initialize` capability JSON, surfaced verbatim. Always a JSON\nobject; its inner shape is the agent's, not ours.",
-            "type": "object"
+            "$ref": "#/$defs/response/AgentCapabilitiesDto",
+            "description": "The stored handshake snapshot: protocol version, the raw ACP capability\nobject, agent info, and the installed harness/adapter versions it was\ncaptured against. Same shape the start/restart responses embed."
           },
           "process_state": {
             "$ref": "#/$defs/response/AgentStateLabel"
@@ -2102,6 +2102,84 @@
           }
         },
         "additionalProperties": false
+      },
+      "AgentCapabilitiesDto": {
+        "type": "object",
+        "properties": {
+          "protocol_version": {
+            "type": "integer",
+            "format": "uint16",
+            "minimum": 0,
+            "maximum": 65535
+          },
+          "capabilities": {
+            "description": "Raw JSON object of the agent's advertised capabilities. We surface it\nverbatim so clients can read every field today without the daemon\ngrowing a struct for each one. Named accessors land alongside the\nsession API.",
+            "type": "object"
+          },
+          "agent_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`agentInfo.name` if the agent provided it. The spec says `SHOULD`,\nnot `MUST`, so this is best-effort."
+          },
+          "agent_title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "agent_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "agent_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Registry id of the agent this snapshot was captured from (the\nconfigured `[agent].id`), so a consumer holding only the start/restart\nbody can tell which agent advertised these capabilities.",
+            "default": null
+          },
+          "harness_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Installed version of the upstream harness (the `harness` installer\nstep, or the `install` step for a native agent), captured at the same\nmoment as the handshake so a consumer keying capabilities by version\nnever pairs one process's advertisement with another's install. Absent\nwhen the installer recorded no version (shell recipes) or when the\nharness is bundled by the adapter.",
+            "default": null
+          },
+          "adapter_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Registry id of the ACP adapter the agent was launched through; absent\nfor native agents.",
+            "default": null
+          },
+          "adapter_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Installed version of that adapter (the `adapter` installer step).",
+            "default": null
+          }
+        },
+        "required": [
+          "protocol_version",
+          "capabilities",
+          "agent_name",
+          "agent_title",
+          "agent_version",
+          "agent_id",
+          "harness_version",
+          "adapter_id",
+          "adapter_version"
+        ],
+        "description": "Our owned view of the `initialize` response. Mirrors the protocol shape\nbut is independent of the SDK's `AgentCapabilities` type so our\n`GET /v1/agent/capabilities` JSON contract stays stable across SDK\nminor-version churn."
       },
       "AgentStateLabel": {
         "type": "string",
@@ -2365,48 +2443,6 @@
           "capabilities",
           "pid"
         ]
-      },
-      "AgentCapabilitiesDto": {
-        "type": "object",
-        "properties": {
-          "protocol_version": {
-            "type": "integer",
-            "format": "uint16",
-            "minimum": 0,
-            "maximum": 65535
-          },
-          "capabilities": {
-            "description": "Raw JSON object of the agent's advertised capabilities. We surface it\nverbatim so clients can read every field today without the daemon\ngrowing a struct for each one. Named accessors land alongside the\nsession API.",
-            "type": "object"
-          },
-          "agent_name": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "`agentInfo.name` if the agent provided it. The spec says `SHOULD`,\nnot `MUST`, so this is best-effort."
-          },
-          "agent_title": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "agent_version": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "protocol_version",
-          "capabilities",
-          "agent_name",
-          "agent_title",
-          "agent_version"
-        ],
-        "description": "Our owned view of the `initialize` response. Mirrors the protocol shape\nbut is independent of the SDK's `AgentCapabilities` type so our\n`GET /v1/agent/capabilities` JSON contract stays stable across SDK\nminor-version churn."
       },
       "AgentRestartBlockedResponse": {
         "type": "object",

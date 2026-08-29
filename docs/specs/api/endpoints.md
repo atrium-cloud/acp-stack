@@ -331,7 +331,7 @@ The API withholds secret values from every response. Auth keys live outside the 
 
 - Tier: `admin`
 - Request: none.
-- Response: standard envelope.
+- Response: `{ "started_at", "capabilities", "pid"? }`. `capabilities` is the handshake snapshot described under `GET /v1/agent/capabilities`, versions included.
 - Notes: starts the supervised agent process. Uses the current `[agent]` config and the shared resolved environment, including selected provider credential bundles.
 
 ### `POST /v1/agent/stop`
@@ -345,7 +345,7 @@ The API withholds secret values from every response. Auth keys live outside the 
 
 - Tier: `admin`
 - Request: query parameters `require_idle=true` and `auto=true`.
-- Response: standard envelope, or blockers when `require_idle=true` is set and restart is blocked.
+- Response: `{ "stopped_at", "started_at", "prior_exit_status"?, "capabilities", "pid"? }` (the same handshake snapshot as `GET /v1/agent/capabilities`), or blockers when `require_idle=true` is set and restart is blocked.
 - Notes:
     - Restarts the supervised agent process. Start/restart uses the current `[agent]` config and the shared resolved environment, including selected provider credential bundles. Provider/model changes that require process reload are applied after restart.
     - `require_idle=true` returns blockers instead of restarting when active sessions have in-flight prompts or pending ACP permission requests.
@@ -500,9 +500,11 @@ All skill routes load config leniently, dropping individually invalid `[[skills.
 
 - Tier: `session`
 - Request: none.
-- Response: the latest ACP capability snapshot when available.
+- Response: `{ "agent_id", "adapter"?, "captured_at", "capabilities", "process_state" }`. The latest handshake snapshot when available.
+    - `capabilities` is the same snapshot object the start/restart responses embed: `{ "protocol_version", "capabilities": {…raw ACP `initialize` advertisement…}, "agent_name", "agent_title", "agent_version", "agent_id", "harness_version", "adapter_id", "adapter_version" }`. Every key is present; the string fields are nullable.
+    - `agent_id` is the configured `[agent].id` the snapshot was captured from. `harness_version` and `adapter_version` are the installed versions from the latest successful installer rows (`harness`/`install` and `adapter` steps), read at the moment of capture; `adapter_id` is the adapter the agent was launched through. Each is null when there is nothing to report: native agents carry no adapter fields, a harness bundled by its adapter has no harness version, and shell-recipe installs record no version.
 - Errors: `404 agent.not_initialized` — occurs only when neither the init capability probe nor agent start has run.
-- Notes: populated by the init capability probe as well as by agent start.
+- Notes: populated by the init capability probe as well as by agent start. Capabilities cannot change between process starts, so the snapshot and its versions describe one launch.
 
 ### `GET /v1/agent/config-options`
 

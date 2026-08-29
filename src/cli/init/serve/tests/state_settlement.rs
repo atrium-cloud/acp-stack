@@ -333,9 +333,9 @@ fn hosted_settlement_reports_the_harness_values_already_in_the_config() {
     assert_eq!(category(&state, "mcp")["status"], json!("ready"));
 
     session.apply_state_signal(super::super::super::run::mcp_applicability_from_probe(
-        &super::super::super::CapabilityProbeOutcome::Probed(mcp_capabilities(
+        &super::super::super::CapabilityProbeOutcome::Probed(Box::new(mcp_capabilities(
             json!({"stdio": true}),
-        )),
+        ))),
     ));
     let settlement = super::super::super::run::mcp_settlement_from_probe(
         &mcp_capabilities(json!({"stdio": true})),
@@ -376,7 +376,7 @@ fn a_declared_mcp_server_stays_inapplicable_when_the_agent_advertises_none() {
         "an agent that takes no MCP servers settles nothing"
     );
     session.apply_state_signal(super::super::super::run::mcp_applicability_from_probe(
-        &super::super::super::CapabilityProbeOutcome::Probed(silent),
+        &super::super::super::CapabilityProbeOutcome::Probed(Box::new(silent)),
     ));
 
     let state = latest_state(&session);

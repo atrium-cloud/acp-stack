@@ -345,10 +345,10 @@ pub(crate) struct AgentCapabilitiesResponseBody {
     agent_id: String,
     adapter: Option<AgentAdapterConfig>,
     captured_at: String,
-    /// Raw ACP `initialize` capability JSON, surfaced verbatim. Always a JSON
-    /// object; its inner shape is the agent's, not ours.
-    #[schemars(extend("type" = "object"))]
-    capabilities: serde_json::Value,
+    /// The stored handshake snapshot: protocol version, the raw ACP capability
+    /// object, agent info, and the installed harness/adapter versions it was
+    /// captured against. Same shape the start/restart responses embed.
+    capabilities: AgentCapabilitiesDto,
     #[schemars(with = "crate::runtime::agent::supervisor::AgentStateLabel")]
     process_state: String,
 }
@@ -380,11 +380,10 @@ async fn capabilities_agent_target(
     let record = store.latest_agent_capabilities(&agent_id)?;
     drop(store);
     let record = record.ok_or(StackError::AgentNotInitialized)?;
-    let capabilities = serde_json::from_str(&record.capabilities_json).map_err(|err| {
-        StackError::AgentInitializeFailed {
+    let capabilities: AgentCapabilitiesDto = serde_json::from_str(&record.capabilities_json)
+        .map_err(|err| StackError::AgentInitializeFailed {
             reason: format!("stored capabilities are unparseable: {err}"),
-        }
-    })?;
+        })?;
     Ok(ApiSuccess::new(AgentCapabilitiesResponseBody {
         agent_id: record.agent_id,
         adapter: agent.adapter,
