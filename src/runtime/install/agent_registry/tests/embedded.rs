@@ -338,13 +338,13 @@ fn embedded_registry_contains_only_curated_examples() {
     assert!(kimi_shell.script.contains("KIMI_NO_MODIFY_PATH=1"));
     let hermes = catalog.lookup("hermes").expect("Hermes Agent entry exists");
     assert_eq!(hermes.name, "Hermes Agent");
-    assert_eq!(hermes.kind, RegistryKind::Native);
+    assert_eq!(hermes.kind, RegistryKind::Adapter);
     assert!(hermes.headless_compatible);
     assert!(hermes.set_provider);
     assert!(hermes.set_model);
     assert!(hermes.allow_custom_provider);
     assert!(hermes.allow_custom_model);
-    assert!(!hermes.set_mode);
+    assert!(hermes.set_mode);
     assert!(!hermes.set_effort);
     assert!(hermes.supports_agent_skills);
     assert_eq!(
@@ -354,6 +354,29 @@ fn embedded_registry_contains_only_curated_examples() {
     assert!(!hermes.subagents);
     assert_eq!(hermes.support_doc.as_deref(), Some("docs/agents/hermes.md"));
     assert!(hermes.sync_exempt);
+    let hermes_adapter = hermes.adapter.as_ref().expect("Hermes Agent adapter");
+    assert_eq!(hermes_adapter.id, "hermes-agent-acp");
+    assert_eq!(
+        hermes_adapter.github.as_deref(),
+        Some("atrium-cloud/hermes-acp")
+    );
+    let hermes_adapter_github = hermes_adapter
+        .install
+        .github
+        .as_ref()
+        .expect("Hermes Agent adapter github install");
+    assert_eq!(
+        hermes_adapter_github.asset_pattern,
+        "hermes-agent-acp-{arch}-linux.zip"
+    );
+    assert_eq!(hermes_adapter_github.archive, ArchiveKind::Zip);
+    assert_eq!(
+        hermes_adapter_github.archive_binary_name.as_deref(),
+        Some("hermes-agent-acp-{arch}-linux")
+    );
+    assert_eq!(hermes_adapter_github.binary_name, "hermes-agent-acp");
+    assert_eq!(hermes_adapter_github.arch.x86_64.as_deref(), Some("x64"));
+    assert_eq!(hermes_adapter_github.arch.aarch64.as_deref(), Some("arm64"));
     let hermes_harness = hermes.harness.as_ref().expect("Hermes Agent harness");
     assert_eq!(hermes_harness.id, "hermes");
     assert!(
@@ -371,7 +394,8 @@ fn embedded_registry_contains_only_curated_examples() {
             .contains("https://hermes-agent.nousresearch.com/install.sh")
     );
     assert!(hermes_shell.script.contains("--skip-browser"));
-    assert!(hermes_shell.script.contains("'.[acp]'"));
+    // The adapter drives `hermes serve`; nothing beyond the base binary is installed.
+    assert!(!hermes_shell.script.contains("'.[acp]'"));
     // The full Python toolchain + virtualenv + checkout fits the shared default,
     // measured at 185s end to end on a fresh 8-core host.
     assert_eq!(hermes_shell.timeout_secs, None);

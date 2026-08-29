@@ -377,8 +377,8 @@ fn init_hermes_writes_provider_backed_config_and_hermes_yaml() {
     assert!(!config_text.contains("test-openrouter-key"));
     let config = load_config_from_str(&config_text).expect("canonical config parses");
     assert_eq!(config.agent.id, "hermes");
-    assert_eq!(config.agent.command, "hermes");
-    assert_eq!(config.agent.args, ["acp"]);
+    assert_eq!(config.agent.command, "hermes-agent-acp");
+    assert!(config.agent.args.is_empty());
     assert_eq!(config.agent.env, ["OPENROUTER_API_KEY"]);
     let provider = config.agent.provider.as_ref().expect("provider configured");
     assert_eq!(provider.id, "openrouter");
@@ -562,8 +562,9 @@ fn init_hermes_openrouter_lists_provider_catalog_models() {
         tempdir.path(),
         &[("OPENROUTER_API_KEY", "test-openrouter-key")],
     );
-    // Hermes speaks pre-1.0 ACP and advertises no model config options, so the
-    // model list must come from the catalog rather than fail.
+    // The adapter's advertised model values are composite `provider/model` ids,
+    // never a pickable set, so the model list must come from the catalog
+    // whatever the agent advertises (here: nothing).
     let options_path = write_acp_config_options(tempdir.path(), &[], &[]);
     let base = spawn_provider_models_server(serde_json::json!({
         "data": [

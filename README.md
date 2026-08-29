@@ -28,7 +28,7 @@ These harnesses are currently supported:
 | Antigravity  | native     |
 | Kimi Code    | native     |
 | Amp Code     | adapter    |
-| Hermes Agent | native     |
+| Hermes Agent | adapter    |
 | Goose        | native     |
 | Kilo Code    | native     |
 

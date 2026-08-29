@@ -742,9 +742,10 @@ fn configure_model_for_init(
     }
 
     // codex-acp advertises codex-core's bundled OpenAI preset catalog whatever
-    // the configured provider, and Hermes speaks pre-1.0 ACP and advertises
-    // nothing, so neither list is a truthful pickable set; substitute the
-    // provider's live catalog instead.
+    // the configured provider, and hermes-agent-acp advertises composite
+    // `provider/model` ids rather than the bare ids config.yaml pins, so
+    // neither list is a truthful pickable set; substitute the provider's live
+    // catalog instead.
     let provider_catalog_lane = agent_model_is_explicit_without_discovery(config)
         && (config.agent.id == CODEX_AGENT_ID || config.agent.id == HERMES_AGENT_ID);
     let values: Vec<String> = if provider_catalog_lane {

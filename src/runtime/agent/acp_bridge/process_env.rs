@@ -1,7 +1,5 @@
 use super::*;
 
-use crate::runtime::agent::agent_headless_config::HERMES_AGENT_ID;
-
 pub(crate) const KIMI_CODE_AGENT_ID: &str = "kimi";
 pub(crate) const KIMI_API_KEY_ENV: &str = "KIMI_API_KEY";
 pub(super) const KIMI_MODEL_API_KEY_ENV: &str = "KIMI_MODEL_API_KEY";
@@ -77,31 +75,10 @@ pub(crate) fn kimi_default_model_for_provider(provider_id: Option<&str>) -> &'st
         .unwrap_or(KIMI_CODE_DEFAULT_MODEL)
 }
 
-// Keeps Hermes' own config.yaml MCP servers out of acps-managed sessions. The
-// value must be exactly "1"; Hermes ignores anything else.
-pub(super) const HERMES_SKIP_CONFIGURED_MCP_ENV: &str = "HERMES_ACP_SKIP_CONFIGURED_MCP";
-
 pub(super) fn build_agent_process_env(
     agent: &AgentConfig,
     mut env: HashMap<String, String>,
 ) -> Result<HashMap<String, String>> {
-    if agent.id == HERMES_AGENT_ID {
-        if env.contains_key(HERMES_SKIP_CONFIGURED_MCP_ENV) {
-            return Err(StackError::AgentInitializeFailed {
-                reason: format!(
-                    "Hermes launch env `{HERMES_SKIP_CONFIGURED_MCP_ENV}` is runtime-managed; remove it from [agent].env"
-                ),
-            });
-        }
-        // Hermes does not advertise `mcpCapabilities` either, so its sessions
-        // run with no MCP servers from either side; keep that visible.
-        tracing::info!(
-            "disabling Hermes global MCP startup ({HERMES_SKIP_CONFIGURED_MCP_ENV}=1); acps owns MCP composition"
-        );
-        env.insert(HERMES_SKIP_CONFIGURED_MCP_ENV.to_owned(), "1".to_owned());
-        return Ok(env);
-    }
-
     if agent.id != KIMI_CODE_AGENT_ID {
         return Ok(env);
     }
@@ -542,40 +519,6 @@ mod tests {
                 .expect_err("managed Kimi env must fail");
             assert!(error.to_string().contains(name), "{error}");
         }
-    }
-
-    #[test]
-    fn hermes_process_env_scopes_out_configured_mcp() {
-        let mut agent = kimi_agent(None);
-        agent.id = "hermes".to_owned();
-        agent.env = vec!["OPENROUTER_API_KEY".to_owned()];
-        let env = HashMap::from([("OPENROUTER_API_KEY".to_owned(), "secret".to_owned())]);
-
-        let prepared = build_agent_process_env(&agent, env).expect("Hermes env");
-
-        assert_eq!(
-            prepared
-                .get(HERMES_SKIP_CONFIGURED_MCP_ENV)
-                .map(String::as_str),
-            Some("1")
-        );
-        assert_eq!(
-            prepared.get("OPENROUTER_API_KEY").map(String::as_str),
-            Some("secret")
-        );
-    }
-
-    #[test]
-    fn hermes_process_env_rejects_operator_declared_mcp_skip() {
-        let mut agent = kimi_agent(None);
-        agent.id = "hermes".to_owned();
-        let env = HashMap::from([(HERMES_SKIP_CONFIGURED_MCP_ENV.to_owned(), "0".to_owned())]);
-
-        let error = build_agent_process_env(&agent, env).expect_err("managed Hermes env must fail");
-        assert!(
-            error.to_string().contains(HERMES_SKIP_CONFIGURED_MCP_ENV),
-            "{error}"
-        );
     }
 
     #[test]

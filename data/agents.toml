@@ -375,20 +375,19 @@ required_tools = ["curl", "bash"]
 [[agents]]
 id = "hermes"
 name = "Hermes Agent"
-kind = "native"
+kind = "adapter"
 headless_compatible = true
-# Documented on the ACP agents page but absent from the upstream registry
-# index; remove once upstream lists it.
+# The upstream registry index lists neither Hermes nor this org's
+# hermes-agent-acp adapter (the sync id); remove once upstream lists the adapter.
 sync_exempt = true
 set_provider = true
 set_model = true
 allow_custom_provider = true
 set_provider_base_url = true
 allow_custom_model = true
-# Hermes exposes modes only through the pre-1.0 `modes` session state, which
-# this runtime does not read (ACP v1 configOptions only), so mode selection
-# stays off until upstream advertises configOptions.
-set_mode = false
+# The hermes-agent-acp adapter advertises ACP v1 session modes on session/new:
+# `default` and `dont_ask` (a per-session approval bypass).
+set_mode = true
 supports_agent_skills = true
 agent_skills_install_dir = "~/.agents/skills"
 # Hermes only discovers ~/.hermes/skills, so managed skills are symlinked there.
@@ -398,6 +397,26 @@ website = "https://hermes-agent.nousresearch.com"
 support_doc = "docs/agents/hermes.md"
 testflight_prompt = "Use your file-writing tool to create a file at the relative path .acp-stack-testflight.txt in your current working directory, containing exactly this text: acp-stack testflight ok. Actually write the file to disk; a reply describing the action without writing the file is a failure."
 testflight_expect_fs = ".acp-stack-testflight.txt"
+
+# ACP v1 adapter that spawns `hermes serve` (the harness below). Six
+# bun-compiled binaries ship on the GitHub Release; only the Linux pair applies.
+[agents.adapter]
+# The binary is `hermes-agent-acp`: Hermes' own installer, `hermes update`, and
+# `hermes uninstall` all claim ~/.local/bin/hermes-acp.
+id = "hermes-agent-acp"
+github = "atrium-cloud/hermes-acp"
+
+[agents.adapter.install.github]
+asset_pattern = "hermes-agent-acp-{arch}-linux.zip"
+archive = "zip"
+# `zip -j` flattens the binary in as `hermes-agent-acp-{arch}-linux`; install
+# renames it to the launched command `hermes-agent-acp`.
+archive_binary_name = "hermes-agent-acp-{arch}-linux"
+binary_name = "hermes-agent-acp"
+
+[agents.adapter.install.github.arch]
+x86_64 = "x64"
+aarch64 = "arm64"
 
 [agents.harness]
 id = "hermes"
@@ -431,18 +450,8 @@ fi
 # root installs off the upstream FHS layout (/usr/local/lib + /usr/local/bin)
 # so the managed paths asserted below stay accurate for every user.
 bash "$installer" --skip-setup --skip-browser --skip-computer-use --non-interactive --dir "$hermes_src" --hermes-home "$hermes_home" </dev/null
+# The adapter drives `hermes serve`, so the base binary is all that is needed.
 test -x "$managed_hermes"
-# Current installers bundle ACP mode; older ones need the optional extra
-# installed into the checkout's venv, so only reach for uv when the ACP
-# entry point is missing.
-if ! "$managed_hermes" acp --version </dev/null >/dev/null 2>&1; then
-    echo "hermes acp entry point missing; installing the optional .[acp] extra" >&2
-    test -d "$hermes_src"
-    uv_bin="$(command -v uv || printf '%s' "${HOME}/.hermes/bin/uv")"
-    test -x "$uv_bin"
-    (cd "$hermes_src" && VIRTUAL_ENV="${hermes_src}/venv" "$uv_bin" pip install -e '.[acp]')
-fi
-"$managed_hermes" acp --version </dev/null >/dev/null
 '''
 creates = "hermes"
 required_tools = ["curl", "bash", "git"]

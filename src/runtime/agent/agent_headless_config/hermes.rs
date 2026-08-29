@@ -15,7 +15,7 @@ fn hermes_config_path(home: &Path) -> PathBuf {
     home.join(".hermes").join("config.yaml")
 }
 
-/// Strips the provider prefix: Hermes composes its own ACP `provider:model` ids, so a prefixed `model.default` comes back double-prefixed (`openrouter:openrouter:...`) in session model lists.
+/// Strips a `provider:` prefix so `model.default` stays the bare id the adapter composes its `provider/model` option ids from.
 fn hermes_native_model<'a>(provider_id: &str, model: &'a str) -> &'a str {
     model
         .strip_prefix(provider_id)

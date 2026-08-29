@@ -289,9 +289,8 @@ fn codex_openrouter_config() -> Config {
     config
 }
 
-/// Hermes takes the model verbatim like Codex/OpenRouter but advertises no
-/// ACP v1 `configOptions`, so the catalog-outage fallback cannot serve an
-/// advertised model list.
+/// Hermes takes the model verbatim like Codex/OpenRouter, so the
+/// catalog-outage fallback serves no advertised model list.
 fn hermes_openrouter_config() -> Config {
     let mut config = codex_openrouter_config();
     config.agent.id = "hermes".to_owned();
@@ -493,7 +492,8 @@ async fn models_degrades_to_empty_for_hermes_on_catalog_outage() {
     let tempdir = TempDir::new().expect("tempdir");
     let home = tempdir.path().join("home");
     seed_provider_credential(&home, "openrouter", &["OPENROUTER_API_KEY"]);
-    // Hermes advertises no v1 `configOptions`; the fixture carries only modes.
+    // The adapter's advertised model select carries composite `provider/model`
+    // ids; the fallback must serve none of them.
     let fixture_path = tempdir.path().join("config-options.json");
     std::fs::write(
         &fixture_path,
@@ -505,6 +505,14 @@ async fn models_degrades_to_empty_for_hermes_on_catalog_outage() {
                 "type": "select",
                 "currentValue": "default",
                 "options": [{ "value": "default", "name": "default" }]
+            },
+            {
+                "id": "model",
+                "name": "Model",
+                "category": "model",
+                "type": "select",
+                "currentValue": "openrouter/deepseek/deepseek-v4-flash",
+                "options": [{ "value": "openrouter/deepseek/deepseek-v4-flash", "name": "deepseek/deepseek-v4-flash" }]
             }
         ])
         .to_string(),
@@ -537,7 +545,7 @@ async fn models_degrades_to_empty_for_hermes_on_catalog_outage() {
     assert_eq!(
         body["data"]["models"].as_array().expect("models array"),
         &Vec::<Value>::new(),
-        "hermes has no ACP-advertised models to fall back to: {body}"
+        "hermes takes its model verbatim, so advertised composite ids are not served: {body}"
     );
     let modes = body["data"]["modes"].as_array().expect("modes array");
     assert!(

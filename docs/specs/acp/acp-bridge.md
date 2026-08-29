@@ -14,8 +14,6 @@ For Kimi Code, the bridge derives Kimi's process-only model API key, selected mo
 
 The lane endpoint is a subscription coding endpoint, a Moonshot platform endpoint, or a custom provider's base URL. A legacy config that omits `[agent.provider]` uses the mainland subscription endpoint. Canonical config keeps only the encrypted key ref; the derived values live in the launched process alone.
 
-For Hermes Agent, the bridge sets the process-only `HERMES_ACP_SKIP_CONFIGURED_MCP=1` before launching `hermes acp`. This keeps MCP servers declared in Hermes' own global config out of acps-managed sessions. Declaring that variable in `[agent].env` is rejected.
-
 ### Client capabilities
 
 The initialize request advertises the client capabilities `acp-stack` implements. Each flag is advertised only when its agent-to-client handlers exist, so the wire contract claims only support the runtime serves.

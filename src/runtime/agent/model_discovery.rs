@@ -44,8 +44,9 @@ pub fn model_value_is_explicit_without_discovery(agent: &AgentConfig) -> bool {
             && agent.provider.as_ref().is_some_and(|provider| {
                 provider.custom.is_some() || provider.id == CODEX_OPENROUTER_PROVIDER_ID
             }))
-        // Hermes advertises pre-1.0 `models`/`modes` session state rather than
-        // ACP v1 `configOptions`, so its advertised list reads empty here.
+        // hermes-agent-acp advertises composite `provider/model` value ids built from
+        // the gateway catalog, while the configured model is the bare id pinned
+        // through config.yaml, so the advertised list cannot gate the choice.
         || agent.id == HERMES_AGENT_ID
 }
 

@@ -9,18 +9,16 @@ use crate::support::write_workspace_init_config;
 
 #[test]
 fn init_rejects_mode_flag_for_agents_without_set_mode() {
-    // pi/hermes declare set_mode=false, so `--mode` must fail fast rather than be dropped.
-    for agent in ["pi", "hermes"] {
-        let tempdir = tempfile::tempdir().expect("tempdir");
+    // pi declares set_mode=false, so `--mode` must fail fast rather than be dropped.
+    let tempdir = tempfile::tempdir().expect("tempdir");
 
-        acps_command(tempdir.path())
-            .args(["init", "--agent", agent, "--mode", "plan"])
-            .assert()
-            .failure()
-            .stderr(predicates::str::contains(
-                "does not support mode configuration through `acps init`",
-            ));
-    }
+    acps_command(tempdir.path())
+        .args(["init", "--agent", "pi", "--mode", "plan"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "does not support mode configuration through `acps init`",
+        ));
 }
 
 #[test]
@@ -293,6 +291,87 @@ fn init_codex_openrouter_writes_both_explicit_model_and_mode() {
     assert_eq!(
         provider.model.as_deref(),
         Some("deepseek/deepseek-v4-flash")
+    );
+}
+
+#[test]
+fn init_hermes_writes_explicit_model_and_validated_mode() {
+    // Hermes takes `--model` verbatim (the adapter advertises composite
+    // `provider/model` ids), while `--mode` is validated against the adapter's
+    // advertised `default`/`dont_ask` modes.
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    write_workspace_init_config(tempdir.path());
+    seed_init_secrets(
+        tempdir.path(),
+        &[("OPENROUTER_API_KEY", "test-openrouter-key")],
+    );
+    let options_path = write_acp_config_options(
+        tempdir.path(),
+        &["openrouter/deepseek/deepseek-v4-flash-0731"],
+        &["default", "dont_ask"],
+    );
+
+    acps_with_empty_path(tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args([
+            "init",
+            "--agent",
+            "hermes",
+            "--provider",
+            "openrouter",
+            "--api-key-ref",
+            "OPENROUTER_API_KEY",
+            "--model",
+            "deepseek/deepseek-v4-flash-0731",
+            "--mode",
+            "bogus",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "advertised modes: [default, dont_ask]",
+        ));
+
+    acps_with_empty_path(tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args([
+            "init",
+            "--fresh",
+            "--agent",
+            "hermes",
+            "--provider",
+            "openrouter",
+            "--api-key-ref",
+            "OPENROUTER_API_KEY",
+            "--model",
+            "deepseek/deepseek-v4-flash-0731",
+            "--mode",
+            "dont_ask",
+        ])
+        .assert()
+        .success();
+
+    let config_text = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
+        .expect("config should be readable");
+    let config = load_config_from_str(&config_text).expect("canonical config parses");
+    assert_eq!(config.agent.mode.as_deref(), Some("dont_ask"));
+    assert_eq!(
+        config
+            .agent
+            .provider
+            .as_ref()
+            .and_then(|provider| provider.model.as_deref()),
+        Some("deepseek/deepseek-v4-flash-0731")
+    );
+    let hermes_config = fs::read_to_string(tempdir.path().join(".hermes/config.yaml"))
+        .expect("hermes config.yaml written");
+    assert!(
+        hermes_config.contains("default: deepseek/deepseek-v4-flash-0731"),
+        "{hermes_config}"
+    );
+    assert!(
+        hermes_config.contains("provider: openrouter"),
+        "{hermes_config}"
     );
 }
 

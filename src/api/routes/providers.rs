@@ -12,7 +12,7 @@ use crate::runtime::agent::model_discovery::{
     fetch_session_config_with_timeout, model_value_is_explicit_without_discovery,
 };
 use crate::runtime::agent::provider_keys::{
-    AgentProviderSummary, models_url_for_provider_id, providers_for_agent,
+    AgentProviderSummary, HERMES_AGENT_ID, models_url_for_provider_id, providers_for_agent,
 };
 use crate::runtime::agent::provider_model_catalog::{cached_models, refresh_provider_models};
 
@@ -239,8 +239,11 @@ pub(crate) async fn models_response_for_config(
     // so the operator learns discovery failed instead of seeing an empty picker.
     let models = match advertised_values_for_category(&response, AgentSessionConfigCategory::Model)
     {
+        // hermes-agent-acp advertises composite `provider/model` ids, which
+        // `agent set --model` would write verbatim into config.yaml.
+        Ok(_) if config.agent.id == HERMES_AGENT_ID => Vec::new(),
         Ok(values) => values,
-        // Explicit-model agents (Hermes) advertise no ACP model options at all.
+        // Explicit-model agents may advertise no ACP model options at all.
         Err(error) if model_value_is_explicit_without_discovery(&config.agent) => {
             tracing::warn!(error = %error, "no ACP model advertisement; serving empty model list");
             Vec::new()

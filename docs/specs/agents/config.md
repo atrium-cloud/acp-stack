@@ -69,7 +69,7 @@ Notes on the shape:
 - Model edits require the configured agent to support model selection.
 - Mode edits require the configured agent to advertise mode choices.
 - Root `agent.model` must be omitted when `[agent.provider].model` is set.
-- Mapped model and mode values are validated against ACP-advertised options, except Claude Code provider-profile, Kimi Code, and Hermes Agent model ids are accepted as supplied. Kimi requires its model before ACP discovery can start; Hermes advertises models only through the pre-1.0 session state this runtime does not read.
+- Mapped model and mode values are validated against ACP-advertised options, except Claude Code provider-profile, Kimi Code, and Hermes Agent model ids are accepted as supplied. Kimi requires its model before ACP discovery can start; the hermes-agent-acp adapter advertises composite `provider/model` ids while `~/.hermes/config.yaml` pins the bare id.
 - Custom-provider model ids are accepted as supplied.
 - Custom-provider ids must not collide with the mapped-provider registry, including ids the registry maps only for other harnesses; a distinct id such as `anthropic-1` is required instead.
 - One custom-provider id carries one `api_key_ref` instance-wide: every declaration of it across the primary agent, subagents, and Array targets must name the same ref, since the credential catalog stores one credential set per provider id.

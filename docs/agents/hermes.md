@@ -1,6 +1,6 @@
 # Hermes Agent
 
-Hermes Agent is a native ACP target. `acp-stack` launches `hermes acp`.
+Hermes Agent reaches ACP through the `hermes-agent-acp` adapter, which `acp-stack` installs and launches.
 
 ## Setup
 
@@ -19,7 +19,7 @@ The `[agent]` config block is generated from the `hermes` entry in `data/agents.
 ### The `~/.hermes/config.yaml` write contract
 
 - `acp-stack` writes only the non-secret `model` block: `model.provider` plus `model.default`.
-- `model.default` carries the bare provider-native model id. Hermes composes its `provider:model` ACP ids itself.
+- `model.default` carries the bare provider-native model id. The adapter composes its `provider/model` ACP config-option ids itself.
 - The rest of the file is user-owned and preserved.
 
 ### Endpoint overrides and `providers.acps-managed`
@@ -42,37 +42,41 @@ Under a managed endpoint, OpenCode Zen/Go get per-model `transport` resolution:
 - `acp-stack` looks the configured model up in the checked-in `data/endpoints.toml` table (mirrored from the Zen/Go docs pages) before falling back to the provider default.
 - A Zen/Go Gemini model is rejected there: the Google-native wire has no Hermes custom-lane transport. Select a different model or clear the endpoint override.
 
-### Install step
+### Install
 
-- The install downloads the upstream installer (Nous-hosted) with a 15s cap, falling back to the official GitHub-hosted copy when the download fails or stalls.
-- The installer runs with `--skip-setup --skip-browser --skip-computer-use --non-interactive`, plus explicit `--dir ~/.hermes/hermes-agent --hermes-home ~/.hermes`. Root installs keep the managed `~/.local/bin/hermes` layout instead of the upstream FHS layout.
-- Current installers bundle ACP mode. The optional `.[acp]` extra is installed into the Hermes checkout only when the `hermes acp` entry point is missing.
-- The installed launcher is a `#!` shell wrapper.
+The adapter and the harness install from separate sources.
 
-### MCP isolation
+- Adapter: a bun-compiled binary from the `atrium-cloud/hermes-acp` GitHub Release. `acp-stack` fetches the Linux asset for the host architecture (`hermes-agent-acp-x64-linux.zip` or `hermes-agent-acp-arm64-linux.zip`) and installs the `hermes-agent-acp` binary.
+- Harness: the `hermes` install downloads the upstream installer (Nous-hosted) with a 15s cap, falling back to the official GitHub-hosted copy when the download fails or stalls.
+- The harness installer runs with `--skip-setup --skip-browser --skip-computer-use --non-interactive`, plus explicit `--dir ~/.hermes/hermes-agent --hermes-home ~/.hermes`. Root installs keep the managed `~/.local/bin/hermes` layout instead of the upstream FHS layout.
+- The base `hermes` binary is enough. The adapter resolves `hermes` on `PATH` and drives `hermes serve`.
 
-At launch, `acp-stack` sets `HERMES_ACP_SKIP_CONFIGURED_MCP=1`. MCP servers declared in Hermes' own `config.yaml` then stay out of acps-managed sessions; acps owns MCP composition. Keep that variable out of `[agent].env`.
+### Transport
+
+The adapter spawns an isolated `hermes serve` on a loopback port. Provider and model reach it through Hermes' own `config.yaml`, written per the contract above.
 
 ### Skills
 
 Managed Agent Skills are installed into `~/.agents/skills` and symlinked into `~/.hermes/skills`, the directory Hermes discovers. See [docs/specs/agents/skills.md](../specs/agents/skills.md) for the managed-skills semantics.
 
+## Modes
+
+The adapter advertises two ACP v1 session modes on `session/new`:
+
+- `default`: per-turn approvals.
+- `dont_ask`: a per-session approval bypass.
+
+Select one with `acps agent set --mode <default|dont_ask>`.
+
 ## Known limitations
 
-Hermes uses pre-1.0 ACP shapes:
+The adapter does not expose every Hermes surface over ACP:
 
-- Session models and modes are advertised through the pre-1.0 `models`/`modes` session state, not ACP v1 `configOptions`.
-- The `initialize` response carries no `mcpCapabilities`.
-
-Until upstream adopts the v1 shapes:
-
-- Model ids are accepted as supplied, without ACP discovery.
-- Mode selection is unavailable (`set_mode = false`).
-- Configured MCP servers are recorded as ignored features for Hermes sessions rather than delivered.
-- Live model switching is unavailable; with no v1 `configOptions` there is no `session/set_config_option` target.
+- MCP passthrough is not advertised, so `acp-stack` composes no MCP servers for Hermes sessions. MCP servers declared in Hermes' own `config.yaml` load gateway-wide and reach every session.
+- Audio prompts, breakpoint forks, and Hermes interactions requiring its own frontend are not exposed.
 
 To change the model, run `acps agent set --model <model-id>`. This rewrites the `model` block of `~/.hermes/config.yaml`. The running agent keeps its startup model until it is restarted (`POST /v1/agent/restart`). The new model applies to sessions created after that.
 
 ## Session capabilities
 
-The native ACP implementation advertises `loadSession` and session list, resume, and fork support at initialize. Capability-dependent operations remain gated by the live `initialize` response. See [docs/specs/acp/acp-bridge.md](../specs/acp/acp-bridge.md) for the generic session-resume behavior.
+The adapter advertises `loadSession` and session list, resume, load, close, delete, and head-only fork support at initialize. Capability-dependent operations remain gated by the live `initialize` response. See [docs/specs/acp/acp-bridge.md](../specs/acp/acp-bridge.md) for the generic session-resume behavior.
