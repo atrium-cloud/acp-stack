@@ -187,7 +187,7 @@ fn shell_install_records_no_version() {
     assert_eq!(result.rows.len(), 1);
     assert!(
         result.rows[0].version.is_none(),
-        "shell installs must leave version unset; got {:?}",
+        "a binary that prints no version must leave version unset; got {:?}",
         result.rows[0].version
     );
 }

@@ -17,8 +17,8 @@ use crate::runtime::process_runner::{
 use super::{
     INSTALL_METHOD_GITHUB, INSTALL_METHOD_NPM, INSTALL_METHOD_SHELL, InstallerOutcome,
     InstallerResult, InstallerRowDraft, MAX_INSTALLER_STREAM_BYTES, ResolvedInstallSpec,
-    StepResult, current_timestamp, resolve_creates, sha256_of_file, verify_binary_spawns,
-    verify_executable_header, verify_expected_sha256,
+    StepResult, current_timestamp, probe_binary_version, resolve_creates, sha256_of_file,
+    verify_binary_spawns, verify_executable_header, verify_expected_sha256,
 };
 
 /// Whole-run budget for one install step when nothing declares its own.
@@ -311,21 +311,38 @@ pub(super) fn shell_step_with_creates(
                 // so spawning here would execute the binary before its
                 // integrity is proven. The header check never executes it.
                 if creates_check.pin_declared {
-                    verify_executable_header(&path)
+                    verify_executable_header(&path)?;
                 } else {
                     verify_binary_spawns(
                         &path,
                         creates_check.workspace_root,
                         creates_check.extra_path_dirs,
                         home,
-                    )
+                    )?;
                 }
+                Ok(path)
             });
-            if let Err(err) = &outcome {
-                row.status = "failed".to_owned();
-                row.stderr = append_stderr_detail(&row.stderr, err);
+            match &outcome {
+                Ok(path) => {
+                    // A pinned binary stays unexecuted until `final_verification`.
+                    if row.version.is_none() && !creates_check.pin_declared {
+                        row.version = probe_binary_version(
+                            path,
+                            creates_check.workspace_root,
+                            creates_check.extra_path_dirs,
+                            home,
+                        );
+                    }
+                }
+                Err(err) => {
+                    row.status = "failed".to_owned();
+                    row.stderr = append_stderr_detail(&row.stderr, err);
+                }
             }
-            StepResult { outcome, row }
+            StepResult {
+                outcome: outcome.map(|_| ()),
+                row,
+            }
         }
         Err(err) => StepResult {
             outcome: Err(err),

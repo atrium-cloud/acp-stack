@@ -59,7 +59,9 @@ Updates follow the recorded install method:
 - Apt uses the declared package.
 - Shell-installed harnesses are probed for a native `update`/`upgrade` subcommand.
 
-A shell-installed harness with no such subcommand and no other channel may declare `update.shell_rerun = true`. The update step then re-runs the shell install recipe. The recipe is responsible for exiting cheaply when nothing changed.
+A shell-installed harness or adapter with no such subcommand and no other channel may declare `update.shell_rerun = true`. The update step then re-runs the shell install recipe. The recipe is responsible for exiting cheaply when nothing changed.
+
+A shell recipe records the version its installed executable prints on `--version`. When the recipe also declares `update.shell_rerun` and a `github` repo, that repo's latest release tag is the upstream: `acps agent check` compares the two, and `acps agent update` skips the rerun while they match.
 
 ### Upstream Registry Sync
 

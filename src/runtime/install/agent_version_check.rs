@@ -54,18 +54,23 @@ fn resolve_upstream_version_for_step(
     step: &str,
     resolver: &dyn LatestVersionResolver,
 ) -> Result<Option<String>> {
-    let install = match step {
-        STEP_HARNESS | STEP_INSTALL => entry.harness.as_ref().map(|h| &h.install),
-        STEP_ADAPTER => entry.adapter.as_ref().map(|a| &a.install),
-        _ => None,
-    };
-    let Some(install) = install else {
-        return Ok(None);
+    let (install, shell_rerun) = match step {
+        STEP_HARNESS | STEP_INSTALL => match entry.harness.as_ref() {
+            Some(harness) => (&harness.install, harness.update.shell_rerun),
+            None => return Ok(None),
+        },
+        STEP_ADAPTER => match entry.adapter.as_ref() {
+            Some(adapter) => (&adapter.install, adapter.update.shell_rerun),
+            None => return Ok(None),
+        },
+        _ => return Ok(None),
     };
     if let Some(npm) = &install.npm {
         return resolver.npm(&npm.package).map(Some);
     }
-    if let Some(_github) = &install.github {
+    // Only a shell_rerun recipe fetches from its declared repo; elsewhere
+    // `github` is a source pointer.
+    if install.github.is_some() || (install.shell.is_some() && shell_rerun) {
         let github_url = if step == STEP_ADAPTER {
             entry
                 .adapter
@@ -83,7 +88,6 @@ fn resolve_upstream_version_for_step(
         )?;
         return resolver.github(&repo).map(Some);
     }
-    // Shell-recipe installs have no machine-checkable upstream.
     Ok(None)
 }
 

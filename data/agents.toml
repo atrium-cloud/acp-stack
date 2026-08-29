@@ -136,6 +136,8 @@ id = "pi"
 name = "Pi Agent"
 kind = "adapter"
 headless_compatible = true
+# Upstream's `pi-acp` id is a different project (svkozak's npm adapter).
+sync_exempt = true
 set_provider = true
 multiple_active_providers = true
 set_model = true
@@ -153,23 +155,91 @@ support_doc = "docs/agents/pi.md"
 testflight_prompt = "Use your file-writing tool to create a file at the relative path .acp-stack-testflight.txt in your current working directory, containing exactly this text: acp-stack testflight ok. Actually write the file to disk; a reply describing the action without writing the file is a failure."
 testflight_expect_fs = ".acp-stack-testflight.txt"
 
+# Node script with no bundled Pi; the bridge sets PI_ACP_PI_BIN at launch.
 [agents.adapter]
 id = "pi-acp"
-github = "svkozak/pi-acp"
+github = "atrium-cloud/pi-acp"
 
-[agents.adapter.install.npm]
-package = "pi-acp"
+# Waits for the Node the parallel harness recipe provides.
+[agents.adapter.install.shell]
+script = '''
+set -eu
+managed_bin="${HOME}/.local/bin"
+managed_adapter="${managed_bin}/pi-acp"
+mkdir -p "$managed_bin"
+node_ready() {
+    command -v node >/dev/null 2>&1 || return 1
+    node -e 'const [a, b, c] = process.versions.node.split(".").map(Number); process.exit(a > 22 || (a === 22 && (b > 19 || (b === 19 && c >= 0))) ? 0 : 1)'
+}
+waited=0
+until node_ready; do
+    if [ "$waited" -ge 540 ]; then
+        echo "Node.js 22.19 or newer did not appear on PATH; the pi harness install provides it" >&2
+        exit 1
+    fi
+    sleep 5
+    waited=$((waited + 5))
+done
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT INT TERM
+curl -fsSL https://github.com/atrium-cloud/pi-acp/releases/latest/download/pi-acp.zip -o "${work}/pi-acp.zip"
+unzip -q -o "${work}/pi-acp.zip" pi-acp -d "$work"
+if [ -f "$managed_adapter" ] && cmp -s "${work}/pi-acp" "$managed_adapter"; then
+    echo "pi-acp unchanged; keeping the installed bundle" >&2
+else
+    install -m 0755 "${work}/pi-acp" "$managed_adapter"
+fi
+test -x "$managed_adapter"
+'''
 creates = "pi-acp"
+required_tools = ["curl", "unzip"]
+
+[agents.adapter.update]
+shell_rerun = true
 
 [agents.harness]
 id = "pi"
 
+# Pi's installer only installs Node from a tty, so the recipe provides it.
 [agents.harness.install.shell]
 script = '''
 set -eu
 managed_bin="${HOME}/.local/bin"
 managed_pi="${managed_bin}/pi"
 mkdir -p "$managed_bin"
+node_ready() {
+    command -v node >/dev/null 2>&1 || return 1
+    node -e 'const [a, b, c] = process.versions.node.split(".").map(Number); process.exit(a > 22 || (a === 22 && (b > 19 || (b === 19 && c >= 0))) ? 0 : 1)'
+}
+if ! node_ready; then
+    case "$(uname -m)" in
+        x86_64) node_arch="x64" ;;
+        aarch64 | arm64) node_arch="arm64" ;;
+        *) echo "no Node.js 22 build for $(uname -m)" >&2; exit 1 ;;
+    esac
+    node_root="${HOME}/.local/share/acp-stack/node"
+    work="$(mktemp -d)"
+    trap 'rm -rf "$work"' EXIT INT TERM
+    sums="$(curl -fsSL https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt)"
+    archive="$(printf '%s\n' "$sums" | grep -o "node-v[0-9.]*-linux-${node_arch}\.tar\.gz" | head -n 1)"
+    test -n "$archive"
+    curl -fsSL "https://nodejs.org/dist/latest-v22.x/${archive}" -o "${work}/${archive}"
+    expected="$(printf '%s\n' "$sums" | grep " ${archive}\$" | cut -d ' ' -f 1)"
+    printf '%s  %s\n' "$expected" "${work}/${archive}" | sha256sum -c - >/dev/null
+    tar -xzf "${work}/${archive}" -C "$work"
+    mkdir -p "$node_root"
+    # Concurrent recipes share this root: lossy rename claim, atomic `current`.
+    release="${node_root}/${archive%.tar.gz}"
+    mv "${work}/${archive%.tar.gz}" "$release" 2>/dev/null || test -d "$release"
+    ln -s "$release" "${node_root}/current.${$}"
+    mv -T "${node_root}/current.${$}" "${node_root}/current"
+    for tool in node npm npx; do
+        ln -sf "${node_root}/current/bin/${tool}" "${managed_bin}/${tool}"
+    done
+    PATH="${managed_bin}:${PATH}"
+    export PATH
+    node_ready
+fi
 # Fetch before running so a curl failure is fatal (no pipefail in POSIX sh).
 installer="$(curl -fsSL https://pi.dev/install.sh)"
 printf '%s' "$installer" | sh
@@ -188,7 +258,7 @@ fi
 test -x "$managed_pi"
 '''
 creates = "pi"
-required_tools = ["curl"]
+required_tools = ["curl", "tar", "sha256sum"]
 
 [agents.harness.install.npm]
 package = "@earendil-works/pi-coding-agent"
@@ -398,25 +468,66 @@ support_doc = "docs/agents/hermes.md"
 testflight_prompt = "Use your file-writing tool to create a file at the relative path .acp-stack-testflight.txt in your current working directory, containing exactly this text: acp-stack testflight ok. Actually write the file to disk; a reply describing the action without writing the file is a failure."
 testflight_expect_fs = ".acp-stack-testflight.txt"
 
-# ACP v1 adapter that spawns `hermes serve` (the harness below). Six
-# bun-compiled binaries ship on the GitHub Release; only the Linux pair applies.
+# Node script that drives `hermes serve`.
 [agents.adapter]
-# The binary is `hermes-agent-acp`: Hermes' own installer, `hermes update`, and
-# `hermes uninstall` all claim ~/.local/bin/hermes-acp.
+# Not `hermes-acp`: Hermes' own installer and uninstaller own that name.
 id = "hermes-agent-acp"
 github = "atrium-cloud/hermes-acp"
 
-[agents.adapter.install.github]
-asset_pattern = "hermes-agent-acp-{arch}-linux.zip"
-archive = "zip"
-# `zip -j` flattens the binary in as `hermes-agent-acp-{arch}-linux`; install
-# renames it to the launched command `hermes-agent-acp`.
-archive_binary_name = "hermes-agent-acp-{arch}-linux"
-binary_name = "hermes-agent-acp"
+# Hermes brings no Node, so the recipe provides it.
+[agents.adapter.install.shell]
+script = '''
+set -eu
+managed_bin="${HOME}/.local/bin"
+managed_adapter="${managed_bin}/hermes-agent-acp"
+mkdir -p "$managed_bin"
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT INT TERM
+node_ready() {
+    command -v node >/dev/null 2>&1 || return 1
+    node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)'
+}
+if ! node_ready; then
+    case "$(uname -m)" in
+        x86_64) node_arch="x64" ;;
+        aarch64 | arm64) node_arch="arm64" ;;
+        *) echo "no Node.js 22 build for $(uname -m)" >&2; exit 1 ;;
+    esac
+    node_root="${HOME}/.local/share/acp-stack/node"
+    sums="$(curl -fsSL https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt)"
+    archive="$(printf '%s\n' "$sums" | grep -o "node-v[0-9.]*-linux-${node_arch}\.tar\.gz" | head -n 1)"
+    test -n "$archive"
+    curl -fsSL "https://nodejs.org/dist/latest-v22.x/${archive}" -o "${work}/${archive}"
+    expected="$(printf '%s\n' "$sums" | grep " ${archive}\$" | cut -d ' ' -f 1)"
+    printf '%s  %s\n' "$expected" "${work}/${archive}" | sha256sum -c - >/dev/null
+    tar -xzf "${work}/${archive}" -C "$work"
+    mkdir -p "$node_root"
+    # Concurrent recipes share this root: lossy rename claim, atomic `current`.
+    release="${node_root}/${archive%.tar.gz}"
+    mv "${work}/${archive%.tar.gz}" "$release" 2>/dev/null || test -d "$release"
+    ln -s "$release" "${node_root}/current.${$}"
+    mv -T "${node_root}/current.${$}" "${node_root}/current"
+    for tool in node npm npx; do
+        ln -sf "${node_root}/current/bin/${tool}" "${managed_bin}/${tool}"
+    done
+    PATH="${managed_bin}:${PATH}"
+    export PATH
+    node_ready
+fi
+curl -fsSL https://github.com/atrium-cloud/hermes-acp/releases/latest/download/hermes-agent-acp.zip -o "${work}/hermes-agent-acp.zip"
+unzip -q -o "${work}/hermes-agent-acp.zip" hermes-agent-acp -d "$work"
+if [ -f "$managed_adapter" ] && cmp -s "${work}/hermes-agent-acp" "$managed_adapter"; then
+    echo "hermes-agent-acp unchanged; keeping the installed bundle" >&2
+else
+    install -m 0755 "${work}/hermes-agent-acp" "$managed_adapter"
+fi
+test -x "$managed_adapter"
+'''
+creates = "hermes-agent-acp"
+required_tools = ["curl", "unzip", "tar", "sha256sum"]
 
-[agents.adapter.install.github.arch]
-x86_64 = "x64"
-aarch64 = "arm64"
+[agents.adapter.update]
+shell_rerun = true
 
 [agents.harness]
 id = "hermes"

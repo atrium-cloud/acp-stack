@@ -332,3 +332,60 @@ fn spawn_gate_probe_runs_exec_only_binary_when_header_read_is_denied() {
     verify_binary_spawns(&binary, tempdir.path(), &[], tempdir.path())
         .expect("an unreadable-but-executable script must pass via the spawn probe");
 }
+
+#[test]
+fn version_token_parses_common_version_lines() {
+    assert_eq!(
+        version_token_from_output("pi-acp 0.1.0\n").as_deref(),
+        Some("0.1.0")
+    );
+    assert_eq!(
+        version_token_from_output("v22.23.2").as_deref(),
+        Some("22.23.2")
+    );
+    assert_eq!(
+        version_token_from_output("hermes-agent 0.20.6 (2026.8.27)").as_deref(),
+        Some("0.20.6")
+    );
+    assert_eq!(
+        version_token_from_output("codex-cli 1.2.3-rc1").as_deref(),
+        Some("1.2.3-rc1")
+    );
+    assert_eq!(version_token_from_output("usage: agent [opts]"), None);
+    assert_eq!(version_token_from_output(""), None);
+}
+
+#[test]
+fn shell_install_records_the_version_the_binary_reports() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let dest_dir = tempdir.path().join("bin");
+    std::fs::create_dir(&dest_dir).expect("create bin dir");
+    let binary_path = dest_dir.join("versioned-agent");
+    let script = format!(
+        "printf '#!/bin/sh\\necho versioned-agent 1.2.3\\n' > {binary} && chmod 755 {binary}",
+        binary = shell_quote_path(&binary_path),
+    );
+    let entry = native_entry(
+        "versioned-agent",
+        "Versioned Agent",
+        Some("docs/agents/versioned-agent.md"),
+        harness_spec(
+            "versioned-agent",
+            shell_install_set(&script, "versioned-agent"),
+        ),
+    );
+    let agent = agent_config("versioned-agent");
+
+    let result = install_resolved_capture(
+        &agent,
+        &entry,
+        HashMap::new(),
+        tempdir.path(),
+        &dest_dir,
+        None,
+        tempdir.path(),
+    );
+
+    result.outcome.expect("shell install succeeds");
+    assert_eq!(result.rows[0].version.as_deref(), Some("1.2.3"));
+}

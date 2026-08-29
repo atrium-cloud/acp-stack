@@ -51,13 +51,18 @@ fn adapter_entry_runs_harness_and_adapter_install_steps_concurrently() {
     std::fs::create_dir(&dest_dir).expect("create bin dir");
     let harness_binary = dest_dir.join("upstream-agent");
     let adapter_binary = dest_dir.join("adapter-agent");
+    // Overlap is proven from start stamps; wall time includes the version probes.
+    let harness_stamp = tempdir.path().join("harness-started");
+    let adapter_stamp = tempdir.path().join("adapter-started");
     let harness_script = format!(
-        "sleep 0.6; mkdir -p {bin}; printf '#!/bin/sh\\n' > {harness}; chmod 755 {harness}",
+        ": > {stamp}; sleep 0.6; mkdir -p {bin}; printf '#!/bin/sh\\n' > {harness}; chmod 755 {harness}",
+        stamp = shell_quote_path(&harness_stamp),
         bin = shell_quote_path(&dest_dir),
         harness = shell_quote_path(&harness_binary),
     );
     let adapter_script = format!(
-        "sleep 0.6; mkdir -p {bin}; printf '#!/bin/sh\\n' > {adapter}; chmod 755 {adapter}",
+        ": > {stamp}; sleep 0.6; mkdir -p {bin}; printf '#!/bin/sh\\n' > {adapter}; chmod 755 {adapter}",
+        stamp = shell_quote_path(&adapter_stamp),
         bin = shell_quote_path(&dest_dir),
         adapter = shell_quote_path(&adapter_binary),
     );
@@ -75,7 +80,6 @@ fn adapter_entry_runs_harness_and_adapter_install_steps_concurrently() {
         ),
     );
 
-    let started = std::time::Instant::now();
     let result = install_resolved_capture(
         &agent_config("adapter-agent"),
         &entry,
@@ -85,12 +89,23 @@ fn adapter_entry_runs_harness_and_adapter_install_steps_concurrently() {
         None,
         tempdir.path(),
     );
-    let elapsed = started.elapsed();
 
     result.outcome.expect("adapter should install");
+    let started_at = |stamp: &Path| -> std::time::SystemTime {
+        std::fs::metadata(stamp)
+            .expect("recipe wrote its start stamp")
+            .modified()
+            .expect("stamp mtime")
+    };
+    let (harness_started, adapter_started) =
+        (started_at(&harness_stamp), started_at(&adapter_stamp));
+    let skew = harness_started
+        .duration_since(adapter_started)
+        .or_else(|_| adapter_started.duration_since(harness_started))
+        .expect("stamps are ordered");
     assert!(
-        elapsed < std::time::Duration::from_millis(1100),
-        "adapter install took {elapsed:?}, expected concurrent steps"
+        skew < std::time::Duration::from_millis(600),
+        "recipes started {skew:?} apart, expected concurrent steps"
     );
     assert_eq!(result.rows.len(), 2);
     assert_eq!(result.rows[0].step, "harness");

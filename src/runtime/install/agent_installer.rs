@@ -84,7 +84,7 @@ pub struct InstallerRowDraft {
     pub exit_status: Option<i32>,
     pub step: String,
     pub method: Option<String>,
-    /// Resolved version the installer wrote; `None` for shell-recipe installs.
+    /// Resolved by the installer, or read from `--version` for shell recipes.
     pub version: Option<String>,
     /// Directory holding the full stdout/stderr capture, set by the persisting
     /// wrappers after they write the files.
@@ -590,33 +590,12 @@ pub(crate) fn verify_binary_spawns(
     extra_path_dirs: &[&Path],
     home: &Path,
 ) -> Result<()> {
-    use crate::runtime::process_runner::{
-        apply_non_interactive_env, detach_into_new_session, forward_host_env, kill_process_group,
-        path_env_with_extra_dirs,
-    };
+    use crate::runtime::process_runner::kill_process_group;
     verify_executable_header(path)?;
-    // The probe changes cwd to `workspace_root`, so a relative `path` would
-    // resolve differently here than it did in `resolve_creates`.
-    let exec_path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-    let mut command = std::process::Command::new(&exec_path);
+    let mut command = version_probe_command(path, workspace_root, extra_path_dirs, home);
     command
-        .arg("--version")
-        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .env_clear();
-    if workspace_root.is_dir() {
-        command.current_dir(workspace_root);
-    }
-    if let Some(path_env) = path_env_with_extra_dirs(extra_path_dirs) {
-        command.env("PATH", path_env);
-    }
-    // HOME is the boot-time runtime home, not the daemon's process env, for
-    // the same test-isolation reason as the install steps.
-    command.env("HOME", home);
-    forward_host_env(&mut command, "LANG");
-    apply_non_interactive_env(&mut command);
-    detach_into_new_session(&mut command);
+        .stderr(std::process::Stdio::null());
     match command.spawn() {
         Ok(mut child) => {
             kill_process_group(&mut child);
@@ -630,6 +609,98 @@ pub(crate) fn verify_binary_spawns(
             source,
         }),
     }
+}
+
+/// `<path> --version` under the same narrow environment the install steps use.
+fn version_probe_command(
+    path: &Path,
+    workspace_root: &Path,
+    extra_path_dirs: &[&Path],
+    home: &Path,
+) -> std::process::Command {
+    use crate::runtime::process_runner::{
+        apply_non_interactive_env, detach_into_new_session, forward_host_env,
+        path_env_with_extra_dirs,
+    };
+    // The probe changes cwd to `workspace_root`, so a relative `path` would
+    // resolve differently here than it did in `resolve_creates`.
+    let exec_path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut command = std::process::Command::new(&exec_path);
+    command
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .env_clear();
+    if workspace_root.is_dir() {
+        command.current_dir(workspace_root);
+    }
+    if let Some(path_env) = path_env_with_extra_dirs(extra_path_dirs) {
+        command.env("PATH", path_env);
+    }
+    // HOME is the boot-time runtime home, not the daemon's process env, for
+    // the same test-isolation reason as the install steps.
+    command.env("HOME", home);
+    forward_host_env(&mut command, "LANG");
+    apply_non_interactive_env(&mut command);
+    detach_into_new_session(&mut command);
+    command
+}
+
+const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+const VERSION_PROBE_CAP_BYTES: usize = 4 * 1024;
+
+/// `<path> --version`, the only version source for shell recipes; `None` on
+/// any failure since the spawn gate already proved the binary runs.
+pub(crate) fn probe_binary_version(
+    path: &Path,
+    workspace_root: &Path,
+    extra_path_dirs: &[&Path],
+    home: &Path,
+) -> Option<String> {
+    use crate::runtime::process_runner::{
+        kill_process_group, spawn_capped_reader, wait_with_timeout,
+    };
+    let mut command = version_probe_command(path, workspace_root, extra_path_dirs, home);
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            tracing::debug!(%error, path = %path.display(), "version probe spawn failed");
+            return None;
+        }
+    };
+    let stdout = child.stdout.take()?;
+    let reader = spawn_capped_reader(stdout, VERSION_PROBE_CAP_BYTES);
+    let deadline = std::time::Instant::now() + VERSION_PROBE_TIMEOUT;
+    let exited_cleanly = match wait_with_timeout(&mut child, deadline) {
+        Ok(Some(status)) => status.success(),
+        Ok(None) | Err(_) => false,
+    };
+    if !exited_cleanly {
+        kill_process_group(&mut child);
+        if let Err(error) = child.wait() {
+            tracing::debug!(%error, path = %path.display(), "version probe child reap failed");
+        }
+        return None;
+    }
+    let output = reader.join().ok()?;
+    version_token_from_output(&output)
+}
+
+/// First version-like token (`pi-acp 0.1.0` → `0.1.0`), leading `v` stripped.
+pub(crate) fn version_token_from_output(output: &str) -> Option<String> {
+    output
+        .split_whitespace()
+        .map(|token| token.strip_prefix('v').unwrap_or(token))
+        .find(|token| {
+            token.contains('.')
+                && token.starts_with(|c: char| c.is_ascii_digit())
+                && token
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
+        })
+        .map(str::to_owned)
 }
 
 /// Executable formats the runtime can spawn: shebang scripts, ELF, and Mach-O

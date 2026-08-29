@@ -227,8 +227,9 @@ mod tests {
     #[test]
     fn sync_exempt_entries_are_not_required_upstream() {
         let catalog = RegistryCatalog::load_embedded().expect("embedded registry");
-        // The adapter id is what upstream would list once Hermes lands there.
+        assert!(!embedded_sync_ids(&catalog).contains(&"pi-acp"));
         assert!(!embedded_sync_ids(&catalog).contains(&"hermes-agent-acp"));
-        assert_eq!(exempt_sync_ids(&catalog), vec!["hermes-agent-acp"]);
+        let exempt: BTreeSet<&str> = exempt_sync_ids(&catalog).into_iter().collect();
+        assert_eq!(exempt, BTreeSet::from(["hermes-agent-acp", "pi-acp"]));
     }
 }

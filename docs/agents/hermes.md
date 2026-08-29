@@ -46,7 +46,7 @@ Under a managed endpoint, OpenCode Zen/Go get per-model `transport` resolution:
 
 The adapter and the harness install from separate sources.
 
-- Adapter: a bun-compiled binary from the `atrium-cloud/hermes-acp` GitHub Release. `acp-stack` fetches the Linux asset for the host architecture (`hermes-agent-acp-x64-linux.zip` or `hermes-agent-acp-arm64-linux.zip`) and installs the `hermes-agent-acp` binary.
+- Adapter: a Node script from the latest `atrium-cloud/hermes-acp` GitHub Release (`hermes-agent-acp.zip`). The recipe installs Node 22 under `~/.local/share/acp-stack/node` when the host has none, and `acps agent update` re-runs it.
 - Harness: the `hermes` install downloads the upstream installer (Nous-hosted) with a 15s cap, falling back to the official GitHub-hosted copy when the download fails or stalls.
 - The harness installer runs with `--skip-setup --skip-browser --skip-computer-use --non-interactive`, plus explicit `--dir ~/.hermes/hermes-agent --hermes-home ~/.hermes`. Root installs keep the managed `~/.local/bin/hermes` layout instead of the upstream FHS layout.
 - The base `hermes` binary is enough. The adapter resolves `hermes` on `PATH` and drives `hermes serve`.

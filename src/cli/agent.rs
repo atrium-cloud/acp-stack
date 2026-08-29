@@ -437,7 +437,6 @@ mod tests {
             self.npm.insert(package.to_owned(), version.to_owned());
             self
         }
-        #[allow(dead_code)]
         fn with_github(mut self, repo: &str, version: &str) -> Self {
             self.github.insert(repo.to_owned(), version.to_owned());
             self
@@ -730,6 +729,52 @@ mod tests {
             (step, AgentCheckStatus::NotInstalled) if step == "install"
         ));
         assert!(agent_check_has_failure(&report));
+    }
+
+    #[test]
+    fn build_agent_check_report_compares_shell_rerun_adapter_against_its_release_repo() {
+        let entry = embedded_entry("pi");
+        let resolver = MockResolver::new()
+            .with_npm("@earendil-works/pi-coding-agent", "0.84.4")
+            .with_github("atrium-cloud/pi-acp", "v0.1.0");
+        let rows = vec![
+            installer_row("harness", Some("0.84.4")),
+            installer_row("adapter", Some("0.1.0")),
+        ];
+        let report = build_agent_check_report(&entry, &check_agent("test-agent"), &rows, &resolver);
+        assert!(matches!(
+            &report[0],
+            (step, AgentCheckStatus::UpToDate { version }) if step == "harness" && version == "0.84.4"
+        ));
+        assert!(matches!(
+            &report[1],
+            (step, AgentCheckStatus::UpToDate { version }) if step == "adapter" && version == "0.1.0"
+        ));
+        let stale_rows = vec![
+            installer_row("harness", Some("0.84.4")),
+            installer_row("adapter", Some("0.0.9")),
+        ];
+        let report =
+            build_agent_check_report(&entry, &check_agent("test-agent"), &stale_rows, &resolver);
+        assert!(matches!(
+            &report[1],
+            (step, AgentCheckStatus::Stale { installed, latest })
+                if step == "adapter" && installed == "0.0.9" && latest == "v0.1.0"
+        ));
+    }
+
+    #[test]
+    fn build_agent_check_report_keeps_vendor_installer_shell_recipes_unknown() {
+        // No shell_rerun, so kimi's `github` is not an upstream.
+        let entry = embedded_entry("kimi");
+        let resolver = MockResolver::new().with_github("MoonshotAI/kimi-code", "v9.9.9");
+        let rows = vec![installer_row("install", Some("1.0.0"))];
+        let report = build_agent_check_report(&entry, &check_agent("test-agent"), &rows, &resolver);
+        assert!(matches!(
+            &report[0],
+            (step, AgentCheckStatus::Unknown { reason }) if step == "install"
+                && reason.contains("no machine-checkable upstream")
+        ));
     }
 
     #[test]

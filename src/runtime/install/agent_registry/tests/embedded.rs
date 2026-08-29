@@ -199,6 +199,48 @@ fn embedded_registry_contains_only_curated_examples() {
     assert!(!pi.set_mode);
     assert!(pi.set_effort);
     assert_eq!(pi.stdio_framing, RegistryStdioFraming::JsonLines);
+    assert!(pi.sync_exempt);
+    let pi_adapter = pi.adapter.as_ref().expect("pi adapter");
+    assert_eq!(pi_adapter.id, "pi-acp");
+    assert_eq!(pi_adapter.github.as_deref(), Some("atrium-cloud/pi-acp"));
+    assert!(
+        pi_adapter.install.npm.is_none(),
+        "the pi-acp release is GitHub-only; the npm `pi-acp` package is another project"
+    );
+    assert!(pi_adapter.install.github.is_none());
+    let pi_adapter_shell = pi_adapter
+        .install
+        .shell
+        .as_ref()
+        .expect("pi adapter shell install");
+    assert!(pi_adapter_shell.script.contains("until node_ready"));
+    assert!(!pi_adapter_shell.script.contains("nodejs.org"));
+    assert!(
+        pi_adapter_shell
+            .script
+            .contains("https://github.com/atrium-cloud/pi-acp/releases/latest/download/pi-acp.zip")
+    );
+    assert!(pi_adapter_shell.script.contains("cmp -s"));
+    assert_eq!(pi_adapter_shell.creates, "pi-acp");
+    assert!(pi_adapter.update.shell_rerun);
+    // The bundle carries no Pi, so the harness install stays and provides Node.
+    let pi_harness = pi.harness.as_ref().expect("pi harness");
+    assert!(!pi_harness.install.is_provided_by_adapter());
+    let pi_harness_shell = pi_harness
+        .install
+        .shell
+        .as_ref()
+        .expect("pi harness shell install");
+    assert!(
+        pi_harness_shell
+            .script
+            .contains("nodejs.org/dist/latest-v22.x/")
+    );
+    assert!(
+        pi_harness_shell
+            .script
+            .contains("https://pi.dev/install.sh")
+    );
     let goose = catalog.lookup("goose").expect("goose entry exists");
     assert_eq!(goose.kind, RegistryKind::Native);
     assert!(goose.headless_compatible);
@@ -360,23 +402,24 @@ fn embedded_registry_contains_only_curated_examples() {
         hermes_adapter.github.as_deref(),
         Some("atrium-cloud/hermes-acp")
     );
-    let hermes_adapter_github = hermes_adapter
+    let hermes_adapter_shell = hermes_adapter
         .install
-        .github
+        .shell
         .as_ref()
-        .expect("Hermes Agent adapter github install");
-    assert_eq!(
-        hermes_adapter_github.asset_pattern,
-        "hermes-agent-acp-{arch}-linux.zip"
+        .expect("Hermes Agent adapter shell install");
+    assert!(
+        hermes_adapter_shell
+            .script
+            .contains("nodejs.org/dist/latest-v22.x/")
     );
-    assert_eq!(hermes_adapter_github.archive, ArchiveKind::Zip);
-    assert_eq!(
-        hermes_adapter_github.archive_binary_name.as_deref(),
-        Some("hermes-agent-acp-{arch}-linux")
-    );
-    assert_eq!(hermes_adapter_github.binary_name, "hermes-agent-acp");
-    assert_eq!(hermes_adapter_github.arch.x86_64.as_deref(), Some("x64"));
-    assert_eq!(hermes_adapter_github.arch.aarch64.as_deref(), Some("arm64"));
+    assert!(hermes_adapter_shell.script.contains(
+        "https://github.com/atrium-cloud/hermes-acp/releases/latest/download/hermes-agent-acp.zip"
+    ));
+    assert!(hermes_adapter_shell.script.contains("cmp -s"));
+    assert_eq!(hermes_adapter_shell.creates, "hermes-agent-acp");
+    assert!(hermes_adapter.install.npm.is_none());
+    assert!(hermes_adapter.install.github.is_none());
+    assert!(hermes_adapter.update.shell_rerun);
     let hermes_harness = hermes.harness.as_ref().expect("Hermes Agent harness");
     assert_eq!(hermes_harness.id, "hermes");
     assert!(
@@ -506,7 +549,7 @@ fn embedded_registry_contains_only_curated_examples() {
     for entry in catalog.entries() {
         assert_eq!(
             entry.sync_exempt,
-            entry.id == "hermes",
+            matches!(entry.id.as_str(), "pi" | "hermes"),
             "sync_exempt is a narrow escape hatch; `{}` must not carry it",
             entry.id
         );

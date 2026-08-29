@@ -75,14 +75,54 @@ pub(crate) fn kimi_default_model_for_provider(provider_id: Option<&str>) -> &'st
         .unwrap_or(KIMI_CODE_DEFAULT_MODEL)
 }
 
+pub(crate) const PI_AGENT_ID: &str = "pi";
+pub(crate) const PI_HARNESS_COMMAND: &str = "pi";
+/// The pi-acp bundle ships without Pi; it runs the `pi` this names.
+pub(crate) const PI_ACP_PI_BIN_ENV: &str = "PI_ACP_PI_BIN";
+
 pub(super) fn build_agent_process_env(
+    agent: &AgentConfig,
+    home: &Path,
+    env: HashMap<String, String>,
+) -> Result<HashMap<String, String>> {
+    match agent.id.as_str() {
+        KIMI_CODE_AGENT_ID => build_kimi_process_env(agent, env),
+        PI_AGENT_ID => build_pi_process_env(home, env),
+        _ => Ok(env),
+    }
+}
+
+fn build_pi_process_env(
+    home: &Path,
+    mut env: HashMap<String, String>,
+) -> Result<HashMap<String, String>> {
+    if env.contains_key(PI_ACP_PI_BIN_ENV) {
+        return Err(StackError::AgentInitializeFailed {
+            reason: format!(
+                "Pi Agent launch env `{PI_ACP_PI_BIN_ENV}` is runtime-managed; remove it from [agent].env"
+            ),
+        });
+    }
+    // A bare name never consults the cwd argument, so `home` stands in for it.
+    let pi_path = super::spawn::resolve_command_path(PI_HARNESS_COMMAND, home, home).ok_or_else(
+        || StackError::AgentInitializeFailed {
+            reason: format!(
+                "Pi Agent harness `{PI_HARNESS_COMMAND}` not found in {} or on PATH; the pi-acp adapter launches it through `{PI_ACP_PI_BIN_ENV}`",
+                crate::runtime::install::local_bin_dir(home).display()
+            ),
+        },
+    )?;
+    env.insert(
+        PI_ACP_PI_BIN_ENV.to_owned(),
+        pi_path.to_string_lossy().into_owned(),
+    );
+    Ok(env)
+}
+
+fn build_kimi_process_env(
     agent: &AgentConfig,
     mut env: HashMap<String, String>,
 ) -> Result<HashMap<String, String>> {
-    if agent.id != KIMI_CODE_AGENT_ID {
-        return Ok(env);
-    }
-
     let provider = agent.provider.as_ref();
     let custom = provider.and_then(|provider| provider.custom.as_ref());
     // Resolve the lane before the runtime-managed guard so every error names
@@ -187,6 +227,80 @@ mod tests {
     use super::*;
     use crate::config::AgentConfig;
     use std::collections::HashMap;
+
+    /// Kimi derivation never touches the home; the pi tests pass a real one.
+    fn build_agent_process_env(
+        agent: &AgentConfig,
+        env: HashMap<String, String>,
+    ) -> Result<HashMap<String, String>> {
+        super::build_agent_process_env(agent, Path::new("/nonexistent-acp-stack-home"), env)
+    }
+
+    fn pi_agent() -> AgentConfig {
+        let mut agent = kimi_agent(None);
+        agent.id = PI_AGENT_ID.to_owned();
+        agent.name = "Pi Agent".to_owned();
+        agent.command = "pi-acp".to_owned();
+        agent.args = Vec::new();
+        agent.env = vec!["OPENROUTER_API_KEY".to_owned()];
+        agent
+    }
+
+    fn home_with_managed_pi() -> tempfile::TempDir {
+        let home = tempfile::tempdir().expect("temp home");
+        let bin = crate::runtime::install::local_bin_dir(home.path());
+        std::fs::create_dir_all(&bin).expect("managed bin dir");
+        std::fs::write(bin.join(PI_HARNESS_COMMAND), "#!/bin/sh\n").expect("managed pi");
+        home
+    }
+
+    #[test]
+    fn pi_process_env_names_the_managed_pi_for_the_adapter() {
+        let home = home_with_managed_pi();
+        let env = HashMap::from([("OPENROUTER_API_KEY".to_owned(), "secret".to_owned())]);
+
+        let prepared =
+            super::build_agent_process_env(&pi_agent(), home.path(), env).expect("pi env");
+
+        assert_eq!(
+            prepared.get(PI_ACP_PI_BIN_ENV).map(String::as_str),
+            Some(
+                crate::runtime::install::local_bin_dir(home.path())
+                    .join(PI_HARNESS_COMMAND)
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+        assert_eq!(
+            prepared.get("OPENROUTER_API_KEY").map(String::as_str),
+            Some("secret")
+        );
+    }
+
+    #[test]
+    fn pi_process_env_rejects_a_declared_pi_bin() {
+        let home = home_with_managed_pi();
+        let env = HashMap::from([(PI_ACP_PI_BIN_ENV.to_owned(), "/opt/pi".to_owned())]);
+
+        let error = super::build_agent_process_env(&pi_agent(), home.path(), env)
+            .expect_err("declared PI_ACP_PI_BIN must fail");
+
+        assert!(error.to_string().contains(PI_ACP_PI_BIN_ENV), "{error}");
+    }
+
+    #[test]
+    fn pi_process_env_requires_an_installed_pi() {
+        let home = tempfile::tempdir().expect("temp home");
+        if crate::runtime::process_runner::resolve_in_path(PI_HARNESS_COMMAND).is_some() {
+            // A host `pi` on PATH makes the missing branch unobservable.
+            return;
+        }
+
+        let error = super::build_agent_process_env(&pi_agent(), home.path(), HashMap::new())
+            .expect_err("missing pi must fail");
+
+        assert!(error.to_string().contains(PI_ACP_PI_BIN_ENV), "{error}");
+    }
 
     fn kimi_agent(model: Option<&str>) -> AgentConfig {
         AgentConfig {

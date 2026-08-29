@@ -40,7 +40,7 @@ impl AcpBridge {
         network_provider: Option<&crate::extensions::NetworkProviderExtension>,
         command_log: Option<TerminalCommandLog>,
     ) -> Result<Self> {
-        let mut env = build_agent_process_env(agent, env)?;
+        let mut env = build_agent_process_env(agent, home, env)?;
         // Last write wins, so the namespace owner's declaration overrides both
         // `[agent].env` and the runtime-managed rewrites above it.
         crate::extensions::apply_workload_env(&mut env, network_provider);

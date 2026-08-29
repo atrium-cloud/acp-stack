@@ -11,7 +11,8 @@ use crate::error::{Result, StackError};
 use crate::runtime::install::agent_installer::{
     INSTALL_METHOD_APT, INSTALL_METHOD_NATIVE, InstallProgress, ReconnectingInstallerSink,
     STEP_ADAPTER, STEP_HARNESS, STEP_INSTALL, begin_tracked_step, finalize_tracked_step,
-    install_one_with_fallback, persist_untracked_installer_row, resolve_creates,
+    install_one_with_fallback, persist_untracked_installer_row, probe_binary_version,
+    resolve_creates,
 };
 use crate::runtime::install::agent_registry::{
     AdapterSpec, AptUpdate, HarnessSpec, InstallSet, RegistryEntry, RegistryKind,
@@ -272,7 +273,12 @@ fn update_component(
     };
     let mut rows = match plan.kind {
         UpdatePlanKind::InstallSet => {
-            let version_pin = plan.latest.as_deref();
+            // A shell recipe cannot honor a pin.
+            let version_pin = if plan.method == INSTALLER_METHOD_SHELL {
+                None
+            } else {
+                plan.latest.as_deref()
+            };
             let chain = install_one_with_fallback(
                 &agent.id,
                 component.field,
@@ -509,17 +515,27 @@ fn choose_update_plan(
 
 /// Re-running the shell install recipe is the declared update path; the plan
 /// carries only the shell install so the fallback chain cannot drift to a
-/// path the entry does not ship. `latest` stays `None` — a shell recipe has
-/// no machine-checkable upstream version, so the recipe itself is responsible
-/// for exiting cheaply when nothing changed.
+/// path the entry does not ship. `latest` is the declared repo's release tag
+/// when there is one; a failed lookup degrades to an unconditional rerun.
 fn shell_rerun_plan(component: &UpdateComponent<'_>) -> Option<UpdatePlan> {
     if !component.shell_rerun {
         return None;
     }
     let shell = component.install.shell.as_ref()?;
+    let latest = component.github_url.and_then(|github_url| {
+        let repo = github_repo_from_url(component.command_id, component.field, github_url);
+        match repo.and_then(|repo| crate::runtime::install::github_release::latest_release_tag(&repo))
+        {
+            Ok(tag) => Some(tag),
+            Err(error) => {
+                tracing::warn!(%error, component = component.command_id, "release tag lookup failed; re-running the recipe unconditionally");
+                None
+            }
+        }
+    });
     Some(UpdatePlan {
         method: INSTALLER_METHOD_SHELL,
-        latest: None,
+        latest,
         install: InstallSet {
             shell: Some(shell.clone()),
             ..InstallSet::default()
@@ -695,14 +711,18 @@ fn run_native_update_step(
         timeout: UPDATE_COMMAND_TIMEOUT,
         home,
     };
-    run_command_step_with_started_at(
+    let mut row = run_command_step_with_started_at(
         step,
         INSTALL_METHOD_NATIVE,
         started_at,
-        path,
+        path.clone(),
         &[subcommand.as_str()],
         &context,
-    )
+    );
+    if row.status == "ran" {
+        row.version = probe_binary_version(&path, workspace_root, &[dest_dir], home);
+    }
+    row
 }
 
 // Distinguishes "the command ran and its help lacks the token" from "the probe
