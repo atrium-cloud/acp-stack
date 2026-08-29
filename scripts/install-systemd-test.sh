@@ -49,6 +49,9 @@ Env knobs:
   ACP_STACK_DEV_PLACEBO_REGISTRY
                                  Test-fixture agent binary path passed into the
                                  container when set
+
+Always set inside the container: ACP_STACK_TEST_DISPOSABLE_HOST=1, which lets a
+fixture build use the container HOME and network.
 USAGE
 }
 
@@ -96,7 +99,10 @@ if [[ ! -x "${acps_binary}" ]]; then
   exit 1
 fi
 
-docker_env_args=()
+# The test container is throwaway, so fixture binaries may use its HOME and the network. Inert on a
+# default build (both guards compile out without `test-fixtures`); it matters when CI supplies a
+# fixture binary via ACP_STACK_SKIP_BUILD=1.
+docker_env_args=(--env "ACP_STACK_TEST_DISPOSABLE_HOST=1")
 if [[ -n "${ACP_STACK_DEV_PLACEBO_REGISTRY:-}" ]]; then
   docker_env_args+=(--env "ACP_STACK_DEV_PLACEBO_REGISTRY=${ACP_STACK_DEV_PLACEBO_REGISTRY}")
 fi
@@ -141,7 +147,8 @@ if [[ -z "${INIT_AGENT}" ]]; then
   exit 1
 fi
 stdout_capture="$(mktemp)"
-docker exec "${CONTAINER_NAME}" \
+# Capturing to a file hides the installer's own diagnostics when it fails, so replay them.
+if ! docker exec "${CONTAINER_NAME}" \
   bash /src/scripts/install-systemd.sh \
     --acps-binary /src/target/release/acps \
     --user "${RUNTIME_USER}" \
@@ -150,7 +157,11 @@ docker exec "${CONTAINER_NAME}" \
     --bind 0.0.0.0:7700 \
     --agent "${INIT_AGENT}" \
     --no-os-deps \
-  >"${stdout_capture}" 2>&1
+  >"${stdout_capture}" 2>&1; then
+  cat "${stdout_capture}" >&2
+  echo "install-systemd-test: installer failed inside the container." >&2
+  exit 1
+fi
 cat "${stdout_capture}"
 
 session_key="$(
@@ -233,6 +244,15 @@ docker exec "${CONTAINER_NAME}" \
     --no-os-deps \
     --force \
   >/dev/null
+
+# systemd does not inherit the container env, so the unit's EnvironmentFile carries the opt-out.
+# ACP_STACK_DEV_PLACEBO_REGISTRY stays out of it: the daemon under test only serves /v1/status and
+# never resolves the agent registry, so only install-time (docker exec) resolution needs it.
+echo "install-systemd-test: seeding /etc/acp-stack/environment for the fixture binary..."
+docker exec "${CONTAINER_NAME}" install -d -m 0755 /etc/acp-stack
+docker exec "${CONTAINER_NAME}" install -m 0644 /dev/null /etc/acp-stack/environment
+docker exec "${CONTAINER_NAME}" bash -c \
+  "printf 'ACP_STACK_TEST_DISPOSABLE_HOST=1\n' > /etc/acp-stack/environment"
 
 echo "install-systemd-test: enabling and starting acp-stack.service..."
 docker exec "${CONTAINER_NAME}" systemctl enable --now acp-stack.service >/dev/null
