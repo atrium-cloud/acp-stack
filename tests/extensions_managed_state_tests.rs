@@ -1133,7 +1133,7 @@ async fn applying_an_override_invalidates_the_provider_model_cache() {
     std::fs::create_dir_all(cache_path.parent().expect("parent")).expect("mkdir");
     std::fs::write(
         &cache_path,
-        br#"{"version": 1, "providers": {"openai": {"fetched_at": 100, "models": [{"value": "openai/gpt-5.5"}]}}}"#,
+        br#"{"version": 2, "providers": {"openai": {"fetched_at": 100, "models": [{"value": "openai/gpt-5.5"}]}}}"#,
     )
     .expect("prime cache");
     assert!(

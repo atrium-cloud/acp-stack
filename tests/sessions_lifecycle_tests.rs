@@ -834,6 +834,62 @@ async fn attached_mcp_event_lists_servers_for_an_mcp_capable_agent() {
 }
 
 #[tokio::test]
+async fn codex_openrouter_effort_pinned_on_disk_is_not_an_ignore_record() {
+    // Codex with OpenRouter carries the effort in its own config file; the
+    // adapter advertises no effort option there, so no ACP set is attempted.
+    let home = tempfile::tempdir().expect("home tempdir");
+    let mut store = SecretStore::open_or_create(home.path()).expect("secret store initializes");
+    store
+        .set_many([("OPENROUTER_API_KEY", "test-openrouter-key")])
+        .expect("flat secret should be stored");
+    let mut catalog = store.provider_credentials().clone();
+    catalog.insert(
+        "openrouter".to_owned(),
+        acp_stack::secrets::ProviderCredentialSet::aliasless(
+            acp_stack::secrets::ProviderCredential::new(
+                std::collections::BTreeMap::from([(
+                    "OPENROUTER_API_KEY".to_owned(),
+                    "test-openrouter-key".to_owned(),
+                )]),
+                std::collections::BTreeMap::new(),
+            ),
+        ),
+    );
+    store
+        .replace_provider_credentials(catalog, &[])
+        .expect("provider credential should be stored");
+    let harness = Harness::spawn_with_and_home(
+        |config| {
+            config.agent.id = "codex".to_owned();
+            config.agent.env = vec!["OPENROUTER_API_KEY".to_owned()];
+            config.agent.provider = Some(acp_stack::config::AgentProviderConfig {
+                id: "openrouter".to_owned(),
+                model: Some("deepseek/deepseek-v4-flash".to_owned()),
+                api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
+                custom: None,
+            });
+            config.agent.effort = Some("high".to_owned());
+        },
+        home.path().to_path_buf(),
+    )
+    .await;
+
+    let response = http()
+        .post(format!("{}/v1/sessions", harness.base_url))
+        .header("Authorization", session_bearer())
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("create");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    assert!(
+        body["data"].get("ignored").is_none(),
+        "a disk-pinned effort must not be reported as ignored: {body}"
+    );
+}
+
+#[tokio::test]
 async fn unadvertised_mode_model_and_effort_are_ignored_not_fatal() {
     // A config-declared value the agent never advertises must degrade to an
     // ignored record, not fail session create with `agent.config_provision`.

@@ -99,6 +99,58 @@ fn array_set_supports_target_custom_provider() {
 }
 
 #[test]
+fn array_set_validates_effort_after_the_model_in_one_command() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let config_path = config_dir.join("acps-config.toml");
+    fs::write(&config_path, VALID_CONFIG).expect("config should be written");
+    acps_command(tempdir.path())
+        .args(["array", "add", "codex"])
+        .assert()
+        .success();
+    let options_path = write_acp_config_options_with_efforts(
+        tempdir.path(),
+        &["gpt-5.5", "gpt-5.4"],
+        &[],
+        &["low", "medium", "high"],
+    );
+
+    acps_command(tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args([
+            "array", "set", "--target", "codex", "--model", "gpt-5.4", "--effort", "high",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("effort: high"));
+
+    let config: toml::Value = toml::from_str(
+        &fs::read_to_string(&config_path).expect("updated config should be readable"),
+    )
+    .expect("config should parse");
+    let codex = &config["array"]["targets"][1]["agent"];
+    assert_eq!(codex["model"].as_str(), Some("gpt-5.4"));
+    assert_eq!(codex["effort"].as_str(), Some("high"));
+
+    // A rejected effort leaves the whole command unapplied, model included.
+    acps_command(tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args([
+            "array", "set", "--target", "codex", "--model", "gpt-5.5", "--effort", "bogus",
+        ])
+        .assert()
+        .failure();
+    let config: toml::Value = toml::from_str(
+        &fs::read_to_string(&config_path).expect("updated config should be readable"),
+    )
+    .expect("config should parse");
+    let codex = &config["array"]["targets"][1]["agent"];
+    assert_eq!(codex["model"].as_str(), Some("gpt-5.4"));
+    assert_eq!(codex["effort"].as_str(), Some("high"));
+}
+
+#[test]
 fn agent_default_set_updates_primary_target_only() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");

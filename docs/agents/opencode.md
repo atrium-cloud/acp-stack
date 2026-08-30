@@ -31,7 +31,7 @@ Set the OpenCode mode with:
 acps agent set --mode <build|plan>
 ```
 
-Reasoning effort follows the runtime advertisement. OpenCode advertises an `effort` (`thought_level`) option when the active model has effort variants. `acps agent set --effort <effort>` validates against that advertisement.
+Reasoning effort follows the runtime advertisement. OpenCode advertises an `effort` (`thought_level`) option when the active model has effort variants. `acps agent set --effort <effort>` validates against that advertisement. For OpenRouter models acps writes the variants from the OpenRouter catalog's reasoning-effort values into `opencode.json` (`provider.openrouter.models.<model>.variants`), so the option appears for effort-capable models.
 
 ### Cloudflare Providers
 

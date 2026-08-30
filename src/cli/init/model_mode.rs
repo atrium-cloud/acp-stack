@@ -8,11 +8,14 @@ use crate::dev_gates::{
 use crate::error::{Result, StackError};
 use crate::runtime::agent::acp_bridge::AgentSessionConfigCategory;
 use crate::runtime::agent::acp_bridge::{KIMI_CODE_AGENT_ID, kimi_default_model_for_provider};
-use crate::runtime::agent::agent_headless_config::HERMES_AGENT_ID;
+use crate::runtime::agent::agent_headless_config::{
+    HERMES_AGENT_ID, provision_agent_headless_config,
+};
 use crate::runtime::agent::config_options::{SessionConfigOptionSnapshot, project_config_options};
 use crate::runtime::agent::model_discovery::{
-    advertised_values_for_category, fetch_session_config, resolve_advertised_model_value,
-    validate_advertised_value,
+    advertised_values_for_category, catalog_effort_values,
+    effort_value_is_explicit_without_discovery, fetch_session_config,
+    resolve_advertised_model_value, validate_advertised_value, validate_catalog_effort_value,
 };
 use crate::runtime::agent::provider_keys::{CODEX_AGENT_ID, agent_provider_id_for_provider_id};
 use crate::runtime::agent::provider_model_catalog::cached_models;
@@ -467,7 +470,16 @@ pub(super) fn configure_model_and_mode_for_init(
                 return Err(error);
             }
         };
-        emit_discovery_applicability_corrections(&response, set_model, set_mode, set_effort);
+        // A harness that pins the effort on disk advertises none over ACP, so
+        // the empty advertisement is expected there, not a registry correction.
+        let catalog_effort_lane = effort_value_is_explicit_without_discovery(&config.agent);
+        emit_discovery_applicability_corrections(
+            &response,
+            set_model,
+            set_mode,
+            set_effort && !catalog_effort_lane,
+        );
+        let model_before = configured_model_value(config);
         if model_lane_active {
             outcome.model_action = configure_model_for_init(
                 args,
@@ -480,6 +492,42 @@ pub(super) fn configure_model_and_mode_for_init(
             )
             .inspect_err(|error| signal_lane_failure(true, false, false, error))?;
         }
+        // Adapters advertise effort levels (and some generic options) for the
+        // model they read from disk, so a changed model needs a fresh
+        // advertisement before those lanes read it.
+        let mut response = response;
+        let mut effort_lane_live = effort_lane_active;
+        let mut generic_prompts_live = interactive;
+        if configured_model_value(config) != model_before
+            && (effort_lane_live || generic_prompts_live)
+        {
+            provision_agent_headless_config(config, home)
+                .inspect_err(|error| signal_lane_failure(false, false, effort_lane_live, error))?;
+            match fetch_session_config(home, config) {
+                Ok(refreshed) => response = refreshed,
+                Err(error) if args.effort.is_none() => {
+                    let reason = format!(
+                        "{} rediscovery after the model change skipped: {error}",
+                        active_lane_label(false, false, effort_lane_live, generic_prompts_live)
+                    );
+                    init_progress(args, &reason);
+                    if effort_lane_live {
+                        prompt::emit_state_signal(|| InitStateSignal::CategoryApplicability {
+                            category: InitCategory::Effort,
+                            applicable: false,
+                            source: ApplicabilitySource::DiscoveryUnavailable,
+                            reason: Some(reason.clone()),
+                        });
+                    }
+                    effort_lane_live = false;
+                    generic_prompts_live = false;
+                }
+                Err(error) => {
+                    signal_lane_failure(false, false, true, &error);
+                    return Err(error);
+                }
+            }
+        }
         if mode_lane_active {
             outcome.mode_action = configure_mode_for_init(
                 args,
@@ -491,14 +539,19 @@ pub(super) fn configure_model_and_mode_for_init(
             )
             .inspect_err(|error| signal_lane_failure(false, true, false, error))?;
         }
-        if effort_lane_active {
+        if effort_lane_live {
             outcome.effort_action =
-                configure_effort_for_init(args, config, config_path, &response, interactive)
+                configure_effort_for_init(args, home, config, config_path, &response, interactive)
                     .inspect_err(|error| signal_lane_failure(false, false, true, error))?;
         }
         outcome.acp_verified = true;
         outcome.config_options_changed =
-            configure_generic_config_options_for_init(config, &response, interactive)?;
+            configure_generic_config_options_for_init(config, &response, generic_prompts_live)?;
+        if catalog_effort_lane && outcome.effort_action == ModelModeAction::Set {
+            // The pin reaches the harness through its own config file.
+            provision_agent_headless_config(config, home)
+                .inspect_err(|error| signal_lane_failure(false, false, true, error))?;
+        }
         Ok::<ModelModeOutcome, StackError>(outcome)
     })();
 
@@ -877,24 +930,51 @@ fn write_mode_into_config(config: &mut Config, mode: String) {
     config.agent.mode = Some(mode);
 }
 
-/// Effort counterpart to `configure_mode_for_init`, sharing the caller's one
-/// provisional session.
+/// Effort counterpart to `configure_mode_for_init`, sharing the caller's
+/// provisional session. A harness that pins the effort on disk takes its
+/// values from the provider catalog instead of the advertisement.
 fn configure_effort_for_init(
     args: &InitArgs,
+    home: &Path,
     config: &mut Config,
     config_path: &Path,
     response: &agent_client_protocol::schema::v1::NewSessionResponse,
     interactive: bool,
 ) -> Result<ModelModeAction> {
-    let values = advertised_values_for_category(response, AgentSessionConfigCategory::Effort)
-        .unwrap_or_default();
+    let catalog_effort_lane = effort_value_is_explicit_without_discovery(&config.agent);
+    let values = if catalog_effort_lane {
+        match catalog_effort_values(home, config) {
+            Ok(values) => values,
+            Err(error) => {
+                if let Some(explicit) = args.effort.as_deref() {
+                    return Err(StackError::AgentConfigProvision {
+                        path: config_path.to_path_buf(),
+                        reason: format!("cannot validate --effort {explicit}: {error}"),
+                    });
+                }
+                init_progress(args, &format!("effort discovery skipped: {error}"));
+                return Ok(ModelModeAction::Skipped);
+            }
+        }
+    } else {
+        advertised_values_for_category(response, AgentSessionConfigCategory::Effort)
+            .unwrap_or_default()
+    };
     if let Some(explicit) = args.effort.as_deref() {
-        validate_advertised_value(response, AgentSessionConfigCategory::Effort, explicit).map_err(
-            |err| StackError::AgentConfigProvision {
-                path: config_path.to_path_buf(),
-                reason: format!("{err}; advertised efforts: [{}]", values.join(", ")),
-            },
-        )?;
+        if catalog_effort_lane {
+            validate_catalog_effort_value(home, config, explicit).map_err(|err| {
+                StackError::AgentConfigProvision {
+                    path: config_path.to_path_buf(),
+                    reason: err.to_string(),
+                }
+            })?;
+        } else {
+            validate_advertised_value(response, AgentSessionConfigCategory::Effort, explicit)
+                .map_err(|err| StackError::AgentConfigProvision {
+                    path: config_path.to_path_buf(),
+                    reason: format!("{err}; advertised efforts: [{}]", values.join(", ")),
+                })?;
+        }
         write_effort_into_config(config, explicit.to_owned());
         return Ok(ModelModeAction::Set);
     }
@@ -909,6 +989,16 @@ fn configure_effort_for_init(
     };
     write_effort_into_config(config, selected);
     Ok(ModelModeAction::Set)
+}
+
+fn configured_model_value(config: &Config) -> Option<String> {
+    config.agent.model.clone().or_else(|| {
+        config
+            .agent
+            .provider
+            .as_ref()
+            .and_then(|provider| provider.model.clone())
+    })
 }
 
 /// Effort lives at the config root like `mode`.

@@ -9,7 +9,8 @@ use crate::error::{Result, StackError};
 use crate::runtime::agent::acp_bridge::AgentSessionConfigCategory;
 use crate::runtime::agent::model_discovery::{
     DEFAULT_MODELS_DISCOVERY_TIMEOUT, advertised_values_for_category,
-    fetch_session_config_with_timeout, model_value_is_explicit_without_discovery,
+    effort_value_is_explicit_without_discovery, fetch_session_config_with_timeout,
+    harness_accepted_efforts, model_value_is_explicit_without_discovery,
 };
 use crate::runtime::agent::provider_keys::{
     AgentProviderSummary, HERMES_AGENT_ID, models_url_for_provider_id, providers_for_agent,
@@ -80,9 +81,10 @@ pub(crate) struct ModelsResponse {
     /// expose a mode option (or, on the catalog fallback path, when ACP
     /// discovery failed).
     modes: Vec<String>,
-    /// ACP-advertised reasoning-effort values (the `thought_level`
-    /// session config option). Empty when the agent does not expose an
-    /// effort option (or, on the catalog fallback path, when ACP
+    /// Reasoning-effort values for the configured model: the ACP-advertised
+    /// `thought_level` session config option, or the provider catalog's list
+    /// when the harness takes the effort from on-disk config. Empty when
+    /// neither source reports any (or, on the catalog fallback path, when ACP
     /// discovery failed).
     efforts: Vec<String>,
     /// Set when the provider declares a model listing endpoint but the
@@ -97,6 +99,11 @@ pub(crate) struct ModelJson {
     pub(crate) value: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) display_name: Option<String>,
+    /// Reasoning-effort values the provider catalog reports for this model.
+    /// Present only on the `provider_catalog` source, and only for models
+    /// the provider marks as effort-selectable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) efforts: Vec<String>,
 }
 
 const MODELS_SOURCE_PROVIDER_CATALOG: &str = "provider_catalog";
@@ -199,7 +206,7 @@ pub(crate) async fn models_response_for_config(
     if let Some(models) = catalog {
         // A discovery failure must not take down a response the catalog can
         // serve on its own.
-        let (modes, efforts) = match fetch_session_config_with_timeout(
+        let (modes, advertised_efforts) = match fetch_session_config_with_timeout(
             home,
             config,
             DEFAULT_MODELS_DISCOVERY_TIMEOUT,
@@ -217,6 +224,26 @@ pub(crate) async fn models_response_for_config(
                 (Vec::new(), Vec::new())
             }
         };
+        // A harness that pins the effort on disk advertises none over ACP, so
+        // the catalog is the only source for the configured model's values.
+        let catalog_effort_lane = effort_value_is_explicit_without_discovery(&config.agent);
+        // Same precedence as catalog validation and session create: root `agent.model` first.
+        let configured_model = config.agent.model.as_deref().or_else(|| {
+            config
+                .agent
+                .provider
+                .as_ref()
+                .and_then(|provider| provider.model.as_deref())
+        });
+        let efforts = if catalog_effort_lane {
+            models
+                .iter()
+                .find(|model| Some(model.value.as_str()) == configured_model)
+                .map(|model| harness_accepted_efforts(&config.agent, model.efforts.clone()))
+                .unwrap_or_default()
+        } else {
+            advertised_efforts
+        };
         return Ok(ModelsResponse {
             agent_id,
             source: MODELS_SOURCE_PROVIDER_CATALOG,
@@ -225,6 +252,11 @@ pub(crate) async fn models_response_for_config(
                 .map(|model| ModelJson {
                     value: model.value,
                     display_name: model.display_name,
+                    efforts: if catalog_effort_lane {
+                        harness_accepted_efforts(&config.agent, model.efforts)
+                    } else {
+                        model.efforts
+                    },
                 })
                 .collect(),
             modes,
@@ -263,6 +295,7 @@ pub(crate) async fn models_response_for_config(
             .map(|value| ModelJson {
                 value,
                 display_name: None,
+                efforts: Vec::new(),
             })
             .collect(),
         modes,

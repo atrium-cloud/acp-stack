@@ -634,6 +634,9 @@ fn installed_skill_names_omits_an_empty_list() {
 fn a_mode_only_discovery_failure_skips_the_lane_instead_of_failing_init() {
     use std::os::unix::fs::PermissionsExt;
 
+    // The stub must really spawn, so no sibling test's discovery fixture may be in the env.
+    #[cfg(feature = "test-fixtures")]
+    let _env = crate::cli::init::test_env::TestEnvGuard::set(&[]);
     let tempdir = tempfile::tempdir().expect("tempdir");
     let stub = tempdir.path().join("silent-agent");
     std::fs::write(&stub, "#!/bin/sh\nexit 0\n").expect("stub written");
@@ -690,6 +693,8 @@ fn a_mode_only_discovery_failure_skips_the_lane_instead_of_failing_init() {
 fn a_registry_default_mode_discovery_failure_skips_the_lane_instead_of_failing_init() {
     use std::os::unix::fs::PermissionsExt;
 
+    #[cfg(feature = "test-fixtures")]
+    let _env = crate::cli::init::test_env::TestEnvGuard::set(&[]);
     let tempdir = tempfile::tempdir().expect("tempdir");
     let stub = tempdir.path().join("silent-agent");
     std::fs::write(&stub, "#!/bin/sh\nexit 0\n").expect("stub written");
@@ -790,6 +795,8 @@ fn pending_credential_fixture() -> (
 #[cfg(unix)]
 #[test]
 fn a_pending_provider_credential_skips_discovery_instead_of_spawning() {
+    #[cfg(feature = "test-fixtures")]
+    let _env = crate::cli::init::test_env::TestEnvGuard::set(&[]);
     let (tempdir, mut config, registry, secrets) = pending_credential_fixture();
     let args = parse_init_args(&[]);
     let driver = Arc::new(RecordingDriver::default());
@@ -814,6 +821,8 @@ fn a_pending_provider_credential_skips_discovery_instead_of_spawning() {
 #[cfg(unix)]
 #[test]
 fn an_explicit_mode_fails_early_when_the_provider_credential_is_pending() {
+    #[cfg(feature = "test-fixtures")]
+    let _env = crate::cli::init::test_env::TestEnvGuard::set(&[]);
     let (tempdir, mut config, registry, secrets) = pending_credential_fixture();
     let args = parse_init_args(&["--mode", "build"]);
 

@@ -77,7 +77,9 @@ use crate::runtime::agent::acp_bridge::{
     StateStoreSessionSink, meta_message_id, prompt_message_id_meta, resolve_command_path,
     session_config_id_for_value, session_mode_selection_for_value,
 };
-use crate::runtime::agent::model_discovery::model_value_is_explicit_without_discovery;
+use crate::runtime::agent::model_discovery::{
+    effort_value_is_explicit_without_discovery, model_value_is_explicit_without_discovery,
+};
 use crate::runtime::agent::provider_keys::ResolvedProviderSnapshot;
 use crate::runtime::agent::session_changes::SessionChangesHandle;
 use crate::secrets::SecretStore;

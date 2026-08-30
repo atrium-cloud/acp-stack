@@ -48,6 +48,7 @@ acps agent provider use openrouter --model <model-id>
 
 - Codex mode values are not fixed here. The `codex-acp` adapter advertises them at runtime, and a mode is validated against that advertisement when you set it. The accepted set follows whichever adapter version is installed (currently `read-only`, `agent`, `agent-full-access`).
 - Reasoning-effort values follow the same rule. The adapter advertises them as the `reasoning_effort` (`thought_level`) session config option when the active model preset supports more than one effort.
+- With OpenRouter the adapter advertises no effort option, so acps validates `--effort` against the OpenRouter catalog's reasoning-effort values for the configured model (`max` excluded, since Codex has no such level) and pins it as `model_reasoning_effort` in `~/.codex/config.toml`. A restart applies it.
 
 Set modes and efforts through:
 

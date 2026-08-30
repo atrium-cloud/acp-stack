@@ -10,9 +10,13 @@ use crate::runtime::agent::acp_bridge::{
     AgentSessionConfigCategory, KIMI_CODE_AGENT_ID, session_config_id_for_value,
     session_mode_selection_for_value, session_model_selection_for_value,
 };
-use crate::runtime::agent::agent_headless_config::provision_agent_headless_config_transition;
+use crate::runtime::agent::agent_headless_config::{
+    provision_agent_headless_config, provision_agent_headless_config_transition,
+};
 use crate::runtime::agent::model_discovery::{
-    fetch_session_config, model_value_is_explicit_without_discovery, resolve_advertised_model_value,
+    effort_value_is_explicit_without_discovery, fetch_session_config,
+    model_value_is_explicit_without_discovery, resolve_advertised_model_value,
+    validate_catalog_effort_value,
 };
 use crate::runtime::agent::provider_keys::{
     CLAUDE_CODE_AGENT_ID, KILO_AGENT_ID, agent_provider_id_for_provider_id,
@@ -516,13 +520,23 @@ fn run_agent_effort_set(
     config.agent.effort = Some(effort.clone());
     let canonical = config.to_canonical_toml()?;
     let config = config::load_config_from_str(&canonical)?;
-    validate_agent_session_config_value(
-        home,
-        &config,
-        AgentSessionConfigCategory::Effort,
-        &effort,
-    )?;
+    let catalog_effort_lane = effort_value_is_explicit_without_discovery(&config.agent);
+    if catalog_effort_lane {
+        refresh_provider_models_best_effort_blocking(home, &config);
+        validate_catalog_effort_value(home, &config, &effort)?;
+    } else {
+        validate_agent_session_config_value(
+            home,
+            &config,
+            AgentSessionConfigCategory::Effort,
+            &effort,
+        )?;
+    }
     atomic_write_owner_only(&config_path, canonical.as_bytes())?;
+    if catalog_effort_lane {
+        // The harness reads the pin from its own config at process start.
+        provision_agent_headless_config(&config, home)?;
+    }
     print_agent_set_agent(&config);
     println!("effort: {effort}");
     print_agent_set_effective_notice_for(Some(&config.agent.id));

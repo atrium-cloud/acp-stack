@@ -564,8 +564,9 @@ All skill routes load config leniently, dropping individually invalid `[[skills.
 
 - Tier: `session` (also mounted on the `init` tier of `acps init serve`, where the bootstrap bearer token replaces the session key, so a hosted backend renders pickers while init is still running).
 - Request: optional `?target_id=<id>` (alias `?target=`) query param selecting a non-default Array target.
-- Response: `{ "agent_id", "source", "models": [{ "value", "display_name"? }], "modes": [...], "efforts": [...], "catalog_error"? }`.
+- Response: `{ "agent_id", "source", "models": [{ "value", "display_name"?, "efforts"? }], "modes": [...], "efforts": [...], "catalog_error"? }`.
     - `efforts` carries the agent's ACP-advertised reasoning-effort values (the `thought_level` session config option) and is empty when the agent exposes no such option.
+    - On the catalog path each model may carry its own `efforts`, the reasoning-effort values the provider's listing reports for that model (OpenRouter's `reasoning.supported_efforts`); the key is absent for models without any.
     - `source` is `"provider_catalog"` when models come from the provider's live model listing (`models_url` in the embedded provider metadata, fetched with the stored API key and cached at `~/.config/acp-stack/provider-models.json`) and `"acp_advertised"` when they come from the agent's ACP `session/new` config options.
     - `catalog_error` is present when the provider declares a model listing endpoint but the catalog is unavailable (fetch failed and nothing cached). The response then falls back to ACP-advertised values, which is an empty `models` list for agents whose model is taken verbatim from on-disk config (Hermes Agent).
 - Notes:

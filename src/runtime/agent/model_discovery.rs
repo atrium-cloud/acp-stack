@@ -25,11 +25,109 @@ use crate::runtime::agent::provider_keys::{
     CLAUDE_CODE_AGENT_ID, CODEX_AGENT_ID, is_claude_code_profiled_provider,
     resolve_agent_environment, resolve_agent_environment_without_secrets,
 };
+use crate::runtime::agent::provider_model_catalog::cached_models;
 use crate::secrets::SecretStore;
 
 /// Default cap for one provisional discovery session, bounding an agent that
 /// accepts initialize but then hangs.
 pub const DEFAULT_MODELS_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Values codex's `model_reasoning_effort` parser accepts. OpenRouter also reports `max`, which
+/// codex has no variant for; pinning it would fail codex's config parse at startup.
+pub const CODEX_REASONING_EFFORTS: [&str; 6] =
+    ["none", "minimal", "low", "medium", "high", "xhigh"];
+
+/// codex-acp advertises `reasoning_effort` only for codex-core's OpenAI presets, so an OpenRouter
+/// model's effort is validated against the provider catalog and pinned in codex's config.toml
+/// instead of set over ACP.
+pub fn effort_value_is_explicit_without_discovery(agent: &AgentConfig) -> bool {
+    agent.id == CODEX_AGENT_ID
+        && agent.provider.as_ref().is_some_and(|provider| {
+            provider.custom.is_none() && provider.id == CODEX_OPENROUTER_PROVIDER_ID
+        })
+}
+
+/// Drop catalog effort values the harness cannot express.
+pub fn harness_accepted_efforts(agent: &AgentConfig, efforts: Vec<String>) -> Vec<String> {
+    if agent.id != CODEX_AGENT_ID {
+        return efforts;
+    }
+    efforts
+        .into_iter()
+        .filter(|effort| CODEX_REASONING_EFFORTS.contains(&effort.as_str()))
+        .collect()
+}
+
+/// Reasoning-effort values the provider catalog reports for the configured model, filtered to
+/// what the harness accepts. Errors name the missing piece: no model, no catalog, or a model the
+/// provider marks as effort-less.
+pub fn catalog_effort_values(home: &Path, config: &Config) -> Result<Vec<String>> {
+    let agent = &config.agent;
+    let Some(provider) = agent.provider.as_ref() else {
+        return Err(StackError::InvalidParam {
+            field: "effort",
+            reason: format!(
+                "{} takes its reasoning effort from the provider catalog and has no provider configured",
+                agent.name
+            ),
+        });
+    };
+    // Same precedence as session create: a root `agent.model` outranks the provider slot.
+    let Some(model) = agent
+        .model
+        .as_deref()
+        .or(provider.model.as_deref())
+        .filter(|model| !model.trim().is_empty())
+    else {
+        return Err(StackError::InvalidParam {
+            field: "effort",
+            reason: format!(
+                "{} needs a configured model before its reasoning-effort values can be resolved; select one first with `acps agent provider use <provider> --model <id>` (or `--model <id>` on init)",
+                agent.name
+            ),
+        });
+    };
+    let Some(models) = cached_models(home, &provider.id) else {
+        return Err(StackError::InvalidParam {
+            field: "effort",
+            reason: format!(
+                "no `{}` model catalog is available to resolve reasoning-effort values for `{model}`",
+                provider.id
+            ),
+        });
+    };
+    let efforts = models
+        .into_iter()
+        .find(|entry| entry.value == model)
+        .map(|entry| entry.efforts)
+        .unwrap_or_default();
+    let efforts = harness_accepted_efforts(agent, efforts);
+    if efforts.is_empty() {
+        return Err(StackError::InvalidParam {
+            field: "effort",
+            reason: format!(
+                "the `{}` catalog reports no reasoning-effort values for `{model}`",
+                provider.id
+            ),
+        });
+    }
+    Ok(efforts)
+}
+
+/// Catalog counterpart of `validate_advertised_value` for the effort category.
+pub fn validate_catalog_effort_value(home: &Path, config: &Config, value: &str) -> Result<()> {
+    let values = catalog_effort_values(home, config)?;
+    if values.iter().any(|candidate| candidate == value) {
+        return Ok(());
+    }
+    Err(StackError::InvalidParam {
+        field: "effort",
+        reason: format!(
+            "the provider catalog does not list `{value}` as an available reasoning effort for the configured model; catalog efforts: [{}]",
+            values.join(", ")
+        ),
+    })
+}
 
 pub fn model_value_is_explicit_without_discovery(agent: &AgentConfig) -> bool {
     agent.id == KIMI_CODE_AGENT_ID
@@ -417,5 +515,50 @@ mod tests {
             "opencode",
             mapped_provider("openrouter")
         )));
+    }
+
+    #[test]
+    fn only_codex_openrouter_takes_effort_from_the_catalog() {
+        assert!(effort_value_is_explicit_without_discovery(&agent(
+            "codex",
+            mapped_provider("openrouter")
+        )));
+        assert!(!effort_value_is_explicit_without_discovery(&agent(
+            "codex",
+            mapped_provider("openai")
+        )));
+        assert!(!effort_value_is_explicit_without_discovery(&agent(
+            "codex",
+            custom_provider()
+        )));
+        assert!(!effort_value_is_explicit_without_discovery(&agent(
+            "codex", None
+        )));
+        assert!(!effort_value_is_explicit_without_discovery(&agent(
+            "opencode",
+            mapped_provider("openrouter")
+        )));
+    }
+
+    #[test]
+    fn codex_drops_catalog_efforts_it_cannot_parse() {
+        let efforts = ["max", "xhigh", "high", "medium", "low", "minimal", "none"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            harness_accepted_efforts(
+                &agent("codex", mapped_provider("openrouter")),
+                efforts.clone()
+            ),
+            vec!["xhigh", "high", "medium", "low", "minimal", "none"]
+        );
+        assert_eq!(
+            harness_accepted_efforts(
+                &agent("opencode", mapped_provider("openrouter")),
+                efforts.clone()
+            ),
+            efforts
+        );
     }
 }

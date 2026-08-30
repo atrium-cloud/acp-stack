@@ -1,5 +1,8 @@
 use super::*;
 
+use crate::runtime::agent::model_discovery::CODEX_REASONING_EFFORTS;
+use crate::runtime::agent::provider_model_catalog::cached_models;
+
 pub(crate) const CODEX_OPENROUTER_PROVIDER_ID: &str = "openrouter";
 // Codex uses OpenRouter's Responses-compatible endpoint instead of the chat
 // completions endpoint most OpenRouter clients configure by default.
@@ -7,6 +10,10 @@ const CODEX_OPENROUTER_RESPONSES_BASE_URL: &str = "https://openrouter.ai/api/v1"
 /// Routing prefix some clients carry in front of an OpenRouter slug. OpenRouter
 /// itself expects the provider-native `vendor/model` form.
 const CODEX_OPENROUTER_SLUG_PREFIX: &str = "openrouter/";
+const CODEX_REASONING_EFFORT_KEY: &str = "model_reasoning_effort";
+/// Without this override codex sends no `reasoning` block for a model outside its preset
+/// catalog, so the effort pin would never reach OpenRouter.
+const CODEX_REASONING_SUMMARIES_KEY: &str = "model_supports_reasoning_summaries";
 
 pub(super) fn provision_codex_config(
     config: &Config,
@@ -30,6 +37,7 @@ pub(super) fn cleanup_codex_config(
     }
     let mut root = read_toml_table(&path)?;
     let mut changed = root.remove("model").is_some();
+    changed |= remove_codex_reasoning_effort_pin(&mut root);
     if let Some(provider_key) = codex_provider_config_key(config) {
         if root.get("model_provider").and_then(TomlValue::as_str) == Some(provider_key.as_str()) {
             root.remove("model_provider");
@@ -57,6 +65,32 @@ pub(super) fn cleanup_codex_config(
         label: "Codex config",
         path,
     }])
+}
+
+/// Only the OpenRouter lane pins the effort on disk; every other lane applies it over ACP, and a
+/// leftover pin would silently shape those requests too.
+fn write_codex_reasoning_effort_pin(root: &mut TomlMap<String, TomlValue>, effort: Option<&str>) {
+    match effort {
+        Some(effort) => {
+            root.insert(
+                CODEX_REASONING_EFFORT_KEY.to_owned(),
+                TomlValue::String(effort.to_owned()),
+            );
+            root.insert(
+                CODEX_REASONING_SUMMARIES_KEY.to_owned(),
+                TomlValue::Boolean(true),
+            );
+        }
+        None => {
+            remove_codex_reasoning_effort_pin(root);
+        }
+    }
+}
+
+fn remove_codex_reasoning_effort_pin(root: &mut TomlMap<String, TomlValue>) -> bool {
+    let removed_effort = root.remove(CODEX_REASONING_EFFORT_KEY).is_some();
+    let removed_summaries = root.remove(CODEX_REASONING_SUMMARIES_KEY).is_some();
+    removed_effort || removed_summaries
 }
 
 fn codex_provider_config_key(config: &Config) -> Option<String> {
@@ -97,6 +131,7 @@ fn provision_codex_main_config(
         };
         let api_key_ref = require_agent_env_for_provider(config, &provider.id, &path)?;
         let mut root = read_toml_table(&path)?;
+        remove_codex_reasoning_effort_pin(&mut root);
         write_codex_custom_provider_selection(
             &mut root,
             &provider.id,
@@ -223,9 +258,40 @@ fn provision_codex_main_config(
         "wire_api".to_owned(),
         TomlValue::String("responses".to_owned()),
     );
+    let effort = config
+        .agent
+        .effort
+        .as_deref()
+        .filter(|effort| codex_catalog_effort_applies(home, model_opt.as_deref(), effort));
+    write_codex_reasoning_effort_pin(&mut root, effort);
 
     write_toml_table(&path, root)?;
     Ok(Some(path))
+}
+
+/// A model change re-provisions without re-validating `agent.effort`, so the pin is withheld when
+/// the catalog shows the new model does not take it (mirroring the ACP lane's `ignored` record).
+/// Without a catalog entry the validated value stands.
+fn codex_catalog_effort_applies(home: &Path, model: Option<&str>, effort: &str) -> bool {
+    let Some(model) = model else {
+        return true;
+    };
+    let Some(models) = cached_models(home, CODEX_OPENROUTER_PROVIDER_ID) else {
+        return true;
+    };
+    let Some(entry) = models.iter().find(|entry| entry.value == model) else {
+        return true;
+    };
+    let applies = CODEX_REASONING_EFFORTS.contains(&effort)
+        && entry.efforts.iter().any(|value| value == effort);
+    if !applies {
+        tracing::warn!(
+            model,
+            effort,
+            "reasoning effort is not available for the configured OpenRouter model; leaving codex config.toml unpinned"
+        );
+    }
+    applies
 }
 
 fn write_codex_custom_provider_selection(
@@ -269,6 +335,7 @@ fn provision_codex_openai_config(config: &Config, path: &Path) -> Result<Option<
         }
         let mut root = read_toml_table(path)?;
         let removed_model = root.remove("model").is_some();
+        let removed_pin = remove_codex_reasoning_effort_pin(&mut root);
         let prior_provider = root
             .get("model_provider")
             .and_then(TomlValue::as_str)
@@ -282,13 +349,14 @@ fn provision_codex_openai_config(config: &Config, path: &Path) -> Result<Option<
                 TomlValue::String("openai".to_owned()),
             );
         }
-        if removed_model || provider_changed {
+        if removed_model || removed_pin || provider_changed {
             write_toml_table(path, root)?;
             return Ok(Some(path.to_path_buf()));
         }
         return Ok(None);
     };
     let mut root = read_toml_table(path)?;
+    remove_codex_reasoning_effort_pin(&mut root);
     if let Some(provider_id) = codex_custom_provider_to_remove(&root) {
         backup_codex_config(path, &provider_id)?;
         if let Some(providers) = root
@@ -400,6 +468,113 @@ mod tests {
             value["model_providers"]["openrouter"]["base_url"].as_str(),
             Some("https://openrouter.ai/api/v1")
         );
+    }
+
+    #[test]
+    fn codex_openrouter_effort_is_pinned_and_cleared_with_the_config_value() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut config = codex_openrouter_config();
+        config.agent.effort = Some("high".to_owned());
+
+        provision_codex_config(&config, tempdir.path(), None).expect("provision with effort");
+        let value = codex_config_value(tempdir.path());
+        assert_eq!(value["model_reasoning_effort"].as_str(), Some("high"));
+        assert_eq!(
+            value["model_supports_reasoning_summaries"].as_bool(),
+            Some(true)
+        );
+
+        config.agent.effort = None;
+        provision_codex_config(&config, tempdir.path(), None).expect("provision without effort");
+        let value = codex_config_value(tempdir.path());
+        assert!(value.get("model_reasoning_effort").is_none(), "{value}");
+        assert!(
+            value.get("model_supports_reasoning_summaries").is_none(),
+            "{value}"
+        );
+    }
+
+    #[test]
+    fn codex_effort_pin_is_withheld_when_the_catalog_model_does_not_take_it() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let cache_path = crate::runtime::agent::provider_model_catalog::cache_path(tempdir.path());
+        std::fs::create_dir_all(cache_path.parent().expect("cache parent")).expect("cache dir");
+        std::fs::write(
+            &cache_path,
+            serde_json::json!({
+                "version": 2,
+                "providers": { "openrouter": { "fetched_at": 100, "models": [
+                    { "value": "deepseek/deepseek-v4-flash", "efforts": ["xhigh", "high"] },
+                    { "value": "meta-llama/llama-3.1-8b-instruct" }
+                ] } }
+            })
+            .to_string(),
+        )
+        .expect("write catalog cache");
+        let mut config = codex_openrouter_config();
+        config.agent.effort = Some("high".to_owned());
+
+        provision_codex_config(&config, tempdir.path(), None).expect("provision deepseek");
+        let value = codex_config_value(tempdir.path());
+        assert_eq!(value["model_reasoning_effort"].as_str(), Some("high"));
+
+        // `agent provider use --model` re-provisions with the effort still in config.
+        config.agent.provider.as_mut().expect("provider").model =
+            Some("meta-llama/llama-3.1-8b-instruct".to_owned());
+        provision_codex_config(&config, tempdir.path(), None).expect("provision llama");
+        let value = codex_config_value(tempdir.path());
+        assert!(value.get("model_reasoning_effort").is_none(), "{value}");
+        assert!(
+            value.get("model_supports_reasoning_summaries").is_none(),
+            "{value}"
+        );
+
+        // A model the catalog does not know keeps the validated value.
+        config.agent.provider.as_mut().expect("provider").model =
+            Some("vendor/unlisted-model".to_owned());
+        provision_codex_config(&config, tempdir.path(), None).expect("provision unlisted");
+        let value = codex_config_value(tempdir.path());
+        assert_eq!(value["model_reasoning_effort"].as_str(), Some("high"));
+    }
+
+    #[test]
+    fn switching_codex_to_openai_drops_the_openrouter_effort_pin() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut config = codex_openrouter_config();
+        config.agent.effort = Some("high".to_owned());
+        provision_codex_config(&config, tempdir.path(), None).expect("provision openrouter");
+
+        let mut config = config_with_agent("codex", &["OPENAI_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "openai".to_owned(),
+            model: Some("gpt-5.5".to_owned()),
+            api_key_ref: Some("OPENAI_API_KEY".to_owned()),
+            custom: None,
+        });
+        // Effort on the openai lane is applied over ACP, so the disk pin must go.
+        config.agent.effort = Some("high".to_owned());
+        provision_codex_config(&config, tempdir.path(), None).expect("provision openai");
+        let value = codex_config_value(tempdir.path());
+        assert_eq!(value["model_provider"].as_str(), Some("openai"));
+        assert!(value.get("model_reasoning_effort").is_none(), "{value}");
+        assert!(
+            value.get("model_supports_reasoning_summaries").is_none(),
+            "{value}"
+        );
+    }
+
+    #[test]
+    fn codex_cleanup_removes_the_effort_pin() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut config = codex_openrouter_config();
+        config.agent.effort = Some("high".to_owned());
+        provision_codex_config(&config, tempdir.path(), None).expect("provision");
+
+        let cleaned = cleanup_codex_config(&config, tempdir.path()).expect("cleanup");
+        assert_eq!(cleaned.len(), 1);
+        // The pin was the only acps-owned content, so cleanup removes the whole file.
+        let path = tempdir.path().join(".codex").join("config.toml");
+        assert!(!path.exists());
     }
 
     /// The runtime-fixed Responses base must agree with the provider row a relay operator reads.

@@ -20,7 +20,8 @@ use crate::runtime::agent::provider_keys::{
 use crate::secrets::SecretStore;
 
 const PROVIDER_MODEL_CACHE_FILE: &str = "provider-models.json";
-const PROVIDER_MODEL_CACHE_VERSION: u32 = 1;
+/// Version 2 added per-model reasoning metadata; older files read as empty and refetch.
+const PROVIDER_MODEL_CACHE_VERSION: u32 = 2;
 /// Bounded so an unreachable provider never stalls `acps agent set`/`init`.
 const PROVIDER_MODELS_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// A cache entry younger than this satisfies a refresh without a network call.
@@ -29,12 +30,16 @@ const PROVIDER_MODELS_CACHE_TTL: Duration = Duration::from_secs(300);
 const PROVIDER_MODELS_FAILURE_BACKOFF: Duration = Duration::from_secs(30);
 
 /// One model as reported by the provider's listing endpoint.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderModel {
     /// Model id the harness accepts verbatim (`agent.provider.model`).
     pub value: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// Reasoning-effort values the provider reports for this model (OpenRouter's
+    /// `reasoning.supported_efforts`), in the provider's order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub efforts: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -78,6 +83,19 @@ pub fn cached_models(home: &Path, provider_id: &str) -> Option<Vec<ProviderModel
         .get(provider_id)
         .map(|entry| entry.models.clone())
         .filter(|models| !models.is_empty())
+}
+
+/// Reasoning-effort values cached for one model; `None` when the model is unknown or reports none.
+pub fn cached_model_efforts(
+    home: &Path,
+    provider_id: &str,
+    model_value: &str,
+) -> Option<Vec<String>> {
+    cached_models(home, provider_id)?
+        .into_iter()
+        .find(|model| model.value == model_value)
+        .map(|model| model.efforts)
+        .filter(|efforts| !efforts.is_empty())
 }
 
 /// Cached catalog only when younger than [`PROVIDER_MODELS_CACHE_TTL`].
@@ -302,9 +320,22 @@ fn parse_models_response(provider_id: &str, body: &Value) -> Result<Vec<Provider
             .and_then(Value::as_str)
             .filter(|name| !name.trim().is_empty() && *name != id)
             .map(str::to_owned);
+        let reasoning = entry.get("reasoning").filter(|value| value.is_object());
+        let efforts = reasoning
+            .and_then(|reasoning| reasoning.get("supported_efforts"))
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
         models.push(ProviderModel {
             value: id.to_owned(),
             display_name,
+            efforts,
         });
     }
     if models.is_empty() {
@@ -412,13 +443,104 @@ mod tests {
                 ProviderModel {
                     value: "kimi-k3".to_owned(),
                     display_name: Some("Kimi K3".to_owned()),
+                    ..Default::default()
                 },
                 ProviderModel {
                     value: "kimi-k2.7-code".to_owned(),
                     display_name: None,
+                    ..Default::default()
                 },
             ]
         );
+    }
+
+    #[test]
+    fn parses_openrouter_reasoning_metadata() {
+        let body = json!({
+            "data": [
+                {
+                    "id": "deepseek/deepseek-v4-flash",
+                    "reasoning": {
+                        "mandatory": false,
+                        "supported_efforts": ["xhigh", "high", 7],
+                        "default_effort": "high"
+                    }
+                },
+                { "id": "anthropic/claude-sonnet-4.5", "reasoning": { "mandatory": false } },
+                { "id": "meta-llama/llama-3.1-8b-instruct" },
+                { "id": "odd/reasoning-shape", "reasoning": "yes" },
+            ]
+        });
+        let models = parse_models_response("openrouter", &body).expect("models");
+        assert_eq!(
+            models[0].efforts,
+            vec!["xhigh".to_owned(), "high".to_owned()]
+        );
+        assert!(models[1].efforts.is_empty());
+        assert!(models[2].efforts.is_empty());
+        assert!(models[3].efforts.is_empty());
+    }
+
+    #[test]
+    fn cached_model_efforts_requires_a_known_model_with_values() {
+        let home = temp_home();
+        write_cache_entry(
+            home.path(),
+            "openrouter",
+            &[
+                ProviderModel {
+                    value: "deepseek/deepseek-v4-flash".to_owned(),
+                    efforts: vec!["xhigh".to_owned(), "high".to_owned()],
+                    ..Default::default()
+                },
+                ProviderModel {
+                    value: "meta-llama/llama-3.1-8b-instruct".to_owned(),
+                    ..Default::default()
+                },
+            ],
+        )
+        .expect("write cache");
+        assert_eq!(
+            cached_model_efforts(home.path(), "openrouter", "deepseek/deepseek-v4-flash"),
+            Some(vec!["xhigh".to_owned(), "high".to_owned()])
+        );
+        assert_eq!(
+            cached_model_efforts(
+                home.path(),
+                "openrouter",
+                "meta-llama/llama-3.1-8b-instruct"
+            ),
+            None
+        );
+        assert_eq!(
+            cached_model_efforts(home.path(), "openrouter", "unknown/model"),
+            None
+        );
+        assert_eq!(
+            cached_model_efforts(home.path(), "moonshotai", "deepseek/deepseek-v4-flash"),
+            None
+        );
+    }
+
+    #[test]
+    fn previous_cache_version_reads_as_empty() {
+        let home = temp_home();
+        let path = cache_path(home.path());
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(
+            &path,
+            br#"{
+                "version": 1,
+                "providers": {
+                    "openrouter": {
+                        "fetched_at": 100,
+                        "models": [{ "value": "openai/gpt-5.5" }]
+                    }
+                }
+            }"#,
+        )
+        .expect("write");
+        assert_eq!(cached_models(home.path(), "openrouter"), None);
     }
 
     #[test]
@@ -455,6 +577,7 @@ mod tests {
             vec![ProviderModel {
                 value: "kimi-k3".to_owned(),
                 display_name: None,
+                ..Default::default()
             }]
         );
     }
@@ -471,6 +594,7 @@ mod tests {
         let models = vec![ProviderModel {
             value: "deepseek/deepseek-v4-flash".to_owned(),
             display_name: Some("DeepSeek V4 Flash".to_owned()),
+            ..Default::default()
         }];
         write_cache_entry(home.path(), "openrouter", &models).expect("write cache");
         assert_eq!(cached_models(home.path(), "openrouter"), Some(models));
@@ -483,10 +607,12 @@ mod tests {
         let openrouter = vec![ProviderModel {
             value: "openai/gpt-5.5".to_owned(),
             display_name: None,
+            ..Default::default()
         }];
         let moonshot = vec![ProviderModel {
             value: "kimi-k3".to_owned(),
             display_name: None,
+            ..Default::default()
         }];
         write_cache_entry(home.path(), "openrouter", &openrouter).expect("write openrouter");
         write_cache_entry(home.path(), "moonshotai", &moonshot).expect("write moonshot");
@@ -520,7 +646,7 @@ mod tests {
         std::fs::write(
             &path,
             br#"{
-                "version": 1,
+                "version": 2,
                 "providers": {
                     "openrouter": {
                         "fetched_at": 100,
@@ -536,6 +662,7 @@ mod tests {
             Some(vec![ProviderModel {
                 value: "openai/gpt-5.5".to_owned(),
                 display_name: None,
+                ..Default::default()
             }])
         );
         assert_eq!(cached_models(home.path(), "moonshotai"), None);
@@ -549,7 +676,7 @@ mod tests {
         std::fs::write(
             &path,
             br#"{
-                "version": 1,
+                "version": 2,
                 "providers": {
                     "openrouter": {
                         "fetched_at": 100,
@@ -563,6 +690,7 @@ mod tests {
         let zai_models = vec![ProviderModel {
             value: "glm-5.2".to_owned(),
             display_name: None,
+            ..Default::default()
         }];
         write_cache_entry(home.path(), "zai", &zai_models).expect("write zai");
         assert_eq!(
@@ -570,6 +698,7 @@ mod tests {
             Some(vec![ProviderModel {
                 value: "openai/gpt-5.5".to_owned(),
                 display_name: None,
+                ..Default::default()
             }])
         );
         assert_eq!(cached_models(home.path(), "zai"), Some(zai_models));
@@ -581,6 +710,7 @@ mod tests {
         let models = vec![ProviderModel {
             value: "openai/gpt-5.5".to_owned(),
             display_name: None,
+            ..Default::default()
         }];
         write_cache_entry(home.path(), "openrouter", &models).expect("write cache");
         record_fetch_failure(home.path(), "openrouter", "boom").expect("record failure");
@@ -602,6 +732,7 @@ mod tests {
         let models = vec![ProviderModel {
             value: "openai/gpt-5.5".to_owned(),
             display_name: None,
+            ..Default::default()
         }];
         write_cache_entry(home.path(), "openrouter", &models).expect("write cache");
         assert_eq!(recent_failure_reason(home.path(), "openrouter"), None);
@@ -626,10 +757,12 @@ mod tests {
         let openrouter = vec![ProviderModel {
             value: "openai/gpt-5.5".to_owned(),
             display_name: None,
+            ..Default::default()
         }];
         let moonshot = vec![ProviderModel {
             value: "kimi-k3".to_owned(),
             display_name: None,
+            ..Default::default()
         }];
         write_cache_entry(home.path(), "openrouter", &openrouter).expect("write openrouter");
         record_fetch_failure(home.path(), "openrouter", "boom").expect("record failure");
@@ -653,6 +786,7 @@ mod tests {
             &[ProviderModel {
                 value: "kimi-k3".to_owned(),
                 display_name: None,
+                ..Default::default()
             }],
         )
         .expect("write moonshot");

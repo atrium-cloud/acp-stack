@@ -200,6 +200,15 @@ impl AgentSupervisor {
         // Must run after the model: adapters advertise effort levels for the currently
         // selected model, so an effort option can appear only once the model is set.
         if let Some(effort) = agent.effort.as_deref()
+            && effort_value_is_explicit_without_discovery(agent)
+        {
+            // The pin lives in the harness's on-disk config; the adapter advertises no
+            // effort option for this model, so a set would only land in `ignored`.
+            tracing::debug!(
+                effort,
+                "effort provisioned on disk; skipping session/set_config_option"
+            );
+        } else if let Some(effort) = agent.effort.as_deref()
             && let Some(refreshed) = provision_session_option(
                 &bridge,
                 &response.session_id,

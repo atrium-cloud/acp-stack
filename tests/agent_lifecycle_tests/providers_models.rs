@@ -372,7 +372,10 @@ async fn models_serves_provider_catalog_for_codex_openrouter() {
     let base = spawn_provider_models_server(json!({
         "data": [
             { "id": "openai/gpt-5.5", "name": "GPT-5.5" },
-            { "id": "deepseek/deepseek-v4-flash" },
+            {
+                "id": "deepseek/deepseek-v4-flash",
+                "reasoning": { "mandatory": false, "supported_efforts": ["max", "xhigh", "high"], "default_effort": "high" }
+            },
         ]
     }));
     let _guards = catalog_fixture_env(&home, &base, fixture_path);
@@ -397,29 +400,29 @@ async fn models_serves_provider_catalog_for_codex_openrouter() {
         "unexpected catalog_error: {body}"
     );
     let models = body["data"]["models"].as_array().expect("models array");
+    let gpt = models
+        .iter()
+        .find(|model| model["value"].as_str() == Some("openai/gpt-5.5"))
+        .expect("catalog model with display name");
+    assert_eq!(gpt["display_name"], "GPT-5.5");
     assert!(
-        models
-            .iter()
-            .any(|model| model["value"].as_str() == Some("openai/gpt-5.5")
-                && model["display_name"].as_str() == Some("GPT-5.5")),
-        "catalog model with display name missing: {models:?}",
+        gpt.get("efforts").is_none(),
+        "a model without reasoning metadata carries no efforts: {gpt}"
     );
-    assert!(
-        models
-            .iter()
-            .any(|model| model["value"].as_str() == Some("deepseek/deepseek-v4-flash")),
-        "catalog model missing: {models:?}",
-    );
+    let deepseek = models
+        .iter()
+        .find(|model| model["value"].as_str() == Some("deepseek/deepseek-v4-flash"))
+        .expect("catalog model");
+    // Codex has no `max` level, so the catalog list is trimmed to what it parses.
+    assert_eq!(deepseek["efforts"], json!(["xhigh", "high"]));
     let modes = body["data"]["modes"].as_array().expect("modes array");
     assert!(
         modes.iter().any(|mode| mode.as_str() == Some("default")),
         "fixture mode values missing: {modes:?}",
     );
-    let efforts = body["data"]["efforts"].as_array().expect("efforts array");
-    assert!(
-        efforts.iter().any(|effort| effort.as_str() == Some("high")),
-        "fixture effort values missing on the catalog path: {efforts:?}",
-    );
+    // Codex with OpenRouter pins the effort on disk, so the configured model's
+    // catalog values replace the fixture's ACP advertisement.
+    assert_eq!(body["data"]["efforts"], json!(["xhigh", "high"]));
 }
 
 #[tokio::test]
@@ -571,7 +574,7 @@ async fn models_serves_stale_cache_without_catalog_error() {
     std::fs::write(
         cache_dir.join("provider-models.json"),
         json!({
-            "version": 1,
+            "version": 2,
             "providers": {
                 "openrouter": {
                     "fetched_at": 1,

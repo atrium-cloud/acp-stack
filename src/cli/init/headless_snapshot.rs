@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Result, StackError};
 
-pub(super) fn headless_config_candidate_paths(agent_id: &str, home: &Path) -> Vec<PathBuf> {
+pub(in crate::cli) fn headless_config_candidate_paths(agent_id: &str, home: &Path) -> Vec<PathBuf> {
     match agent_id {
         "goose" => vec![home.join(".config").join("goose").join("config.yaml")],
         "opencode" => vec![home.join(".config").join("opencode").join("opencode.json")],
@@ -31,7 +31,7 @@ pub(super) fn headless_config_candidate_paths(agent_id: &str, home: &Path) -> Ve
 
 /// Per-agent directories holding provisioner side files whose names are
 /// operator-supplied, so they cannot be enumerated up front.
-pub(super) fn headless_config_side_dirs(agent_id: &str, home: &Path) -> Vec<PathBuf> {
+pub(in crate::cli) fn headless_config_side_dirs(agent_id: &str, home: &Path) -> Vec<PathBuf> {
     match agent_id {
         "goose" => vec![home.join(".config").join("goose").join("custom_providers")],
         _ => Vec::new(),
@@ -40,7 +40,7 @@ pub(super) fn headless_config_side_dirs(agent_id: &str, home: &Path) -> Vec<Path
 
 /// Capture existing file names per directory before provisioning, so anything
 /// new matching a known side-effect pattern can be removed on rejection.
-pub(super) fn capture_dir_listings_for(
+pub(in crate::cli) fn capture_dir_listings_for(
     dirs: &[PathBuf],
 ) -> Result<Vec<(PathBuf, std::collections::HashSet<std::ffi::OsString>)>> {
     use std::collections::HashSet;
@@ -69,7 +69,7 @@ pub(super) fn capture_dir_listings_for(
     Ok(listings)
 }
 
-pub(super) fn remove_new_files_in_dirs(
+pub(in crate::cli) fn remove_new_files_in_dirs(
     listings: Vec<(PathBuf, std::collections::HashSet<std::ffi::OsString>)>,
 ) {
     for (dir, prior_names) in listings {
@@ -119,7 +119,9 @@ fn is_known_provisioner_side_artifact(dir: &Path, name: &std::ffi::OsStr) -> boo
     false
 }
 
-pub(super) fn capture_path_snapshots(paths: &[PathBuf]) -> Result<Vec<(PathBuf, Option<Vec<u8>>)>> {
+pub(in crate::cli) fn capture_path_snapshots(
+    paths: &[PathBuf],
+) -> Result<Vec<(PathBuf, Option<Vec<u8>>)>> {
     let mut snapshots = Vec::with_capacity(paths.len());
     for path in paths {
         let prior = if path.exists() {
@@ -139,7 +141,7 @@ pub(super) fn capture_path_snapshots(paths: &[PathBuf]) -> Result<Vec<(PathBuf, 
 
 /// Best-effort restore of prior contents; a restore failure is logged rather
 /// than masking the real discovery/validation error.
-pub(super) fn restore_headless_snapshots(snapshots: Vec<(PathBuf, Option<Vec<u8>>)>) {
+pub(in crate::cli) fn restore_headless_snapshots(snapshots: Vec<(PathBuf, Option<Vec<u8>>)>) {
     for (path, prior) in snapshots {
         match prior {
             Some(bytes) => {

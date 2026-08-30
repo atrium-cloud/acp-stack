@@ -2686,6 +2686,13 @@
               "string",
               "null"
             ]
+          },
+          "efforts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Reasoning-effort values the provider catalog reports for this model.\nPresent only on the `provider_catalog` source, and only for models\nthe provider marks as effort-selectable."
           }
         },
         "required": [
@@ -5049,7 +5056,7 @@
             "items": {
               "type": "string"
             },
-            "description": "ACP-advertised reasoning-effort values (the `thought_level`\nsession config option). Empty when the agent does not expose an\neffort option (or, on the catalog fallback path, when ACP\ndiscovery failed)."
+            "description": "Reasoning-effort values for the configured model: the ACP-advertised\n`thought_level` session config option, or the provider catalog's list\nwhen the harness takes the effort from on-disk config. Empty when\nneither source reports any (or, on the catalog fallback path, when ACP\ndiscovery failed)."
           },
           "catalog_error": {
             "type": [

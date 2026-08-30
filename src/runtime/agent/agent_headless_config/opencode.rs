@@ -52,7 +52,7 @@ pub(super) fn provision_opencode_config(
     let providers = ensure_object_field(&mut root, "provider", &path)?;
     for provider in &active_providers {
         let provider_key =
-            write_opencode_provider_config(config, providers, provider, &path, endpoint)?;
+            write_opencode_provider_config(config, home, providers, provider, &path, endpoint)?;
         enabled_providers.insert(provider_key);
     }
     if enabled_providers.is_empty() {
@@ -122,6 +122,7 @@ fn opencode_provider_config_key<'a>(
 
 fn write_opencode_provider_config(
     config: &Config,
+    home: &Path,
     providers: &mut Map<String, serde_json::Value>,
     provider: &AgentProviderConfig,
     path: &Path,
@@ -177,7 +178,8 @@ fn write_opencode_provider_config(
     let base_url_override =
         super::rerouted_mapped_base_url_for(endpoint, &config.agent.id, &provider.id, path)?;
     let provider_config = ensure_object_field(providers, agent_provider_id, path)?;
-    insert_if_missing(provider_config, "models", json!({}), path)?;
+    let models = ensure_object_field(provider_config, "models", path)?;
+    write_opencode_effort_variants(home, provider, agent_provider_id, models);
     let options = ensure_object_field(provider_config, "options", path)?;
     options.insert("apiKey".to_owned(), json!(format!("{{env:{api_key_ref}}}")));
     // acps owns `options.baseURL` for a mapped provider: removing it on a
@@ -191,6 +193,51 @@ fn write_opencode_provider_config(
         }
     }
     Ok(agent_provider_id.to_owned())
+}
+
+/// OpenCode advertises its `effort` option only for a model with `variants`, and nothing populates
+/// them for a mapped provider's models; the provider catalog's effort list fills them in. acps owns
+/// the mapped provider block, so stale variants under other models are dropped on every write.
+fn write_opencode_effort_variants(
+    home: &Path,
+    provider: &AgentProviderConfig,
+    agent_provider_id: &str,
+    models: &mut Map<String, serde_json::Value>,
+) {
+    for entry in models.values_mut() {
+        if let Some(entry) = entry.as_object_mut() {
+            entry.remove("variants");
+        }
+    }
+    let Some(model) = provider
+        .model
+        .as_deref()
+        .filter(|model| !model.trim().is_empty())
+    else {
+        return;
+    };
+    let bare_model = model
+        .strip_prefix(&format!("{agent_provider_id}/"))
+        .unwrap_or(model);
+    let Some(efforts) = crate::runtime::agent::provider_model_catalog::cached_model_efforts(
+        home,
+        &provider.id,
+        bare_model,
+    ) else {
+        return;
+    };
+    // OpenCode's config schema keys variants by id; the body is the provider-options object it
+    // ships for its own OpenRouter variants (`reasoning.effort`), which the OpenRouter SDK sends.
+    let variants = efforts
+        .iter()
+        .map(|effort| (effort.clone(), json!({ "reasoning": { "effort": effort } })))
+        .collect::<Map<String, serde_json::Value>>();
+    let entry = models
+        .entry(bare_model.to_owned())
+        .or_insert_with(|| json!({}));
+    if let Some(entry) = entry.as_object_mut() {
+        entry.insert("variants".to_owned(), serde_json::Value::Object(variants));
+    }
 }
 
 #[cfg(test)]
@@ -239,6 +286,98 @@ mod tests {
             600000
         );
         assert!(value["provider"]["opencode-go"]["options"]["apiKey"].is_null());
+    }
+
+    fn write_openrouter_catalog(home: &Path, models: Value) {
+        let path = crate::runtime::agent::provider_model_catalog::cache_path(home);
+        std::fs::create_dir_all(path.parent().expect("cache parent")).expect("cache dir");
+        let fetched_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        std::fs::write(
+            &path,
+            json!({
+                "version": 2,
+                "providers": {
+                    "openrouter": { "fetched_at": fetched_at, "models": models }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write catalog cache");
+    }
+
+    fn opencode_openrouter_config(model: &str) -> Config {
+        let mut config = config_with_agent("opencode", &["OPENCODE_API_KEY", "OPENROUTER_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "openrouter".to_owned(),
+            model: Some(model.to_owned()),
+            api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
+            custom: None,
+        });
+        config
+    }
+
+    #[test]
+    fn opencode_openrouter_model_gets_effort_variants_from_the_catalog() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir
+            .path()
+            .join(".config")
+            .join("opencode")
+            .join("opencode.json");
+        std::fs::create_dir_all(path.parent().expect("path has parent")).expect("create parent");
+        // A stale entry from an earlier model selection must not survive the rewrite.
+        std::fs::write(
+            &path,
+            r#"{"provider":{"openrouter":{"models":{"old/model":{"variants":{"low":{"reasoning":{"effort":"low"}}}}}}}}"#,
+        )
+        .expect("write existing config");
+        write_openrouter_catalog(
+            tempdir.path(),
+            json!([
+                { "value": "deepseek/deepseek-v4-flash", "efforts": ["xhigh", "high"] },
+                { "value": "meta-llama/llama-3.1-8b-instruct" }
+            ]),
+        );
+        let config = opencode_openrouter_config("openrouter/deepseek/deepseek-v4-flash");
+
+        provision_agent_headless_config(&config, tempdir.path()).expect("provision");
+
+        let value: Value = serde_json::from_str(
+            &std::fs::read_to_string(&path).expect("opencode config should be readable"),
+        )
+        .expect("opencode config json parses");
+        assert_eq!(value["model"], "openrouter/deepseek/deepseek-v4-flash");
+        assert_eq!(
+            value["provider"]["openrouter"]["models"]["deepseek/deepseek-v4-flash"]["variants"],
+            json!({
+                "xhigh": { "reasoning": { "effort": "xhigh" } },
+                "high": { "reasoning": { "effort": "high" } }
+            })
+        );
+        assert!(
+            value["provider"]["openrouter"]["models"]["old/model"]
+                .get("variants")
+                .is_none(),
+            "{value}"
+        );
+
+        // A model without catalog efforts writes no variants.
+        let config = opencode_openrouter_config("openrouter/meta-llama/llama-3.1-8b-instruct");
+        provision_agent_headless_config(&config, tempdir.path()).expect("re-provision");
+        let value: Value = serde_json::from_str(
+            &std::fs::read_to_string(&path).expect("opencode config should be readable"),
+        )
+        .expect("opencode config json parses");
+        let models = value["provider"]["openrouter"]["models"]
+            .as_object()
+            .expect("models object");
+        assert!(
+            models.values().all(|entry| entry.get("variants").is_none()),
+            "{value}"
+        );
     }
 
     #[test]

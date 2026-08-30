@@ -591,7 +591,7 @@ mod tests {
             .map(|value| json!({ "value": value }))
             .collect();
         let body = json!({
-            "version": 1,
+            "version": 2,
             "providers": { provider_id: { "fetched_at": 0, "models": entries } }
         });
         std::fs::write(&path, body.to_string()).expect("write cache");

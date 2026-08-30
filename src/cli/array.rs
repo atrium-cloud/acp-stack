@@ -12,6 +12,9 @@ use crate::error::{Result, StackError};
 use crate::fs_util::{atomic_write_owner_only, home_dir};
 use crate::runtime::agent::acp_bridge::AgentSessionConfigCategory;
 use crate::runtime::agent::agent_headless_config::provision_agent_headless_config_transition;
+use crate::runtime::agent::model_discovery::{
+    effort_value_is_explicit_without_discovery, validate_catalog_effort_value,
+};
 use crate::runtime::agent::provider_keys::{
     agent_provider_id_for_provider_id, env_refs_for_agent_id,
 };
@@ -28,6 +31,10 @@ use super::agent::{
 use super::core::{
     CliMethod, OutputFormat, SessionAccess, daemon_base_url, daemon_request, encode_path_segment,
     local_daemon_request, print_json, resolve_admin_key, resolve_session_access,
+};
+use super::init::headless_snapshot::{
+    capture_dir_listings_for, capture_path_snapshots, headless_config_candidate_paths,
+    headless_config_side_dirs, remove_new_files_in_dirs, restore_headless_snapshots,
 };
 
 const ARRAY_STATUS_DAEMON_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -617,12 +624,8 @@ fn run_array_set(args: ArraySetArgs, output: OutputFormat) -> Result<()> {
                 ),
             });
         }
-        validate_agent_session_config_value(
-            &home,
-            &target_config,
-            AgentSessionConfigCategory::Effort,
-            effort,
-        )?;
+        // Validated below, after the model write and provisioning: adapters
+        // advertise effort levels for the model the harness reads from disk.
         target_config.agent.effort = Some(effort.to_owned());
     }
 
@@ -667,8 +670,49 @@ fn run_array_set(args: ArraySetArgs, output: OutputFormat) -> Result<()> {
         &home,
         &target_config,
     );
-    let provisioned =
-        provision_agent_headless_config_transition(&previous_target_config, &target_config, &home)?;
+    // An effort rejection must leave the headless files as they were, so the
+    // snapshot is taken before the provisioning the validation depends on.
+    let effort_rollback = args
+        .effort
+        .as_deref()
+        .map(|_| {
+            let candidate_paths = headless_config_candidate_paths(&target_config.agent.id, &home);
+            let snapshots = capture_path_snapshots(&candidate_paths)?;
+            let mut dir_scan = candidate_paths
+                .iter()
+                .filter_map(|path| path.parent().map(Path::to_path_buf))
+                .collect::<Vec<_>>();
+            dir_scan.extend(headless_config_side_dirs(&target_config.agent.id, &home));
+            Ok::<_, StackError>((snapshots, capture_dir_listings_for(&dir_scan)?))
+        })
+        .transpose()?;
+    let provisioned_and_validated =
+        provision_agent_headless_config_transition(&previous_target_config, &target_config, &home)
+            .and_then(|provisioned| {
+                if let Some(effort) = args.effort.as_deref() {
+                    if effort_value_is_explicit_without_discovery(&target_config.agent) {
+                        validate_catalog_effort_value(&home, &target_config, effort)?;
+                    } else {
+                        validate_agent_session_config_value(
+                            &home,
+                            &target_config,
+                            AgentSessionConfigCategory::Effort,
+                            effort,
+                        )?;
+                    }
+                }
+                Ok(provisioned)
+            });
+    let provisioned = match provisioned_and_validated {
+        Ok(provisioned) => provisioned,
+        Err(error) => {
+            if let Some((snapshots, dir_listings)) = effort_rollback {
+                restore_headless_snapshots(snapshots);
+                remove_new_files_in_dirs(dir_listings);
+            }
+            return Err(error);
+        }
+    };
     atomic_write_owner_only(&config_path, canonical.as_bytes())?;
     if output.is_json() {
         let target = &validated.array.targets[target_index];

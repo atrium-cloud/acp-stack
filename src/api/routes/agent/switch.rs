@@ -205,6 +205,7 @@ pub(crate) async fn agent_switch_handler(
             .map(|value| ModelJson {
                 value,
                 display_name: None,
+                efforts: Vec::new(),
             })
             .collect()
     } else {

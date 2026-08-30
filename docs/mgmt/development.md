@@ -20,6 +20,8 @@ cargo clippy --all-targets
 cargo clippy --all-targets --features dev-tools,test-fixtures
 ```
 
+Prefer `--all-features` for routine local checks. The pre-commit hook and CI use the same feature set, so incremental builds are reused instead of rebuilt per flag combination.
+
 For code changes, use the repository's `cargo` checks and run the pre-commit hook before commit. For doc-only changes, run the link/leak checks below.
 
 ```sh
@@ -28,6 +30,12 @@ rg -n "\\[[^]]+\\]\\(([^)#]+)\\)" README.md docs
 ```
 
 The first check flags maintainer/internal language that has leaked into operator docs or stable specs. Review any hit there. Hits inside `docs/mgmt/` are expected.
+
+## Pre-Commit Hook
+
+The local pre-commit hook runs the format check, API schema regeneration, clippy, and lib unit tests. It never installs or runs the `acps` binary on the maintainer's machine.
+
+Integration suites and release gates that drive the `acps` binary run in the `release-gate-tests` workflow on GitHub runners, on every push to `main` and every pull request. Set `ACPS_PRECOMMIT_FULL=1` to opt into a full local run.
 
 ## Test Scripts
 

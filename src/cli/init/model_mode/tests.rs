@@ -270,6 +270,7 @@ fn explicit_effort_is_written_and_settled_at_the_write() {
     let action = prompt::with_hosted_driver(driver.clone(), || {
         configure_effort_for_init(
             &args,
+            Path::new("home"),
             &mut config,
             Path::new("acps-config.toml"),
             &response_with_efforts(&["low", "medium", "high"]),
@@ -296,6 +297,7 @@ fn explicit_effort_that_is_not_advertised_lists_the_advertised_efforts() {
 
     let error = configure_effort_for_init(
         &args,
+        Path::new("home"),
         &mut config,
         Path::new("acps-config.toml"),
         &response_with_efforts(&["low", "medium", "high"]),
@@ -319,6 +321,7 @@ fn an_effort_picker_with_nothing_advertised_skips_without_writing() {
 
     let action = configure_effort_for_init(
         &args,
+        Path::new("home"),
         &mut config,
         Path::new("acps-config.toml"),
         &response_with(&["openai/gpt-5.5"], &["build"]),
@@ -545,6 +548,9 @@ fn skipped_generic_options_keep_the_advertised_defaults_unoverridden() {
 
 #[test]
 fn deferred_mapped_credential_writes_explicit_model_without_discovery() {
+    // Holds the discovery-fixture env lock so a sibling test's fixture path is never observed.
+    #[cfg(feature = "test-fixtures")]
+    let _env = crate::cli::init::test_env::TestEnvGuard::set(&[]);
     let home = tempfile::tempdir().expect("tempdir");
     let secrets = crate::secrets::new_shared_secret_store(
         crate::secrets::SecretStore::open_or_create(home.path()).expect("secret store"),
@@ -599,6 +605,169 @@ fn deferred_mapped_credential_writes_explicit_model_without_discovery() {
             .and_then(|provider| provider.model.as_deref()),
         Some("some/model"),
         "the explicit model lands in the provider block unvalidated"
+    );
+}
+
+/// Picks `openrouter/model-b` at the model prompt and, at that moment, rewrites the discovery
+/// fixture so only the post-model advertisement carries efforts; then takes the first effort.
+struct ModelDependentEffortDriver {
+    fixture_path: PathBuf,
+    offered: std::sync::Mutex<Vec<(prompt::HostedPromptKind, Vec<String>)>>,
+}
+
+fn write_discovery_fixture(path: &Path, efforts: &[&str]) {
+    let mut options = vec![serde_json::json!({
+        "id": "model",
+        "name": "Model",
+        "category": "model",
+        "type": "select",
+        "currentValue": "openrouter/model-a",
+        "options": [
+            { "value": "openrouter/model-a", "name": "openrouter/model-a" },
+            { "value": "openrouter/model-b", "name": "openrouter/model-b" }
+        ]
+    })];
+    if !efforts.is_empty() {
+        options.push(serde_json::json!({
+            "id": "effort",
+            "name": "Effort",
+            "category": "thought_level",
+            "type": "select",
+            "currentValue": efforts[0],
+            "options": efforts
+                .iter()
+                .map(|value| serde_json::json!({ "value": value, "name": value }))
+                .collect::<Vec<_>>()
+        }));
+    }
+    std::fs::write(path, serde_json::Value::Array(options).to_string()).expect("write fixture");
+}
+
+impl prompt::HostedPromptDriver for ModelDependentEffortDriver {
+    fn select(
+        &self,
+        request: prompt::HostedPromptRequest,
+    ) -> Result<prompt::HostedPromptOutcome<Option<usize>>> {
+        let values: Vec<String> = request
+            .items
+            .iter()
+            .map(|item| item.value.clone())
+            .collect();
+        let choice = match request.kind {
+            prompt::HostedPromptKind::Model => {
+                write_discovery_fixture(&self.fixture_path, &["high"]);
+                values
+                    .iter()
+                    .position(|value| value == "openrouter/model-b")
+            }
+            prompt::HostedPromptKind::Effort => Some(0),
+            _ => None,
+        };
+        self.offered
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push((request.kind, values));
+        Ok(prompt::HostedPromptOutcome::Handled(choice))
+    }
+
+    fn confirm(
+        &self,
+        _request: prompt::HostedPromptRequest,
+    ) -> Result<prompt::HostedPromptOutcome<bool>> {
+        Ok(prompt::HostedPromptOutcome::Unhandled)
+    }
+
+    fn text(
+        &self,
+        _request: prompt::HostedPromptRequest,
+    ) -> Result<prompt::HostedPromptOutcome<Option<String>>> {
+        Ok(prompt::HostedPromptOutcome::Unhandled)
+    }
+
+    fn password(
+        &self,
+        _request: prompt::HostedPromptRequest,
+    ) -> Result<prompt::HostedPromptOutcome<Option<String>>> {
+        Ok(prompt::HostedPromptOutcome::Unhandled)
+    }
+
+    fn progress(&self, _message: String) {}
+
+    fn result(&self, _payload: serde_json::Value) {}
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn effort_prompt_reads_the_advertisement_of_the_model_just_picked() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let fixture_path = home.path().join("config-options.json");
+    write_discovery_fixture(&fixture_path, &[]);
+    let _env = crate::cli::init::test_env::TestEnvGuard::set(&[
+        (FIXTURE_CONFIG_OPTIONS_ENV, fixture_path.as_path()),
+        (
+            crate::dev_gates::PROVIDER_MODELS_BASE_ENV,
+            Path::new("http://127.0.0.1:1"),
+        ),
+    ]);
+    let mut store = crate::secrets::SecretStore::open_or_create(home.path()).expect("secret store");
+    store
+        .set_many([("OPENROUTER_API_KEY", "test-openrouter-key")])
+        .expect("seed key");
+    let secrets = crate::secrets::new_shared_secret_store(store);
+    let registry = RegistryCatalog::load_embedded().expect("registry");
+    let mut config = crate::config::load_config_from_str(include_str!(
+        "../../../../tests/fixtures/valid-opencode-stack.toml"
+    ))
+    .expect("fixture config");
+    config.agent.env = vec!["OPENROUTER_API_KEY".to_owned()];
+    config.agent.provider = Some(crate::config::AgentProviderConfig {
+        id: "openrouter".to_owned(),
+        model: None,
+        api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
+        custom: None,
+    });
+    let args = parse_init_args(&[]);
+    let driver = std::sync::Arc::new(ModelDependentEffortDriver {
+        fixture_path: fixture_path.clone(),
+        offered: std::sync::Mutex::new(Vec::new()),
+    });
+
+    let outcome = prompt::with_hosted_driver(driver.clone(), || {
+        configure_model_and_mode_for_init(
+            &args,
+            home.path(),
+            &registry,
+            &mut config,
+            Path::new("acps-config.toml"),
+            &secrets,
+        )
+    })
+    .expect("interactive discovery succeeds");
+
+    assert_eq!(outcome.model_action, ModelModeAction::Set);
+    assert_eq!(
+        config
+            .agent
+            .provider
+            .as_ref()
+            .and_then(|provider| provider.model.as_deref()),
+        Some("openrouter/model-b")
+    );
+    assert_eq!(
+        outcome.effort_action,
+        ModelModeAction::Set,
+        "the effort lane must read the post-model advertisement"
+    );
+    assert_eq!(config.agent.effort.as_deref(), Some("high"));
+    let offered = driver
+        .offered
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(
+        offered.iter().any(|(kind, values)| {
+            matches!(kind, prompt::HostedPromptKind::Effort) && values.contains(&"high".to_owned())
+        }),
+        "effort prompt was not offered the refreshed values: {offered:?}"
     );
 }
 

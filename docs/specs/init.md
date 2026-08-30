@@ -141,13 +141,13 @@ The operator-facing sequence, in order:
 13. Provider, model, mode, effort, and session config options.
     - Supported registry agents:
         - Select or validate provider and required secret refs. A ref is satisfied by the flat secret store or by a structured catalog credential covering it (registry providers via their canonical mapping, custom providers via the configured `api_key_ref`); the provider picker's readiness labels and the resume-time idempotence check use the same rule.
-        - Discover ACP-advertised model, mode, and reasoning-effort options with one provisional session shared by all lanes. Effort values come from the agent's `thought_level` session config option.
+        - Discover ACP-advertised model, mode, and reasoning-effort options from a provisional session. When the model lane changes the model, the harness config is re-provisioned and a second provisional session serves the effort and session-config-option lanes, since adapters advertise those per model. Effort values come from the agent's `thought_level` session config option; Codex with OpenRouter takes them from the provider catalog instead.
         - Interactive runs also prompt the select and boolean session config options the typed lanes do not own. An explicit answer persists under `[agent.config_options]`; a skip keeps the agent's advertised current value and writes no override.
         - The mode and effort lanes run only for agents the registry marks as supporting them; `--mode` or `--effort` against any other registry agent is rejected before discovery, as `--model` is.
         - Provider-backed agents need a provider (passed this run or already in config) before any lane runs, since the harness cannot be launched to advertise anything without one.
         - Interactive runs offer mode and effort selectors alongside the model selector.
         - A non-interactive run without `--mode`/`--effort` never enters that lane: it spawns nothing, prints nothing, and writes no value. The exception is an agent whose registry entry declares `default_mode` (kimi: `yolo`): the mode lane runs, and the default lands when the agent advertises it.
-        - Explicit `--mode` and `--effort` are validated against the advertised values, and a rejection lists them.
+        - Explicit `--mode` and `--effort` are validated against the advertised values, and a rejection lists them. Codex with OpenRouter validates `--effort` against the provider catalog's reasoning-effort values for the configured model and pins the value in `~/.codex/config.toml`.
         - When mode and/or effort are the only active lanes and neither flag was passed, a provisional session that cannot be established is reported and skipped rather than failing init; an explicit `--mode`/`--effort` still fails loudly.
         - Discovery also requires a resolvable provider credential:
             - When hosted init has deferred the provider credential, discovery skips with a progress note; explicit `--model`, `--mode`, and `--effort` values are written without advertised-value validation.

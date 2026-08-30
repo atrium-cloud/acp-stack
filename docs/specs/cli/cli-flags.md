@@ -94,7 +94,7 @@ acps init \
 #### Provider, model, mode, effort
 
 - `--provider <provider-id>`, `--api-key-ref <ref>`, `--model <model-id>`: select provider, credential ref, and model.
-- `--mode <mode-id>`, `--effort <effort-id>`: set a session mode or reasoning effort non-interactively. Both are validated against the agent's ACP-advertised values.
+- `--mode <mode-id>`, `--effort <effort-id>`: set a session mode or reasoning effort non-interactively. Both are validated against the agent's ACP-advertised values. Codex with OpenRouter validates `--effort` against the provider catalog's reasoning-effort values for the configured model, since the adapter advertises none for OpenRouter models.
 - The mode lane applies only to agents that support session modes. The effort lane applies only to agents that advertise a reasoning-effort (`thought_level`) config option.
 - A non-interactive run without `--mode`/`--effort` writes no mode or effort.
 - `--custom-provider --provider <id> --provider-name <name> --base-url <url> --api-key-ref <ref> --model <model-id>`: declare a custom provider.
@@ -472,7 +472,7 @@ acps agent set --effort <effort>
 
 ### Flags
 
-- `--model <model>`, `--mode <mode>`, `--effort <effort>`: mapped values, validated against the configured agent's ACP-advertised options.
+- `--model <model>`, `--mode <mode>`, `--effort <effort>`: mapped values, validated against the configured agent's ACP-advertised options. Codex with OpenRouter validates `--effort` against the provider catalog's reasoning-effort values for the configured model and writes the pin into `~/.codex/config.toml`.
 - `--custom-provider` with `--provider`, `--provider-name`, `--base-url`, `--api-key-ref`, `--model`: declare custom-provider metadata. Custom-provider model ids are accepted as supplied.
 
 ### Output
