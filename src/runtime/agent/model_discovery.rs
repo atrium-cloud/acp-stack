@@ -22,8 +22,9 @@ use crate::runtime::agent::acp_bridge::{
 };
 use crate::runtime::agent::agent_headless_config::{CODEX_OPENROUTER_PROVIDER_ID, HERMES_AGENT_ID};
 use crate::runtime::agent::provider_keys::{
-    CLAUDE_CODE_AGENT_ID, CODEX_AGENT_ID, is_claude_code_profiled_provider,
-    resolve_agent_environment, resolve_agent_environment_without_secrets,
+    CLAUDE_CODE_AGENT_ID, CODEX_AGENT_ID, GOOSE_AGENT_ID, is_claude_code_profiled_provider,
+    models_url_for_provider_id, resolve_agent_environment,
+    resolve_agent_environment_without_secrets,
 };
 use crate::runtime::agent::provider_model_catalog::cached_models;
 use crate::secrets::SecretStore;
@@ -72,13 +73,7 @@ pub fn catalog_effort_values(home: &Path, config: &Config) -> Result<Vec<String>
             ),
         });
     };
-    // Same precedence as session create: a root `agent.model` outranks the provider slot.
-    let Some(model) = agent
-        .model
-        .as_deref()
-        .or(provider.model.as_deref())
-        .filter(|model| !model.trim().is_empty())
-    else {
+    let Some(model) = configured_model_value(agent) else {
         return Err(StackError::InvalidParam {
             field: "effort",
             reason: format!(
@@ -146,6 +141,100 @@ pub fn model_value_is_explicit_without_discovery(agent: &AgentConfig) -> bool {
         // the gateway catalog, while the configured model is the bare id pinned
         // through config.yaml, so the advertised list cannot gate the choice.
         || agent.id == HERMES_AGENT_ID
+        // goose reads `GOOSE_MODEL` from its own config before it can answer
+        // `session/new`, so no provisional session can produce a list to gate
+        // the choice; the model comes from the provider catalog or verbatim.
+        || agent.id == GOOSE_AGENT_ID
+}
+
+/// Whether the configured model reaches the harness only through its on-disk config, making a
+/// `session/set_config_option` model set redundant at best. goose is the exception among the
+/// explicit-model harnesses: it also accepts a live model switch over ACP.
+pub fn model_applies_from_disk_only(agent: &AgentConfig) -> bool {
+    model_value_is_explicit_without_discovery(agent) && agent.id != GOOSE_AGENT_ID
+}
+
+/// goose resolves its model from its own config while starting a session, so a provisional
+/// discovery session cannot be spawned for it until a model is configured.
+pub fn session_new_requires_a_configured_model(agent: &AgentConfig) -> bool {
+    agent.id == GOOSE_AGENT_ID
+}
+
+/// Configured model with session-create precedence: a root `agent.model` outranks the provider slot.
+pub fn configured_model_value(agent: &AgentConfig) -> Option<&str> {
+    agent
+        .model
+        .as_deref()
+        .or_else(|| {
+            agent
+                .provider
+                .as_ref()
+                .and_then(|provider| provider.model.as_deref())
+        })
+        .filter(|model| !model.trim().is_empty())
+}
+
+/// True when a discovery spawn would reach an agent that cannot answer `session/new` yet. goose
+/// reads the model from its provisioned config, which carries the provider slot only, so a root
+/// `agent.model` does not unblock it.
+pub fn discovery_is_blocked_without_a_model(agent: &AgentConfig) -> bool {
+    session_new_requires_a_configured_model(agent)
+        && agent
+            .provider
+            .as_ref()
+            .and_then(|provider| provider.model.as_deref())
+            .is_none_or(|model| model.trim().is_empty())
+}
+
+fn missing_model_for_discovery_error(agent: &AgentConfig) -> StackError {
+    StackError::InvalidParam {
+        field: "model",
+        reason: format!(
+            "{} resolves its model while starting a session, so its modes and reasoning-effort values cannot be discovered before one is configured; select a model first (`--model <id>` on init, or `acps agent provider use <provider> --model <id>`)",
+            agent.name
+        ),
+    }
+}
+
+/// Model values the provider catalog reports, for agents whose model list cannot come from a
+/// provisional ACP session. Errors name the missing piece: no provider, a custom provider, a
+/// provider that publishes no listing endpoint, or no cached catalog.
+pub fn catalog_model_values(home: &Path, config: &Config) -> Result<Vec<String>> {
+    let agent = &config.agent;
+    let Some(provider) = agent.provider.as_ref() else {
+        return Err(StackError::InvalidParam {
+            field: "model",
+            reason: format!(
+                "{} takes its model list from the provider catalog and has no provider configured",
+                agent.name
+            ),
+        });
+    };
+    if provider.custom.is_some() {
+        return Err(StackError::InvalidParam {
+            field: "model",
+            reason: format!(
+                "custom provider `{}` publishes no model catalog; pass the model id explicitly",
+                provider.id
+            ),
+        });
+    }
+    if models_url_for_provider_id(&provider.id).is_none() {
+        return Err(StackError::InvalidParam {
+            field: "model",
+            reason: format!(
+                "provider `{}` publishes no model listing endpoint; pass the model id explicitly",
+                provider.id
+            ),
+        });
+    }
+    let Some(models) = cached_models(home, &provider.id) else {
+        return Err(StackError::InvalidParam {
+            field: "model",
+            reason: format!("no `{}` model catalog is available", provider.id),
+        });
+    };
+    Ok(models.into_iter().map(|model| model.value).collect())
 }
 
 /// Spawn the configured agent, open one provisional ACP session, and
@@ -192,6 +281,12 @@ pub async fn fetch_session_config_with_timeout(
             path,
             reason: format!("ACP session/new fixture is invalid: {source}"),
         });
+    }
+
+    // Fail before the spawn rather than after the harness rejects `session/new`
+    // for a reason only it can name.
+    if discovery_is_blocked_without_a_model(&config.agent) {
+        return Err(missing_model_for_discovery_error(&config.agent));
     }
 
     let env = resolve_agent_env(home, config)?;
@@ -507,6 +602,157 @@ mod tests {
         assert!(model_value_is_explicit_without_discovery(&agent(
             "hermes", None
         )));
+    }
+
+    fn goose_config(provider_model: Option<&str>) -> Config {
+        let mut config = crate::config::load_config_from_str(include_str!(
+            "../../../tests/fixtures/valid-opencode-stack.toml"
+        ))
+        .expect("fixture config");
+        config.agent.id = GOOSE_AGENT_ID.to_owned();
+        config.agent.name = "Goose".to_owned();
+        config.agent.command = "goose".to_owned();
+        config.agent.provider = Some(AgentProviderConfig {
+            id: "openrouter".to_owned(),
+            model: provider_model.map(str::to_owned),
+            api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
+            custom: None,
+        });
+        config
+    }
+
+    /// Writes the on-disk catalog cache the way a successful fetch would.
+    fn seed_provider_catalog(home: &Path, provider_id: &str, models: &[&str]) {
+        let path = crate::runtime::agent::provider_model_catalog::cache_path(home);
+        std::fs::create_dir_all(path.parent().expect("cache parent")).expect("create cache dir");
+        let fetched_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_secs();
+        let entries: Vec<serde_json::Value> = models
+            .iter()
+            .map(|value| serde_json::json!({ "value": value }))
+            .collect();
+        let body = serde_json::json!({
+            "version": 2,
+            "providers": { provider_id: { "fetched_at": fetched_at, "models": entries } }
+        });
+        std::fs::write(&path, body.to_string()).expect("write cache");
+    }
+
+    #[test]
+    fn goose_takes_its_model_verbatim_and_still_applies_it_over_acp() {
+        let goose = agent(GOOSE_AGENT_ID, mapped_provider("openrouter"));
+        assert!(model_value_is_explicit_without_discovery(&goose));
+        assert!(
+            !model_applies_from_disk_only(&goose),
+            "goose accepts a live model switch, so the ACP set must not be skipped"
+        );
+        assert!(model_applies_from_disk_only(&agent(
+            "codex",
+            mapped_provider("openrouter")
+        )));
+    }
+
+    #[test]
+    fn goose_discovery_is_blocked_until_a_provider_model_is_configured() {
+        assert!(session_new_requires_a_configured_model(&agent(
+            GOOSE_AGENT_ID,
+            mapped_provider("openrouter")
+        )));
+        assert!(!session_new_requires_a_configured_model(&agent(
+            "opencode",
+            mapped_provider("openrouter")
+        )));
+        assert!(discovery_is_blocked_without_a_model(
+            &goose_config(None).agent
+        ));
+        assert!(discovery_is_blocked_without_a_model(
+            &goose_config(Some("  ")).agent
+        ));
+        assert!(!discovery_is_blocked_without_a_model(
+            &goose_config(Some("openrouter/model-a")).agent
+        ));
+        assert!(!discovery_is_blocked_without_a_model(&agent(
+            "opencode",
+            mapped_provider("openrouter")
+        )));
+    }
+
+    #[test]
+    fn a_discovery_session_is_refused_before_the_model_less_agent_is_spawned() {
+        let home = tempfile::tempdir().expect("tempdir");
+
+        let error = fetch_session_config(home.path(), &goose_config(None))
+            .expect_err("a model-less goose must never be spawned for discovery");
+
+        assert!(
+            error
+                .to_string()
+                .contains("resolves its model while starting a session"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn catalog_model_values_come_from_the_cached_provider_catalog() {
+        let home = tempfile::tempdir().expect("tempdir");
+        seed_provider_catalog(
+            home.path(),
+            "openrouter",
+            &["openrouter/model-a", "openrouter/model-b"],
+        );
+
+        let values =
+            catalog_model_values(home.path(), &goose_config(None)).expect("catalog values");
+
+        assert_eq!(values, vec!["openrouter/model-a", "openrouter/model-b"]);
+    }
+
+    #[test]
+    fn catalog_model_values_name_the_missing_piece() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let mut without_catalog = goose_config(None);
+        without_catalog
+            .agent
+            .provider
+            .as_mut()
+            .expect("provider")
+            .id = "openai".to_owned();
+
+        let error = catalog_model_values(home.path(), &without_catalog)
+            .expect_err("openai publishes no listing endpoint for the catalog lane");
+        assert!(
+            error.to_string().contains("no model listing endpoint"),
+            "{error}"
+        );
+
+        let error = catalog_model_values(home.path(), &goose_config(None))
+            .expect_err("an unseeded cache has no catalog");
+        assert!(
+            error.to_string().contains("no `openrouter` model catalog"),
+            "{error}"
+        );
+
+        let mut without_provider = goose_config(None);
+        without_provider.agent.provider = None;
+        let error = catalog_model_values(home.path(), &without_provider)
+            .expect_err("no provider, no catalog");
+        assert!(
+            error.to_string().contains("no provider configured"),
+            "{error}"
+        );
+
+        let mut custom = goose_config(None);
+        custom.agent.provider = custom_provider();
+        let error = catalog_model_values(home.path(), &custom)
+            .expect_err("a custom provider publishes no catalog");
+        assert!(
+            error
+                .to_string()
+                .contains("custom provider `my-gateway` publishes no model catalog"),
+            "{error}"
+        );
     }
 
     #[test]

@@ -167,7 +167,7 @@ impl AgentSupervisor {
                 .as_ref()
                 .and_then(|provider| provider.model.as_deref())
         }) {
-            if model_value_is_explicit_without_discovery(agent) {
+            if model_applies_from_disk_only(agent) {
                 // The harness reads this pin from on-disk config at process start, so the
                 // adapter's advertised list is an echo at best and a set can only fail spuriously.
                 tracing::debug!(

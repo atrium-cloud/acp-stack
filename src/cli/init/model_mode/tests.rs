@@ -333,10 +333,22 @@ fn an_effort_picker_with_nothing_advertised_skips_without_writing() {
     assert!(config.agent.effort.is_none());
 }
 
-/// Answers every picker with its first option and records what was offered.
+/// Answers every picker with its first option and records what each was offered.
 #[derive(Default)]
 struct FirstChoiceDriver {
-    offered: std::sync::Mutex<Vec<Vec<String>>>,
+    offered: std::sync::Mutex<Vec<(prompt::HostedPromptKind, Vec<String>)>>,
+}
+
+impl FirstChoiceDriver {
+    fn offered_for(&self, kind: prompt::HostedPromptKind) -> Vec<Vec<String>> {
+        self.offered
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .filter(|(recorded, _)| *recorded == kind)
+            .map(|(_, values)| values.clone())
+            .collect()
+    }
 }
 
 #[derive(Default)]
@@ -407,13 +419,14 @@ impl prompt::HostedPromptDriver for FirstChoiceDriver {
         self.offered
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(
+            .push((
+                request.kind,
                 request
                     .items
                     .iter()
                     .map(|item| item.value.clone())
                     .collect(),
-            );
+            ));
         Ok(prompt::HostedPromptOutcome::Handled(Some(0)))
     }
 
@@ -466,11 +479,7 @@ fn a_repeated_advertised_value_is_offered_once() {
     assert_eq!(action, ModelModeAction::Set);
     assert_eq!(config.agent.mode.as_deref(), Some("bypass"));
     assert_eq!(
-        driver
-            .offered
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .as_slice(),
+        driver.offered_for(prompt::HostedPromptKind::Mode),
         [vec![
             "bypass".to_owned(),
             "default".to_owned(),
@@ -768,6 +777,255 @@ fn effort_prompt_reads_the_advertisement_of_the_model_just_picked() {
             matches!(kind, prompt::HostedPromptKind::Effort) && values.contains(&"high".to_owned())
         }),
         "effort prompt was not offered the refreshed values: {offered:?}"
+    );
+}
+
+/// Goose cannot answer `session/new` before `GOOSE_MODEL` is configured, so its model lane reads
+/// the provider catalog and every spawning lane waits for the model to settle.
+fn goose_config(provider_model: Option<&str>) -> Config {
+    let mut config = crate::config::load_config_from_str(include_str!(
+        "../../../../tests/fixtures/valid-opencode-stack.toml"
+    ))
+    .expect("fixture config");
+    config.agent.id = "goose".to_owned();
+    config.agent.name = "Goose".to_owned();
+    config.agent.command = "goose".to_owned();
+    config.agent.env = vec!["OPENROUTER_API_KEY".to_owned()];
+    config.agent.provider = Some(crate::config::AgentProviderConfig {
+        id: "openrouter".to_owned(),
+        model: provider_model.map(str::to_owned),
+        api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
+        custom: None,
+    });
+    config
+}
+
+/// Only the fixture-gated catalog test seeds a catalog, so the default-feature build has no caller.
+#[cfg(feature = "test-fixtures")]
+fn seed_provider_catalog(home: &Path, models: &[&str]) {
+    let path = crate::runtime::agent::provider_model_catalog::cache_path(home);
+    std::fs::create_dir_all(path.parent().expect("cache parent")).expect("create cache dir");
+    let fetched_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+    let entries: Vec<serde_json::Value> = models
+        .iter()
+        .map(|value| serde_json::json!({ "value": value }))
+        .collect();
+    std::fs::write(
+        &path,
+        serde_json::json!({
+            "version": 2,
+            "providers": { "openrouter": { "fetched_at": fetched_at, "models": entries } }
+        })
+        .to_string(),
+    )
+    .expect("write cache");
+}
+
+fn configured_provider_model(config: &Config) -> Option<&str> {
+    config
+        .agent
+        .provider
+        .as_ref()
+        .and_then(|provider| provider.model.as_deref())
+}
+
+#[test]
+fn goose_explicit_model_is_written_without_a_discovery_session() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let secrets = crate::secrets::new_shared_secret_store(
+        crate::secrets::SecretStore::open_or_create(home.path()).expect("secret store"),
+    );
+    let registry = RegistryCatalog::load_embedded().expect("registry");
+    let mut config = goose_config(None);
+    let args = parse_init_args(&["--model", "openrouter/model-x", "--non-interactive"]);
+
+    // No catalog, no credential, and no goose binary: an explicit model must still land.
+    let outcome = configure_model_and_mode_for_init(
+        &args,
+        home.path(),
+        &registry,
+        &mut config,
+        Path::new("acps-config.toml"),
+        &secrets,
+    )
+    .expect("an explicit model needs no discovery");
+
+    assert_eq!(outcome.model_action, ModelModeAction::Set);
+    assert!(!outcome.acp_verified, "no session may have been opened");
+    assert_eq!(
+        configured_provider_model(&config),
+        Some("openrouter/model-x")
+    );
+}
+
+#[test]
+fn goose_rejects_an_empty_explicit_model() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let secrets = crate::secrets::new_shared_secret_store(
+        crate::secrets::SecretStore::open_or_create(home.path()).expect("secret store"),
+    );
+    let registry = RegistryCatalog::load_embedded().expect("registry");
+    let mut config = goose_config(None);
+    let args = parse_init_args(&["--model", "   ", "--non-interactive"]);
+
+    let error = configure_model_and_mode_for_init(
+        &args,
+        home.path(),
+        &registry,
+        &mut config,
+        Path::new("acps-config.toml"),
+        &secrets,
+    )
+    .expect_err("an empty model id is not a model");
+
+    assert!(error.to_string().contains("non-empty model id"), "{error}");
+    assert_eq!(configured_provider_model(&config), None);
+}
+
+#[test]
+fn goose_mode_and_effort_flags_are_rejected_without_a_model() {
+    let registry = RegistryCatalog::load_embedded().expect("registry");
+    let config = goose_config(None);
+
+    for flag in ["--mode", "--effort"] {
+        let args = parse_init_args(&[flag, "some-value"]);
+        let error = preflight_model_and_mode_for_init(
+            &args,
+            &registry,
+            &config,
+            Path::new("acps-config.toml"),
+        )
+        .expect_err("discovery needs a model first");
+        assert!(
+            error.to_string().contains("needs a configured model"),
+            "{flag}: {error}"
+        );
+    }
+
+    let args = parse_init_args(&["--mode", "some-value"]);
+    preflight_model_and_mode_for_init(
+        &args,
+        &registry,
+        &goose_config(Some("openrouter/model-a")),
+        Path::new("acps-config.toml"),
+    )
+    .expect("a configured model unblocks the mode lane");
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn goose_model_picker_offers_the_provider_catalog_and_unblocks_the_mode_lane() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let fixture_path = home.path().join("config-options.json");
+    // The advertisement carries models goose could only offer once it is running; the catalog is
+    // the truthful pickable set, so these must never reach the model prompt.
+    std::fs::write(
+        &fixture_path,
+        serde_json::to_string(
+            &response_with(&["advertised/model"], &["auto", "chat"]).config_options,
+        )
+        .expect("fixture serializes"),
+    )
+    .expect("write fixture");
+    let _env = crate::cli::init::test_env::TestEnvGuard::set(&[(
+        FIXTURE_CONFIG_OPTIONS_ENV,
+        fixture_path.as_path(),
+    )]);
+    seed_provider_catalog(home.path(), &["openrouter/model-a", "openrouter/model-b"]);
+    let secrets = crate::secrets::new_shared_secret_store(
+        crate::secrets::SecretStore::open_or_create(home.path()).expect("secret store"),
+    );
+    let registry = RegistryCatalog::load_embedded().expect("registry");
+    let mut config = goose_config(None);
+    let args = parse_init_args(&[]);
+    let driver = std::sync::Arc::new(FirstChoiceDriver::default());
+
+    let outcome = prompt::with_hosted_driver(driver.clone(), || {
+        configure_model_and_mode_for_init(
+            &args,
+            home.path(),
+            &registry,
+            &mut config,
+            Path::new("acps-config.toml"),
+            &secrets,
+        )
+    })
+    .expect("the catalog lane settles the model");
+
+    assert_eq!(outcome.model_action, ModelModeAction::Set);
+    assert_eq!(
+        configured_provider_model(&config),
+        Some("openrouter/model-a")
+    );
+    assert_eq!(
+        driver.offered_for(prompt::HostedPromptKind::Model),
+        vec![vec![
+            "openrouter/model-a".to_owned(),
+            "openrouter/model-b".to_owned(),
+            "__skip".to_owned(),
+        ]],
+        "the model prompt must offer catalog values, never the advertisement"
+    );
+    assert!(
+        driver
+            .offered_for(prompt::HostedPromptKind::Mode)
+            .iter()
+            .any(|values| values.contains(&"chat".to_owned())),
+        "the mode lane runs once the model is configured",
+    );
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn goose_mode_and_effort_lanes_are_skipped_while_no_model_is_configured() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let fixture_path = home.path().join("config-options.json");
+    std::fs::write(
+        &fixture_path,
+        serde_json::to_string(
+            &response_with(&["advertised/model"], &["auto", "chat"]).config_options,
+        )
+        .expect("fixture serializes"),
+    )
+    .expect("write fixture");
+    let _env = crate::cli::init::test_env::TestEnvGuard::set(&[(
+        FIXTURE_CONFIG_OPTIONS_ENV,
+        fixture_path.as_path(),
+    )]);
+    // No catalog is seeded, so the model lane has nothing to offer and skips.
+    let secrets = crate::secrets::new_shared_secret_store(
+        crate::secrets::SecretStore::open_or_create(home.path()).expect("secret store"),
+    );
+    let registry = RegistryCatalog::load_embedded().expect("registry");
+    let mut config = goose_config(None);
+    let args = parse_init_args(&[]);
+    let driver = std::sync::Arc::new(FirstChoiceDriver::default());
+
+    let outcome = prompt::with_hosted_driver(driver.clone(), || {
+        configure_model_and_mode_for_init(
+            &args,
+            home.path(),
+            &registry,
+            &mut config,
+            Path::new("acps-config.toml"),
+            &secrets,
+        )
+    })
+    .expect("an unconfigured model is not an init failure");
+
+    assert_eq!(outcome.model_action, ModelModeAction::Skipped);
+    assert_eq!(outcome.mode_action, ModelModeAction::Skipped);
+    assert_eq!(outcome.effort_action, ModelModeAction::Skipped);
+    assert!(!outcome.acp_verified, "no session may have been opened");
+    assert!(config.agent.mode.is_none());
+    assert!(
+        driver
+            .offered_for(prompt::HostedPromptKind::Mode)
+            .is_empty(),
+        "the mode prompt must not run off an advertisement no session could produce",
     );
 }
 

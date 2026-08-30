@@ -192,7 +192,15 @@ pub(crate) async fn agent_switch_handler(
         .map(ProvisionedAgentConfigJson::from)
         .collect::<Vec<_>>();
 
-    let models = if target_entry.set_model {
+    // A target that resolves its model while starting a session cannot answer a
+    // discovery session yet, so the switch reports no models rather than failing.
+    // Where the provider publishes a catalog, `GET /v1/models` serves the list
+    // once the switch lands; where it does not, no route can list models until a
+    // model is named explicitly.
+    let models = if target_entry.set_model
+        && !crate::runtime::agent::model_discovery::discovery_is_blocked_without_a_model(
+            &candidate_config.agent,
+        ) {
         let response = fetch_session_config_with_timeout(
             &home,
             &candidate_config,

@@ -93,8 +93,8 @@ acps init \
 
 #### Provider, model, mode, effort
 
-- `--provider <provider-id>`, `--api-key-ref <ref>`, `--model <model-id>`: select provider, credential ref, and model.
-- `--mode <mode-id>`, `--effort <effort-id>`: set a session mode or reasoning effort non-interactively. Both are validated against the agent's ACP-advertised values. Codex with OpenRouter validates `--effort` against the provider catalog's reasoning-effort values for the configured model, since the adapter advertises none for OpenRouter models.
+- `--provider <provider-id>`, `--api-key-ref <ref>`, `--model <model-id>`: select provider, credential ref, and model. Where `--model` skips advertisement validation (a custom provider, or a harness that reads the model from its own config), the value is trimmed, rejected when empty, and otherwise written as given.
+- `--mode <mode-id>`, `--effort <effort-id>`: set a session mode or reasoning effort non-interactively. Both are validated against the agent's ACP-advertised values. Codex with OpenRouter validates `--effort` against the provider catalog's reasoning-effort values for the configured model, since the adapter advertises none for OpenRouter models. Goose resolves its model while starting a session, so both flags require a model — pass `--model` alongside them or configure one first.
 - The mode lane applies only to agents that support session modes. The effort lane applies only to agents that advertise a reasoning-effort (`thought_level`) config option.
 - A non-interactive run without `--mode`/`--effort` writes no mode or effort.
 - `--custom-provider --provider <id> --provider-name <name> --base-url <url> --api-key-ref <ref> --model <model-id>`: declare a custom provider.

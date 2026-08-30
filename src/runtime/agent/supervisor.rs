@@ -78,7 +78,7 @@ use crate::runtime::agent::acp_bridge::{
     session_config_id_for_value, session_mode_selection_for_value,
 };
 use crate::runtime::agent::model_discovery::{
-    effort_value_is_explicit_without_discovery, model_value_is_explicit_without_discovery,
+    effort_value_is_explicit_without_discovery, model_applies_from_disk_only,
 };
 use crate::runtime::agent::provider_keys::ResolvedProviderSnapshot;
 use crate::runtime::agent::session_changes::SessionChangesHandle;

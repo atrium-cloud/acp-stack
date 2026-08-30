@@ -13,9 +13,10 @@ use crate::runtime::agent::agent_headless_config::{
 };
 use crate::runtime::agent::config_options::{SessionConfigOptionSnapshot, project_config_options};
 use crate::runtime::agent::model_discovery::{
-    advertised_values_for_category, catalog_effort_values,
-    effort_value_is_explicit_without_discovery, fetch_session_config,
-    resolve_advertised_model_value, validate_advertised_value, validate_catalog_effort_value,
+    advertised_values_for_category, catalog_effort_values, catalog_model_values,
+    discovery_is_blocked_without_a_model, effort_value_is_explicit_without_discovery,
+    fetch_session_config, resolve_advertised_model_value, session_new_requires_a_configured_model,
+    validate_advertised_value, validate_catalog_effort_value,
 };
 use crate::runtime::agent::provider_keys::{CODEX_AGENT_ID, agent_provider_id_for_provider_id};
 use crate::runtime::agent::provider_model_catalog::cached_models;
@@ -149,6 +150,24 @@ pub(super) fn preflight_model_and_mode_for_init(
             ),
         });
     }
+    // A harness that resolves its model while starting a session cannot open the
+    // provisional session the mode and effort lanes read until one is configured.
+    if args.model.is_none() && discovery_is_blocked_without_a_model(&config.agent) {
+        for (field, requested) in [
+            ("mode", args.mode.is_some()),
+            ("effort", args.effort.is_some()),
+        ] {
+            if requested {
+                return Err(StackError::InvalidParam {
+                    field,
+                    reason: format!(
+                        "{} needs a configured model before its {field} values can be discovered; pass --model <id> together with --{field}, or run `acps agent set` after init",
+                        entry.name,
+                    ),
+                });
+            }
+        }
+    }
     Ok(())
 }
 
@@ -217,7 +236,11 @@ pub(super) fn configure_model_and_mode_for_init(
         && set_model
         && let Some(model) = args.model.as_deref()
     {
-        write_model_into_config(config, model.to_owned(), set_provider);
+        write_model_into_config(
+            config,
+            validated_explicit_model(model, &agent_name)?,
+            set_provider,
+        );
         outcome.model_action = ModelModeAction::Set;
     }
 
@@ -238,7 +261,11 @@ pub(super) fn configure_model_and_mode_for_init(
         && explicit_model_without_discovery
         && let Some(model) = args.model.as_deref()
     {
-        write_model_into_config(config, model.to_owned(), set_provider);
+        write_model_into_config(
+            config,
+            validated_explicit_model(model, &agent_name)?,
+            set_provider,
+        );
         outcome.model_action = ModelModeAction::Set;
         model_lane_active = false;
     }
@@ -418,6 +445,48 @@ pub(super) fn configure_model_and_mode_for_init(
         crate::runtime::agent::provider_model_catalog::refresh_provider_models_best_effort_blocking(
             home, config,
         );
+        // A harness that resolves its model while starting a session cannot advertise one, so its
+        // lane reads the provider catalog and must settle before anything spawns it.
+        let mut model_lane_active = model_lane_active;
+        if model_lane_active && session_new_requires_a_configured_model(&config.agent) {
+            outcome.model_action = configure_model_from_catalog_for_init(
+                args,
+                home,
+                config,
+                &agent_name,
+                set_provider,
+            )
+            .inspect_err(|error| signal_lane_failure(true, false, false, error))?;
+            model_lane_active = false;
+        }
+        if discovery_is_blocked_without_a_model(&config.agent) {
+            let reason = format!(
+                "{} discovery skipped: {agent_name} needs a configured model before a session can be opened",
+                active_lane_label(
+                    false,
+                    mode_lane_active,
+                    effort_lane_active,
+                    generic_lane_active
+                )
+            );
+            init_progress(args, &reason);
+            prompt::emit_state_signals(|| {
+                [
+                    (mode_lane_active, InitCategory::Mode),
+                    (effort_lane_active, InitCategory::Effort),
+                ]
+                .into_iter()
+                .filter(|(live, _)| *live)
+                .map(|(_, category)| InitStateSignal::CategoryApplicability {
+                    category,
+                    applicable: false,
+                    source: ApplicabilitySource::DiscoveryUnavailable,
+                    reason: Some(reason.clone()),
+                })
+                .collect()
+            });
+            return Ok(outcome);
+        }
         crate::runtime::agent::agent_headless_config::provision_agent_headless_config(config, home)
             .inspect_err(|error| {
                 signal_lane_failure(
@@ -779,7 +848,11 @@ fn configure_model_for_init(
 ) -> Result<ModelModeAction> {
     if let Some(explicit) = args.model.as_deref() {
         if agent_model_is_explicit_without_discovery(config) {
-            write_model_into_config(config, explicit.to_owned(), provider_backed);
+            write_model_into_config(
+                config,
+                validated_explicit_model(explicit, agent_name)?,
+                provider_backed,
+            );
             return Ok(ModelModeAction::Set);
         }
         let agent_provider_id = provider_backed
@@ -870,6 +943,66 @@ fn configure_model_for_init(
     if !agent_model_is_explicit_without_discovery(config) {
         validate_advertised_value(response, AgentSessionConfigCategory::Model, &selected)?;
     }
+    write_model_into_config(config, selected, provider_backed);
+    Ok(ModelModeAction::Set)
+}
+
+/// An explicit model that skips advertisement validation is still a value the harness has to
+/// resolve, so an empty one is rejected instead of pinned.
+fn validated_explicit_model(model: &str, agent_name: &str) -> Result<String> {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return Err(StackError::InvalidParam {
+            field: "model",
+            reason: format!("{agent_name} needs a non-empty model id"),
+        });
+    }
+    Ok(trimmed.to_owned())
+}
+
+/// Model lane for a harness that cannot advertise models over a provisional session: the values
+/// come from the provider catalog, and a provider that publishes no catalog leaves `--model` as
+/// the only lane.
+fn configure_model_from_catalog_for_init(
+    args: &InitArgs,
+    home: &Path,
+    config: &mut Config,
+    agent_name: &str,
+    provider_backed: bool,
+) -> Result<ModelModeAction> {
+    let values = match catalog_model_values(home, config) {
+        Ok(values) => values,
+        Err(error) => {
+            init_progress(
+                args,
+                &format!(
+                    "model discovery skipped: {error}; rerun with `acps init --model <value>` to write a model into config"
+                ),
+            );
+            return Ok(ModelModeAction::Skipped);
+        }
+    };
+    if !prompts_enabled(args) {
+        // Print the catalog and leave config untouched; the operator names the
+        // model on a rerun.
+        if !args.handoff_json {
+            println!("provider catalog models for {agent_name}:");
+            for value in &values {
+                println!("  {value}");
+            }
+            println!("rerun with `acps init --model <value>` to write a model into config");
+        }
+        return Ok(ModelModeAction::PrintedList);
+    }
+    let Some(selected) = prompt_session_config_selection(
+        prompt::HostedPromptKind::Model,
+        true,
+        &values,
+        AgentSessionConfigCategory::Model,
+    )?
+    else {
+        return Ok(ModelModeAction::Skipped);
+    };
     write_model_into_config(config, selected, provider_backed);
     Ok(ModelModeAction::Set)
 }

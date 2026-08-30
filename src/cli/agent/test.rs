@@ -18,7 +18,7 @@ use crate::runtime::agent::acp_bridge::{
     session_mode_selection_for_value, session_model_selection_for_value,
 };
 use crate::runtime::agent::model_discovery::{
-    effort_value_is_explicit_without_discovery, model_value_is_explicit_without_discovery,
+    effort_value_is_explicit_without_discovery, model_applies_from_disk_only,
 };
 use crate::runtime::install::agent_registry::RegistryCatalog;
 
@@ -1098,7 +1098,7 @@ async fn apply_agent_test_session_config(
             .as_ref()
             .and_then(|provider| provider.model.as_deref())
     }) {
-        if model_value_is_explicit_without_discovery(agent) {
+        if model_applies_from_disk_only(agent) {
             // Same skip as the supervisor: the harness reads this pin from its
             // on-disk config, so the advertised-list match can only fail spuriously.
             tracing::debug!(

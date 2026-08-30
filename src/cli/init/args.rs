@@ -265,10 +265,11 @@ pub struct InitArgs {
     /// API family for a custom provider: chat-completions, responses, or anthropic-messages.
     #[arg(long = "provider-api", requires = "custom_provider")]
     pub(super) provider_api: Option<String>,
-    /// Initial model id. With `--custom-provider`, taken verbatim as the
-    /// custom model id. Otherwise validated against the agent's
-    /// ACP-advertised `model` values discovered via a provisional
-    /// session.
+    /// Initial model id. Validated against the agent's ACP-advertised `model`
+    /// values discovered via a provisional session, except with
+    /// `--custom-provider` and for harnesses that take the model from their own
+    /// config, where the value is trimmed, rejected when empty, and otherwise
+    /// written as given.
     #[arg(long)]
     pub(super) model: Option<String>,
     /// Initial session mode id, validated against the agent's ACP-advertised

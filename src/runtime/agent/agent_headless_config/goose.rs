@@ -40,10 +40,6 @@ pub(super) fn provision_goose_config(
         }
         let values = [
             ("GOOSE_PROVIDER", YamlValue::String(provider_id.to_owned())),
-            (
-                "GOOSE_MODEL",
-                YamlValue::String(configured_provider_model(config).unwrap_or("").to_owned()),
-            ),
             ("GOOSE_MODE", YamlValue::String("auto".to_owned())),
             (
                 "GOOSE_CONTEXT_STRATEGY",
@@ -54,6 +50,9 @@ pub(super) fn provision_goose_config(
         for (key, value) in values {
             root.insert(YamlValue::String(key.to_owned()), value);
         }
+        // An empty pin is not a model: goose fails to resolve it while starting a
+        // session, so an unset model must leave the key absent instead.
+        write_goose_model(&mut root, config);
         write_yaml_mapping(&path, root)?;
         written.push(path.clone());
         written.push(custom_provider_path);
@@ -122,8 +121,16 @@ pub(super) fn provision_goose_config(
             YamlValue::String(super::endpoint_origin(origin)?),
         );
     }
-    // With no provider model configured, drop any stale `GOOSE_MODEL` so the
-    // launched process does not keep using it under the new provider.
+    write_goose_model(&mut root, config);
+
+    write_yaml_mapping(&path, root)?;
+    written.push(path.clone());
+    Ok(written)
+}
+
+/// With no provider model configured, drop any stale `GOOSE_MODEL` so the launched process
+/// neither keeps the previous provider's model nor starts with an unresolvable empty one.
+fn write_goose_model(root: &mut serde_norway::Mapping, config: &Config) {
     match configured_provider_model(config) {
         Some(model) => {
             root.insert(
@@ -135,10 +142,6 @@ pub(super) fn provision_goose_config(
             root.remove(YamlValue::String("GOOSE_MODEL".to_owned()));
         }
     }
-
-    write_yaml_mapping(&path, root)?;
-    written.push(path.clone());
-    Ok(written)
 }
 
 pub(super) fn cleanup_goose_config(
@@ -321,6 +324,44 @@ mod tests {
         assert_eq!(value["GOOSE_PROVIDER"], "cerebras");
         assert_eq!(value["GOOSE_MODEL"], "llama3.1-8b");
         assert_eq!(value["CUSTOM_SETTING"], "keep");
+    }
+
+    #[test]
+    fn goose_custom_provider_without_model_clears_stale_goose_model() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir
+            .path()
+            .join(".config")
+            .join("goose")
+            .join("config.yaml");
+        std::fs::create_dir_all(path.parent().expect("path has parent")).expect("create parent");
+        std::fs::write(
+            &path,
+            "GOOSE_PROVIDER: openrouter\nGOOSE_MODEL: anthropic/claude-stale\nKEEP_ME: yes\n",
+        )
+        .expect("write existing config");
+        let mut config =
+            custom_provider_config("goose", crate::config::CustomProviderApi::ChatCompletions);
+        // The operator declared the custom provider but skipped model setup; an empty pin is one
+        // goose cannot resolve while starting a session.
+        config
+            .agent
+            .provider
+            .as_mut()
+            .expect("custom provider")
+            .model = None;
+
+        provision_agent_headless_config(&config, tempdir.path()).expect("provision");
+
+        let value = goose_config_value(tempdir.path());
+        assert_eq!(value["GOOSE_PROVIDER"], "myprovider");
+        assert!(
+            value.as_mapping().is_some_and(|map| {
+                !map.contains_key(serde_norway::Value::String("GOOSE_MODEL".to_owned()))
+            }),
+            "GOOSE_MODEL must be removed rather than written empty: {value:?}",
+        );
+        assert_eq!(value["KEEP_ME"], "yes");
     }
 
     #[test]
