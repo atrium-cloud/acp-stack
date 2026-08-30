@@ -847,6 +847,40 @@ fn hermes_api_modes_are_data_driven() {
     assert_eq!(hermes_api_mode_for_provider_id("not-a-provider"), None);
 }
 
+/// The native base-URL env lane replaces the managed named entry, so every listed pair must be a
+/// hermes provider acps can actually route: reachable through the mapping under the same id
+/// hermes' overlay uses, and carrying a vendor base to reroute.
+#[test]
+fn hermes_base_url_env_lane_covers_only_routable_hermes_providers() {
+    for (native_provider_id, base_url_env) in HERMES_PROVIDER_BASE_URL_ENV {
+        let provider_id =
+            canonical_provider_id_for_agent_native_id(HERMES_AGENT_ID, native_provider_id)
+                .unwrap_or_else(|| panic!("`{native_provider_id}` is not a hermes provider"));
+        assert!(
+            agent_provider_accepts_endpoint_override(HERMES_AGENT_ID, provider_id),
+            "`{provider_id}` carries `{base_url_env}` but is refused an endpoint override"
+        );
+        assert!(
+            vendor_base_url_for_agent_provider_id(HERMES_AGENT_ID, provider_id).is_some(),
+            "`{provider_id}` has no vendor base URL to reroute"
+        );
+        assert_eq!(
+            agent_provider_id_for_provider_id(HERMES_AGENT_ID, provider_id),
+            Some(native_provider_id),
+            "acps must write `{native_provider_id}` as the native id for `{provider_id}`"
+        );
+    }
+    // Hermes' anthropic overlay declares no base-URL variable, so it stays on the managed entry.
+    assert_eq!(
+        hermes_base_url_env_for_native_provider_id("anthropic"),
+        None
+    );
+    assert_eq!(
+        hermes_base_url_env_for_native_provider_id("not-a-provider"),
+        None
+    );
+}
+
 #[test]
 fn endpoint_override_pairs_are_data_driven() {
     assert!(agent_provider_accepts_endpoint_override(

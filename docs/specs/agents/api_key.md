@@ -44,7 +44,8 @@ Each harness reads resolved credentials its own way. Env var names and base comp
 - Hermes maps only API-key providers.
 - Headless provisioning writes the non-secret `model` block of `~/.hermes/config.yaml`.
 - The key itself reaches the process only through `[agent].env`.
-- Endpoint-carrying configurations (custom providers and credential endpoint overrides) are provisioned as a managed named `providers.acps-managed` entry with `key_env` and `transport`, referenced as `model.provider: custom:acps-managed` — never as `model.base_url`.
+- A credential endpoint override on a mapped provider whose Hermes overlay declares a base-URL env var is delivered through that variable in the launch environment; `model.provider` keeps the provider-native id.
+- The remaining endpoint-carrying configurations (custom providers, and mapped providers without such a variable) are provisioned as a managed named `providers.acps-managed` entry with `key_env` and `transport`, referenced as `model.provider: custom:acps-managed` — never as `model.base_url`.
 
 ### Kilo Code
 

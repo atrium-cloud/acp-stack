@@ -1,7 +1,10 @@
 use super::*;
 
 use crate::runtime::agent::agent_headless_config::reroute_base_url;
-use crate::runtime::agent::provider_keys::vendor_base_url_for_agent_provider_id;
+use crate::runtime::agent::provider_keys::{
+    HERMES_AGENT_ID, agent_provider_id_for_provider_id, hermes_base_url_env_for_native_provider_id,
+    resolve_base_url_template, vendor_base_url_for_agent_provider_id,
+};
 
 pub(crate) const KIMI_CODE_AGENT_ID: &str = "kimi";
 pub(crate) const KIMI_API_KEY_ENV: &str = "KIMI_API_KEY";
@@ -103,8 +106,64 @@ pub(super) fn build_agent_process_env(
             let endpoint = crate::secrets::managed_provider_endpoint_override_for_home(home)?;
             build_antigravity_process_env(env, endpoint.as_ref())
         }
+        HERMES_AGENT_ID => {
+            let endpoint = crate::secrets::managed_provider_endpoint_override_for_home(home)?;
+            build_hermes_process_env(agent, env, endpoint.as_ref())
+        }
         _ => Ok(env),
     }
+}
+
+/// A mapped Hermes provider whose native overlay declares a base-URL env var carries its endpoint
+/// override there, so `config.yaml` keeps the native provider id. Nothing is persisted: the value
+/// is derived from the stored override at every launch, so clearing the override stops exporting
+/// it and the overlay falls back to its vendor default.
+fn build_hermes_process_env(
+    agent: &AgentConfig,
+    mut env: HashMap<String, String>,
+    endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
+) -> Result<HashMap<String, String>> {
+    // A custom provider carries its endpoint on the managed named entry in config.yaml.
+    let Some(provider) = agent
+        .provider
+        .as_ref()
+        .filter(|provider| provider.custom.is_none())
+    else {
+        return Ok(env);
+    };
+    let Some(base_url_env) = agent_provider_id_for_provider_id(HERMES_AGENT_ID, &provider.id)
+        .and_then(hermes_base_url_env_for_native_provider_id)
+    else {
+        return Ok(env);
+    };
+    // Guarded even without an override: an operator-declared value would otherwise silently
+    // displace the vendor endpoint acp-stack provisioned the lane for.
+    if env.contains_key(base_url_env) {
+        return Err(StackError::AgentInitializeFailed {
+            reason: format!(
+                "Hermes Agent launch env `{base_url_env}` is runtime-managed; remove it from [agent].env"
+            ),
+        });
+    }
+    let Some(endpoint) = endpoint.filter(|endpoint| endpoint.provider_id == provider.id) else {
+        return Ok(env);
+    };
+    let Some(vendor_base_url) =
+        vendor_base_url_for_agent_provider_id(HERMES_AGENT_ID, &provider.id)
+    else {
+        return Err(StackError::AgentInitializeFailed {
+            reason: format!(
+                "Hermes Agent provider `{}` declares no vendor base URL, so its endpoint override cannot be composed",
+                provider.id
+            ),
+        });
+    };
+    let vendor_base_url = resolve_base_url_template(vendor_base_url, &endpoint.companion_values)?;
+    env.insert(
+        base_url_env.to_owned(),
+        reroute_base_url(&endpoint.base_url, &vendor_base_url)?,
+    );
+    Ok(env)
 }
 
 /// Antigravity has no provider selection; the override names the provider its credential is
@@ -796,6 +855,99 @@ mod tests {
             .expect_err("unmapped provider must fail");
 
         assert!(error.to_string().contains("openai"), "{error}");
+    }
+
+    fn hermes_agent(provider_id: &str, api_key_ref: &str) -> AgentConfig {
+        let mut agent = kimi_agent(None);
+        agent.id = HERMES_AGENT_ID.to_owned();
+        agent.name = "Hermes Agent".to_owned();
+        agent.command = "hermes-agent-acp".to_owned();
+        agent.args = Vec::new();
+        agent.model = None;
+        agent.env = vec![api_key_ref.to_owned()];
+        agent.provider = Some(crate::config::AgentProviderConfig {
+            id: provider_id.to_owned(),
+            model: Some("deepseek/deepseek-v4-flash".to_owned()),
+            api_key_ref: Some(api_key_ref.to_owned()),
+            custom: None,
+        });
+        agent
+    }
+
+    #[test]
+    fn hermes_process_env_carries_the_override_in_the_native_base_url_var() {
+        let env = HashMap::from([("OPENROUTER_API_KEY".to_owned(), "secret".to_owned())]);
+        let agent = hermes_agent("openrouter", "OPENROUTER_API_KEY");
+
+        let prepared = build_hermes_process_env(&agent, env, Some(&override_for("openrouter")))
+            .expect("Hermes env");
+
+        assert_eq!(
+            prepared.get("OPENROUTER_BASE_URL").map(String::as_str),
+            Some("http://127.0.0.1:3129/api/v1")
+        );
+        assert_eq!(
+            prepared.get("OPENROUTER_API_KEY").map(String::as_str),
+            Some("secret")
+        );
+    }
+
+    #[test]
+    fn hermes_process_env_without_an_override_exports_no_base_url() {
+        let env = HashMap::from([("OPENROUTER_API_KEY".to_owned(), "secret".to_owned())]);
+        let agent = hermes_agent("openrouter", "OPENROUTER_API_KEY");
+
+        assert_eq!(
+            build_hermes_process_env(&agent, env.clone(), None).expect("Hermes env"),
+            env
+        );
+    }
+
+    #[test]
+    fn hermes_process_env_ignores_an_override_for_another_provider() {
+        let env = HashMap::from([("OPENROUTER_API_KEY".to_owned(), "secret".to_owned())]);
+        let agent = hermes_agent("openrouter", "OPENROUTER_API_KEY");
+
+        let prepared = build_hermes_process_env(&agent, env, Some(&override_for("anthropic")))
+            .expect("Hermes env");
+
+        assert!(!prepared.contains_key("OPENROUTER_BASE_URL"));
+    }
+
+    #[test]
+    fn hermes_process_env_leaves_a_managed_lane_provider_alone() {
+        let env = HashMap::from([("ANTHROPIC_API_KEY".to_owned(), "secret".to_owned())]);
+        let agent = hermes_agent("anthropic", "ANTHROPIC_API_KEY");
+
+        assert_eq!(
+            build_hermes_process_env(&agent, env.clone(), Some(&override_for("anthropic")))
+                .expect("Hermes env"),
+            env
+        );
+    }
+
+    #[test]
+    fn hermes_process_env_leaves_a_custom_provider_alone() {
+        let env = HashMap::from([("CUSTOM_API_KEY".to_owned(), "secret".to_owned())]);
+        let mut agent =
+            kimi_agent_with_custom_provider(crate::config::CustomProviderApi::default());
+        agent.id = HERMES_AGENT_ID.to_owned();
+
+        assert_eq!(
+            build_hermes_process_env(&agent, env.clone(), Some(&override_for("myprovider")))
+                .expect("Hermes env"),
+            env
+        );
+    }
+
+    #[test]
+    fn hermes_process_env_rejects_a_declared_base_url() {
+        let env = HashMap::from([("OPENROUTER_BASE_URL".to_owned(), "https://x".to_owned())]);
+        let agent = hermes_agent("openrouter", "OPENROUTER_API_KEY");
+
+        let error = build_hermes_process_env(&agent, env, None).expect_err("managed env must fail");
+
+        assert!(error.to_string().contains("OPENROUTER_BASE_URL"), "{error}");
     }
 
     #[test]

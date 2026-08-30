@@ -17,7 +17,9 @@ use crate::runtime::agent::acp_bridge::{
     AgentSessionModelSelection, SessionEventSink, session_config_id_for_value,
     session_mode_selection_for_value, session_model_selection_for_value,
 };
-use crate::runtime::agent::model_discovery::model_value_is_explicit_without_discovery;
+use crate::runtime::agent::model_discovery::{
+    effort_value_is_explicit_without_discovery, model_value_is_explicit_without_discovery,
+};
 use crate::runtime::install::agent_registry::RegistryCatalog;
 
 use super::install::{operator_registry_override, resolve_agent_env_for_cli};
@@ -1112,14 +1114,24 @@ async fn apply_agent_test_session_config(
         }
     }
     if let Some(effort) = agent.effort.as_deref() {
-        let config_id = session_config_id_for_value(
-            response.config_options.as_deref(),
-            AgentSessionConfigCategory::Effort,
-            effort,
-        )?;
-        bridge
-            .set_session_config_option(response.session_id.clone(), &config_id, effort)
-            .await?;
+        if effort_value_is_explicit_without_discovery(agent) {
+            // Same skip as the supervisor: the pin lives in the harness's on-disk config
+            // and the adapter advertises no effort option for this model, so a set can
+            // only fail spuriously.
+            tracing::debug!(
+                effort,
+                "effort provisioned on disk; skipping session/set_config_option"
+            );
+        } else {
+            let config_id = session_config_id_for_value(
+                response.config_options.as_deref(),
+                AgentSessionConfigCategory::Effort,
+                effort,
+            )?;
+            bridge
+                .set_session_config_option(response.session_id.clone(), &config_id, effort)
+                .await?;
+        }
     }
     Ok(())
 }

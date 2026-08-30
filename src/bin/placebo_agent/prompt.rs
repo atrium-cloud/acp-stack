@@ -61,6 +61,29 @@ pub(crate) async fn handle_prompt(
             return responder
                 .respond_with_error(Error::new(-32000, "expected session mode before prompt"));
         }
+        for spec in &state.args.expect_config_option {
+            // A malformed spec is reported rather than skipped, so a typo fails the
+            // asserting test instead of silently passing it.
+            let Some((config_id, expected)) = spec.split_once('=') else {
+                return responder.respond_with_error(Error::new(
+                    -32000,
+                    format!("malformed --expect-config-option `{spec}`"),
+                ));
+            };
+            let applied = matches!(
+                state.config_option_values.get(&(
+                    request.session_id.0.to_string(),
+                    config_id.to_owned(),
+                )),
+                Some(SessionConfigOptionValue::ValueId { value }) if value.0.as_ref() == expected
+            );
+            if !applied {
+                return responder.respond_with_error(Error::new(
+                    -32000,
+                    format!("expected config option `{config_id}` = `{expected}` before prompt"),
+                ));
+            }
+        }
     }
     if prompt_contains_testflight_marker(&request) {
         tokio::fs::write(TESTFLIGHT_MARKER, TESTFLIGHT_CONTENT)

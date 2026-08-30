@@ -20,7 +20,8 @@ use crate::runtime::agent::provider_keys::{
     CLAUDE_CODE_AGENT_ID, CODEX_OPENAI_PROVIDER_ID, ClaudeCodeProviderProfile,
     agent_provider_id_for_provider_id, claude_code_profile_for_provider_id,
     effective_active_provider_ids, env_var_for_agent_provider_id, hermes_api_mode_for_provider_id,
-    provider_name_for_provider_id, vendor_base_url_for_agent_provider_id,
+    hermes_base_url_env_for_native_provider_id, provider_name_for_provider_id,
+    vendor_base_url_for_agent_provider_id,
 };
 
 mod antigravity;

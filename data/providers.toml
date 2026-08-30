@@ -18,7 +18,11 @@
 # `anthropic_messages`, or `codex_responses`) declared on the managed
 # named-provider entry acp-stack writes when an endpoint override reroutes
 # the provider. Every hermes-enabled provider must declare the sub-table;
-# omitting `api_mode` marks the pair as unable to carry an override.
+# omitting `api_mode` marks the pair as unable to carry an override. A
+# provider listed in HERMES_PROVIDER_BASE_URL_ENV
+# (src/runtime/agent/provider_keys.rs) instead carries its override in the
+# base-URL env var its native hermes overlay declares, and keeps its native
+# id; the managed entry is the fallback for the rest.
 #
 # `base_url` is the vendor endpoint base most agents send the provider's
 # traffic to (models.dev `api`, or the agent SDK default). A managed-state

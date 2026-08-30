@@ -202,6 +202,11 @@ pub(crate) struct AcpArgs {
     pub(crate) fs_read_limit: Option<u32>,
     #[arg(long)]
     pub(crate) expect_model_config: Option<String>,
+    /// Fail `session/prompt` unless `<id>=<value>` was applied via
+    /// `session/set_config_option` on this session first, proving the generic
+    /// config lane fired (mirrors `--expect-model-config`). Repeatable.
+    #[arg(long)]
+    pub(crate) expect_config_option: Vec<String>,
     #[arg(long)]
     pub(crate) write_pid: Option<PathBuf>,
 }

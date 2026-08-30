@@ -193,6 +193,87 @@ fn agent_test_applies_configured_model_before_prompt() {
         .stdout(predicates::str::contains("agent test: ok"));
 }
 
+/// Advertise a `thought_level` select that omits `high`, so an ACP effort set for `high` can only
+/// fail. A run that still passes proves the set was skipped.
+const EFFORT_OPTION_WITHOUT_HIGH: &str = "reasoning_effort@thought_level=low:low,medium";
+const EFFORT_OPTION_WITH_HIGH: &str = "reasoning_effort@thought_level=low:low,high";
+
+/// Append `[agent]` keys to the fake-agent config `write_fake_agent_home` wrote. `[agent]` is the
+/// last table in the fixture, so appended keys land in it.
+fn append_agent_config(home: &std::path::Path, lines: &str) {
+    let config_path = home.join(".config/acp-stack/acps-config.toml");
+    let mut config = fs::read_to_string(&config_path).expect("config should be readable");
+    config.push_str(lines);
+    fs::write(&config_path, config).expect("config should be written");
+}
+
+#[test]
+fn agent_test_skips_the_effort_config_option_when_the_effort_is_pinned_on_disk() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    write_fake_agent_home(
+        tempdir.path(),
+        &["--config-option-select", EFFORT_OPTION_WITHOUT_HIGH],
+    );
+    seed_provider_credential(tempdir.path(), "openrouter", &["OPENROUTER_API_KEY"]);
+    let config_path = tempdir.path().join(".config/acp-stack/acps-config.toml");
+    let config = fs::read_to_string(&config_path).expect("config should be readable");
+    fs::write(
+        &config_path,
+        config.replace(r#"id = "placebo""#, r#"id = "codex""#),
+    )
+    .expect("config should be written");
+    append_agent_config(
+        tempdir.path(),
+        "effort = \"high\"\nprovider = { id = \"openrouter\" }\n",
+    );
+
+    acps_command(tempdir.path())
+        .args(["agent", "test", "--prompt", "hello"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent test: ok"));
+}
+
+#[test]
+fn agent_test_fails_when_an_unpinned_effort_is_not_advertised() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    write_fake_agent_home(
+        tempdir.path(),
+        &["--config-option-select", EFFORT_OPTION_WITHOUT_HIGH],
+    );
+    append_agent_config(tempdir.path(), "effort = \"high\"\n");
+
+    acps_command(tempdir.path())
+        .args(["agent", "test", "--prompt", "hello"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "agent test failed at session creation",
+        ))
+        .stderr(predicates::str::contains("high"));
+}
+
+#[test]
+fn agent_test_applies_an_advertised_effort_before_prompt() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    write_fake_agent_home(
+        tempdir.path(),
+        &[
+            "--config-option-select",
+            EFFORT_OPTION_WITH_HIGH,
+            "--expect-config-option",
+            "reasoning_effort=high",
+        ],
+    );
+    append_agent_config(tempdir.path(), "effort = \"high\"\n");
+
+    acps_command(tempdir.path())
+        .args(["agent", "test", "--prompt", "hello"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent test: ok"));
+}
+
 #[test]
 fn agent_test_reports_initialize_failure_stage() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");

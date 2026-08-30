@@ -22,25 +22,32 @@ The `[agent]` config block is generated from the `hermes` entry in `data/agents.
 - `model.default` carries the bare provider-native model id. The adapter composes its `provider/model` ACP config-option ids itself.
 - The rest of the file is user-owned and preserved.
 
+### Endpoint overrides: the native base-URL env lane
+
+A mapped provider whose Hermes overlay declares a base-URL environment variable keeps its native identity: `model.provider` stays the provider-native id, and `acp-stack` exports the rerouted endpoint into the agent launch environment under that variable (`openrouter` → `OPENROUTER_BASE_URL`, `zai` → `GLM_BASE_URL`, and the rest of the table in `src/runtime/agent/provider_keys.rs`). Hermes resolves an api-key provider's base URL as the explicit config value, then this variable, then the overlay default, so only the endpoint changes and the adapter keeps advertising `<native>/<model>` option ids.
+
+Nothing is persisted for this lane. The value is derived from the stored override at every launch, so clearing the override simply stops exporting it and the overlay falls back to its vendor endpoint. Declaring the variable in `[agent].env` is refused — it is runtime-managed.
+
 ### Endpoint overrides and `providers.acps-managed`
 
-An endpoint-carrying configuration — a custom OpenAI-compatible provider, or a mapped provider with a credential endpoint override — keeps `model.base_url` out of the file. Instead, `acp-stack` writes a named `providers.acps-managed` entry carrying:
+The remaining endpoint-carrying configurations — a custom OpenAI-compatible provider, or a mapped provider whose overlay declares no base-URL variable (Anthropic) — keep `model.base_url` out of the file. Instead, `acp-stack` writes a named `providers.acps-managed` entry carrying:
 
 - `name`
 - `base_url`
 - `key_env` — the provider-native env ref, which Hermes reads unconditionally.
 - `transport` — the provider's declared wire shape from `data/providers.toml`, or the custom provider's `api`.
 
-`model.provider` then points at `custom:acps-managed`. User-owned entries under `providers:` are preserved. Clearing the override removes the entry and restores the mapped lane.
+`model.provider` then points at `custom:acps-managed`. User-owned entries under `providers:` are preserved. Clearing the override removes the entry and restores the mapped lane; so does a provider that reaches Hermes over the native env lane, so a stale entry can never shadow it.
 
 ### Managed endpoints: per-model transport lookup
 
-Under a managed endpoint, OpenCode Zen/Go get per-model `transport` resolution:
+Under a managed endpoint, providers that route different models over different wires get per-model `transport` resolution:
 
-- These providers route different models over different wires.
 - Their `/v1/models` listings carry no wire metadata.
-- `acp-stack` looks the configured model up in the checked-in `data/endpoints.toml` table (mirrored from the Zen/Go docs pages) before falling back to the provider default.
-- A Zen/Go Gemini model is rejected there: the Google-native wire has no Hermes custom-lane transport. Select a different model or clear the endpoint override.
+- `acp-stack` looks the configured model up in the checked-in `data/endpoints.toml` table before falling back to the provider default.
+- A Google-native-wire model is rejected there: that wire has no Hermes custom-lane transport. Select a different model or clear the endpoint override.
+
+This applies only to the managed lane. OpenCode Zen/Go — the providers `data/endpoints.toml` currently covers — reach Hermes over the native env lane, where Hermes' own overlay picks the transport, so a Zen/Go Gemini model works under an override.
 
 ### Install
 

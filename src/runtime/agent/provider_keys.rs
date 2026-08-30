@@ -37,6 +37,36 @@ const GOOSE_PROVIDER_HOST_ENV: [(&str, &str); 4] = [
     ("openrouter", "OPENROUTER_HOST"),
     ("xai", "XAI_HOST"),
 ];
+/// Hermes' per-provider base-URL env override, keyed by the hermes-native provider id. Each
+/// native overlay resolves its endpoint as the explicit config value, then this variable, then
+/// the overlay default, so exporting it reroutes the provider without displacing its identity.
+///
+/// Only pairs whose hermes-native provider id matches a hermes overlay that declares the
+/// variable are listed. The remaining hermes-enabled providers stay on the managed named-entry
+/// lane: their overlay declares no base-url env var (anthropic, ai-gateway, fw, google, meta-ai,
+/// commandcode), or the overlay declaring one goes by a different id than the hermes-native id
+/// acps writes (openai vs openai-api, kimi vs kimi-for-coding, kilocode vs kilo, novita-ai vs
+/// novita, gmicloud vs gmi).
+const HERMES_PROVIDER_BASE_URL_ENV: [(&str, &str); 18] = [
+    ("actual", "ACTUAL_BASE_URL"),
+    ("alibaba", "DASHSCOPE_BASE_URL"),
+    ("alibaba-coding-plan", "ALIBABA_CODING_PLAN_BASE_URL"),
+    ("arcee", "ARCEE_BASE_URL"),
+    ("deepseek", "DEEPSEEK_BASE_URL"),
+    ("huggingface", "HF_BASE_URL"),
+    ("minimax", "MINIMAX_BASE_URL"),
+    ("minimax-cn", "MINIMAX_CN_BASE_URL"),
+    ("nvidia", "NVIDIA_BASE_URL"),
+    ("ollama-cloud", "OLLAMA_BASE_URL"),
+    ("opencode", "OPENCODE_ZEN_BASE_URL"),
+    ("opencode-go", "OPENCODE_GO_BASE_URL"),
+    ("openrouter", "OPENROUTER_BASE_URL"),
+    ("stepfun", "STEPFUN_BASE_URL"),
+    ("tencent-tokenhub", "TOKENHUB_BASE_URL"),
+    ("xai", "XAI_BASE_URL"),
+    ("xiaomi", "XIAOMI_BASE_URL"),
+    ("zai", "GLM_BASE_URL"),
+];
 /// Codex reserves `openai` for its own built-in provider definition, whose replacement table
 /// shape is version-dependent, so this pair cannot carry an endpoint override.
 pub const CODEX_OPENAI_PROVIDER_ID: &str = "openai";
@@ -718,6 +748,18 @@ pub fn goose_host_env_for_native_provider_id(native_provider_id: &str) -> Option
         .map(|(_, host_env)| *host_env)
 }
 
+/// Hermes' native overlay for `native_provider_id` reads its endpoint from this env var, letting
+/// a mapped provider carry an override while keeping its native id in `config.yaml`. A provider
+/// absent here has to ride the managed named-provider entry instead.
+pub fn hermes_base_url_env_for_native_provider_id(
+    native_provider_id: &str,
+) -> Option<&'static str> {
+    HERMES_PROVIDER_BASE_URL_ENV
+        .iter()
+        .find(|(native, _)| *native == native_provider_id)
+        .map(|(_, base_url_env)| *base_url_env)
+}
+
 /// Whether an (agent, provider) pair can carry an operator-supplied endpoint: the agent must have
 /// somewhere to write it and acp-stack must know the vendor path to keep. A provider outside the
 /// mapping is a configured custom provider, which carries its own vendor base.
@@ -735,6 +777,8 @@ pub fn agent_provider_accepts_endpoint_override(agent_id: &str, provider_id: &st
         return false;
     }
     match agent_id {
+        // Every provider in HERMES_PROVIDER_BASE_URL_ENV also declares an api_mode, so the
+        // native base-URL-env lane is a strict subset of what this already admits.
         HERMES_AGENT_ID => {
             provider
                 .hermes
