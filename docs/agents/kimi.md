@@ -55,7 +55,7 @@ The API key stays in the encrypted secret store. At launch, `acp-stack`:
 
 - passes its value as `KIMI_MODEL_API_KEY`
 - selects the model through `KIMI_MODEL_NAME`
-- sets `KIMI_MODEL_BASE_URL` to the selected lane's endpoint
+- sets `KIMI_MODEL_BASE_URL` to the selected lane's endpoint; a managed-state endpoint override replaces its origin and keeps the lane's path (`/v1` on the Moonshot platform, `/coding/v1` on the subscription lanes), see [Endpoint overrides](../specs/extensions.md#endpoint-overrides)
 
 Reserve `[agent].env` for the credential ref; `acp-stack` owns the `KIMI_MODEL_*` launch vars.
 
@@ -65,7 +65,7 @@ Reserve `[agent].env` for the credential ref; `acp-stack` owns the `KIMI_MODEL_*
 - K3 requires a Moderato plan or above on the subscription lanes. Eligible users select it with `acps init --agent kimi --provider kimi-code --model k3` or `acps agent set --model k3`.
 - Model ids are accepted as supplied, without ACP discovery, because Kimi requires the model environment to initialize. Kimi Code validates the id when the process starts.
 - If a hand-edited config omits the model, the runtime launches with the lane default.
-- Mode values are discovered over ACP. Select one with `acps agent set --mode <mode>`.
+- Mode values are discovered over ACP. Select one with `acps agent set --mode <mode>`. A non-interactive init without `--mode` selects `yolo` (the registry `default_mode`): Kimi's default mode raises an ACP permission request for every tool call, which the daemon path parks on an operator decision.
 - Reasoning effort is discovered the same way. Kimi advertises a `thinking` (`thought_level`) option offering `off` plus the model's declared effort levels. Set it with `acps agent set --effort <effort>`.
 
 ## Sessions and capabilities

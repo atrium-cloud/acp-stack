@@ -123,6 +123,7 @@ fn explicit_mode_is_written_and_settled_at_the_write() {
             Path::new("acps-config.toml"),
             &response_with(&[], &["default", "bypass"]),
             true,
+            None,
         )
     })
     .expect("advertised mode is accepted");
@@ -149,6 +150,7 @@ fn explicit_mode_that_is_not_advertised_lists_the_advertised_modes() {
         Path::new("acps-config.toml"),
         &response_with(&[], &["default", "bypass"]),
         true,
+        None,
     )
     .expect_err("unadvertised mode must be rejected");
 
@@ -173,11 +175,68 @@ fn a_mode_picker_with_nothing_advertised_skips_without_writing() {
         Path::new("acps-config.toml"),
         &response_with(&["openai/gpt-5.5"], &[]),
         true,
+        None,
     )
     .expect("an empty mode list is not a failure");
 
     assert_eq!(action, ModelModeAction::Skipped);
     assert!(config.agent.mode.is_none());
+}
+
+#[test]
+fn registry_default_mode_lands_unattended_when_advertised() {
+    let mut config = amp_config();
+    let args = parse_init_args(&[]);
+
+    let action = configure_mode_for_init(
+        &args,
+        &mut config,
+        Path::new("acps-config.toml"),
+        &response_with(&[], &["default", "yolo"]),
+        false,
+        Some("yolo"),
+    )
+    .expect("advertised default mode is accepted");
+
+    assert_eq!(action, ModelModeAction::Set);
+    assert_eq!(config.agent.mode.as_deref(), Some("yolo"));
+}
+
+#[test]
+fn registry_default_mode_is_skipped_when_not_advertised() {
+    let mut config = amp_config();
+    let args = parse_init_args(&[]);
+
+    let action = configure_mode_for_init(
+        &args,
+        &mut config,
+        Path::new("acps-config.toml"),
+        &response_with(&[], &["default"]),
+        false,
+        Some("yolo"),
+    )
+    .expect("a default that cannot land is not a failure");
+
+    assert_eq!(action, ModelModeAction::Skipped);
+    assert!(config.agent.mode.is_none());
+}
+
+#[test]
+fn explicit_mode_wins_over_the_registry_default() {
+    let mut config = amp_config();
+    let args = parse_init_args(&["--mode", "default"]);
+
+    configure_mode_for_init(
+        &args,
+        &mut config,
+        Path::new("acps-config.toml"),
+        &response_with(&[], &["default", "yolo"]),
+        false,
+        Some("yolo"),
+    )
+    .expect("explicit mode is accepted");
+
+    assert_eq!(config.agent.mode.as_deref(), Some("default"));
 }
 
 // Model twin of the mode picker skip; amp-acp before v0.8.0 advertises no `model` option.
@@ -396,6 +455,7 @@ fn a_repeated_advertised_value_is_offered_once() {
             Path::new("acps-config.toml"),
             &response_with(&[], &["default", "bypass", "default"]),
             true,
+            None,
         )
     })
     .expect("a duplicated advertised value is not a failure");

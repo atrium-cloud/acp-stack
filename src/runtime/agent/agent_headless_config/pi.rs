@@ -10,8 +10,17 @@ pub(super) fn provision_pi_config(
     let Some(provider) = config.agent.provider.as_ref() else {
         return Ok(None);
     };
-    let base_url_override = super::endpoint_base_url_for(endpoint, &provider.id);
     let models_path = home.join(".pi").join("agent").join("models.json");
+    let base_url_override = match provider.custom.as_ref() {
+        Some(custom) => super::rerouted_base_url_for(endpoint, &provider.id, &custom.base_url)?,
+        None => super::rerouted_mapped_base_url_for(
+            endpoint,
+            &config.agent.id,
+            &provider.id,
+            &models_path,
+        )?,
+    };
+    let base_url_override = base_url_override.as_deref();
     if let Some(custom) = provider.custom.as_ref() {
         let api_key_ref = require_agent_env_for_provider(config, &provider.id, &models_path)?;
         write_pi_custom_models_json(
@@ -81,7 +90,7 @@ pub(super) fn cleanup_pi_config(
         let owned_key = if provider.custom.is_some() {
             Some(provider.id.clone())
         } else {
-            super::endpoint_base_url_for(endpoint, &provider.id).and_then(|_| {
+            super::endpoint_origin_for(endpoint, &provider.id).and_then(|_| {
                 agent_provider_id_for_provider_id("pi", &provider.id).map(str::to_owned)
             })
         };
@@ -216,7 +225,8 @@ mod tests {
     fn pi_endpoint(provider_id: &str) -> crate::secrets::ProviderEndpointOverride {
         crate::secrets::ProviderEndpointOverride {
             provider_id: provider_id.to_owned(),
-            base_url: "http://127.0.0.1:3129/anthropic".to_owned(),
+            base_url: "http://127.0.0.1:3129".to_owned(),
+            companion_values: std::collections::BTreeMap::new(),
         }
     }
 
@@ -251,10 +261,37 @@ mod tests {
         )
         .expect("provision with override");
 
+        // pi's Anthropic client appends `/v1/messages` itself, so the rerouted base is bare.
         let value = pi_models_value(tempdir.path()).expect("models.json written");
         assert_eq!(
             value["providers"]["anthropic"],
-            json!({ "baseUrl": "http://127.0.0.1:3129/anthropic" })
+            json!({ "baseUrl": "http://127.0.0.1:3129" })
+        );
+    }
+
+    #[test]
+    fn pi_mapped_provider_endpoint_keeps_the_vendor_path() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut config = config_with_agent("pi", &["OPENCODE_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "opencode-go".to_owned(),
+            model: Some("opencode-go/deepseek-v4-flash".to_owned()),
+            api_key_ref: Some("OPENCODE_API_KEY".to_owned()),
+            custom: None,
+        });
+
+        provision_pi_config(
+            &config,
+            tempdir.path(),
+            None,
+            Some(&pi_endpoint("opencode-go")),
+        )
+        .expect("provision with override");
+
+        let value = pi_models_value(tempdir.path()).expect("models.json written");
+        assert_eq!(
+            value["providers"]["opencode-go"],
+            json!({ "baseUrl": "http://127.0.0.1:3129/zen/go/v1" })
         );
     }
 
@@ -320,7 +357,7 @@ mod tests {
         let value = pi_models_value(tempdir.path()).expect("models.json written");
         assert_eq!(
             value["providers"]["myprovider"]["baseUrl"],
-            "http://127.0.0.1:3129/anthropic"
+            "http://127.0.0.1:3129/v1"
         );
     }
 

@@ -49,7 +49,7 @@ To run a provider other than the Kilo gateway:
 - `init`, `acps config import`, and `acps agent set --model` seed the declaration when missing. When a recognized provider-native credential is declared, they record an empty placeholder for `KILO_API_KEY` automatically. No separate `acps secrets set KILO_API_KEY` is needed.
 - Select an `<provider>/<model>` model, e.g. `openrouter/<model>`.
 
-`acp-stack` has no native config module for Kilo. Provider and model selection stay with the harness (`set_provider = false`).
+Provider and model selection stay with the harness (`set_provider = false`). The one key `acp-stack` writes into `~/.config/kilo/kilo.json` is a managed-state endpoint override: `provider.<id>.options.baseURL` for the provider the override names (`kilo` at `<origin>/api/gateway`, `openrouter` at `<origin>/api/v1`), removed again when the override clears. See [Endpoint overrides](../specs/extensions.md#endpoint-overrides).
 
 ## Loopback bridge
 

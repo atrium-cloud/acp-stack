@@ -25,6 +25,18 @@ pub const CLAUDE_CODE_AGENT_ID: &str = "claude-code";
 pub const CODEX_AGENT_ID: &str = "codex";
 pub const HERMES_AGENT_ID: &str = "hermes";
 pub const KILO_AGENT_ID: &str = "kilo";
+pub const GOOSE_AGENT_ID: &str = "goose";
+pub const KIMI_AGENT_ID: &str = "kimi";
+pub const ANTIGRAVITY_AGENT_ID: &str = "antigravity";
+
+/// Goose's host-only endpoint setting per native provider id; providers absent here have no
+/// endpoint field in goose and cannot carry an override.
+const GOOSE_PROVIDER_HOST_ENV: [(&str, &str); 4] = [
+    ("openai", "OPENAI_HOST"),
+    ("anthropic", "ANTHROPIC_HOST"),
+    ("openrouter", "OPENROUTER_HOST"),
+    ("xai", "XAI_HOST"),
+];
 /// Codex reserves `openai` for its own built-in provider definition, whose replacement table
 /// shape is version-dependent, so this pair cannot carry an endpoint override.
 pub const CODEX_OPENAI_PROVIDER_ID: &str = "openai";
@@ -66,6 +78,14 @@ pub struct ProviderEnvMapping {
     /// OpenAI-compatible `GET /models` endpoint for live model-catalog fetches.
     #[serde(default)]
     pub models_url: Option<String>,
+    /// The vendor endpoint base most agents send this provider's traffic to. An endpoint override
+    /// keeps this path and swaps the origin, so a provider without one cannot be rerouted.
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// Per-agent vendor bases for agents whose native client expects a different path than
+    /// `base_url` (pi's Anthropic client appends `/v1/messages` itself, for example).
+    #[serde(default)]
+    pub base_urls: BTreeMap<String, String>,
     #[serde(default)]
     pub claude_code: Option<ClaudeCodeProviderProfile>,
     #[serde(default)]
@@ -131,6 +151,16 @@ impl ProviderEnvMapping {
                 (mapped_agent_id == agent_id).then_some(provider_id.as_str())
             })
             .or_else(|| Some(self.primary_id()))
+    }
+
+    fn vendor_base_url(&self, agent_id: &str) -> Option<&str> {
+        if !self.agents.iter().any(|agent| agent == agent_id) {
+            return None;
+        }
+        self.base_urls
+            .get(agent_id)
+            .or(self.base_url.as_ref())
+            .map(String::as_str)
     }
 }
 
@@ -345,6 +375,39 @@ impl ProviderKeyMapping {
                         ));
                     }
                 }
+            }
+            // A base may only template the companions this provider's credential stores.
+            let placeholder_env_vars: HashSet<&str> = self
+                .api_keys
+                .iter()
+                .filter(|api_key| {
+                    api_key
+                        .provider_ids
+                        .iter()
+                        .any(|id| mapping.contains_id(id))
+                })
+                .flat_map(|api_key| api_key.companion_env_vars.iter())
+                .chain(mapping.companion_env_vars.iter())
+                .map(String::as_str)
+                .collect();
+            if let Some(base_url) = mapping.base_url.as_deref() {
+                validate_vendor_base_url(
+                    &format!("providers.{primary_id}.base_url"),
+                    base_url,
+                    &placeholder_env_vars,
+                )?;
+            }
+            for (agent, base_url) in &mapping.base_urls {
+                if !mapping.agents.iter().any(|supported| supported == agent) {
+                    return provider_mapping_error(format!(
+                        "provider `{primary_id}` has a base URL for unsupported agent `{agent}`"
+                    ));
+                }
+                validate_vendor_base_url(
+                    &format!("providers.{primary_id}.base_urls.{agent}"),
+                    base_url,
+                    &placeholder_env_vars,
+                )?;
             }
             for provider_id in &mapping.id {
                 if !provider_overrides.insert(provider_id.as_str()) {
@@ -635,22 +698,62 @@ pub fn provider_uses_agent_native_auth(agent_id: &str, provider_id: &str) -> boo
             .is_some_and(|profile| profile.agent_native_auth)
 }
 
-/// Whether an (agent, provider) pair can carry an operator-supplied endpoint. Codex plus the
-/// built-in `openai` id and Hermes pairs with no declared api_mode cannot; unknown ids can.
+/// The vendor endpoint base `agent_id` sends `provider_id`'s traffic to by default; an endpoint
+/// override keeps its path and replaces its origin.
+pub fn vendor_base_url_for_agent_provider_id(
+    agent_id: &str,
+    provider_id: &str,
+) -> Option<&'static str> {
+    ProviderKeyMapping::load_embedded()
+        .provider_mapping(provider_id)
+        .and_then(|provider| provider.vendor_base_url(agent_id))
+}
+
+/// Goose reads a host-only endpoint per native provider from `config.yaml`, appending its own
+/// request path, so an override carries the origin alone.
+pub fn goose_host_env_for_native_provider_id(native_provider_id: &str) -> Option<&'static str> {
+    GOOSE_PROVIDER_HOST_ENV
+        .iter()
+        .find(|(native, _)| *native == native_provider_id)
+        .map(|(_, host_env)| *host_env)
+}
+
+/// Whether an (agent, provider) pair can carry an operator-supplied endpoint: the agent must have
+/// somewhere to write it and acp-stack must know the vendor path to keep. A provider outside the
+/// mapping is a configured custom provider, which carries its own vendor base.
 pub fn agent_provider_accepts_endpoint_override(agent_id: &str, provider_id: &str) -> bool {
     if agent_id == CODEX_AGENT_ID && provider_id == CODEX_OPENAI_PROVIDER_ID {
         return false;
     }
-    if agent_id != HERMES_AGENT_ID {
-        return true;
-    }
     let mapping = ProviderKeyMapping::load_embedded();
-    match mapping.provider_mapping(provider_id) {
-        Some(provider) if provider.agents.iter().any(|agent| agent == HERMES_AGENT_ID) => provider
-            .hermes
-            .as_ref()
-            .is_some_and(|profile| profile.api_mode.is_some()),
-        _ => true,
+    let Some(provider) = mapping.provider_mapping(provider_id) else {
+        // Kilo and Antigravity have no custom-provider path that could carry the override.
+        return !matches!(agent_id, KILO_AGENT_ID | ANTIGRAVITY_AGENT_ID);
+    };
+    // A mapped provider the agent does not run has no native slot to write into.
+    if !provider.agents.iter().any(|agent| agent == agent_id) {
+        return false;
+    }
+    match agent_id {
+        HERMES_AGENT_ID => {
+            provider
+                .hermes
+                .as_ref()
+                .is_some_and(|profile| profile.api_mode.is_some())
+                && provider.vendor_base_url(agent_id).is_some()
+        }
+        // Every keyed Claude Code lane speaks Anthropic Messages at the profile base or the
+        // vendor default; a native-auth lane (Bedrock, Vertex, Foundry) ignores ANTHROPIC_BASE_URL.
+        CLAUDE_CODE_AGENT_ID => !provider_uses_agent_native_auth(agent_id, provider_id),
+        GOOSE_AGENT_ID => provider
+            .agent_native_provider_id(agent_id)
+            .and_then(goose_host_env_for_native_provider_id)
+            .is_some(),
+        // Kimi fixes each lane's base in its launch environment.
+        KIMI_AGENT_ID => {
+            crate::runtime::agent::acp_bridge::kimi_provider_profile(Some(provider_id)).is_some()
+        }
+        _ => provider.vendor_base_url(agent_id).is_some(),
     }
 }
 
@@ -982,6 +1085,74 @@ fn validate_token(field: &str, value: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+const BASE_URL_PLACEHOLDER_FILL: &str = "placeholder";
+
+fn validate_vendor_base_url(
+    field: &str,
+    value: &str,
+    placeholder_env_vars: &HashSet<&str>,
+) -> Result<()> {
+    validate_token(field, value)?;
+    let mut filled = value.to_owned();
+    for placeholder in base_url_template_placeholders(value) {
+        if !placeholder_env_vars.contains(placeholder) {
+            return provider_mapping_error(format!(
+                "`{field}` value `{value}` templates `{{{placeholder}}}`, which is not a companion \
+                 env var of this provider"
+            ));
+        }
+        filled = filled.replace(&format!("{{{placeholder}}}"), BASE_URL_PLACEHOLDER_FILL);
+    }
+    if filled.contains(['{', '}']) {
+        return provider_mapping_error(format!(
+            "`{field}` value `{value}` has an unbalanced placeholder brace"
+        ));
+    }
+    let parsed = reqwest::Url::parse(&filled).map_err(|_| StackError::RegistryLoad {
+        reason: format!("`{field}` value `{value}` is not a valid URL"),
+    })?;
+    if parsed.scheme() != "https" || parsed.host_str().is_none() {
+        return provider_mapping_error(format!("`{field}` value `{value}` must be an https URL"));
+    }
+    Ok(())
+}
+
+/// The `{ENV_VAR}` placeholders a vendor base template carries, in order of appearance.
+pub fn base_url_template_placeholders(template: &str) -> Vec<&str> {
+    let mut placeholders = Vec::new();
+    let mut rest = template;
+    while let Some(start) = rest.find('{') {
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('}') else {
+            break;
+        };
+        placeholders.push(&after[..end]);
+        rest = &after[end + 1..];
+    }
+    placeholders
+}
+
+/// `template` with every `{ENV_VAR}` placeholder filled from the credential's stored values.
+pub fn resolve_base_url_template(
+    template: &str,
+    values: &BTreeMap<String, String>,
+) -> Result<String> {
+    let mut resolved = template.to_owned();
+    for name in base_url_template_placeholders(template) {
+        let Some(value) = values.get(name) else {
+            return Err(StackError::InvalidParam {
+                field: "base_url",
+                reason: format!(
+                    "vendor base URL `{template}` needs the stored `{name}` value to compose an \
+                     endpoint override"
+                ),
+            });
+        };
+        resolved = resolved.replace(&format!("{{{name}}}"), value);
+    }
+    Ok(resolved)
 }
 
 fn is_supported_agent_id(agent_id: &str) -> bool {

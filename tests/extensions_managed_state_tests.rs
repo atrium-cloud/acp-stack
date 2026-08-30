@@ -604,7 +604,7 @@ async fn rejects_a_base_url_for_an_agent_without_an_endpoint_field() {
             ADMIN_KEY,
             apply_body(
                 1,
-                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3129/openai"),
+                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3129"),
             ),
         )
         .await;
@@ -629,7 +629,7 @@ async fn rejects_a_base_url_for_codex_built_in_openai() {
             ADMIN_KEY,
             apply_body(
                 1,
-                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3129/openai"),
+                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3129"),
             ),
         )
         .await;
@@ -680,7 +680,7 @@ async fn a_rejected_endpoint_revision_stays_reusable() {
             ADMIN_KEY,
             apply_body(
                 5,
-                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3129/openai"),
+                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3129"),
             ),
         )
         .await;
@@ -713,7 +713,7 @@ async fn a_rejected_endpoint_revision_stays_reusable() {
 async fn codex_accepts_a_base_url_for_openrouter() {
     let harness = ServerHarness::spawn().await;
     use_codex_agent(&harness);
-    let base_url = "http://127.0.0.1:3129/openrouter";
+    let base_url = "http://127.0.0.1:3129";
     let response = harness
         .post_apply(
             NAMESPACE,
@@ -733,10 +733,10 @@ async fn codex_accepts_a_base_url_for_openrouter() {
 #[tokio::test]
 async fn accepts_https_and_loopback_base_urls() {
     for base_url in [
-        "https://relay.example/anthropic",
-        "http://127.0.0.1:3129/anthropic",
-        "http://localhost:3129/openai",
-        "http://[::1]:3129/openai",
+        "https://relay.example",
+        "http://127.0.0.1:3129",
+        "http://localhost:3129",
+        "http://[::1]:3129",
     ] {
         let harness = ServerHarness::spawn().await;
         use_endpoint_capable_agent(&harness);
@@ -753,7 +753,7 @@ async fn accepts_https_and_loopback_base_urls() {
             .provider_credential_set("openai")
             .and_then(|set| set.sole.as_ref())
             .expect("stored credential");
-        // Stored verbatim: each agent module appends per its own convention.
+        // Stored as given: each agent module composes its vendor path behind this origin.
         assert_eq!(credential.base_url.as_deref(), Some(base_url));
     }
 }
@@ -767,6 +767,8 @@ async fn rejects_malformed_base_urls() {
         ("https://user:pw@relay.example/v1", "credentials"),
         ("https://relay.example/v1?key=leak", "query string"),
         ("https://relay.example/v1#frag", "query string"),
+        ("https://relay.example/anthropic", "no path"),
+        ("http://127.0.0.1:3129/openai", "no path"),
     ] {
         let harness = ServerHarness::spawn().await;
         use_endpoint_capable_agent(&harness);
@@ -801,7 +803,7 @@ async fn replay_at_the_same_revision_with_a_changed_base_url_conflicts() {
             ADMIN_KEY,
             apply_body(
                 4,
-                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3129/openai"),
+                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3129"),
             ),
         )
         .await;
@@ -813,7 +815,7 @@ async fn replay_at_the_same_revision_with_a_changed_base_url_conflicts() {
             ADMIN_KEY,
             apply_body(
                 4,
-                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3129/openai"),
+                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3129"),
             ),
         )
         .await;
@@ -829,7 +831,7 @@ async fn replay_at_the_same_revision_with_a_changed_base_url_conflicts() {
             ADMIN_KEY,
             apply_body(
                 4,
-                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3129/other"),
+                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3130"),
             ),
         )
         .await;
@@ -857,7 +859,7 @@ async fn clearing_the_selection_drops_the_stored_base_url() {
             ADMIN_KEY,
             apply_body(
                 2,
-                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3129/openai"),
+                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3129"),
             ),
         )
         .await;
@@ -1032,7 +1034,7 @@ async fn a_second_provider_endpoint_override_is_rejected_until_the_first_is_clea
             ADMIN_KEY,
             apply_body(
                 1,
-                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3129/openai"),
+                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3129"),
             ),
         )
         .await;
@@ -1044,7 +1046,7 @@ async fn a_second_provider_endpoint_override_is_rejected_until_the_first_is_clea
             ADMIN_KEY,
             apply_body(
                 1,
-                openrouter_selection_with_base_url("sk-b", "http://127.0.0.1:3129/openrouter"),
+                openrouter_selection_with_base_url("sk-b", "http://127.0.0.1:3129"),
             ),
         )
         .await;
@@ -1076,7 +1078,7 @@ async fn a_second_provider_endpoint_override_is_rejected_until_the_first_is_clea
             ADMIN_KEY,
             apply_body(
                 1,
-                openrouter_selection_with_base_url("sk-b", "http://127.0.0.1:3129/openrouter"),
+                openrouter_selection_with_base_url("sk-b", "http://127.0.0.1:3129"),
             ),
         )
         .await;
@@ -1099,7 +1101,7 @@ async fn re_applying_an_endpoint_for_the_same_provider_is_allowed() {
             ADMIN_KEY,
             apply_body(
                 1,
-                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3129/openai"),
+                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3129"),
             ),
         )
         .await;
@@ -1111,7 +1113,7 @@ async fn re_applying_an_endpoint_for_the_same_provider_is_allowed() {
             ADMIN_KEY,
             apply_body(
                 2,
-                openai_selection_with_base_url("sk-b", "http://127.0.0.1:3129/openai-2"),
+                openai_selection_with_base_url("sk-b", "http://127.0.0.1:3130"),
             ),
         )
         .await;
@@ -1145,7 +1147,7 @@ async fn applying_an_override_invalidates_the_provider_model_cache() {
             ADMIN_KEY,
             apply_body(
                 1,
-                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3129/openai"),
+                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3129"),
             ),
         )
         .await;

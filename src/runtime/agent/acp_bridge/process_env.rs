@@ -1,5 +1,8 @@
 use super::*;
 
+use crate::runtime::agent::agent_headless_config::reroute_base_url;
+use crate::runtime::agent::provider_keys::vendor_base_url_for_agent_provider_id;
+
 pub(crate) const KIMI_CODE_AGENT_ID: &str = "kimi";
 pub(crate) const KIMI_API_KEY_ENV: &str = "KIMI_API_KEY";
 pub(super) const KIMI_MODEL_API_KEY_ENV: &str = "KIMI_MODEL_API_KEY";
@@ -80,16 +83,61 @@ pub(crate) const PI_HARNESS_COMMAND: &str = "pi";
 /// The pi-acp bundle ships without Pi; it runs the `pi` this names.
 pub(crate) const PI_ACP_PI_BIN_ENV: &str = "PI_ACP_PI_BIN";
 
+pub(crate) const ANTIGRAVITY_AGENT_ID: &str = "antigravity";
+/// The Antigravity CLI's Gemini endpoint setting: a service root, so an override origin is the
+/// whole value.
+pub(crate) const ANTIGRAVITY_BASE_URL_ENV: &str = "GOOGLE_GEMINI_BASE_URL";
+
 pub(super) fn build_agent_process_env(
     agent: &AgentConfig,
     home: &Path,
     env: HashMap<String, String>,
 ) -> Result<HashMap<String, String>> {
     match agent.id.as_str() {
-        KIMI_CODE_AGENT_ID => build_kimi_process_env(agent, env),
+        KIMI_CODE_AGENT_ID => {
+            let endpoint = crate::secrets::managed_provider_endpoint_override_for_home(home)?;
+            build_kimi_process_env(agent, env, endpoint.as_ref())
+        }
         PI_AGENT_ID => build_pi_process_env(home, env),
+        ANTIGRAVITY_AGENT_ID => {
+            let endpoint = crate::secrets::managed_provider_endpoint_override_for_home(home)?;
+            build_antigravity_process_env(env, endpoint.as_ref())
+        }
         _ => Ok(env),
     }
+}
+
+/// Antigravity has no provider selection; the override names the provider its credential is
+/// stored under, and the rerouted base is the bare origin.
+fn build_antigravity_process_env(
+    mut env: HashMap<String, String>,
+    endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
+) -> Result<HashMap<String, String>> {
+    if env.contains_key(ANTIGRAVITY_BASE_URL_ENV) {
+        return Err(StackError::AgentInitializeFailed {
+            reason: format!(
+                "Antigravity launch env `{ANTIGRAVITY_BASE_URL_ENV}` is runtime-managed; remove it from [agent].env"
+            ),
+        });
+    }
+    let Some(endpoint) = endpoint else {
+        return Ok(env);
+    };
+    let Some(vendor_base_url) =
+        vendor_base_url_for_agent_provider_id(ANTIGRAVITY_AGENT_ID, &endpoint.provider_id)
+    else {
+        return Err(StackError::AgentInitializeFailed {
+            reason: format!(
+                "Antigravity cannot route provider `{}` through a custom endpoint",
+                endpoint.provider_id
+            ),
+        });
+    };
+    env.insert(
+        ANTIGRAVITY_BASE_URL_ENV.to_owned(),
+        reroute_base_url(&endpoint.base_url, vendor_base_url)?,
+    );
+    Ok(env)
 }
 
 fn build_pi_process_env(
@@ -122,6 +170,7 @@ fn build_pi_process_env(
 fn build_kimi_process_env(
     agent: &AgentConfig,
     mut env: HashMap<String, String>,
+    endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
 ) -> Result<HashMap<String, String>> {
     let provider = agent.provider.as_ref();
     let custom = provider.and_then(|provider| provider.custom.as_ref());
@@ -196,9 +245,22 @@ fn build_kimi_process_env(
         });
     }
 
+    // The lane's vendor base keeps its path behind the override origin. The override may be
+    // stored under any alias of the active lane (a provider-less config runs the Kimi For
+    // Coding lane), so lanes are compared by their base rather than by id.
+    let override_targets_active_lane =
+        |endpoint: &&crate::secrets::ProviderEndpointOverride| match provider {
+            Some(provider) if provider.id == endpoint.provider_id => true,
+            _ => kimi_provider_profile(Some(&endpoint.provider_id))
+                .is_some_and(|(lane_base_url, _, _)| lane_base_url == base_url),
+        };
+    let base_url = match endpoint.filter(override_targets_active_lane) {
+        Some(endpoint) => reroute_base_url(&endpoint.base_url, base_url)?,
+        None => base_url.to_owned(),
+    };
     env.insert(KIMI_MODEL_API_KEY_ENV.to_owned(), api_key);
     env.insert(KIMI_MODEL_NAME_ENV.to_owned(), model.to_owned());
-    env.insert(KIMI_MODEL_BASE_URL_ENV.to_owned(), base_url.to_owned());
+    env.insert(KIMI_MODEL_BASE_URL_ENV.to_owned(), base_url);
     if let Some(custom) = custom {
         env.insert(
             KIMI_MODEL_PROVIDER_TYPE_ENV.to_owned(),
@@ -584,6 +646,156 @@ mod tests {
                 summary.id
             );
         }
+    }
+
+    fn override_for(provider_id: &str) -> crate::secrets::ProviderEndpointOverride {
+        crate::secrets::ProviderEndpointOverride {
+            provider_id: provider_id.to_owned(),
+            base_url: "http://127.0.0.1:3129".to_owned(),
+            companion_values: std::collections::BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn kimi_process_env_endpoint_override_keeps_the_lane_path_behind_the_origin() {
+        let env = HashMap::from([("MOONSHOT_API_KEY".to_owned(), "secret".to_owned())]);
+        let agent = kimi_agent_with_provider(KIMI_MOONSHOT_PROVIDER_ID, None);
+
+        let prepared =
+            super::build_kimi_process_env(&agent, env, Some(&override_for("moonshotai")))
+                .expect("Kimi env with override");
+
+        assert_eq!(
+            prepared.get(KIMI_MODEL_BASE_URL_ENV).map(String::as_str),
+            Some("http://127.0.0.1:3129/v1")
+        );
+    }
+
+    #[test]
+    fn kimi_process_env_endpoint_override_reroutes_the_provider_less_default_lane() {
+        for provider_id in KIMI_SUBSCRIPTION_PROVIDER_IDS {
+            let env = HashMap::from([(KIMI_API_KEY_ENV.to_owned(), "secret".to_owned())]);
+
+            let prepared = super::build_kimi_process_env(
+                &kimi_agent(None),
+                env,
+                Some(&override_for(provider_id)),
+            )
+            .expect("Kimi env with override");
+
+            assert_eq!(
+                prepared.get(KIMI_MODEL_BASE_URL_ENV).map(String::as_str),
+                Some("http://127.0.0.1:3129/coding/v1"),
+                "override under `{provider_id}` must reroute the default lane"
+            );
+        }
+    }
+
+    #[test]
+    fn kimi_process_env_provider_less_config_ignores_an_override_for_another_lane() {
+        let env = HashMap::from([(KIMI_API_KEY_ENV.to_owned(), "secret".to_owned())]);
+
+        let prepared = super::build_kimi_process_env(
+            &kimi_agent(None),
+            env,
+            Some(&override_for("moonshotai")),
+        )
+        .expect("Kimi env");
+
+        assert_eq!(
+            prepared.get(KIMI_MODEL_BASE_URL_ENV).map(String::as_str),
+            Some(KIMI_CODE_BASE_URL)
+        );
+    }
+
+    #[test]
+    fn kimi_process_env_endpoint_override_under_a_lane_alias_reroutes_the_configured_lane() {
+        let env = HashMap::from([(KIMI_API_KEY_ENV.to_owned(), "secret".to_owned())]);
+        let agent = kimi_agent_with_provider("kimi-code", None);
+
+        let prepared = super::build_kimi_process_env(&agent, env, Some(&override_for("kimi")))
+            .expect("Kimi env");
+
+        assert_eq!(
+            prepared.get(KIMI_MODEL_BASE_URL_ENV).map(String::as_str),
+            Some("http://127.0.0.1:3129/coding/v1")
+        );
+    }
+
+    #[test]
+    fn kimi_process_env_endpoint_override_for_another_provider_is_ignored() {
+        let env = HashMap::from([("MOONSHOT_API_KEY".to_owned(), "secret".to_owned())]);
+        let agent = kimi_agent_with_provider(KIMI_MOONSHOT_PROVIDER_ID, None);
+
+        let prepared = super::build_kimi_process_env(&agent, env, Some(&override_for("kimi-code")))
+            .expect("Kimi env");
+
+        assert_eq!(
+            prepared.get(KIMI_MODEL_BASE_URL_ENV).map(String::as_str),
+            Some(KIMI_MOONSHOT_BASE_URL)
+        );
+    }
+
+    #[test]
+    fn kimi_process_env_custom_provider_override_keeps_the_declared_path() {
+        let env = HashMap::from([("CUSTOM_API_KEY".to_owned(), "secret".to_owned())]);
+        let agent = kimi_agent_with_custom_provider(crate::config::CustomProviderApi::default());
+
+        let prepared =
+            super::build_kimi_process_env(&agent, env, Some(&override_for("myprovider")))
+                .expect("Kimi custom env");
+
+        assert_eq!(
+            prepared.get(KIMI_MODEL_BASE_URL_ENV).map(String::as_str),
+            Some("http://127.0.0.1:3129/v1")
+        );
+    }
+
+    #[test]
+    fn antigravity_process_env_endpoint_override_is_the_bare_origin() {
+        let env = HashMap::from([("GEMINI_API_KEY".to_owned(), "secret".to_owned())]);
+
+        let prepared = build_antigravity_process_env(env, Some(&override_for("google")))
+            .expect("Antigravity env");
+
+        assert_eq!(
+            prepared.get(ANTIGRAVITY_BASE_URL_ENV).map(String::as_str),
+            Some("http://127.0.0.1:3129")
+        );
+        assert_eq!(
+            prepared.get("GEMINI_API_KEY").map(String::as_str),
+            Some("secret")
+        );
+    }
+
+    #[test]
+    fn antigravity_process_env_without_an_override_is_unchanged() {
+        let env = HashMap::from([("GEMINI_API_KEY".to_owned(), "secret".to_owned())]);
+
+        assert_eq!(
+            build_antigravity_process_env(env.clone(), None).expect("Antigravity env"),
+            env
+        );
+    }
+
+    #[test]
+    fn antigravity_process_env_rejects_a_declared_base_url() {
+        let env = HashMap::from([(ANTIGRAVITY_BASE_URL_ENV.to_owned(), "x".to_owned())]);
+
+        let error = build_antigravity_process_env(env, None).expect_err("managed env must fail");
+
+        assert!(
+            error.to_string().contains(ANTIGRAVITY_BASE_URL_ENV),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn antigravity_process_env_refuses_an_unmapped_provider() {
+        let error = build_antigravity_process_env(HashMap::new(), Some(&override_for("openai")))
+            .expect_err("unmapped provider must fail");
+
+        assert!(error.to_string().contains("openai"), "{error}");
     }
 
     #[test]

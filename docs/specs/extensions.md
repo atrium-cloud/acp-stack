@@ -97,21 +97,29 @@ Rejection happens before any revision watermark persists. An orchestrator that a
 
 ### Endpoint overrides
 
-The `base_url` value must be an `https://` URL with a host, or `http://` to a loopback host (`127.0.0.1`, `::1`, `localhost`). This is the same rule MCP HTTP servers obey, so a local relay listener stays reachable while the no-plaintext-off-host rule holds. Embedded credentials, query strings, and fragments are rejected; the value is at most 2048 bytes.
+The `base_url` value is an origin: scheme, host, and optional port, with no path. It must be an `https://` URL with a host, or `http://` to a loopback host (`127.0.0.1`, `::1`, `localhost`). This is the same rule MCP HTTP servers obey, so a local relay listener stays reachable while the no-plaintext-off-host rule holds. Embedded credentials, query strings, fragments, and any path are rejected with `request.invalid_param`; the value is at most 2048 bytes.
 
-The value is stored verbatim; each agent appends to it per its own native convention. `base_url` participates in the identical-replay comparison, so a replay at the applied revision carrying a different endpoint raises a conflict.
+A stored value carrying a path is rejected by every provisioning path (init, `acps agent set`, `acps agent switch`, and extension apply) until the selection is re-applied with the bare origin; the vendor path is composed by the runtime, so a stored `http://127.0.0.1:3129/v1` becomes `http://127.0.0.1:3129`.
 
-An endpoint override is written into the configured agent's own native config. It is accepted only for agents whose registry entry declares `set_provider_base_url`:
+The origin replaces the scheme, host, and port of the vendor base the agent×provider pair would otherwise use, and that base's path is kept verbatim. Claude Code on `moonshotai` writes `http://127.0.0.1:3129/anthropic`; Claude Code on `kimi-coding-plan` writes `http://127.0.0.1:3129/coding/`; codex on `openrouter` writes `http://127.0.0.1:3129/api/v1`; pi and opencode on `opencode-go` write `http://127.0.0.1:3129/zen/go/v1`. `base_url` participates in the identical-replay comparison, so a replay at the applied revision carrying a different origin raises a conflict.
+
+The vendor base comes from the provider row in `data/providers.toml` (`base_url`, with `[providers.base_urls]` per-agent entries where an agent's client expects a different path), from the Claude Code profile, from the Kimi lane, or from a custom provider's own `base_url`. A row base may carry `{ENV_VAR}` placeholders naming the provider's companion env vars; they are filled from the stored credential's companion values when the override is composed, so Cloudflare AI Gateway on opencode writes `http://127.0.0.1:3129/v1/<CLOUDFLARE_ACCOUNT_ID>/<CLOUDFLARE_GATEWAY_ID>/compat`.
+
+An endpoint override is written into the configured agent's own native config or launch environment. It is accepted only for agents whose registry entry declares `set_provider_base_url`:
 
 - `opencode`: `provider.<id>.options.baseURL`.
 - `pi`: a `models.json` provider entry carrying only `baseUrl`. pi treats it as an override of the built-in provider and keeps its model list.
 - `codex`: `[model_providers.<id>].base_url`.
 - `claude-code`: `ANTHROPIC_BASE_URL` in the settings `env` block.
-- `hermes`: a managed named entry in the `providers:` map of `~/.hermes/config.yaml`. The entry `providers.acps-managed` carries the provider's `name`, the override `base_url`, a `key_env` that reads the stored key unconditionally, and a `transport` pinning the wire shape. It pairs with `model.provider: custom:acps-managed` and the provider-native model id. Only the managed entry is written; `model.base_url` stays untouched. The bare `custom` lane resolves its key and wire shape from URL heuristics, and both miss on a loopback relay base.
+- `hermes`: a managed named entry in the `providers:` map of `~/.hermes/config.yaml`. The entry `providers.acps-managed` carries the provider's `name`, the rerouted `base_url`, a `key_env` that reads the stored key unconditionally, and a `transport` pinning the wire shape. It pairs with `model.provider: custom:acps-managed` and the provider-native model id. Only the managed entry is written; `model.base_url` stays untouched. The bare `custom` lane resolves its key and wire shape from URL heuristics, and both miss on a loopback relay base.
+- `goose`: the provider's host setting in `~/.config/goose/config.yaml` (`OPENAI_HOST`, `ANTHROPIC_HOST`, `OPENROUTER_HOST`, `XAI_HOST`). Goose appends its own request path, so the value is the bare origin.
+- `kimi`: `KIMI_MODEL_BASE_URL` in the launch environment, the lane's base behind the origin.
+- `kilo`: `provider.<id>.options.baseURL` in `~/.config/kilo/kilo.json` for the provider the override names.
+- `antigravity`: `GOOGLE_GEMINI_BASE_URL` in the launch environment, the bare origin.
 
-Any other agent is rejected with `request.invalid_param` before the revision persists.
+`amp` reaches its own backend over a websocket and is rejected with `request.invalid_param` before the revision persists.
 
-Codex additionally refuses an override for its built-in `openai` provider. Codex reserves that provider id, and the shape a replacement table must take is version-dependent. Use `openrouter` or a custom provider instead. An agent switch that would land the overridden provider on that pair is rejected at plan time.
+Pairs that have nowhere to write the override, or whose vendor base is unknown, are rejected the same way: codex with its built-in `openai` provider (Codex reserves that id and the replacement table shape is version-dependent; use `openrouter` or a custom provider), hermes providers without a declared `api_mode`, goose providers without a host setting (`mistral`, `groq`, `cerebras`), Claude Code native-auth lanes (Bedrock, Vertex, Foundry), a mapped provider the configured agent does not run, and any mapped provider whose row declares no `base_url` for the agent. An agent switch that would land the overridden provider on such a pair is rejected at plan time.
 
 At most one provider may hold an endpoint override at a time — the native config carries exactly one. A `base_url` selection naming a different provider while another namespace's credential already carries an endpoint is rejected with `request.invalid_param` before the revision persists. The revision stays reusable once the first namespace's endpoint is cleared.
 
@@ -128,9 +136,7 @@ While an override is stored, every agent-change path that would strand it is rej
 
 On an `applied` or `cleared` outcome, the provider model-catalog cache entries for the outgoing and incoming providers are invalidated. The next catalog read refetches from the endpoint now in force.
 
-Provider model-catalog fetches follow the override. When an override names the configured provider, the catalog is read from `{base_url}/models`. The declared `models_url` is set aside, and the stored value still goes along as the credential.
-
-That `{base}/models` convention matches every shipped `models_url` but one: novita-ai's listing lives outside its inference base. Its fetch under an override fails, and the catalog degrades to the last cached entry while inference still follows the override.
+Provider model-catalog fetches follow the override. When an override names the configured provider, the declared `models_url` is read behind the override origin with its path kept, and the stored value still goes along as the credential.
 
 Only providers that declare a `models_url` are ever fetched. With the override cleared, the declared URL is used unchanged.
 

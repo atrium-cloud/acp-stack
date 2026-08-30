@@ -254,6 +254,28 @@ pub fn add_kimi_placebo_target(config: &mut Config) {
     });
 }
 
+/// Amp is the one registry agent without an endpoint field (it reaches its own backend over a
+/// websocket), so it stands in wherever a test needs an override-incapable target.
+pub fn add_amp_placebo_target(config: &mut Config) {
+    let mut secondary = config.agent.clone();
+    secondary.id = "amp".to_owned();
+    secondary.name = "Amp Code".to_owned();
+    secondary.command = env!("CARGO_BIN_EXE_placebo-agent").to_owned();
+    secondary.args = vec!["acp".into()];
+    secondary.env = vec!["AMP_API_KEY".to_owned()];
+    secondary.cwd = Some(std::env::temp_dir().to_string_lossy().into_owned());
+    secondary.expected_sha256 = None;
+    secondary.install = Some(acp_stack::config::AgentInstallConfig {
+        install_type: "shell".into(),
+        creates: "true".into(),
+        shell: Some("true".into()),
+    });
+    config.array.targets.push(ArrayTargetConfig {
+        id: "amp".to_owned(),
+        agent: secondary,
+    });
+}
+
 pub fn add_hermes_placebo_target(config: &mut Config) {
     let mut secondary = config.agent.clone();
     secondary.id = "hermes".to_owned();

@@ -146,7 +146,7 @@
               "string",
               "null"
             ],
-            "description": "Endpoint base the agent must send this provider's traffic to instead of\nthe vendor default. Written into the agent's own native config, so the\nconfigured agent must declare `set_provider_base_url` in the registry."
+            "description": "Origin (scheme, host, port; no path) the agent must send this provider's\ntraffic to instead of the vendor host. The agent keeps the provider's own\npath behind it. Written into the agent's native config or launch\nenvironment, so the configured agent must declare\n`set_provider_base_url` in the registry."
           }
         },
         "additionalProperties": false

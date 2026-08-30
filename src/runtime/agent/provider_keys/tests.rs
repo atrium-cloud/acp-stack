@@ -863,6 +863,235 @@ fn endpoint_override_pairs_are_data_driven() {
         "codex",
         "openrouter"
     ));
+    // Goose needs a host setting for the native provider.
+    assert!(agent_provider_accepts_endpoint_override(
+        "goose",
+        "openrouter"
+    ));
+    assert!(!agent_provider_accepts_endpoint_override(
+        "goose", "cerebras"
+    ));
+    // Kimi lanes are fixed in the runtime; a provider outside them has no lane.
+    assert!(agent_provider_accepts_endpoint_override(
+        "kimi",
+        "moonshotai"
+    ));
+    assert!(agent_provider_accepts_endpoint_override(
+        "kimi",
+        "kimi-code"
+    ));
+    // Keyed Claude Code lanes reroute; native-auth lanes ignore ANTHROPIC_BASE_URL.
+    assert!(agent_provider_accepts_endpoint_override(
+        "claude-code",
+        "moonshotai"
+    ));
+    assert!(agent_provider_accepts_endpoint_override(
+        "claude-code",
+        "anthropic"
+    ));
+    // A mapped provider the agent does not run has no native slot to write into.
+    assert!(!agent_provider_accepts_endpoint_override(
+        "kimi",
+        "openrouter"
+    ));
+    assert!(!agent_provider_accepts_endpoint_override(
+        "antigravity",
+        "openai"
+    ));
+    assert!(agent_provider_accepts_endpoint_override(
+        "antigravity",
+        "google"
+    ));
+    assert!(agent_provider_accepts_endpoint_override("kilo", "kilo"));
+    assert!(agent_provider_accepts_endpoint_override(
+        "kilo",
+        "openrouter"
+    ));
+    // A mapped provider without a vendor base cannot be composed.
+    assert!(!agent_provider_accepts_endpoint_override(
+        "opencode",
+        "deepinfra"
+    ));
+    assert!(agent_provider_accepts_endpoint_override(
+        "opencode",
+        "cloudflare-ai-gateway"
+    ));
+    assert!(agent_provider_accepts_endpoint_override(
+        "opencode", "jiekou"
+    ));
+    assert!(agent_provider_accepts_endpoint_override(
+        "hermes", "kilocode"
+    ));
+    // An unmapped id is a configured custom provider carrying its own base, except for the
+    // agents that have no custom-provider path at all.
+    assert!(agent_provider_accepts_endpoint_override(
+        "opencode",
+        "myprovider"
+    ));
+    assert!(!agent_provider_accepts_endpoint_override(
+        "kilo",
+        "myprovider"
+    ));
+    assert!(!agent_provider_accepts_endpoint_override(
+        "antigravity",
+        "myprovider"
+    ));
+    assert!(agent_provider_accepts_endpoint_override(
+        "opencode",
+        "opencode-go"
+    ));
+}
+
+#[test]
+fn vendor_base_urls_prefer_the_agent_entry() {
+    assert_eq!(
+        vendor_base_url_for_agent_provider_id("opencode", "anthropic"),
+        Some("https://api.anthropic.com/v1")
+    );
+    assert_eq!(
+        vendor_base_url_for_agent_provider_id("pi", "anthropic"),
+        Some("https://api.anthropic.com")
+    );
+    assert_eq!(
+        vendor_base_url_for_agent_provider_id("antigravity", "google"),
+        Some("https://generativelanguage.googleapis.com")
+    );
+    // The hermes managed entry pins the chat_completions transport, so its
+    // Google base is the OpenAI-compatible surface.
+    assert_eq!(
+        vendor_base_url_for_agent_provider_id("hermes", "google"),
+        Some("https://generativelanguage.googleapis.com/v1beta/openai")
+    );
+    assert_eq!(
+        vendor_base_url_for_agent_provider_id("pi", "google"),
+        Some("https://generativelanguage.googleapis.com/v1beta")
+    );
+    // pi drives the Vercel gateway over its Anthropic-compatible surface.
+    assert_eq!(
+        vendor_base_url_for_agent_provider_id("pi", "vercel-ai-gateway"),
+        Some("https://ai-gateway.vercel.sh")
+    );
+    assert_eq!(
+        vendor_base_url_for_agent_provider_id("hermes", "vercel-ai-gateway"),
+        Some("https://ai-gateway.vercel.sh/v1")
+    );
+    assert_eq!(
+        vendor_base_url_for_agent_provider_id("hermes", "commandcode"),
+        Some("https://api.commandcode.ai/provider/v1")
+    );
+    assert_eq!(
+        vendor_base_url_for_agent_provider_id("opencode", "jiekou"),
+        Some("https://api.jiekou.ai/openai")
+    );
+    assert_eq!(
+        vendor_base_url_for_agent_provider_id("kimi", "openrouter"),
+        None
+    );
+    // Per-account segments stay as placeholders until the stored companions fill them.
+    assert_eq!(
+        vendor_base_url_for_agent_provider_id("opencode", "cloudflare-ai-gateway"),
+        Some(
+            "https://gateway.ai.cloudflare.com/v1/{CLOUDFLARE_ACCOUNT_ID}/{CLOUDFLARE_GATEWAY_ID}/compat"
+        )
+    );
+    assert_eq!(
+        vendor_base_url_for_agent_provider_id("opencode", "deepinfra"),
+        None
+    );
+}
+
+#[test]
+fn templated_vendor_base_urls_resolve_from_stored_companions() {
+    assert_eq!(
+        base_url_template_placeholders(
+            "https://gateway.ai.cloudflare.com/v1/{CLOUDFLARE_ACCOUNT_ID}/{CLOUDFLARE_GATEWAY_ID}/compat"
+        ),
+        ["CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_GATEWAY_ID"]
+    );
+    assert!(base_url_template_placeholders("https://api.openai.com/v1").is_empty());
+
+    let values = BTreeMap::from([
+        ("CLOUDFLARE_ACCOUNT_ID".to_owned(), "acct".to_owned()),
+        ("CLOUDFLARE_GATEWAY_ID".to_owned(), "gw".to_owned()),
+    ]);
+    assert_eq!(
+        resolve_base_url_template(
+            "https://gateway.ai.cloudflare.com/v1/{CLOUDFLARE_ACCOUNT_ID}/{CLOUDFLARE_GATEWAY_ID}/compat",
+            &values
+        )
+        .expect("resolves"),
+        "https://gateway.ai.cloudflare.com/v1/acct/gw/compat"
+    );
+    assert_eq!(
+        resolve_base_url_template("https://api.openai.com/v1", &BTreeMap::new()).expect("literal"),
+        "https://api.openai.com/v1"
+    );
+    let error = resolve_base_url_template(
+        "https://{DATABRICKS_HOST}/ai-gateway/mlflow/v1",
+        &BTreeMap::new(),
+    )
+    .expect_err("missing companion");
+    assert!(error.to_string().contains("DATABRICKS_HOST"), "{error}");
+}
+
+#[test]
+fn templated_vendor_base_urls_may_only_name_contract_companions() {
+    let env_vars = r#"
+[[api_keys]]
+env_var = "EXAMPLE_API_KEY"
+provider_ids = ["example"]
+companion_env_vars = ["EXAMPLE_ACCOUNT_ID"]
+optional_env_vars = []
+"#;
+    let accepted = r#"
+[[providers]]
+id = ["example"]
+name = "Example"
+agents = ["opencode"]
+base_url = "https://api.example.com/{EXAMPLE_ACCOUNT_ID}/v1"
+"#;
+    ProviderKeyMapping::from_toml_parts(env_vars, accepted).expect("companion placeholder loads");
+
+    let rejected = r#"
+[[providers]]
+id = ["example"]
+name = "Example"
+agents = ["opencode"]
+base_url = "https://api.example.com/{EXAMPLE_REGION}/v1"
+"#;
+    let error = ProviderKeyMapping::from_toml_parts(env_vars, rejected)
+        .expect_err("unknown placeholder is rejected");
+    assert!(error.to_string().contains("EXAMPLE_REGION"), "{error}");
+
+    let unbalanced = r#"
+[[providers]]
+id = ["example"]
+name = "Example"
+agents = ["opencode"]
+base_url = "https://api.example.com/{EXAMPLE_ACCOUNT_ID/v1"
+"#;
+    let error = ProviderKeyMapping::from_toml_parts(env_vars, unbalanced)
+        .expect_err("unbalanced brace is rejected");
+    assert!(error.to_string().contains("unbalanced"), "{error}");
+}
+
+/// The runtime-fixed lane bases must agree with the provider rows a relay operator reads.
+#[test]
+fn kimi_lane_constants_match_the_provider_rows() {
+    use crate::runtime::agent::acp_bridge::kimi_provider_profile;
+    for provider_id in [
+        "kimi-code",
+        "kimi-coding-global",
+        "moonshotai",
+        "moonshotai-cn",
+    ] {
+        let (lane_base, _, _) = kimi_provider_profile(Some(provider_id)).expect("kimi lane");
+        assert_eq!(
+            vendor_base_url_for_agent_provider_id("kimi", provider_id),
+            Some(lane_base),
+            "{provider_id}"
+        );
+    }
 }
 
 #[test]

@@ -138,6 +138,7 @@ pub(crate) fn native_entry(
         support_doc: support_doc.map(str::to_owned),
         testflight_prompt: None,
         testflight_expect_fs: None,
+        default_mode: None,
         adapter: None,
         harness: Some(harness),
     }
@@ -177,6 +178,7 @@ pub(crate) fn adapter_entry(
         support_doc: support_doc.map(str::to_owned),
         testflight_prompt: None,
         testflight_expect_fs: None,
+        default_mode: None,
         adapter: Some(adapter),
         harness: Some(harness),
     }

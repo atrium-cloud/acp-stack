@@ -135,7 +135,7 @@ fn openrouter_deposit(revision: i64) -> Value {
         json!({
             "provider_id": "openrouter",
             "source_refs": { "OPENROUTER_API_KEY": "PROVIDER_CAPSULE" },
-            "base_url": "http://127.0.0.1:8787/v1",
+            "base_url": "http://127.0.0.1:8787",
         }),
     )
 }
@@ -163,7 +163,7 @@ async fn deposit_writes_secrets_and_applies_selection_atomically() {
             .expect("managed credential");
         assert_eq!(
             credential.base_url.as_deref(),
-            Some("http://127.0.0.1:8787/v1")
+            Some("http://127.0.0.1:8787")
         );
         assert_eq!(
             credential
@@ -189,7 +189,7 @@ async fn deposit_writes_secrets_and_applies_selection_atomically() {
         .expect("endpoint override read")
         .expect("endpoint override present");
     assert_eq!(override_.provider_id, "openrouter");
-    assert_eq!(override_.base_url, "http://127.0.0.1:8787/v1");
+    assert_eq!(override_.base_url, "http://127.0.0.1:8787");
     let reopened = SecretStore::open_read_only(&harness.home).expect("reopen store");
     assert_eq!(
         reopened.get("PROVIDER_CAPSULE").expect("durable secret"),

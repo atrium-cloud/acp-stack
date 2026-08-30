@@ -122,7 +122,13 @@ pub(super) fn provision_hermes_config(
         return Ok(written);
     };
     let provider_id = provider.id.as_str();
-    let base_url_override = super::endpoint_base_url_for(endpoint, provider_id);
+    let base_url_override = match provider.custom.as_ref() {
+        Some(custom) => super::rerouted_base_url_for(endpoint, provider_id, &custom.base_url)?,
+        None => {
+            super::rerouted_mapped_base_url_for(endpoint, &config.agent.id, provider_id, &path)?
+        }
+    };
+    let base_url_override = base_url_override.as_deref();
     let api_key_ref = require_agent_env_for_provider(config, provider_id, &path)?;
 
     let mut root = read_yaml_mapping(&path)?;
@@ -492,7 +498,8 @@ mod tests {
     fn endpoint(provider_id: &str) -> crate::secrets::ProviderEndpointOverride {
         crate::secrets::ProviderEndpointOverride {
             provider_id: provider_id.to_owned(),
-            base_url: "http://127.0.0.1:3129/openrouter".to_owned(),
+            base_url: "http://127.0.0.1:3129".to_owned(),
+            companion_values: std::collections::BTreeMap::new(),
         }
     }
 
@@ -532,7 +539,7 @@ mod tests {
         assert_eq!(value["model"]["default"], "deepseek/deepseek-v4-flash");
         let entry = &value["providers"]["acps-managed"];
         assert_eq!(entry["name"], "OpenRouter (managed endpoint)");
-        assert_eq!(entry["base_url"], "http://127.0.0.1:3129/openrouter");
+        assert_eq!(entry["base_url"], "http://127.0.0.1:3129/api/v1");
         assert_eq!(entry["key_env"], "OPENROUTER_API_KEY");
         assert_eq!(entry["transport"], "chat_completions");
         assert!(entry["default_model"].is_null(), "{entry:?}");
@@ -821,7 +828,7 @@ mod tests {
         assert_eq!(value["model"]["provider"], "custom:acps-managed");
         assert_eq!(
             value["providers"]["acps-managed"]["base_url"],
-            "http://127.0.0.1:3129/openrouter"
+            "http://127.0.0.1:3129/v1"
         );
     }
 

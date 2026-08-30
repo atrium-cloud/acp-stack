@@ -9,21 +9,27 @@ fn embedded_registry_parses() {
     );
 }
 
-/// The flag gates whether a managed credential may carry a `base_url`, so an agent
-/// without a native endpoint field would accept routing it silently never applies.
+/// Kimi's default mode parks every tool call on an operator permission decision.
 #[test]
-fn only_agents_with_a_native_endpoint_field_declare_set_provider_base_url() {
+fn kimi_declares_yolo_as_the_unattended_default_mode() {
     let catalog = RegistryCatalog::load_embedded().expect("registry");
-    for id in ["opencode", "pi", "codex", "claude-code", "hermes"] {
-        assert!(
-            catalog.supports_provider_base_url(id),
-            "`{id}` writes a per-provider endpoint and must declare set_provider_base_url"
-        );
-    }
-    for id in ["goose", "amp", "kimi", "kilo", "antigravity"] {
-        assert!(
-            !catalog.supports_provider_base_url(id),
-            "`{id}` has no per-provider endpoint field and must not declare set_provider_base_url"
+    let kimi = catalog.lookup("kimi").expect("kimi entry");
+    assert_eq!(kimi.default_mode.as_deref(), Some("yolo"));
+}
+
+/// The flag gates whether a managed credential may carry a `base_url`. Every agent that talks
+/// plain HTTP to its provider has an endpoint field acp-stack writes; amp reaches its own
+/// backend over a websocket and is the sole exception.
+#[test]
+fn every_http_agent_declares_set_provider_base_url() {
+    let catalog = RegistryCatalog::load_embedded().expect("registry");
+    for entry in catalog.entries() {
+        let expected = entry.id != "amp";
+        assert_eq!(
+            catalog.supports_provider_base_url(&entry.id),
+            expected,
+            "`{}` set_provider_base_url must be {expected}",
+            entry.id
         );
     }
     assert!(!catalog.supports_provider_base_url("not-a-registered-agent"));

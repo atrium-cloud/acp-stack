@@ -20,6 +20,14 @@
 # the provider. Every hermes-enabled provider must declare the sub-table;
 # omitting `api_mode` marks the pair as unable to carry an override.
 #
+# `base_url` is the vendor endpoint base most agents send the provider's
+# traffic to (models.dev `api`, or the agent SDK default). A managed-state
+# endpoint override keeps its path and replaces its origin, so a row without
+# one cannot be rerouted. `[providers.base_urls]` overrides it per agent id
+# where an agent's client expects a different path (pi and hermes Anthropic
+# clients append `/v1/messages` themselves). Claude Code lanes use the
+# `[providers.claude_code]` base_url; Kimi lanes are fixed in the runtime.
+#
 # `models_url` is the provider's OpenAI-compatible model listing endpoint:
 # `GET <models_url>` with `Authorization: Bearer <api key>` returning
 # `{"data": [{"id": ..., "name"?: ...}]}`. It backs live model-catalog
@@ -30,6 +38,7 @@
 id = ["anthropic"]
 name = "Anthropic"
 agents = ["pi", "opencode", "goose", "claude-code", "hermes"]
+base_url = "https://api.anthropic.com/v1"
 
 # First-party Anthropic API needs no provisioning extras; the empty sub-table
 # marks the provider as Claude Code-profiled.
@@ -37,6 +46,10 @@ agents = ["pi", "opencode", "goose", "claude-code", "hermes"]
 
 [providers.hermes]
 api_mode = "anthropic_messages"
+
+[providers.base_urls]
+pi = "https://api.anthropic.com"
+hermes = "https://api.anthropic.com"
 
 [[providers]]
 id = ["ant-ling"]
@@ -52,6 +65,7 @@ agents = ["pi"]
 id = ["openai"]
 name = "OpenAI"
 agents = ["pi", "opencode", "goose", "codex", "hermes"]
+base_url = "https://api.openai.com/v1"
 
 [providers.hermes]
 api_mode = "codex_responses"
@@ -60,6 +74,7 @@ api_mode = "codex_responses"
 id = ["deepseek"]
 name = "DeepSeek"
 agents = ["pi", "opencode", "claude-code", "hermes"]
+base_url = "https://api.deepseek.com"
 models_url = "https://api.deepseek.com/models"
 
 [providers.claude_code]
@@ -76,30 +91,43 @@ api_mode = "chat_completions"
 [[providers]]
 id = ["google"]
 name = "Google AI Studio"
-agents = ["pi", "opencode", "hermes"]
+agents = ["pi", "opencode", "hermes", "antigravity"]
+base_url = "https://generativelanguage.googleapis.com/v1beta"
 
 [providers.hermes]
 api_mode = "chat_completions"
+
+[providers.base_urls]
+antigravity = "https://generativelanguage.googleapis.com"
+hermes = "https://generativelanguage.googleapis.com/v1beta/openai"
 
 [[providers]]
 id = ["mistral"]
 name = "Mistral"
 agents = ["pi", "opencode", "goose"]
+base_url = "https://api.mistral.ai/v1"
+
+[providers.base_urls]
+pi = "https://api.mistral.ai"
 
 [[providers]]
 id = ["groq"]
 name = "Groq"
 agents = ["pi", "opencode", "goose"]
+base_url = "https://api.groq.com/openai/v1"
 
 [[providers]]
 id = ["cerebras"]
 name = "Cerebras"
 agents = ["pi", "opencode", "goose"]
+base_url = "https://api.cerebras.ai/v1"
 
 [[providers]]
 id = ["cloudflare-ai-gateway"]
 name = "Cloudflare AI Gateway"
 agents = ["pi", "opencode"]
+# The gateway's unified OpenAI-compatible endpoint; the account and gateway segments come from the stored companions.
+base_url = "https://gateway.ai.cloudflare.com/v1/{CLOUDFLARE_ACCOUNT_ID}/{CLOUDFLARE_GATEWAY_ID}/compat"
 companion_env_vars = ["CLOUDFLARE_GATEWAY_ID"]
 optional_env_vars = []
 
@@ -111,11 +139,13 @@ pi = "CLOUDFLARE_API_KEY"
 id = ["cloudflare-workers-ai"]
 name = "Cloudflare Workers AI"
 agents = ["pi", "opencode"]
+base_url = "https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/v1"
 
 [[providers]]
 id = ["xai"]
 name = "xAI"
 agents = ["pi", "opencode", "goose", "hermes"]
+base_url = "https://api.x.ai/v1"
 
 [providers.hermes]
 api_mode = "codex_responses"
@@ -123,7 +153,8 @@ api_mode = "codex_responses"
 [[providers]]
 id = ["openrouter"]
 name = "OpenRouter"
-agents = ["pi", "opencode", "goose", "codex", "hermes"]
+agents = ["pi", "opencode", "goose", "codex", "hermes", "kilo"]
+base_url = "https://openrouter.ai/api/v1"
 models_url = "https://openrouter.ai/api/v1/models"
 
 [providers.hermes]
@@ -133,11 +164,16 @@ api_mode = "chat_completions"
 id = ["vercel-ai-gateway", "vercel", "ai-gateway"]
 name = "Vercel AI Gateway"
 agents = ["pi", "opencode", "hermes"]
+base_url = "https://ai-gateway.vercel.sh/v1"
 
 [providers.provider_ids]
 vercel-ai-gateway = "pi"
 vercel = "opencode"
 ai-gateway = "hermes"
+
+# pi drives the gateway over its Anthropic-compatible surface, which appends /v1/messages itself.
+[providers.base_urls]
+pi = "https://ai-gateway.vercel.sh"
 
 [providers.hermes]
 api_mode = "chat_completions"
@@ -147,6 +183,7 @@ id = ["zai"]
 name = "Z.AI"
 # does not appear to have a status page
 agents = ["pi", "opencode", "claude-code", "hermes"]
+base_url = "https://api.z.ai/api/paas/v4"
 # No models_url: GET /api/paas/v4/models answers 401 but is absent from
 # Z.AI's API reference and OpenAPI spec (checked 2026-08-01), so the
 # response shape is unverified.
@@ -178,6 +215,7 @@ id = ["opencode"]
 name = "OpenCode Zen"
 # does not appear to have a status page
 agents = ["pi", "opencode", "hermes"]
+base_url = "https://opencode.ai/zen/v1"
 # Verified 2026-08-20: 200 with the standard {"data":[{"id":...}]} shape,
 # served even unauthenticated.
 models_url = "https://opencode.ai/zen/v1/models"
@@ -196,6 +234,7 @@ id = ["opencode-go"]
 name = "OpenCode Go"
 # does not appear to have a status page
 agents = ["pi", "opencode", "hermes"]
+base_url = "https://opencode.ai/zen/go/v1"
 # Verified 2026-08-20: 200 with the standard {"data":[{"id":...}]} shape,
 # served even unauthenticated.
 models_url = "https://opencode.ai/zen/go/v1/models"
@@ -215,6 +254,7 @@ agents = ["pi"]
 id = ["huggingface"]
 name = "Hugging Face"
 agents = ["pi", "opencode", "hermes"]
+base_url = "https://router.huggingface.co/v1"
 # Verified 2026-08-20: 200 with the standard {"data":[{"id":...}]} shape,
 # served even unauthenticated.
 models_url = "https://router.huggingface.co/v1/models"
@@ -226,6 +266,7 @@ api_mode = "chat_completions"
 id = ["fireworks", "fireworks-ai", "fw"]
 name = "Fireworks"
 agents = ["pi", "opencode", "hermes"]
+base_url = "https://api.fireworks.ai/inference/v1"
 # Probed 2026-08-20: 401 unauthenticated, so the response shape is unverified;
 # the best-effort fetch degrades to a logged skip if it turns out wrong.
 models_url = "https://api.fireworks.ai/inference/v1/models"
@@ -244,6 +285,7 @@ api_mode = "chat_completions"
 id = ["together", "togetherai"]
 name = "Together AI"
 agents = ["pi", "opencode"]
+base_url = "https://api.together.xyz/v1"
 
 [providers.provider_ids]
 together = "pi"
@@ -253,6 +295,7 @@ togetherai = "opencode"
 id = ["kimi-coding", "kimi-for-coding", "kimi-coding-plan", "kimi", "kimi-code"]
 name = "Kimi For Coding"
 agents = ["pi", "opencode", "claude-code", "hermes", "kimi"]
+base_url = "https://api.kimi.com/coding/v1"
 # No models_url: probed 2026-08-20 with a real subscription key — the coding
 # surface has no model-list route (/coding/* variants all 404) and the platform
 # /v1/models rejects coding-plan keys with 401.
@@ -278,10 +321,15 @@ kimi-code = "kimi"
 [providers.hermes]
 api_mode = "anthropic_messages"
 
+[providers.base_urls]
+pi = "https://api.kimi.com/coding"
+hermes = "https://api.kimi.com/coding"
+
 [[providers]]
 id = ["kimi-coding-global"]
 name = "Kimi For Coding (Global)"
 agents = ["kimi"]
+base_url = "https://api.kimi.ai/coding/v1"
 # Global-region subscription endpoint (api.kimi.ai); same coding surface as
 # the mainland row, so it shares the KIMI_API_KEY credential and has no
 # model-list route either.
@@ -293,6 +341,7 @@ kimi-coding-global = "kimi"
 id = ["minimax"]
 name = "MiniMax"
 agents = ["pi", "opencode", "claude-code", "hermes"]
+base_url = "https://api.minimax.io/anthropic/v1"
 
 [providers.claude_code]
 base_url = "https://api.minimax.io/anthropic"
@@ -302,10 +351,15 @@ env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "
 [providers.hermes]
 api_mode = "anthropic_messages"
 
+[providers.base_urls]
+pi = "https://api.minimax.io/anthropic"
+hermes = "https://api.minimax.io/anthropic"
+
 [[providers]]
 id = ["minimax-cn"]
 name = "MiniMax (China)"
 agents = ["pi", "opencode", "claude-code", "hermes"]
+base_url = "https://api.minimaxi.com/anthropic/v1"
 
 [providers.claude_code]
 base_url = "https://api.minimaxi.com/anthropic"
@@ -335,6 +389,7 @@ id = ["xiaomi"]
 name = "Xiaomi"
 # does not appear to have a status page
 agents = ["pi", "opencode", "claude-code", "hermes"]
+base_url = "https://api.xiaomimimo.com/v1"
 # Probed 2026-08-20: 401 unauthenticated, so the response shape is unverified;
 # the best-effort fetch degrades to a logged skip if it turns out wrong.
 models_url = "https://api.xiaomimimo.com/v1/models"
@@ -351,6 +406,7 @@ id = ["xiaomi-token-plan-cn"]
 name = "Xiaomi Token Plan (China)"
 # does not appear to have a status page
 agents = ["pi", "opencode", "claude-code"]
+base_url = "https://token-plan-cn.xiaomimimo.com/v1"
 
 [providers.claude_code]
 base_url = "https://token-plan-cn.xiaomimimo.com/anthropic"
@@ -361,6 +417,7 @@ id = ["xiaomi-token-plan-ams"]
 name = "Xiaomi Token Plan (Europe)"
 # does not appear to have a status page
 agents = ["pi", "opencode", "claude-code"]
+base_url = "https://token-plan-ams.xiaomimimo.com/v1"
 
 [providers.claude_code]
 base_url = "https://token-plan-ams.xiaomimimo.com/anthropic"
@@ -371,6 +428,7 @@ id = ["xiaomi-token-plan-sgp"]
 name = "Xiaomi Token Plan (Singapore)"
 # does not appear to have a status page
 agents = ["pi", "opencode", "claude-code"]
+base_url = "https://token-plan-sgp.xiaomimimo.com/v1"
 
 [providers.claude_code]
 base_url = "https://token-plan-sgp.xiaomimimo.com/anthropic"
@@ -474,6 +532,7 @@ agents = ["amp"]
 id = ["actual"]
 name = "Actual Computer"
 agents = ["hermes"]
+base_url = "https://api.actual.inc/v1"
 
 [providers.hermes]
 api_mode = "codex_responses"
@@ -482,6 +541,7 @@ api_mode = "codex_responses"
 id = ["commandcode"]
 name = "CommandCode"
 agents = ["hermes"]
+base_url = "https://api.commandcode.ai/provider/v1"
 
 [providers.hermes]
 api_mode = "chat_completions"
@@ -490,6 +550,7 @@ api_mode = "chat_completions"
 id = ["kilocode"]
 name = "Kilo Code"
 agents = ["hermes"]
+base_url = "https://api.kilo.ai/api/gateway"
 
 [providers.hermes]
 api_mode = "chat_completions"
@@ -504,11 +565,13 @@ api_mode = "chat_completions"
 id = ["302ai"]
 name = "302.AI"
 agents = ["opencode"]
+base_url = "https://api.302.ai/v1"
 
 [[providers]]
 id = ["abacus"]
 name = "Abacus"
 agents = ["opencode"]
+base_url = "https://routellm.abacus.ai/v1"
 
 [[providers]]
 id = ["aihubmix"]
@@ -519,6 +582,7 @@ agents = ["opencode"]
 id = ["alibaba"]
 name = "Alibaba"
 agents = ["opencode", "hermes"]
+base_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 # Probed 2026-08-20: 401 unauthenticated, so the response shape is unverified;
 # the best-effort fetch degrades to a logged skip if it turns out wrong.
 models_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models"
@@ -530,11 +594,13 @@ api_mode = "chat_completions"
 id = ["alibaba-cn"]
 name = "Alibaba (China)"
 agents = ["opencode"]
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 [[providers]]
 id = ["alibaba-coding-plan"]
 name = "Alibaba Coding Plan"
 agents = ["opencode", "hermes"]
+base_url = "https://coding-intl.dashscope.aliyuncs.com/v1"
 # Verified 2026-08-20: 200 with the standard {"data":[{"id":...}]} shape,
 # served even unauthenticated.
 models_url = "https://coding-intl.dashscope.aliyuncs.com/v1/models"
@@ -546,21 +612,25 @@ api_mode = "chat_completions"
 id = ["alibaba-coding-plan-cn"]
 name = "Alibaba Coding Plan (China)"
 agents = ["opencode"]
+base_url = "https://coding.dashscope.aliyuncs.com/v1"
 
 [[providers]]
 id = ["alibaba-token-plan"]
 name = "Alibaba Token Plan"
 agents = ["opencode"]
+base_url = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
 
 [[providers]]
 id = ["alibaba-token-plan-cn"]
 name = "Alibaba Token Plan (China)"
 agents = ["opencode"]
+base_url = "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
 
 [[providers]]
 id = ["ambient"]
 name = "Ambient"
 agents = ["opencode"]
+base_url = "https://api.ambient.xyz/v1"
 
 [[providers]]
 id = ["atomic-chat"]
@@ -571,6 +641,7 @@ agents = ["opencode"]
 id = ["arcee"]
 name = "Arcee"
 agents = ["opencode", "hermes"]
+base_url = "https://api.arcee.ai/api/v1"
 # Probed 2026-08-20: 401 unauthenticated, so the response shape is unverified;
 # the best-effort fetch degrades to a logged skip if it turns out wrong.
 models_url = "https://api.arcee.ai/api/v1/models"
@@ -587,6 +658,7 @@ api_mode = "chat_completions"
 id = ["auriko"]
 name = "Auriko"
 agents = ["opencode"]
+base_url = "https://api.auriko.ai/v1"
 
 [[providers]]
 id = ["azure"]
@@ -607,31 +679,37 @@ agents = ["opencode"]
 id = ["baseten"]
 name = "Baseten"
 agents = ["pi", "opencode"]
+base_url = "https://inference.baseten.co/v1"
 
 [[providers]]
 id = ["berget"]
 name = "Berget.AI"
 agents = ["opencode"]
+base_url = "https://api.berget.ai/v1"
 
 [[providers]]
 id = ["chutes"]
 name = "Chutes"
 agents = ["opencode"]
+base_url = "https://llm.chutes.ai/v1"
 
 [[providers]]
 id = ["clarifai"]
 name = "Clarifai"
 agents = ["opencode"]
+base_url = "https://api.clarifai.com/v2/ext/openai/v1"
 
 [[providers]]
 id = ["cline-pass"]
 name = "ClinePass"
 agents = ["opencode"]
+base_url = "https://api.cline.bot/api/v1"
 
 [[providers]]
 id = ["cloudferro-sherlock"]
 name = "CloudFerro Sherlock"
 agents = ["opencode"]
+base_url = "https://api-sherlock.cloudferro.com/openai/v1"
 
 [[providers]]
 id = ["cohere"]
@@ -642,16 +720,20 @@ agents = ["opencode"]
 id = ["cortecs"]
 name = "Cortecs"
 agents = ["opencode"]
+base_url = "https://api.cortecs.ai/v1"
 
 [[providers]]
 id = ["crof"]
 name = "CrofAI"
 agents = ["opencode"]
+base_url = "https://crof.ai/v1"
 
 [[providers]]
 id = ["databricks"]
 name = "Databricks"
 agents = ["opencode"]
+# The workspace host is per-account; an override replaces it with the origin and keeps the path.
+base_url = "https://{DATABRICKS_HOST}/ai-gateway/mlflow/v1"
 
 [[providers]]
 id = ["deepinfra"]
@@ -662,26 +744,31 @@ agents = ["opencode"]
 id = ["digitalocean"]
 name = "DigitalOcean"
 agents = ["opencode"]
+base_url = "https://inference.do-ai.run/v1"
 
 [[providers]]
 id = ["dinference"]
 name = "DInference"
 agents = ["opencode"]
+base_url = "https://api.dinference.com/v1"
 
 [[providers]]
 id = ["drun"]
 name = "D.Run (China)"
 agents = ["opencode"]
+base_url = "https://chat.d.run/v1"
 
 [[providers]]
 id = ["evroc"]
 name = "evroc"
 agents = ["opencode"]
+base_url = "https://models.think.evroc.com/v1"
 
 [[providers]]
 id = ["fastrouter"]
 name = "FastRouter"
 agents = ["opencode"]
+base_url = "https://go.fastrouter.ai/api/v1"
 
 [[providers]]
 id = ["firepass"]
@@ -692,16 +779,19 @@ agents = ["opencode"]
 id = ["friendli"]
 name = "Friendli"
 agents = ["opencode"]
+base_url = "https://api.friendli.ai/serverless/v1"
 
 [[providers]]
 id = ["frogbot"]
 name = "FrogBot"
 agents = ["opencode"]
+base_url = "https://app.frogbot.ai/api/v1"
 
 [[providers]]
 id = ["github-copilot"]
 name = "GitHub Copilot"
 agents = ["opencode"]
+base_url = "https://api.githubcopilot.com"
 
 [[providers]]
 id = ["github-models"]
@@ -717,6 +807,7 @@ agents = ["opencode"]
 id = ["gmicloud"]
 name = "GMI Cloud"
 agents = ["opencode", "hermes"]
+base_url = "https://api.gmi-serving.com/v1"
 # Probed 2026-08-20: 401 unauthenticated, so the response shape is unverified;
 # the best-effort fetch degrades to a logged skip if it turns out wrong.
 models_url = "https://api.gmi-serving.com/v1/models"
@@ -728,71 +819,85 @@ api_mode = "chat_completions"
 id = ["helicone"]
 name = "Helicone"
 agents = ["opencode"]
+base_url = "https://ai-gateway.helicone.ai/v1"
 
 [[providers]]
 id = ["hetzner"]
 name = "Hetzner"
 agents = ["opencode"]
+base_url = "https://inference.hetzner.com/api/v1"
 
 [[providers]]
 id = ["hpc-ai"]
 name = "HPC-AI"
 agents = ["opencode"]
+base_url = "https://api.hpc-ai.com/inference/v1"
 
 [[providers]]
 id = ["iflowcn"]
 name = "iFlow"
 agents = ["opencode"]
+base_url = "https://apis.iflow.cn/v1"
 
 [[providers]]
 id = ["inception"]
 name = "Inception"
 agents = ["opencode"]
+base_url = "https://api.inceptionlabs.ai/v1"
 
 [[providers]]
 id = ["inceptron"]
 name = "Inceptron"
 agents = ["opencode"]
+base_url = "https://api.inceptron.io/v1"
 
 [[providers]]
 id = ["inference"]
 name = "Inference"
 agents = ["opencode"]
+base_url = "https://inference.net/v1"
 
 [[providers]]
 id = ["io-net"]
 name = "IO.NET"
 agents = ["opencode"]
+base_url = "https://api.intelligence.io.solutions/api/v1"
 
 [[providers]]
 id = ["jiekou"]
 name = "Jiekou.AI"
 agents = ["opencode"]
+base_url = "https://api.jiekou.ai/openai"
 
 [[providers]]
 id = ["kilo"]
 name = "Kilo Gateway"
-agents = ["opencode"]
+agents = ["opencode", "kilo"]
+base_url = "https://api.kilo.ai/api/gateway"
 
 [[providers]]
 id = ["kuae-cloud-coding-plan"]
 name = "KUAE Cloud Coding Plan"
 agents = ["opencode"]
+base_url = "https://coding-plan-endpoint.kuaecloud.net/v1"
 
 [[providers]]
 id = ["lilac"]
 name = "Lilac"
 agents = ["opencode"]
+base_url = "https://api.getlilac.com/v1"
 
 [[providers]]
 id = ["llama"]
 name = "Llama"
 agents = ["opencode"]
+base_url = "https://api.llama.com/compat/v1"
 
 [[providers]]
 id = ["llmgateway"]
 name = "LLM Gateway"
 agents = ["opencode"]
+base_url = "https://api.llmgateway.io/v1"
 
 [[providers]]
 id = ["lmstudio"]
@@ -803,21 +908,25 @@ agents = ["opencode"]
 id = ["longcat"]
 name = "LongCat"
 agents = ["opencode"]
+base_url = "https://api.longcat.chat/openai"
 
 [[providers]]
 id = ["lucidquery"]
 name = "LucidQuery AI"
 agents = ["opencode"]
+base_url = "https://api.lucidquery.com/v1"
 
 [[providers]]
 id = ["meganova"]
 name = "Meganova"
 agents = ["opencode"]
+base_url = "https://api.meganova.ai/v1"
 
 [[providers]]
 id = ["meta", "meta-ai"]
 name = "Meta"
 agents = ["opencode", "hermes"]
+base_url = "https://api.meta.ai/v1"
 # Probed 2026-08-20: 401 unauthenticated, so the response shape is unverified;
 # the best-effort fetch degrades to a logged skip if it turns out wrong.
 models_url = "https://api.llama.com/compat/v1/models"
@@ -838,6 +947,7 @@ api_mode = "codex_responses"
 id = ["minimax-cn-coding-plan"]
 name = "MiniMax Token Plan (minimaxi.com)"
 agents = ["opencode", "claude-code"]
+base_url = "https://api.minimaxi.com/anthropic/v1"
 
 [providers.claude_code]
 base_url = "https://api.minimaxi.com/anthropic"
@@ -848,6 +958,7 @@ env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "
 id = ["minimax-coding-plan"]
 name = "MiniMax Token Plan (minimax.io)"
 agents = ["opencode", "claude-code"]
+base_url = "https://api.minimax.io/anthropic/v1"
 
 [providers.claude_code]
 base_url = "https://api.minimax.io/anthropic"
@@ -858,26 +969,31 @@ env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "
 id = ["mixlayer"]
 name = "Mixlayer"
 agents = ["opencode"]
+base_url = "https://models.mixlayer.ai/v1"
 
 [[providers]]
 id = ["moark"]
 name = "Moark"
 agents = ["opencode"]
+base_url = "https://moark.com/v1"
 
 [[providers]]
 id = ["modal"]
 name = "Modal"
 agents = ["opencode"]
+base_url = "https://inference.us-west.modal.direct/v1"
 
 [[providers]]
 id = ["modelscope"]
 name = "ModelScope"
 agents = ["opencode"]
+base_url = "https://api-inference.modelscope.cn/v1"
 
 [[providers]]
 id = ["moonshotai"]
 name = "Moonshot AI"
 agents = ["opencode", "claude-code", "kimi"]
+base_url = "https://api.moonshot.ai/v1"
 models_url = "https://api.moonshot.ai/v1/models"
 
 [providers.claude_code]
@@ -892,6 +1008,7 @@ env = { ENABLE_TOOL_SEARCH = "false", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1048576
 id = ["moonshotai-cn"]
 name = "Moonshot AI (China)"
 agents = ["opencode", "claude-code", "kimi"]
+base_url = "https://api.moonshot.cn/v1"
 
 [providers.claude_code]
 base_url = "https://api.moonshot.cn/anthropic"
@@ -905,41 +1022,45 @@ env = { ENABLE_TOOL_SEARCH = "false", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1048576
 id = ["morph"]
 name = "Morph"
 agents = ["opencode"]
+base_url = "https://api.morphllm.com/v1"
 
 [[providers]]
 id = ["nano-gpt"]
 name = "NanoGPT"
 agents = ["opencode"]
+base_url = "https://nano-gpt.com/api/v1"
 
 [[providers]]
 id = ["nearai"]
 name = "NEAR AI Cloud"
 agents = ["opencode"]
+base_url = "https://cloud-api.near.ai/v1"
 
 [[providers]]
 id = ["nebius"]
 name = "Nebius Token Factory"
 agents = ["opencode"]
+base_url = "https://api.tokenfactory.nebius.com/v1"
 
 [[providers]]
 id = ["neuralwatt"]
 name = "Neuralwatt"
 agents = ["opencode"]
+base_url = "https://api.neuralwatt.com/v1"
 
 [[providers]]
 id = ["nova"]
 name = "Nova"
 agents = ["opencode"]
+base_url = "https://api.nova.amazon.com/v1"
 
 [[providers]]
 id = ["novita-ai"]
 name = "NovitaAI"
 agents = ["opencode", "hermes"]
+base_url = "https://api.novita.ai/openai"
 # Verified 2026-08-20: 200 with the standard {"data":[{"id":...}]} shape,
-# served even unauthenticated. Note the /openai base, not /v1. This is the one
-# shipped provider whose listing does not live at {inference base}/models, so
-# under an endpoint override the catalog fetch fails and degrades to the last
-# cached entry while inference still follows the override.
+# served even unauthenticated. Note the /openai base, not /v1.
 models_url = "https://api.novita.ai/openai/models"
 
 [providers.hermes]
@@ -949,6 +1070,7 @@ api_mode = "chat_completions"
 id = ["nvidia"]
 name = "Nvidia" # NIM
 agents = ["pi", "opencode", "hermes"]
+base_url = "https://integrate.api.nvidia.com/v1"
 # Verified 2026-08-20: 200 with the standard {"data":[{"id":...}]} shape,
 # served even unauthenticated.
 models_url = "https://integrate.api.nvidia.com/v1/models"
@@ -960,6 +1082,7 @@ api_mode = "chat_completions"
 id = ["ollama-cloud"]
 name = "Ollama Cloud"
 agents = ["opencode", "hermes"]
+base_url = "https://ollama.com/v1"
 # Verified 2026-08-20: 200 with the standard {"data":[{"id":...}]} shape,
 # served even unauthenticated.
 models_url = "https://ollama.com/v1/models"
@@ -971,11 +1094,13 @@ api_mode = "chat_completions"
 id = ["orcarouter"]
 name = "OrcaRouter"
 agents = ["opencode"]
+base_url = "https://api.orcarouter.ai/v1"
 
 [[providers]]
 id = ["ovhcloud"]
 name = "OVHcloud AI Endpoints"
 agents = ["opencode"]
+base_url = "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1"
 
 [[providers]]
 id = ["perplexity"]
@@ -986,16 +1111,19 @@ agents = ["opencode"]
 id = ["perplexity-agent"]
 name = "Perplexity Agent"
 agents = ["opencode"]
+base_url = "https://api.perplexity.ai/v1"
 
 [[providers]]
 id = ["poe"]
 name = "Poe"
 agents = ["opencode"]
+base_url = "https://api.poe.com/v1"
 
 [[providers]]
 id = ["poolside"]
 name = "Poolside"
 agents = ["opencode"]
+base_url = "https://inference.poolside.ai/v1"
 
 [[providers]]
 id = ["privatemode-ai"]
@@ -1006,26 +1134,31 @@ agents = ["opencode"]
 id = ["qihang-ai"]
 name = "QiHang"
 agents = ["opencode"]
+base_url = "https://api.qhaigc.net/v1"
 
 [[providers]]
 id = ["qiniu-ai"]
 name = "Qiniu"
 agents = ["opencode"]
+base_url = "https://api.qnaigc.com/v1"
 
 [[providers]]
 id = ["regolo-ai"]
 name = "Regolo AI"
 agents = ["opencode"]
+base_url = "https://api.regolo.ai/v1"
 
 [[providers]]
 id = ["requesty"]
 name = "Requesty"
 agents = ["opencode"]
+base_url = "https://router.requesty.ai/v1"
 
 [[providers]]
 id = ["routing-run"]
 name = "routing.run"
 agents = ["opencode"]
+base_url = "https://api.routing.run/v1"
 
 [[providers]]
 id = ["sap-ai-core"]
@@ -1036,31 +1169,37 @@ agents = ["opencode"]
 id = ["sarvam"]
 name = "Sarvam AI"
 agents = ["opencode"]
+base_url = "https://api.sarvam.ai/v1"
 
 [[providers]]
 id = ["scaleway"]
 name = "Scaleway"
 agents = ["opencode"]
+base_url = "https://api.scaleway.ai/v1"
 
 [[providers]]
 id = ["siliconflow"]
 name = "SiliconFlow"
 agents = ["opencode"]
+base_url = "https://api.siliconflow.com/v1"
 
 [[providers]]
 id = ["siliconflow-cn"]
 name = "SiliconFlow (China)"
 agents = ["opencode"]
+base_url = "https://api.siliconflow.cn/v1"
 
 [[providers]]
 id = ["stackit"]
 name = "STACKIT"
 agents = ["opencode"]
+base_url = "https://api.openai-compat.model-serving.eu01.onstackit.cloud/v1"
 
 [[providers]]
 id = ["stepfun"]
 name = "StepFun"
 agents = ["opencode", "hermes"]
+base_url = "https://api.stepfun.com/v1"
 
 [providers.hermes]
 api_mode = "chat_completions"
@@ -1069,41 +1208,49 @@ api_mode = "chat_completions"
 id = ["stepfun-ai"]
 name = "StepFun AI"
 agents = ["opencode"]
+base_url = "https://api.stepfun.ai/v1"
 
 [[providers]]
 id = ["stepfun-ai-step-plan"]
 name = "StepFun Step Plan (Global)"
 agents = ["opencode"]
+base_url = "https://api.stepfun.ai/step_plan/v1"
 
 [[providers]]
 id = ["stepfun-step-plan"]
 name = "StepFun Step Plan (China)"
 agents = ["opencode"]
+base_url = "https://api.stepfun.com/step_plan/v1"
 
 [[providers]]
 id = ["submodel"]
 name = "submodel"
 agents = ["opencode"]
+base_url = "https://llm.submodel.ai/v1"
 
 [[providers]]
 id = ["synthetic"]
 name = "Synthetic"
 agents = ["opencode"]
+base_url = "https://api.synthetic.new/openai/v1"
 
 [[providers]]
 id = ["tencent-coding-plan"]
 name = "Tencent Coding Plan (China)"
 agents = ["opencode"]
+base_url = "https://api.lkeap.cloud.tencent.com/coding/v3"
 
 [[providers]]
 id = ["tencent-token-plan"]
 name = "Tencent Token Plan"
 agents = ["opencode"]
+base_url = "https://api.lkeap.cloud.tencent.com/plan/v3"
 
 [[providers]]
 id = ["tencent-tokenhub"]
 name = "Tencent TokenHub"
 agents = ["opencode", "hermes"]
+base_url = "https://tokenhub.tencentmaas.com/v1"
 # Probed 2026-08-20: 401 unauthenticated, so the response shape is unverified;
 # the best-effort fetch degrades to a logged skip if it turns out wrong.
 models_url = "https://tokenhub.tencentmaas.com/v1/models"
@@ -1115,21 +1262,25 @@ api_mode = "chat_completions"
 id = ["the-grid-ai"]
 name = "The Grid AI"
 agents = ["opencode"]
+base_url = "https://api.thegrid.ai/v1"
 
 [[providers]]
 id = ["thinkingmachines"]
 name = "Thinking Machines"
 agents = ["opencode"]
+base_url = "https://tinker.thinkingmachines.dev/services/tinker-prod/anthropic/api/v1"
 
 [[providers]]
 id = ["umans-ai-coding-plan"]
 name = "Umans AI Coding Plan"
 agents = ["opencode"]
+base_url = "https://api.code.umans.ai/v1"
 
 [[providers]]
 id = ["upstage"]
 name = "Upstage"
 agents = ["opencode"]
+base_url = "https://api.upstage.ai/v1/solar"
 
 [[providers]]
 id = ["v0"]
@@ -1145,36 +1296,43 @@ agents = ["opencode"]
 id = ["vivgrid"]
 name = "Vivgrid"
 agents = ["opencode"]
+base_url = "https://api.vivgrid.com/v1"
 
 [[providers]]
 id = ["vultr"]
 name = "Vultr"
 agents = ["opencode"]
+base_url = "https://api.vultrinference.com/v1"
 
 [[providers]]
 id = ["wafer.ai"]
 name = "Wafer"
 agents = ["opencode"]
+base_url = "https://pass.wafer.ai/v1"
 
 [[providers]]
 id = ["wandb"]
 name = "Weights & Biases"
 agents = ["opencode"]
+base_url = "https://api.inference.wandb.ai/v1"
 
 [[providers]]
 id = ["zai-coding-plan"]
 name = "Z.AI Coding Plan"
 agents = ["opencode"]
+base_url = "https://api.z.ai/api/coding/paas/v4"
 
 [[providers]]
 id = ["zenmux"]
 name = "ZenMux"
 agents = ["opencode"]
+base_url = "https://zenmux.ai/api/v1"
 
 [[providers]]
 id = ["zhipuai"]
 name = "Zhipu AI"
 agents = ["opencode", "claude-code"]
+base_url = "https://open.bigmodel.cn/api/paas/v4"
 
 [providers.claude_code]
 base_url = "https://open.bigmodel.cn/api/anthropic"
@@ -1188,3 +1346,4 @@ env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "
 id = ["zhipuai-coding-plan"]
 name = "Zhipu AI Coding Plan"
 agents = ["opencode"]
+base_url = "https://open.bigmodel.cn/api/coding/paas/v4"

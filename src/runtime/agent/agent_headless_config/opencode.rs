@@ -128,15 +128,20 @@ fn write_opencode_provider_config(
     endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
 ) -> Result<String> {
     let api_key_ref = require_agent_env_for_provider_config(config, provider, &provider.id, path)?;
-    let base_url_override = super::endpoint_base_url_for(endpoint, &provider.id);
     if let Some(custom) = provider.custom.as_ref() {
+        let base_url_override =
+            super::rerouted_base_url_for(endpoint, &provider.id, &custom.base_url)?;
         let provider_config = ensure_object_field(providers, &provider.id, path)?;
         provider_config.insert("npm".to_owned(), json!("@ai-sdk/openai-compatible"));
         provider_config.insert("name".to_owned(), json!(custom.name.clone()));
         let options = ensure_object_field(provider_config, "options", path)?;
         options.insert(
             "baseURL".to_owned(),
-            json!(base_url_override.unwrap_or(custom.base_url.as_str())),
+            json!(
+                base_url_override
+                    .as_deref()
+                    .unwrap_or(custom.base_url.as_str())
+            ),
         );
         options.insert("apiKey".to_owned(), json!(format!("{{env:{api_key_ref}}}")));
         let models = ensure_object_field(provider_config, "models", path)?;
@@ -169,6 +174,8 @@ fn write_opencode_provider_config(
             ),
         });
     };
+    let base_url_override =
+        super::rerouted_mapped_base_url_for(endpoint, &config.agent.id, &provider.id, path)?;
     let provider_config = ensure_object_field(providers, agent_provider_id, path)?;
     insert_if_missing(provider_config, "models", json!({}), path)?;
     let options = ensure_object_field(provider_config, "options", path)?;
@@ -275,7 +282,8 @@ mod tests {
     fn endpoint(provider_id: &str) -> crate::secrets::ProviderEndpointOverride {
         crate::secrets::ProviderEndpointOverride {
             provider_id: provider_id.to_owned(),
-            base_url: "http://127.0.0.1:3129/openai".to_owned(),
+            base_url: "http://127.0.0.1:3129".to_owned(),
+            companion_values: std::collections::BTreeMap::new(),
         }
     }
 
@@ -299,7 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn opencode_mapped_provider_endpoint_is_written_and_restored() {
+    fn opencode_mapped_provider_endpoint_keeps_the_vendor_path_and_is_restored() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let config = opencode_openai_config();
 
@@ -308,7 +316,7 @@ mod tests {
         let value = opencode_config_value(tempdir.path());
         assert_eq!(
             value["provider"]["openai"]["options"]["baseURL"],
-            "http://127.0.0.1:3129/openai"
+            "http://127.0.0.1:3129/v1"
         );
         assert_eq!(
             value["provider"]["openai"]["options"]["apiKey"],
@@ -350,7 +358,61 @@ mod tests {
         let value = opencode_config_value(tempdir.path());
         assert_eq!(
             value["provider"]["myprovider"]["options"]["baseURL"],
-            "http://127.0.0.1:3129/openai"
+            "http://127.0.0.1:3129/v1"
+        );
+    }
+
+    #[test]
+    fn opencode_mapped_provider_without_a_vendor_base_refuses_the_override() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut config = config_with_agent("opencode", &["DEEPINFRA_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "deepinfra".to_owned(),
+            model: None,
+            api_key_ref: Some("DEEPINFRA_API_KEY".to_owned()),
+            custom: None,
+        });
+
+        let error =
+            provision_opencode_config(&config, tempdir.path(), Some(&endpoint("deepinfra")))
+                .expect_err("no vendor base must refuse");
+
+        assert!(error.to_string().contains("vendor base URL"), "{error}");
+    }
+
+    #[test]
+    fn opencode_templated_vendor_base_composes_from_stored_companions() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut config = config_with_agent("opencode", &["CLOUDFLARE_API_TOKEN"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "cloudflare-ai-gateway".to_owned(),
+            model: None,
+            api_key_ref: Some("CLOUDFLARE_API_TOKEN".to_owned()),
+            custom: None,
+        });
+        let mut override_ = endpoint("cloudflare-ai-gateway");
+        override_.companion_values = std::collections::BTreeMap::from([
+            ("CLOUDFLARE_ACCOUNT_ID".to_owned(), "acct".to_owned()),
+            ("CLOUDFLARE_GATEWAY_ID".to_owned(), "gw".to_owned()),
+        ]);
+
+        provision_opencode_config(&config, tempdir.path(), Some(&override_)).expect("provision");
+
+        let value = opencode_config_value(tempdir.path());
+        assert_eq!(
+            value["provider"]["cloudflare-ai-gateway"]["options"]["baseURL"],
+            "http://127.0.0.1:3129/v1/acct/gw/compat"
+        );
+
+        let error = provision_opencode_config(
+            &config,
+            tempdir.path(),
+            Some(&endpoint("cloudflare-ai-gateway")),
+        )
+        .expect_err("missing companions must refuse");
+        assert!(
+            error.to_string().contains("CLOUDFLARE_ACCOUNT_ID"),
+            "{error}"
         );
     }
 

@@ -3,6 +3,8 @@ use super::*;
 use crate::runtime::agent::provider_model_catalog::cached_models;
 
 const CLAUDE_CODE_API_KEY_HELPER_PREFIX: &str = "printenv ";
+/// Claude Code's own default; the base an unprofiled Anthropic lane reroutes from.
+const ANTHROPIC_DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
 pub(super) fn provision_claude_code_config(
     config: &Config,
@@ -116,9 +118,15 @@ fn write_claude_provider_env(
     endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
 ) -> Result<()> {
     write_claude_provider_env_inner(config, provider, env, path)?;
-    // Last write wins over both the custom provider's base URL and the profile default.
-    if let Some(base_url) = super::endpoint_base_url_for(endpoint, &provider.id) {
-        env.insert("ANTHROPIC_BASE_URL".to_owned(), json!(base_url));
+    // Last write wins over both the custom provider's base URL and the profile default: the
+    // override origin fronts whichever vendor base the lane would otherwise use.
+    if let Some(origin) = super::endpoint_origin_for(endpoint, &provider.id) {
+        let vendor_base_url = env
+            .get("ANTHROPIC_BASE_URL")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(ANTHROPIC_DEFAULT_BASE_URL);
+        let rerouted = super::reroute_base_url(origin, vendor_base_url)?;
+        env.insert("ANTHROPIC_BASE_URL".to_owned(), json!(rerouted));
     }
     Ok(())
 }
@@ -387,7 +395,8 @@ mod tests {
     fn claude_endpoint(provider_id: &str) -> crate::secrets::ProviderEndpointOverride {
         crate::secrets::ProviderEndpointOverride {
             provider_id: provider_id.to_owned(),
-            base_url: "http://127.0.0.1:3129/anthropic".to_owned(),
+            base_url: "http://127.0.0.1:3129".to_owned(),
+            companion_values: std::collections::BTreeMap::new(),
         }
     }
 
@@ -409,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_code_endpoint_overrides_the_profile_base_url_and_restores_it() {
+    fn claude_code_endpoint_keeps_the_profile_path_behind_the_override_origin_and_restores_it() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let config = claude_moonshot_config();
 
@@ -428,6 +437,50 @@ mod tests {
         assert_eq!(
             claude_settings_value(tempdir.path())["env"]["ANTHROPIC_BASE_URL"],
             "https://api.moonshot.ai/anthropic"
+        );
+    }
+
+    #[test]
+    fn claude_code_endpoint_keeps_a_trailing_slash_profile_path() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut config = config_with_agent("claude-code", &["KIMI_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "kimi-coding-plan".to_owned(),
+            model: None,
+            api_key_ref: Some("KIMI_API_KEY".to_owned()),
+            custom: None,
+        });
+
+        provision_claude_code_config(
+            &config,
+            tempdir.path(),
+            Some(&claude_endpoint("kimi-coding-plan")),
+        )
+        .expect("provision with override");
+
+        assert_eq!(
+            claude_settings_value(tempdir.path())["env"]["ANTHROPIC_BASE_URL"],
+            "http://127.0.0.1:3129/coding/"
+        );
+    }
+
+    #[test]
+    fn claude_code_endpoint_for_the_anthropic_lane_is_the_bare_origin() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut config = config_with_agent("claude-code", &["ANTHROPIC_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "anthropic".to_owned(),
+            model: None,
+            api_key_ref: Some("ANTHROPIC_API_KEY".to_owned()),
+            custom: None,
+        });
+
+        provision_claude_code_config(&config, tempdir.path(), Some(&claude_endpoint("anthropic")))
+            .expect("provision with override");
+
+        assert_eq!(
+            claude_settings_value(tempdir.path())["env"]["ANTHROPIC_BASE_URL"],
+            "http://127.0.0.1:3129"
         );
     }
 

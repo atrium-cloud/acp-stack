@@ -76,7 +76,15 @@ fn provision_codex_main_config(
     let Some(provider) = config.agent.provider.as_ref() else {
         return Ok(None);
     };
-    let base_url_override = super::endpoint_base_url_for(endpoint, &provider.id);
+    let base_url_override = match provider.custom.as_ref() {
+        Some(custom) => super::rerouted_base_url_for(endpoint, &provider.id, &custom.base_url)?,
+        None => super::rerouted_base_url_for(
+            endpoint,
+            &provider.id,
+            CODEX_OPENROUTER_RESPONSES_BASE_URL,
+        )?,
+    };
+    let base_url_override = base_url_override.as_deref();
     if let Some(custom) = provider.custom.as_ref() {
         if custom.api != CustomProviderApi::Responses {
             return Err(StackError::AgentConfigProvision {
@@ -347,7 +355,8 @@ mod tests {
     fn codex_endpoint(provider_id: &str) -> crate::secrets::ProviderEndpointOverride {
         crate::secrets::ProviderEndpointOverride {
             provider_id: provider_id.to_owned(),
-            base_url: "http://127.0.0.1:3129/openrouter".to_owned(),
+            base_url: "http://127.0.0.1:3129".to_owned(),
+            companion_values: std::collections::BTreeMap::new(),
         }
     }
 
@@ -369,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_openrouter_endpoint_replaces_the_provider_base_url() {
+    fn codex_openrouter_endpoint_keeps_the_responses_path_behind_the_override_origin() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let config = codex_openrouter_config();
 
@@ -378,7 +387,7 @@ mod tests {
         let value = codex_config_value(tempdir.path());
         assert_eq!(
             value["model_providers"]["openrouter"]["base_url"].as_str(),
-            Some("http://127.0.0.1:3129/openrouter")
+            Some("http://127.0.0.1:3129/api/v1")
         );
         assert_eq!(
             value["model_providers"]["openrouter"]["wire_api"].as_str(),
@@ -390,6 +399,15 @@ mod tests {
         assert_eq!(
             value["model_providers"]["openrouter"]["base_url"].as_str(),
             Some("https://openrouter.ai/api/v1")
+        );
+    }
+
+    /// The runtime-fixed Responses base must agree with the provider row a relay operator reads.
+    #[test]
+    fn codex_openrouter_constant_matches_the_provider_row() {
+        assert_eq!(
+            vendor_base_url_for_agent_provider_id("codex", "openrouter"),
+            Some(CODEX_OPENROUTER_RESPONSES_BASE_URL)
         );
     }
 
@@ -422,7 +440,7 @@ mod tests {
         let value = codex_config_value(tempdir.path());
         assert_eq!(
             value["model_providers"]["myprovider"]["base_url"].as_str(),
-            Some("http://127.0.0.1:3129/openrouter")
+            Some("http://127.0.0.1:3129/v1")
         );
     }
 

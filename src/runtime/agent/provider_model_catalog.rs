@@ -144,7 +144,7 @@ pub async fn refresh_provider_models(
         return Err(catalog_error(&provider.id, reason));
     }
     let endpoint = crate::secrets::managed_provider_endpoint_override_for_home(home)?;
-    let models_url = resolve_models_url(&provider.id, declared_url, endpoint.as_ref());
+    let models_url = resolve_models_url(&provider.id, declared_url, endpoint.as_ref())?;
 
     match fetch_provider_models(home, config, &provider.id, &models_url).await {
         Ok(models) => {
@@ -241,25 +241,23 @@ fn catalog_error(provider_id: &str, reason: String) -> StackError {
 }
 
 /// A managed endpoint override outranks the `ACP_STACK_PROVIDER_MODELS_BASE` dev gate, which in
-/// turn outranks the declared `models_url`.
+/// turn outranks the declared `models_url`. The override is an origin, so the declared listing
+/// URL keeps its path behind it.
 fn resolve_models_url(
     provider_id: &str,
     declared: &str,
     endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
-) -> String {
+) -> Result<String> {
     if let Some(endpoint) = endpoint.filter(|endpoint| endpoint.provider_id == provider_id) {
-        return models_url_for_base(&endpoint.base_url);
+        return crate::runtime::agent::agent_headless_config::reroute_base_url(
+            &endpoint.base_url,
+            declared,
+        );
     }
-    match fixture_string(PROVIDER_MODELS_BASE_ENV) {
+    Ok(match fixture_string(PROVIDER_MODELS_BASE_ENV) {
         Some(base) => format!("{}/{provider_id}/models", base.trim_end_matches('/')),
         None => declared.to_owned(),
-    }
-}
-
-/// `{base}/models`, the suffix every shipped `models_url` uses. novita-ai is the exception: its
-/// listing is not under its inference base, so its fetch degrades to the last cached entry.
-fn models_url_for_base(base_url: &str) -> String {
-    format!("{}/models", base_url.trim_end_matches('/'))
+    })
 }
 
 fn resolve_provider_api_key(home: &Path, config: &Config, provider_id: &str) -> Result<String> {
@@ -669,48 +667,40 @@ mod tests {
         crate::secrets::ProviderEndpointOverride {
             provider_id: provider_id.to_owned(),
             base_url: base_url.to_owned(),
+            companion_values: std::collections::BTreeMap::new(),
         }
     }
 
     #[test]
-    fn endpoint_override_replaces_the_declared_models_url() {
-        let endpoint = override_for("openrouter", "http://127.0.0.1:3129/openrouter");
+    fn endpoint_override_reroutes_the_declared_models_url_behind_its_origin() {
+        let endpoint = override_for("openrouter", "http://127.0.0.1:3129");
         assert_eq!(
             resolve_models_url(
                 "openrouter",
                 "https://openrouter.ai/api/v1/models",
                 Some(&endpoint)
-            ),
-            "http://127.0.0.1:3129/openrouter/models"
+            )
+            .expect("rerouted"),
+            "http://127.0.0.1:3129/api/v1/models"
         );
     }
 
     #[test]
     fn endpoint_override_for_another_provider_leaves_the_declared_url() {
-        let endpoint = override_for("moonshotai", "http://127.0.0.1:3129/moonshotai");
+        let endpoint = override_for("moonshotai", "http://127.0.0.1:3129");
         assert_eq!(
             resolve_models_url(
                 "openrouter",
                 "https://openrouter.ai/api/v1/models",
                 Some(&endpoint)
-            ),
+            )
+            .expect("declared"),
             "https://openrouter.ai/api/v1/models"
         );
         assert_eq!(
-            resolve_models_url("openrouter", "https://openrouter.ai/api/v1/models", None),
+            resolve_models_url("openrouter", "https://openrouter.ai/api/v1/models", None)
+                .expect("declared"),
             "https://openrouter.ai/api/v1/models"
-        );
-    }
-
-    #[test]
-    fn models_url_for_base_appends_one_segment_regardless_of_trailing_slash() {
-        assert_eq!(
-            models_url_for_base("http://127.0.0.1:3129/openrouter"),
-            "http://127.0.0.1:3129/openrouter/models"
-        );
-        assert_eq!(
-            models_url_for_base("http://127.0.0.1:3129/openrouter/"),
-            "http://127.0.0.1:3129/openrouter/models"
         );
     }
 

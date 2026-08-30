@@ -329,6 +329,10 @@ pub struct RegistryEntry {
     /// the runtime can verify the agent did the work rather than hallucinating a reply.
     #[serde(default)]
     pub testflight_expect_fs: Option<String>,
+    /// Session mode init selects when `--mode` is absent and the agent advertises it, for
+    /// agents whose default mode parks every tool call on an operator permission decision.
+    #[serde(default)]
+    pub default_mode: Option<String>,
     /// Catalog-declared adapter. Like `kind`, read through
     /// [`effective_registry_entry`] so operator overrides are honored.
     #[serde(default)]
@@ -466,6 +470,7 @@ fn development_placebo_entry(placebo_path: &str, install: InstallSet) -> Registr
         support_doc: Some("src/bin/placebo_agent/main.rs".to_owned()),
         testflight_prompt: None,
         testflight_expect_fs: None,
+        default_mode: None,
         adapter: None,
         harness: Some(HarnessSpec {
             id: placebo_path.to_owned(),

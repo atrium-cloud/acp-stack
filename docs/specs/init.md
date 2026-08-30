@@ -73,7 +73,7 @@ The operator-facing sequence, in order:
     - While a managed-state endpoint override is stored, an agent apply is rejected when the target cannot carry the override:
         - A registry agent without `set_provider_base_url`.
         - Any custom agent.
-        - A re-confirmed agent whose kept provider is the overridden one on a pair that refuses overrides (codex + `openai`).
+        - A re-confirmed agent whose kept provider is the overridden one on a pair that refuses overrides (codex + `openai`, goose + a provider without a host setting, a provider row without a vendor `base_url` for the agent).
         - Clear the namespace's credential endpoint first; see [extensions.md](extensions.md#type-managed-state).
 4. Environment configuration (new config only).
     a. Standard setup
@@ -146,7 +146,7 @@ The operator-facing sequence, in order:
         - The mode and effort lanes run only for agents the registry marks as supporting them; `--mode` or `--effort` against any other registry agent is rejected before discovery, as `--model` is.
         - Provider-backed agents need a provider (passed this run or already in config) before any lane runs, since the harness cannot be launched to advertise anything without one.
         - Interactive runs offer mode and effort selectors alongside the model selector.
-        - A non-interactive run without `--mode`/`--effort` never enters that lane: it spawns nothing, prints nothing, and writes no value.
+        - A non-interactive run without `--mode`/`--effort` never enters that lane: it spawns nothing, prints nothing, and writes no value. The exception is an agent whose registry entry declares `default_mode` (kimi: `yolo`): the mode lane runs, and the default lands when the agent advertises it.
         - Explicit `--mode` and `--effort` are validated against the advertised values, and a rejection lists them.
         - When mode and/or effort are the only active lanes and neither flag was passed, a provisional session that cannot be established is reported and skipped rather than failing init; an explicit `--mode`/`--effort` still fails loudly.
         - Discovery also requires a resolvable provider credential:

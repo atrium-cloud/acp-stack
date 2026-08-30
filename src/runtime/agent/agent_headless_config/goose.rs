@@ -1,6 +1,20 @@
 use super::*;
+use crate::runtime::agent::provider_keys::goose_host_env_for_native_provider_id;
 
-pub(super) fn provision_goose_config(config: &Config, home: &Path) -> Result<Vec<PathBuf>> {
+/// Every host setting acps may write into goose's `config.yaml`; all are managed keys so a
+/// cleared or moved override never leaves a stale host behind.
+const GOOSE_MANAGED_HOST_KEYS: [&str; 4] = [
+    "OPENAI_HOST",
+    "ANTHROPIC_HOST",
+    "OPENROUTER_HOST",
+    "XAI_HOST",
+];
+
+pub(super) fn provision_goose_config(
+    config: &Config,
+    home: &Path,
+    endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
+) -> Result<Vec<PathBuf>> {
     let path = home.join(".config").join("goose").join("config.yaml");
     let mut written = Vec::new();
     let Some(provider) = config.agent.provider.as_ref() else {
@@ -9,9 +23,21 @@ pub(super) fn provision_goose_config(config: &Config, home: &Path) -> Result<Vec
     let provider_id = provider.id.as_str();
     let api_key_ref = require_agent_env_for_provider(config, provider_id, &path)?;
     if let Some(custom) = provider.custom.as_ref() {
-        let custom_provider_path =
-            write_goose_custom_provider(home, provider_id, custom, api_key_ref)?;
+        let base_url_override =
+            super::rerouted_base_url_for(endpoint, provider_id, &custom.base_url)?;
+        let custom_provider_path = write_goose_custom_provider(
+            home,
+            provider_id,
+            custom,
+            api_key_ref,
+            base_url_override.as_deref().unwrap_or(&custom.base_url),
+        )?;
         let mut root = read_yaml_mapping(&path)?;
+        // A custom provider carries its endpoint in its own file; a host left by an earlier
+        // mapped-provider override would otherwise linger in config.yaml.
+        for key in GOOSE_MANAGED_HOST_KEYS {
+            root.remove(YamlValue::String(key.to_owned()));
+        }
         let values = [
             ("GOOSE_PROVIDER", YamlValue::String(provider_id.to_owned())),
             (
@@ -75,6 +101,27 @@ pub(super) fn provision_goose_config(config: &Config, home: &Path) -> Result<Vec
     for (key, value) in values {
         root.insert(YamlValue::String(key.to_owned()), value);
     }
+    // Goose appends its own request path to a host setting, so the override origin is the
+    // whole value. Every managed host key is dropped first so a cleared or moved override
+    // restores the vendor endpoint.
+    for key in GOOSE_MANAGED_HOST_KEYS {
+        root.remove(YamlValue::String(key.to_owned()));
+    }
+    if let Some(origin) = super::endpoint_origin_for(endpoint, provider_id) {
+        let Some(host_env) = goose_host_env_for_native_provider_id(agent_provider_id) else {
+            return Err(StackError::AgentConfigProvision {
+                path: path.clone(),
+                reason: format!(
+                    "goose provider `{provider_id}` has no host setting, so it cannot be routed \
+                     through a custom endpoint"
+                ),
+            });
+        };
+        root.insert(
+            YamlValue::String(host_env.to_owned()),
+            YamlValue::String(super::endpoint_origin(origin)?),
+        );
+    }
     // With no provider model configured, drop any stale `GOOSE_MODEL` so the
     // launched process does not keep using it under the new provider.
     match configured_provider_model(config) {
@@ -109,7 +156,10 @@ pub(super) fn cleanup_goose_config(
             "GOOSE_MODE",
             "GOOSE_CONTEXT_STRATEGY",
             "GOOSE_DISABLE_SESSION_NAMING",
-        ] {
+        ]
+        .into_iter()
+        .chain(GOOSE_MANAGED_HOST_KEYS)
+        {
             changed |= root.remove(YamlValue::String(key.to_owned())).is_some();
         }
         if changed {
@@ -143,6 +193,7 @@ fn write_goose_custom_provider(
     provider_id: &str,
     custom: &AgentCustomProviderConfig,
     api_key_ref: &str,
+    base_url: &str,
 ) -> Result<PathBuf> {
     let path = home
         .join(".config")
@@ -153,7 +204,7 @@ fn write_goose_custom_provider(
     root.insert("id".to_owned(), json!(provider_id));
     root.insert("name".to_owned(), json!(custom.name.clone()));
     root.insert("engine".to_owned(), json!("openai"));
-    root.insert("base_url".to_owned(), json!(custom.base_url.clone()));
+    root.insert("base_url".to_owned(), json!(base_url));
     root.insert("api_key_env".to_owned(), json!(api_key_ref));
     root.insert("context_limit".to_owned(), json!(custom.context));
     root.insert(
@@ -309,6 +360,125 @@ mod tests {
             "GOOSE_MODEL must be removed when no provider model is configured",
         );
         assert_eq!(value["KEEP_ME"], "yes");
+    }
+
+    fn goose_endpoint(provider_id: &str) -> crate::secrets::ProviderEndpointOverride {
+        crate::secrets::ProviderEndpointOverride {
+            provider_id: provider_id.to_owned(),
+            base_url: "http://127.0.0.1:3129".to_owned(),
+            companion_values: std::collections::BTreeMap::new(),
+        }
+    }
+
+    fn goose_openrouter_config() -> Config {
+        let mut config = config_with_agent("goose", &["OPENROUTER_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "openrouter".to_owned(),
+            model: Some("deepseek/deepseek-v4-flash".to_owned()),
+            api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
+            custom: None,
+        });
+        config
+    }
+
+    fn goose_config_value(home: &Path) -> serde_norway::Value {
+        let path = home.join(".config").join("goose").join("config.yaml");
+        serde_norway::from_str(&std::fs::read_to_string(path).expect("goose config readable"))
+            .expect("goose config yaml parses")
+    }
+
+    /// Every host key the provider mapping can hand out must be one cleanup removes.
+    #[test]
+    fn goose_managed_host_keys_cover_every_provider_host_env() {
+        let mapped: Vec<&str> = ["openai", "anthropic", "openrouter", "xai"]
+            .into_iter()
+            .map(|native| goose_host_env_for_native_provider_id(native).expect("host env"))
+            .collect();
+        assert_eq!(mapped.len(), GOOSE_MANAGED_HOST_KEYS.len());
+        for host_env in mapped {
+            assert!(GOOSE_MANAGED_HOST_KEYS.contains(&host_env), "{host_env}");
+        }
+    }
+
+    #[test]
+    fn goose_mapped_provider_endpoint_rejects_an_override_carrying_a_path() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let config = goose_openrouter_config();
+        let mut override_ = goose_endpoint("openrouter");
+        override_.base_url = "http://127.0.0.1:3129/v1".to_owned();
+
+        let error = provision_goose_config(&config, tempdir.path(), Some(&override_))
+            .expect_err("a path in the stored override must not reach the host setting");
+        assert!(error.to_string().contains("carries a path"), "{error}");
+    }
+
+    #[test]
+    fn goose_mapped_provider_endpoint_writes_the_host_origin_and_restores_it() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let config = goose_openrouter_config();
+
+        provision_goose_config(&config, tempdir.path(), Some(&goose_endpoint("openrouter")))
+            .expect("provision with override");
+        let value = goose_config_value(tempdir.path());
+        assert_eq!(value["OPENROUTER_HOST"], "http://127.0.0.1:3129");
+
+        provision_goose_config(&config, tempdir.path(), None).expect("provision without");
+        let value = goose_config_value(tempdir.path());
+        assert!(value["OPENROUTER_HOST"].is_null(), "{value:?}");
+        assert_eq!(value["GOOSE_PROVIDER"], "openrouter");
+    }
+
+    #[test]
+    fn goose_endpoint_for_another_provider_is_ignored() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+
+        provision_goose_config(
+            &goose_openrouter_config(),
+            tempdir.path(),
+            Some(&goose_endpoint("openai")),
+        )
+        .expect("provision");
+
+        let value = goose_config_value(tempdir.path());
+        assert!(value["OPENAI_HOST"].is_null(), "{value:?}");
+        assert!(value["OPENROUTER_HOST"].is_null(), "{value:?}");
+    }
+
+    #[test]
+    fn goose_provider_without_a_host_setting_refuses_the_override() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut config = config_with_agent("goose", &["CEREBRAS_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "cerebras".to_owned(),
+            model: Some("llama3.1-8b".to_owned()),
+            api_key_ref: Some("CEREBRAS_API_KEY".to_owned()),
+            custom: None,
+        });
+
+        let error =
+            provision_goose_config(&config, tempdir.path(), Some(&goose_endpoint("cerebras")))
+                .expect_err("no host setting must refuse");
+
+        assert!(error.to_string().contains("no host setting"), "{error}");
+    }
+
+    #[test]
+    fn goose_custom_provider_endpoint_keeps_the_declared_path() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let config =
+            custom_provider_config("goose", crate::config::CustomProviderApi::ChatCompletions);
+
+        provision_goose_config(&config, tempdir.path(), Some(&goose_endpoint("myprovider")))
+            .expect("provision");
+
+        let provider_path = tempdir
+            .path()
+            .join(".config/goose/custom_providers/myprovider.json");
+        let provider: Value = serde_json::from_str(
+            &std::fs::read_to_string(provider_path).expect("custom provider should be readable"),
+        )
+        .expect("custom provider parses");
+        assert_eq!(provider["base_url"], "http://127.0.0.1:3129/v1");
     }
 
     #[test]

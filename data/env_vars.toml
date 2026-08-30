@@ -79,6 +79,12 @@ companion_env_vars = ["CLOUDFLARE_ACCOUNT_ID"]
 optional_env_vars = []
 
 [[api_keys]]
+env_var = "DATABRICKS_TOKEN"
+provider_ids = ["databricks"]
+companion_env_vars = ["DATABRICKS_HOST"]
+optional_env_vars = []
+
+[[api_keys]]
 env_var = "XAI_API_KEY"
 provider_ids = ["xai"]
 companion_env_vars = []

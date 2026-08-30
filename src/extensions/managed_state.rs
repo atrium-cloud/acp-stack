@@ -117,9 +117,11 @@ pub struct CredentialSelection {
     /// at apply time and the ref name is retained alongside the value.
     #[serde(default)]
     pub source_refs: BTreeMap<String, String>,
-    /// Endpoint base the agent must send this provider's traffic to instead of
-    /// the vendor default. Written into the agent's own native config, so the
-    /// configured agent must declare `set_provider_base_url` in the registry.
+    /// Origin (scheme, host, port; no path) the agent must send this provider's
+    /// traffic to instead of the vendor host. The agent keeps the provider's own
+    /// path behind it. Written into the agent's native config or launch
+    /// environment, so the configured agent must declare
+    /// `set_provider_base_url` in the registry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
 }
@@ -336,10 +338,10 @@ fn resolve_selection(
     })
 }
 
-/// A provider endpoint base obeys the shared endpoint rule: https, or http to a
+/// A provider endpoint override obeys the shared endpoint rule: https, or http to a
 /// loopback host (an in-guest relay listener), no credentials, no query or
-/// fragment, bounded. Stored verbatim — each agent module appends per its own
-/// native convention.
+/// fragment, bounded. It is an origin only: the agent×provider profile keeps its
+/// own vendor path, so a path here would be composed twice or shadow it.
 fn validate_base_url(base_url: &str) -> Result<()> {
     use crate::config::{EndpointUrlProblem, MAX_ENDPOINT_URL_BYTES, check_endpoint_url};
 
@@ -361,7 +363,22 @@ fn validate_base_url(base_url: &str) -> Result<()> {
                 format!("base_url exceeds the {MAX_ENDPOINT_URL_BYTES}-byte limit")
             }
         },
-    })
+    })?;
+    let parsed = reqwest::Url::parse(base_url).map_err(|_| StackError::InvalidParam {
+        field: "desired.selection.base_url",
+        reason: "base_url is not a valid URL".to_owned(),
+    })?;
+    if parsed.path() != "/" {
+        return Err(StackError::InvalidParam {
+            field: "desired.selection.base_url",
+            reason: format!(
+                "base_url must be an origin with no path (the agent keeps the provider's own \
+                 path); remove `{}`",
+                parsed.path()
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Reject the endpoint override before any watermark or catalog persist when

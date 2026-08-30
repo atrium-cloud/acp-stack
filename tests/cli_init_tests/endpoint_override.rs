@@ -16,7 +16,7 @@ fn stage_endpoint_override(home: &std::path::Path, provider_id: &str) {
                 provider_id: provider_id.to_owned(),
                 values: BTreeMap::from([("TEST_API_KEY".to_owned(), "sk-test".to_owned())]),
                 source_refs: BTreeMap::new(),
-                base_url: Some(format!("http://127.0.0.1:3129/{provider_id}")),
+                base_url: Some("http://127.0.0.1:3129".to_owned()),
             }),
         )
         .expect("override should be staged");

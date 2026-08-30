@@ -283,6 +283,9 @@ impl fmt::Debug for ManagedCredentialSelection {
 pub struct ProviderEndpointOverride {
     pub provider_id: String,
     pub base_url: String,
+    /// The credential's stored companion values (account ids, workspace hosts), which fill the
+    /// `{ENV_VAR}` placeholders a vendor base may carry. The API key itself stays out.
+    pub companion_values: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -484,9 +487,20 @@ impl SecretStore {
                     ),
                 });
             }
+            let companions =
+                crate::runtime::agent::provider_keys::companion_env_refs_for_provider_id(
+                    provider_id,
+                );
+            let companion_values = credential
+                .values
+                .iter()
+                .filter(|(name, _)| companions.contains(&name.as_str()))
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect();
             found = Some(ProviderEndpointOverride {
                 provider_id: provider_id.clone(),
                 base_url: base_url.to_owned(),
+                companion_values,
             });
         }
         Ok(found)

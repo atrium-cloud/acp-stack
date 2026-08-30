@@ -32,3 +32,5 @@ The ACP server advertises model and mode selection per session: Gemini 3.x model
 The install targets Linux x86_64 and aarch64 only, matching the platforms the upstream registry distributes for this runtime.
 
 Antigravity receives configured MCP servers through ACP, gated by the live `initialize` capability self-report. Managed Agent Skills are installed into `~/.agents/skills`.
+
+A managed-state endpoint override for the `google` provider reaches the launch environment as `GOOGLE_GEMINI_BASE_URL`, the bare origin; the CLI treats it as the Gemini service root. `[agent].env` must not declare that variable. See [Endpoint overrides](../specs/extensions.md#endpoint-overrides).

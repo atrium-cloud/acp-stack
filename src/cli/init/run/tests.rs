@@ -683,6 +683,66 @@ fn a_mode_only_discovery_failure_skips_the_lane_instead_of_failing_init() {
     );
 }
 
+// A registry `default_mode` activates the lane unattended, so the same silent
+// harness must still degrade to a skipped lane with the mode left unset.
+#[cfg(unix)]
+#[test]
+fn a_registry_default_mode_discovery_failure_skips_the_lane_instead_of_failing_init() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let stub = tempdir.path().join("silent-agent");
+    std::fs::write(&stub, "#!/bin/sh\nexit 0\n").expect("stub written");
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+        .expect("stub is executable");
+    let registry = RegistryCatalog::from_toml(
+        r#"
+[[agents]]
+id = "amp"
+name = "Amp Code"
+kind = "native"
+headless_compatible = true
+set_mode = true
+default_mode = "yolo"
+support_doc = "docs/agents/amp.md"
+
+[agents.harness]
+id = "amp"
+
+[agents.harness.install.shell]
+script = "true"
+creates = "true"
+"#,
+    )
+    .expect("registry");
+    let mut config = config_for_agent("amp");
+    config.agent.command = stub.display().to_string();
+    config.agent.args = Vec::new();
+    config.agent.env = Vec::new();
+    config.agent.install = None;
+    config.agent.cwd = Some(tempdir.path().display().to_string());
+    config.workspace.root = tempdir.path().display().to_string();
+    let args = parse_init_args(&["--non-interactive"]);
+    let driver = Arc::new(RecordingDriver::default());
+
+    let outcome = prompt::with_hosted_driver(driver.clone(), || {
+        configure_model_and_mode_for_init(
+            &args,
+            tempdir.path(),
+            &registry,
+            &mut config,
+            &tempdir.path().join("acps-config.toml"),
+            &crate::secrets::new_shared_secret_store(
+                SecretStore::open_or_create(tempdir.path()).expect("secret store"),
+            ),
+        )
+    })
+    .expect("a default_mode discovery failure must not fail init");
+
+    assert_eq!(outcome.mode_action, ModelModeAction::Skipped);
+    assert!(config.agent.mode.is_none());
+}
+
 /// A custom provider whose api-key ref arrives later through a managed credential
 /// push: lanes that would spawn the agent must gate on the credential, not the spawn.
 #[cfg(unix)]

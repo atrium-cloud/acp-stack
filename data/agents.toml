@@ -284,6 +284,7 @@ set_provider = true
 set_model = true
 allow_custom_provider = true
 allow_custom_model = true
+set_provider_base_url = true
 set_mode = true # values come from goose's runtime advertisement (Mode-category config option)
 set_effort = true # advertised as `thinking_effort` (thought_level)
 supports_agent_skills = true
@@ -411,7 +412,11 @@ set_provider = true
 set_model = true
 allow_custom_provider = true
 allow_custom_model = true
+set_provider_base_url = true
 set_mode = true
+# Kimi's default mode raises an ACP permission request for every tool call, which the
+# daemon path parks on an operator decision; unattended runs need `yolo`.
+default_mode = "yolo"
 set_effort = true # advertised as `thinking` (thought_level): `off` plus the model's declared effort levels
 supports_agent_skills = true
 agent_skills_install_dir = "~/.agents/skills"
@@ -581,6 +586,7 @@ set_provider = false
 set_model = true
 allow_custom_provider = false
 allow_custom_model = false
+set_provider_base_url = true
 set_mode = true # build, plan (opencode fork)
 set_effort = true # advertised as `effort` (thought_level) when the active model has effort variants (opencode fork)
 supports_agent_skills = true
@@ -608,8 +614,9 @@ id = "antigravity"
 name = "Google Antigravity"
 kind = "native"
 headless_compatible = true
-# Upstream publishes the official ACP server as `antigravity-acp`; the catalog
-# id doubles as the launch command, so it stays `antigravity`.
+# ACP is native to the Antigravity CLI; the upstream ACP registry lists it as
+# `antigravity-acp`. The catalog id doubles as the launch command, so it stays
+# `antigravity`.
 sync_id = "antigravity-acp"
 # Auth is env-var based (GEMINI_API_KEY) against the single supported headless
 # provider (Google AI Studio), selected by the `auth.type` key acps writes
@@ -623,6 +630,7 @@ set_model = true
 set_mode = true
 allow_custom_provider = false
 allow_custom_model = false
+set_provider_base_url = true
 supports_agent_skills = true
 agent_skills_install_dir = "~/.agents/skills"
 stdio_framing = "json-lines"

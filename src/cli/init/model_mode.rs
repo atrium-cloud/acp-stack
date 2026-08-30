@@ -164,6 +164,7 @@ pub(super) fn configure_model_and_mode_for_init(
     let set_mode = entry.is_some_and(|entry| entry.set_mode);
     let set_effort = entry.is_some_and(|entry| entry.set_effort);
     let set_provider = entry.is_some_and(|entry| entry.set_provider);
+    let default_mode = entry.and_then(|entry| entry.default_mode.as_deref());
     let agent_name = entry
         .map(|entry| entry.name.as_str())
         .unwrap_or(config.agent.name.as_str())
@@ -240,7 +241,9 @@ pub(super) fn configure_model_and_mode_for_init(
     }
     // No print-the-list fallback here, so an unattended run without
     // `--mode`/`--effort` never spawns the harness at all.
-    let mode_lane_active = set_mode && provider_present && (args.mode.is_some() || interactive);
+    let mode_lane_active = set_mode
+        && provider_present
+        && (args.mode.is_some() || interactive || default_mode.is_some());
     let effort_lane_active =
         set_effort && provider_present && (args.effort.is_some() || interactive);
     let generic_lane_active = interactive && provider_present;
@@ -478,9 +481,15 @@ pub(super) fn configure_model_and_mode_for_init(
             .inspect_err(|error| signal_lane_failure(true, false, false, error))?;
         }
         if mode_lane_active {
-            outcome.mode_action =
-                configure_mode_for_init(args, config, config_path, &response, interactive)
-                    .inspect_err(|error| signal_lane_failure(false, true, false, error))?;
+            outcome.mode_action = configure_mode_for_init(
+                args,
+                config,
+                config_path,
+                &response,
+                interactive,
+                default_mode,
+            )
+            .inspect_err(|error| signal_lane_failure(false, true, false, error))?;
         }
         if effort_lane_active {
             outcome.effort_action =
@@ -820,6 +829,7 @@ fn configure_mode_for_init(
     config_path: &Path,
     response: &agent_client_protocol::schema::v1::NewSessionResponse,
     interactive: bool,
+    default_mode: Option<&str>,
 ) -> Result<ModelModeAction> {
     let values = advertised_values_for_category(response, AgentSessionConfigCategory::Mode)
         .unwrap_or_default();
@@ -833,6 +843,16 @@ fn configure_mode_for_init(
             },
         )?;
         write_mode_into_config(config, explicit.to_owned());
+        return Ok(ModelModeAction::Set);
+    }
+    // The registry default only lands unattended and only when the harness still
+    // advertises it; a stale catalog value must not survive validation by accident.
+    if !interactive
+        && config.agent.mode.is_none()
+        && let Some(default_mode) = default_mode
+        && values.iter().any(|value| value == default_mode)
+    {
+        write_mode_into_config(config, default_mode.to_owned());
         return Ok(ModelModeAction::Set);
     }
     let Some(selected) = prompt_session_config_selection(

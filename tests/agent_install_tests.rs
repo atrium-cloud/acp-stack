@@ -183,6 +183,7 @@ fn adapter_kind_entry() -> RegistryEntry {
         support_doc: Some("docs/agents/fake-agent.md".to_owned()),
         testflight_prompt: None,
         testflight_expect_fs: None,
+        default_mode: None,
         harness: Some(HarnessSpec {
             id: HARNESS_BIN.to_owned(),
             acp_args: default_acp_args(),

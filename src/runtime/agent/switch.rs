@@ -96,7 +96,14 @@ pub fn ensure_endpoint_override_survives_target(
             ),
         });
     }
-    if target_provider_id == Some(endpoint.provider_id.as_str())
+    // Kilo and Antigravity provision the override for the credential's provider whatever the
+    // configured selection, so the pair check applies to them regardless of the target provider.
+    let override_follows_credential = matches!(
+        target_agent_id,
+        crate::runtime::agent::provider_keys::KILO_AGENT_ID
+            | crate::runtime::agent::provider_keys::ANTIGRAVITY_AGENT_ID
+    );
+    if (override_follows_credential || target_provider_id == Some(endpoint.provider_id.as_str()))
         && !agent_provider_accepts_endpoint_override(target_agent_id, &endpoint.provider_id)
     {
         return Err(StackError::InvalidParam {
@@ -1114,7 +1121,7 @@ mod tests {
                     provider_id: provider_id.to_owned(),
                     values: BTreeMap::from([("TEST_API_KEY".to_owned(), "sk-test".to_owned())]),
                     source_refs: BTreeMap::new(),
-                    base_url: Some(format!("http://127.0.0.1:3129/{provider_id}")),
+                    base_url: Some("http://127.0.0.1:3129".to_owned()),
                 }),
             )
             .expect("stage override");
@@ -1138,6 +1145,29 @@ mod tests {
             "{message}"
         );
         assert!(message.contains("openai"), "{message}");
+    }
+
+    #[test]
+    fn override_guard_checks_the_credential_pair_for_agents_that_follow_it() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let _home = HomeEnvGuard::set(tempdir.path());
+        // kilo does not run `openai`, and it provisions whatever provider the override names.
+        stage_endpoint_override(tempdir.path(), "openai");
+
+        for agent_id in ["kilo", "antigravity"] {
+            let error =
+                ensure_endpoint_override_survives_target(tempdir.path(), agent_id, true, None)
+                    .expect_err("an override the target cannot map must be rejected at plan time");
+            let message = error.to_string();
+            assert!(
+                message.contains(&format!(
+                    "agent `{agent_id}` cannot route provider `openai` through a custom endpoint"
+                )),
+                "{message}"
+            );
+        }
+        ensure_endpoint_override_survives_target(tempdir.path(), "opencode", true, None)
+            .expect("a provider-selecting agent is gated on its configured provider");
     }
 
     #[test]

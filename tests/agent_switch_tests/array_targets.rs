@@ -6,8 +6,8 @@ use acp_stack::runtime::agent::switch_journal::switch_journal_path;
 use acp_stack::secrets::{ManagedCredentialSelection, SecretStore};
 
 use crate::common::agent::{
-    AgentHarness, add_codex_placebo_target, add_hermes_placebo_target, add_kimi_placebo_target,
-    admin_bearer, http, session_bearer, test_config,
+    AgentHarness, add_amp_placebo_target, add_codex_placebo_target, add_hermes_placebo_target,
+    add_kimi_placebo_target, admin_bearer, http, session_bearer, test_config,
 };
 
 /// Stage an externally-owned credential carrying an endpoint override, so the
@@ -26,7 +26,7 @@ fn stage_endpoint_override(home: &std::path::Path, provider_id: &str) {
                     "sk-test".to_owned(),
                 )]),
                 source_refs: std::collections::BTreeMap::new(),
-                base_url: Some(format!("http://127.0.0.1:3129/{provider_id}")),
+                base_url: Some("http://127.0.0.1:3129".to_owned()),
             }),
         )
         .expect("stage override");
@@ -320,7 +320,7 @@ async fn agent_switch_to_array_target_without_endpoint_field_is_rejected_with_ov
     stage_endpoint_override(tempdir.path(), "openai");
     let mut config = test_config();
     config.array.enabled = true;
-    add_kimi_placebo_target(&mut config);
+    add_amp_placebo_target(&mut config);
     let harness =
         AgentHarness::spawn_with_config_and_home(config, tempdir.path().to_path_buf()).await;
     let config_before = std::fs::read_to_string(&harness.config_path).expect("config before");
@@ -329,7 +329,7 @@ async fn agent_switch_to_array_target_without_endpoint_field_is_rejected_with_ov
         .await
         .post(format!("{}/v1/agent/switch", harness.base_url))
         .header("Authorization", admin_bearer())
-        .json(&json!({ "agent_id": "kimi" }))
+        .json(&json!({ "agent_id": "amp" }))
         .send()
         .await
         .expect("switch target");
@@ -340,7 +340,7 @@ async fn agent_switch_to_array_target_without_endpoint_field_is_rejected_with_ov
     assert!(
         body["error"]
             .to_string()
-            .contains("agent `kimi` cannot route a provider through a custom endpoint"),
+            .contains("agent `amp` cannot route a provider through a custom endpoint"),
         "{body}"
     );
 

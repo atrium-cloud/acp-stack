@@ -37,6 +37,7 @@ GOOSE_DISABLE_SESSION_NAMING: true
 - For that reason, `acps agent set --provider <provider-id>` requires the selected `api_key_ref` to match the provider's mapped env var.
 - The configured model is applied through ACP `session/set_config_option` on each new session; the YAML carries no `GOOSE_MODEL`.
 - Mode and reasoning effort follow the same path. Goose advertises a Mode-category option and a `thinking_effort` (`thought_level`) option at runtime. Select them with `acps agent set --mode <mode>` / `--effort <effort>`; values are validated against that advertisement.
+- A managed-state endpoint override lands in the provider's host setting in the same YAML (`OPENAI_HOST`, `ANTHROPIC_HOST`, `OPENROUTER_HOST`, `XAI_HOST`) as the bare origin; goose appends its own request path. Providers without a host setting (`mistral`, `groq`, `cerebras`) reject an override. See [Endpoint overrides](../specs/extensions.md#endpoint-overrides).
 
 ## Session Resume
 
