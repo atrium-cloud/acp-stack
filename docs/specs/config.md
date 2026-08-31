@@ -52,6 +52,7 @@ review = ["sudo *", "rm *"]
 deny = ["shutdown*", "reboot*"]
 request_timeout = "5m"
 timeout_action = "deny"
+acp_prompt_action = "ask"
 
 [commands]
 default_timeout = "10m"
@@ -225,6 +226,8 @@ Provider and model fields are documented in [agents/config.md](agents/config.md)
 
 - `deny` patterns reject immediately.
 - Pending requests expire after `request_timeout` using `timeout_action`.
+- `acp_prompt_action` selects how an agent's own permission requests are answered: `ask` (the default) records the request and waits for a decision, and `approve` decides it as it arrives for unattended operation. It applies only to agent-raised requests; mediated command requests always wait for a decision.
+- `mode`, `deny`, and `review` govern mediated commands, and `acp_prompt_action` governs agent-raised requests. The two surfaces are disjoint: a `deny` pattern does not screen work an agent performs through its own tooling, under either value of `acp_prompt_action`.
 - Command `deny` and `review` patterns are checked against raw and shell-word-normalized forms of the full submitted command and each simple command segment found through shell control operators, command substitution, or process substitution.
 - Shell word construction in the command word requires review when no policy pattern matches.
 - `[commands].env_allowlist` is the only non-secret environment forwarded into mediated shell commands. Secret refs are injected only through explicit agent or MCP configuration.

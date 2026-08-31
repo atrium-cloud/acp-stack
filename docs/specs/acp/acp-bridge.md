@@ -165,6 +165,14 @@ ACP permission requests flow into the same permission system used by mediated co
 
 Cancelling a session settles its still-pending requests as `cancelled` and answers the agent with the cancelled outcome, which is what lets an agent parked on a permission end its turn. The sweep runs for as long as the runtime waits for the turn to settle, so a request raised after the cancel notification is answered in kind.
 
+`[permissions].acp_prompt_action = "approve"` answers agent-raised requests as they arrive, for runtimes that operate unattended:
+
+- The request is recorded and decided approved in one step, with `policy` as the deciding principal and `auto-approved by policy` as the reason, so the durable trail separates it from an operator decision and from a timeout.
+- The agent is answered with an option it offered, chosen the way an unattended grant always is: the first `allow_once`, else the first `allow_always`. An agent that offered no such option leaves nothing to select, so that request waits for a decision like any other.
+- Such a request is terminal before the call returns, so it carries no expiry and never appears in the pending queue.
+- Mediated command requests are unaffected: they wait for a decision under every value of this setting.
+- Requests are answered on arrival whether or not a cancel is in flight, so under `approve` the cancelled-outcome sweep above has nothing of its own to answer: the agent ends its turn on the `session/cancel` notification rather than on a permission answer.
+
 ## MCP Servers
 
 Configured MCP servers are attached to ACP sessions when the agent and SDK support session MCP configuration. Secret refs for MCP env vars and headers are resolved at attach time; the resolved values stay out of logs and API responses.

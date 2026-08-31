@@ -105,7 +105,7 @@ async fn prompt_rejects_unadvertised_image_content() {
 async fn cancelled_permission_does_not_block_dispatch_and_is_persisted() {
     use std::time::Duration;
 
-    use acp_stack::config::PermissionTimeoutAction;
+    use acp_stack::config::{AcpPromptAction, PermissionTimeoutAction};
     use acp_stack::events::EventHub;
     use acp_stack::runtime::mediation::permissions::PermissionService;
     use acp_stack::state::StateStore;
@@ -123,6 +123,7 @@ async fn cancelled_permission_does_not_block_dispatch_and_is_persisted() {
         events,
         Duration::from_secs(60),
         PermissionTimeoutAction::Deny,
+        AcpPromptAction::Ask,
     );
     let mut config = fake_agent_config();
     config.args.push("--request-permission-then-cancel".into());

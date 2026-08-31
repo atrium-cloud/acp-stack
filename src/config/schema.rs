@@ -37,6 +37,7 @@ pub const DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS: u64 = 65_536;
 pub const DEFAULT_PERMISSION_REQUEST_TIMEOUT: &str = "5m";
 pub const DEFAULT_PERMISSION_TIMEOUT_ACTION: PermissionTimeoutAction =
     PermissionTimeoutAction::Deny;
+pub const DEFAULT_ACP_PROMPT_ACTION: AcpPromptAction = AcpPromptAction::Ask;
 pub const DEFAULT_AGENT_AUTO_UPDATE_FREQUENCY: &str = "1d";
 pub const DEFAULT_STACK_UPDATE_FREQUENCY: &str = "1d";
 pub const DEFAULT_STACK_UPDATE_POLICY: StackUpdatePolicy = StackUpdatePolicy::SecurityCritical;

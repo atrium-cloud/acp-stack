@@ -70,6 +70,43 @@ fn permissions_timeout_action_defaults_to_deny() {
 }
 
 #[test]
+fn permissions_acp_prompt_action_defaults_to_ask() {
+    let config = load_config_from_str(VALID_CONFIG).expect("valid config");
+    assert_eq!(config.permissions.acp_prompt_action, None);
+    assert!(matches!(
+        config.permissions.effective_acp_prompt_action(),
+        acp_stack::config::AcpPromptAction::Ask
+    ));
+}
+
+#[test]
+fn accepts_permissions_acp_prompt_action_approve() {
+    let updated = VALID_CONFIG.replace(
+        "[agent]",
+        "[permissions]\nmode = \"auto\"\nacp_prompt_action = \"approve\"\n\n[agent]",
+    );
+    let config = load_config_from_str(&updated).expect("approve is a valid action");
+    assert!(matches!(
+        config.permissions.effective_acp_prompt_action(),
+        acp_stack::config::AcpPromptAction::Approve
+    ));
+}
+
+#[test]
+fn rejects_invalid_permissions_acp_prompt_action() {
+    let bad = VALID_CONFIG.replace(
+        "[agent]",
+        "[permissions]\nmode = \"auto\"\nacp_prompt_action = \"always\"\n\n[agent]",
+    );
+    let error = load_config_from_str(&bad).expect_err("invalid acp_prompt_action must fail");
+    assert_eq!(
+        error.public_message(),
+        "permissions.acp_prompt_action must be one of ask, approve"
+    );
+    assert_eq!(error.error_code(), "config.invalid");
+}
+
+#[test]
 fn rejects_invalid_permissions_timeout_action() {
     let bad = VALID_CONFIG.replace(
         "[agent]",

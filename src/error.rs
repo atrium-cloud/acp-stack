@@ -811,6 +811,9 @@ pub enum StackError {
     #[error("permissions.timeout_action must be one of deny, approve")]
     InvalidTimeoutAction,
 
+    #[error("permissions.acp_prompt_action must be one of ask, approve")]
+    InvalidAcpPromptAction,
+
     #[error("security.http.trusted_proxies entry `{value}` is not a valid IP address")]
     InvalidTrustedProxy { value: String },
 

@@ -1531,6 +1531,18 @@
             ],
             "description": "Requires `agent_update`. Hour/day/week units, e.g. `12h`, `1d`."
           },
+          "acp_prompt_action": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "How an agent's `session/request_permission` is answered, mirroring\n`--acp-prompt-action`: `ask` records the request and waits for a\ndecision, `approve` decides it on arrival for unattended operation.\nMediated command requests always ask. Absent leaves the\n`[permissions]` schema default (`ask`). Applies only when creating a\nstarter config.",
+            "enum": [
+              "ask",
+              "approve",
+              null
+            ]
+          },
           "defer_provider_credentials": {
             "type": [
               "boolean",
@@ -8794,6 +8806,17 @@
               }
             ],
             "description": "Action when a pending permission request expires. Absent leaves the\n`\"deny\"` default."
+          },
+          "acp_prompt_action": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/config/AcpPromptAction"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How an agent's `session/request_permission` is answered. `\"ask\"` (the\ndefault when absent) records the request and waits for a decision;\n`\"approve\"` decides it immediately for unattended operation. Mediated\ncommand requests are unaffected either way."
           }
         },
         "additionalProperties": false
@@ -8805,6 +8828,21 @@
           "approve"
         ],
         "description": "Expiry action for a pending permission request."
+      },
+      "AcpPromptAction": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "ask",
+            "description": "Record the request and wait for a decision."
+          },
+          {
+            "type": "string",
+            "const": "approve",
+            "description": "Decide the request approved as it arrives."
+          }
+        ],
+        "description": "How agent-raised permission requests are answered."
       },
       "CommandsConfig": {
         "type": "object",

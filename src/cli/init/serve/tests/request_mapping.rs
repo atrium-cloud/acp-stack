@@ -22,6 +22,19 @@ fn start_init_request_maps_sandbox_into_args() {
 }
 
 #[test]
+fn start_init_request_maps_acp_prompt_action_into_args() {
+    let args = request_from_json(r#"{"agent":"placebo","acp_prompt_action":"approve"}"#)
+        .into_init_args()
+        .expect("valid request");
+    assert_eq!(args.acp_prompt_action.as_deref(), Some("approve"));
+    // Absent leaves the schema default, so an existing caller keeps asking.
+    let args = request_from_json(r#"{"agent":"placebo"}"#)
+        .into_init_args()
+        .expect("valid request");
+    assert_eq!(args.acp_prompt_action, None);
+}
+
+#[test]
 fn start_init_request_maps_custom_agent_declaration_into_args() {
     let args = request_from_json(
         r#"{

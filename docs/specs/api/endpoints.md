@@ -953,6 +953,7 @@ Permission requests are created by ACP permission callbacks and by mediated comm
 - Composed mediated commands using shell control operators, command substitution, or process substitution require review before execution, including in `permissions.mode = "auto"`.
 - Policy matching considers shell-word-normalized command words, so constructed spellings such as quoted or escaped command names can be denied or routed to review.
 - Cancellation is not an HTTP operation: pending requests are cancelled internally when their owning flow ends (session close, mediated-command cancel).
+- With `[permissions].acp_prompt_action = "approve"`, an agent's own request is recorded and decided approved as it arrives, with `policy` as the deciding principal. It is never pending, so it is readable through `GET /v1/permissions/{id}` and the permission log but never appears in the pending list or accepts an approve/deny call. Mediated command requests still wait for a decision.
 
 ### `GET /v1/permissions/pending`
 

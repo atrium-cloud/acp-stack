@@ -219,6 +219,12 @@ pub struct InitArgs {
         requires = "agent_update"
     )]
     pub(super) agent_update_frequency: Option<String>,
+    /// How an agent's permission requests are answered: ask (record the
+    /// request and wait for a decision) or approve (decide it on arrival, for
+    /// unattended operation). Mediated command requests always ask. Applies
+    /// only when creating a starter config.
+    #[arg(long = "acp-prompt-action", value_name = "ask|approve")]
+    pub(super) acp_prompt_action: Option<String>,
     /// Confirm that init is running without prompts. Non-interactive first
     /// runs must also pass `--agent <id>`.
     #[arg(long)]
@@ -484,6 +490,7 @@ impl Default for InitArgs {
             stack_update_frequency: None,
             agent_update: None,
             agent_update_frequency: None,
+            acp_prompt_action: None,
             non_interactive: false,
             handoff_json: false,
             from_file: None,

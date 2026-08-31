@@ -426,6 +426,7 @@ impl AppState {
             event_hub.clone(),
             config_arc.permissions.effective_request_timeout(),
             config_arc.permissions.effective_timeout_action(),
+            config_arc.permissions.effective_acp_prompt_action(),
         );
         let commands = CommandGateway::new(
             state_arc.clone(),

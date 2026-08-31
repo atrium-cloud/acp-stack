@@ -11,6 +11,11 @@ use super::*;
 pub(crate) const TIMEOUT_ACTION_DENY: &str = "deny";
 pub(crate) const TIMEOUT_ACTION_APPROVE: &str = "approve";
 
+/// Wire spellings of [`AcpPromptAction`], matched by validation and by
+/// [`PermissionsConfig::effective_acp_prompt_action`].
+pub(crate) const ACP_PROMPT_ACTION_ASK: &str = "ask";
+pub(crate) const ACP_PROMPT_ACTION_APPROVE: &str = "approve";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PermissionsConfig {
@@ -31,6 +36,14 @@ pub struct PermissionsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(with = "Option<PermissionTimeoutAction>")]
     pub timeout_action: Option<String>,
+    /// How an agent's `session/request_permission` is answered. `"ask"` (the
+    /// default when absent) records the request and waits for a decision;
+    /// `"approve"` decides it immediately for unattended operation. Mediated
+    /// command requests are unaffected either way.
+    // A `String` on the wire for the same reason as `timeout_action`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<AcpPromptAction>")]
+    pub acp_prompt_action: Option<String>,
 }
 
 impl Default for PermissionsConfig {
@@ -41,6 +54,7 @@ impl Default for PermissionsConfig {
             deny: Vec::new(),
             request_timeout: None,
             timeout_action: None,
+            acp_prompt_action: None,
         }
     }
 }
@@ -67,6 +81,24 @@ impl PermissionsConfig {
             _ => DEFAULT_PERMISSION_TIMEOUT_ACTION,
         }
     }
+
+    /// Absent means `ask`, so an existing config keeps waiting for a decision.
+    pub fn effective_acp_prompt_action(&self) -> AcpPromptAction {
+        match self.acp_prompt_action.as_deref() {
+            Some(ACP_PROMPT_ACTION_APPROVE) => AcpPromptAction::Approve,
+            _ => DEFAULT_ACP_PROMPT_ACTION,
+        }
+    }
+}
+
+/// How agent-raised permission requests are answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum AcpPromptAction {
+    /// Record the request and wait for a decision.
+    Ask,
+    /// Decide the request approved as it arrives.
+    Approve,
 }
 
 /// Expiry action for a pending permission request.

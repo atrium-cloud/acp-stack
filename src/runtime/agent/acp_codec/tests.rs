@@ -325,6 +325,12 @@ fn auto_approve_cancels_on_empty_options() {
 }
 
 async fn fresh_service() -> (tempfile::TempDir, PermissionService) {
+    fresh_service_with_action(AcpPromptAction::Ask).await
+}
+
+async fn fresh_service_with_action(
+    acp_prompt_action: AcpPromptAction,
+) -> (tempfile::TempDir, PermissionService) {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("state.sqlite");
     let store = StateStore::open(&path).expect("open");
@@ -338,8 +344,95 @@ async fn fresh_service() -> (tempfile::TempDir, PermissionService) {
             events,
             Duration::from_secs(60),
             PermissionTimeoutAction::Deny,
+            acp_prompt_action,
         ),
     )
+}
+
+/// Under `approve`, the request is decided as it arrives: the adapter is
+/// answered with an option the agent actually offered, and the durable trail
+/// records who decided it.
+#[tokio::test]
+async fn policy_approve_answers_the_request_on_arrival() {
+    let (_dir, service) = fresh_service_with_action(AcpPromptAction::Approve).await;
+    let sink: Arc<dyn SessionEventSink> = Arc::new(RecordingSink::default());
+    let outcome = resolve_acp_permission(&service, &sink, fake_request("sess_policy"), None)
+        .await
+        .expect("permission response");
+
+    // The selected id is one the agent offered, never a fabricated one.
+    assert_eq!(selected_option_id(outcome), Some("allow".to_owned()));
+    assert!(
+        service.pending(10).await.expect("pending").is_empty(),
+        "an answered request never waits"
+    );
+}
+
+/// An agent that offers no option granting the request has no id for an
+/// approval to name, so the request is asked like any other.
+#[tokio::test]
+async fn policy_approve_asks_when_no_option_grants() {
+    let (_dir, service) = fresh_service_with_action(AcpPromptAction::Approve).await;
+    let request = request_with_options(vec![
+        ("deny-once", PermissionOptionKind::RejectOnce),
+        ("deny-always", PermissionOptionKind::RejectAlways),
+    ]);
+    let service_for_task = service.clone();
+    let sink: Arc<dyn SessionEventSink> = Arc::new(RecordingSink::default());
+    let outcome_task = tokio::spawn(async move {
+        resolve_acp_permission(&service_for_task, &sink, request, None).await
+    });
+
+    let permission_id = await_pending_permission(&service).await;
+    service
+        .deny(&permission_id, None, "session-key")
+        .await
+        .expect("deny");
+    let outcome = outcome_task
+        .await
+        .expect("task joins")
+        .expect("permission response");
+    assert_eq!(outcome, RequestPermissionOutcome::Cancelled);
+}
+
+/// Only agent-raised requests are answered by the knob; a mediated command's
+/// request still waits for its own decision.
+#[tokio::test]
+async fn policy_approve_leaves_command_requests_asking() {
+    let (_dir, service) = fresh_service_with_action(AcpPromptAction::Approve).await;
+    let (record, mut receiver) = service
+        .request(NewPermission {
+            source: PermissionSource::Command,
+            requester: Some("cmd_policy".to_owned()),
+            subject_id: Some("cmd_policy".to_owned()),
+            detail: serde_json::json!({ "command": "sudo apt update" }),
+        })
+        .await
+        .expect("request");
+    assert_eq!(record.status, "pending");
+    assert!(
+        record.expires_at.is_some(),
+        "a command request keeps its expiry timer"
+    );
+    assert!(
+        receiver.try_recv().is_err(),
+        "nothing may decide a command request on arrival"
+    );
+
+    let pending = service.pending(10).await.expect("pending");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].source, "command");
+}
+
+async fn await_pending_permission(service: &PermissionService) -> String {
+    for _ in 0..50 {
+        let pending = service.pending(10).await.expect("pending");
+        if let Some(first) = pending.first() {
+            return first.id.clone();
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("permission row must appear");
 }
 
 #[tokio::test]

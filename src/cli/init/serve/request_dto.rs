@@ -131,6 +131,14 @@ pub(super) struct StartInitRequest {
     agent_update: Option<String>,
     /// Requires `agent_update`. Hour/day/week units, e.g. `12h`, `1d`.
     agent_update_frequency: Option<String>,
+    /// How an agent's `session/request_permission` is answered, mirroring
+    /// `--acp-prompt-action`: `ask` records the request and waits for a
+    /// decision, `approve` decides it on arrival for unattended operation.
+    /// Mediated command requests always ask. Absent leaves the
+    /// `[permissions]` schema default (`ask`). Applies only when creating a
+    /// starter config.
+    #[schemars(extend("enum" = ["ask", "approve", null]))]
+    acp_prompt_action: Option<String>,
     /// The caller's declaration that it will push the configured provider's
     /// credential through the managed-state extension after init. Only then does
     /// a missing provider ref soft-pass, and only for a ref the push can deliver:
@@ -677,6 +685,7 @@ impl StartInitRequest {
         args.stack_update_frequency = self.stack_update_frequency;
         args.agent_update = self.agent_update;
         args.agent_update_frequency = self.agent_update_frequency;
+        args.acp_prompt_action = self.acp_prompt_action;
         args.defer_provider_credentials = self.defer_provider_credentials.unwrap_or(false);
         args.prompt_extensions = self.extensions;
         args.prompt_sandbox_mask_paths = self.sandbox_mask_paths;

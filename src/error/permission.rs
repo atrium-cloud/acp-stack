@@ -11,6 +11,7 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         PermissionNotFound { .. } => "permission.not_found",
         InvalidPermissionTransition { .. } => "permission.invalid_transition",
         InvalidTimeoutAction
+        | InvalidAcpPromptAction
         | InvalidTrustedProxy { .. }
         | InvalidMcpServer { .. }
         | DuplicateMcpServer { .. }
@@ -29,6 +30,9 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
         }
         InvalidTimeoutAction => {
             "permissions.timeout_action must be one of deny, approve".to_owned()
+        }
+        InvalidAcpPromptAction => {
+            "permissions.acp_prompt_action must be one of ask, approve".to_owned()
         }
         InvalidTrustedProxy { value } => {
             format!("security.http.trusted_proxies entry `{value}` is not a valid IP address")
@@ -55,6 +59,7 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         // reads as "decision race lost", not "malformed request".
         InvalidPermissionTransition { .. } => StatusCode::CONFLICT,
         InvalidTimeoutAction
+        | InvalidAcpPromptAction
         | InvalidTrustedProxy { .. }
         | InvalidMcpServer { .. }
         | DuplicateMcpServer { .. }

@@ -149,6 +149,87 @@ impl StateStore {
         Ok(record)
     }
 
+    /// Insert a request row already `approved` together with its
+    /// `permission_decisions` row, in one transaction: a request answered on
+    /// arrival is never observable as `pending`, and a failure midway writes
+    /// nothing at all. `input.expires_at` is ignored: the row is terminal at
+    /// insert, so nothing is left to expire.
+    pub fn append_approved_permission_request(
+        &self,
+        input: NewPermissionRequest<'_>,
+        deciding_principal: Option<&str>,
+        reason: Option<&str>,
+    ) -> Result<(PermissionRequestRecord, PermissionDecisionRecord)> {
+        validate_json_payload(self.connection(), input.detail_json)?;
+        let now = current_timestamp();
+        let record = PermissionRequestRecord {
+            id: next_permission_request_id(),
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            status: PermissionStatus::Approved.as_str().to_owned(),
+            source: input.source.to_owned(),
+            requester: input.requester.map(str::to_owned),
+            subject_id: input.subject_id.map(str::to_owned),
+            detail_json: input.detail_json.to_owned(),
+            expires_at: None,
+        };
+        let decision = PermissionDecisionRecord {
+            id: next_permission_decision_id(),
+            request_id: record.id.clone(),
+            created_at: now.clone(),
+            decision: PermissionStatus::Approved.as_str().to_owned(),
+            deciding_principal: deciding_principal.map(str::to_owned),
+            reason: reason.map(str::to_owned),
+        };
+        let transaction =
+            Transaction::new_unchecked(self.connection(), TransactionBehavior::Immediate)?;
+        transaction.execute(
+            r#"
+            INSERT INTO permission_requests
+                (id, created_at, updated_at, status, source,
+                 requester, subject_id, detail_json, expires_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "#,
+            params![
+                record.id,
+                record.created_at,
+                record.updated_at,
+                record.status,
+                record.source,
+                record.requester,
+                record.subject_id,
+                record.detail_json,
+                record.expires_at,
+            ],
+        )?;
+        transaction.execute(
+            r#"
+            INSERT INTO permission_decisions
+                (id, request_id, created_at, decision, deciding_principal, reason)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+            params![
+                decision.id,
+                decision.request_id,
+                decision.created_at,
+                decision.decision,
+                decision.deciding_principal,
+                decision.reason,
+            ],
+        )?;
+        if self.external_logging_enabled() {
+            super::sink_outbox::enqueue(&transaction, "permission_requests", &record.id, &now)?;
+            super::sink_outbox::enqueue(
+                &transaction,
+                "permission_decisions",
+                &decision.id,
+                &decision.created_at,
+            )?;
+        }
+        transaction.commit()?;
+        Ok((record, decision))
+    }
+
     /// Transition a permission request to a terminal status, returning the pre-update status.
     pub fn transition_permission_status(
         &self,
@@ -448,5 +529,58 @@ impl StateStore {
 
         transaction.commit()?;
         Ok((canceled, expired))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store() -> (tempfile::TempDir, StateStore) {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state");
+        store.migrate().expect("migrate");
+        (tempdir, store)
+    }
+
+    /// A request approved on arrival is terminal from the moment it exists:
+    /// the request row and its decision row commit together, so no reader can
+    /// observe it `pending` and the audit-trail invariant holds at insert.
+    #[test]
+    fn append_approved_permission_request_inserts_terminal_row_with_decision() {
+        let (_tempdir, store) = store();
+        let (record, decision) = store
+            .append_approved_permission_request(
+                NewPermissionRequest {
+                    source: "acp",
+                    requester: Some("session:sess"),
+                    subject_id: Some("sess"),
+                    detail_json: "{}",
+                    expires_at: None,
+                },
+                Some("policy"),
+                Some("auto-approved by policy"),
+            )
+            .expect("append approved request");
+
+        assert_eq!(record.status, "approved");
+        assert_eq!(record.expires_at, None);
+        assert_eq!(decision.request_id, record.id);
+        assert_eq!(decision.decision, "approved");
+
+        let persisted = store
+            .get_permission_request(&record.id)
+            .expect("read")
+            .expect("row exists");
+        assert_eq!(persisted.status, "approved");
+        let decision_count: i64 = store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM permission_decisions WHERE request_id = ?1",
+                params![record.id],
+                |row| row.get(0),
+            )
+            .expect("count decisions");
+        assert_eq!(decision_count, 1);
     }
 }

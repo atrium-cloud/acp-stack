@@ -89,6 +89,7 @@ The operator-facing sequence, in order:
     MCP prompting runs after agent install as its own step (step 12); flag-declared MCP servers (`--mcp-stdio`, `--mcp-http`, `--mcp-preset`) still land in the starter config here.
 5. Config and state.
     - Write a starter config or validate the existing/imported config.
+    - `--acp-prompt-action <ask|approve>` sets `[permissions].acp_prompt_action` in a starter config, so a runtime that operates unattended can answer agent permission requests on arrival from its first run. Absent leaves the schema default (`ask`); the flag applies only when a starter config is written.
     - Open SQLite state and run migrations.
     - For supported registry agents:
         - New selections default to `[agent.auto_update] enabled = true`, `frequency = "1d"`.

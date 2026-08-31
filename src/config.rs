@@ -10,13 +10,14 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 pub use self::schema::{
-    AgentAdapterConfig, AgentAdapterOverrideArchMap, AgentAdapterOverrideArchiveKind,
-    AgentAdapterOverrideConfig, AgentAdapterOverrideGithubInstall, AgentAdapterOverrideInstall,
-    AgentAdapterOverrideNpmInstall, AgentAdapterOverrideShellInstall, AgentAdapterOverrideUpdate,
-    AgentAutoUpdateConfig, AgentConfig, AgentConfigOptionValue, AgentCustomProviderConfig,
-    AgentInstallConfig, AgentProviderConfig, AgentProvidersConfig, AgentSubagentConfig, ApiConfig,
-    ArrayConfig, ArrayTargetConfig, CloudflareEdgeConfig, CodeSourceConfig, CommandsConfig,
-    CustomProviderApi, DEFAULT_AGENT_AUTO_UPDATE_FREQUENCY, DEFAULT_COMMAND_PROGRESS_INTERVAL,
+    AcpPromptAction, AgentAdapterConfig, AgentAdapterOverrideArchMap,
+    AgentAdapterOverrideArchiveKind, AgentAdapterOverrideConfig, AgentAdapterOverrideGithubInstall,
+    AgentAdapterOverrideInstall, AgentAdapterOverrideNpmInstall, AgentAdapterOverrideShellInstall,
+    AgentAdapterOverrideUpdate, AgentAutoUpdateConfig, AgentConfig, AgentConfigOptionValue,
+    AgentCustomProviderConfig, AgentInstallConfig, AgentProviderConfig, AgentProvidersConfig,
+    AgentSubagentConfig, ApiConfig, ArrayConfig, ArrayTargetConfig, CloudflareEdgeConfig,
+    CodeSourceConfig, CommandsConfig, CustomProviderApi, DEFAULT_ACP_PROMPT_ACTION,
+    DEFAULT_AGENT_AUTO_UPDATE_FREQUENCY, DEFAULT_COMMAND_PROGRESS_INTERVAL,
     DEFAULT_CUSTOM_MODEL_CONTEXT, DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
     DEFAULT_NETWORK_PROVIDER_TIMEOUT, DEFAULT_PERMISSION_REQUEST_TIMEOUT,
     DEFAULT_PERMISSION_TIMEOUT_ACTION, DEFAULT_PROMPTS_STALE_THRESHOLD,

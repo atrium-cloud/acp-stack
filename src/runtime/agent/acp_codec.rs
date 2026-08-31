@@ -6,13 +6,14 @@ use std::sync::Arc;
 
 use agent_client_protocol::RequestCancellation;
 use agent_client_protocol::schema::v1::{
-    Meta, NewSessionResponse, PermissionOptionId, PermissionOptionKind, ReadTextFileRequest,
-    ReadTextFileResponse, RequestPermissionOutcome, RequestPermissionRequest,
+    Meta, NewSessionResponse, PermissionOption, PermissionOptionId, PermissionOptionKind,
+    ReadTextFileRequest, ReadTextFileResponse, RequestPermissionOutcome, RequestPermissionRequest,
     SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigSelectOptions,
     SessionNotification, SessionUpdate, WriteTextFileRequest, WriteTextFileResponse,
 };
 use tokio::sync::{Mutex as TokioMutex, mpsc};
 
+use crate::config::AcpPromptAction;
 use crate::error::{Result, StackError};
 use crate::runtime::agent::acp_bridge::{
     AgentSessionConfigCategory, AgentSessionModeSelection, AgentSessionModelSelection,
@@ -318,6 +319,32 @@ pub(crate) async fn resolve_acp_permission(
         .first()
         .map(|opt| opt.option_id.0.to_string());
 
+    // Policy answers the request as it arrives, but only when the agent offered
+    // an option that grants: with nothing to select, an approval has no id to
+    // name, so the request falls back to being asked.
+    if service.acp_prompt_action() == AcpPromptAction::Approve
+        && let Some(option) = allow_kind_option(&request)
+    {
+        let option_id = option.option_id.0.to_string();
+        return match service
+            .approve_by_policy(NewPermission {
+                source: PermissionSource::Acp,
+                requester: Some(format!("session:{session_id}")),
+                subject_id: Some(session_id),
+                detail,
+            })
+            .await
+        {
+            Ok(_) => Ok(RequestPermissionOutcome::Selected(
+                SelectedPermissionOutcome::new(PermissionOptionId::new(option_id)),
+            )),
+            Err(err) => {
+                tracing::warn!(error = %err, "permission service rejected a policy approval");
+                Err(agent_client_protocol::Error::internal_error())
+            }
+        };
+    }
+
     let (record, mut rx) = match service
         .request(NewPermission {
             source: PermissionSource::Acp,
@@ -382,17 +409,7 @@ async fn wait_for_request_cancellation(cancellation: Option<RequestCancellation>
 pub(crate) fn auto_approve_acp_permission(
     request: &RequestPermissionRequest,
 ) -> RequestPermissionOutcome {
-    let allow = request
-        .options
-        .iter()
-        .find(|option| option.kind == PermissionOptionKind::AllowOnce)
-        .or_else(|| {
-            request
-                .options
-                .iter()
-                .find(|option| option.kind == PermissionOptionKind::AllowAlways)
-        });
-    match allow {
+    match allow_kind_option(request) {
         Some(option) => {
             tracing::info!(
                 option = %option.name,
@@ -404,6 +421,23 @@ pub(crate) fn auto_approve_acp_permission(
         }
         None => RequestPermissionOutcome::Cancelled,
     }
+}
+
+/// The option to select when a grant is answered without an operator: first
+/// `AllowOnce`, else first `AllowAlways`. One-shot grants come first so a grant
+/// never leaves a durable allow behind on the agent side; reject-kind options
+/// are never selected, and an agent that offered no grant gets `None`.
+fn allow_kind_option(request: &RequestPermissionRequest) -> Option<&PermissionOption> {
+    request
+        .options
+        .iter()
+        .find(|option| option.kind == PermissionOptionKind::AllowOnce)
+        .or_else(|| {
+            request
+                .options
+                .iter()
+                .find(|option| option.kind == PermissionOptionKind::AllowAlways)
+        })
 }
 
 /// Byte cap on `fs/read_text_file`; ACP has no size field on the request.

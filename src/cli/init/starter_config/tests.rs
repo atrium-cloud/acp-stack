@@ -796,6 +796,37 @@ fn sandbox_override_must_match_existing_config() {
 }
 
 #[test]
+fn acp_prompt_action_is_written_and_must_match_an_existing_config() {
+    let existing = starter_config_from_args(&parse_init_args(&[
+        "--agent",
+        "placebo",
+        "--acp-prompt-action",
+        "approve",
+    ]));
+    assert_eq!(
+        existing.permissions.acp_prompt_action.as_deref(),
+        Some("approve")
+    );
+
+    let same = parse_init_args(&["--agent", "placebo", "--acp-prompt-action", "approve"]);
+    validate_deployment_overrides_match_existing(&same, &existing)
+        .expect("a matching action is accepted");
+
+    // Rejected rather than ignored: an operator must never believe requests are
+    // answered on arrival while they are still waiting for a decision.
+    let conflict = parse_init_args(&["--agent", "placebo", "--acp-prompt-action", "ask"]);
+    let error = validate_deployment_overrides_match_existing(&conflict, &existing)
+        .expect_err("a conflicting action must be rejected");
+    assert!(error.to_string().contains("approve"), "got: {error}");
+
+    // An omitted field is `ask`, so asking for `ask` against it matches.
+    let default_config = starter_config_from_args(&parse_init_args(&["--agent", "placebo"]));
+    assert_eq!(default_config.permissions.acp_prompt_action, None);
+    validate_deployment_overrides_match_existing(&conflict, &default_config)
+        .expect("`ask` matches a config that omits the field");
+}
+
+#[test]
 fn standard_setup_profile_declares_base_dependencies_without_build_toolchain() {
     let mut args = parse_init_args(&["--agent", "placebo"]);
     args.standard_agent_work_deps = true;

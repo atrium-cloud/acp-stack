@@ -27,7 +27,23 @@ pub(crate) fn validate_deployment_overrides_match_existing(
         "--sandbox",
         args.sandbox.as_deref(),
         sandbox_mode_str(config.workspace.sandbox.mode),
+    )?;
+    // Compared against the effective value so `ask` matches a config that
+    // simply omits the field. Without this the flag would be silently dropped
+    // on a re-run, leaving an operator who asked for unattended answering with
+    // requests that wait for a decision.
+    reject_conflicting_deployment_override(
+        "--acp-prompt-action",
+        args.acp_prompt_action.as_deref(),
+        acp_prompt_action_str(config.permissions.effective_acp_prompt_action()),
     )
+}
+
+fn acp_prompt_action_str(action: config::AcpPromptAction) -> &'static str {
+    match action {
+        config::AcpPromptAction::Ask => "ask",
+        config::AcpPromptAction::Approve => "approve",
+    }
 }
 
 pub(crate) fn reject_starter_only_mcp_args_for_existing_config(args: &InitArgs) -> Result<()> {
@@ -237,7 +253,7 @@ pub(crate) fn starter_config(args: &InitArgs) -> Result<String> {
         },
         agent: agent.clone(),
         array: config::ArrayConfig::from_agent(agent),
-        permissions: Default::default(),
+        permissions: permissions_from_args(args),
         commands: Default::default(),
         prompts: Default::default(),
         dependencies: Default::default(),
@@ -255,6 +271,15 @@ pub(crate) fn starter_config(args: &InitArgs) -> Result<String> {
     let canonical = starter.to_canonical_toml()?;
     config::load_config_from_str(&canonical)?;
     Ok(canonical)
+}
+
+/// Everything but the prompt-answering knob keeps its schema default; an absent
+/// flag leaves that field absent too, so the written config stays minimal.
+fn permissions_from_args(args: &InitArgs) -> config::PermissionsConfig {
+    config::PermissionsConfig {
+        acp_prompt_action: args.acp_prompt_action.clone(),
+        ..Default::default()
+    }
 }
 
 fn starter_supabase_config(args: &InitArgs) -> SupabaseLoggingConfig {

@@ -10,10 +10,13 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex as TokioMutex, oneshot};
 
-use crate::config::PermissionTimeoutAction;
+use crate::config::{AcpPromptAction, PermissionTimeoutAction};
 use crate::error::{Result, StackError};
 use crate::events::EventHub;
-use crate::state::{NewPermissionRequest, PermissionRequestRecord, PermissionStatus, StateStore};
+use crate::state::{
+    NewPermissionRequest, PermissionDecisionRecord, PermissionRequestRecord, PermissionStatus,
+    StateStore,
+};
 
 /// Source of a permission request. ACP-source requests originate from a
 /// pass-through `session/request_permission`; command-source requests come
@@ -145,6 +148,12 @@ const SESSION_PENDING_PERMISSION_SCAN_LIMIT: u32 = 1000;
 /// principal and reason; this only labels the late hand-off.
 const RACED_DECISION_REASON: &str = "decided before the waiter was registered";
 
+/// Deciding principal and reason recorded on a request the configured
+/// `acp_prompt_action` answered, distinguishing it in the audit trail from an
+/// operator decision and from a timeout.
+const POLICY_DECIDING_PRINCIPAL: &str = "policy";
+const POLICY_APPROVAL_REASON: &str = "auto-approved by policy";
+
 #[derive(Clone)]
 pub struct PermissionService {
     state: Arc<TokioMutex<StateStore>>,
@@ -152,6 +161,7 @@ pub struct PermissionService {
     pending: Arc<TokioMutex<HashMap<String, PendingOp>>>,
     timeout: Duration,
     timeout_action: PermissionTimeoutAction,
+    acp_prompt_action: AcpPromptAction,
 }
 
 impl PermissionService {
@@ -160,6 +170,7 @@ impl PermissionService {
         events: EventHub,
         timeout: Duration,
         timeout_action: PermissionTimeoutAction,
+        acp_prompt_action: AcpPromptAction,
     ) -> Self {
         Self {
             state,
@@ -167,7 +178,14 @@ impl PermissionService {
             pending: Arc::new(TokioMutex::new(HashMap::new())),
             timeout,
             timeout_action,
+            acp_prompt_action,
         }
+    }
+
+    /// How agent-raised requests are answered. Mediated command requests always
+    /// ask, whatever this says.
+    pub fn acp_prompt_action(&self) -> AcpPromptAction {
+        self.acp_prompt_action
     }
 
     /// Create a new permission row, register a waiter, and schedule the timer.
@@ -181,23 +199,7 @@ impl PermissionService {
         oneshot::Receiver<PermissionOutcome>,
     )> {
         let expires_at = compute_expiry(self.timeout);
-        let detail_json = serde_json::to_string(&input.detail).map_err(|err| {
-            tracing::error!(error = %err, "failed to serialize permission detail JSON");
-            StackError::StateInvalidJson {
-                field: "permission_requests.detail_json",
-                reason: err.to_string(),
-            }
-        })?;
-        let record = {
-            let state = self.state.lock().await;
-            state.append_permission_request(NewPermissionRequest {
-                source: input.source.as_str(),
-                requester: input.requester.as_deref(),
-                subject_id: input.subject_id.as_deref(),
-                detail_json: &detail_json,
-                expires_at: expires_at.as_deref(),
-            })?
-        };
+        let record = self.insert_request(&input, expires_at.as_deref()).await?;
 
         let (tx, rx) = oneshot::channel();
         {
@@ -208,6 +210,63 @@ impl PermissionService {
         // that window (the session-cancel sweep polls several times a second)
         // settles it and finds nothing to fire. Re-read the row and answer the
         // waiter here, or the caller would await a decision nobody can send.
+        self.publish_created_event(&record).await;
+
+        // Published first so the created event precedes any decision event the
+        // settle below fires for a request raced inside the waiter window.
+        self.settle_waiter_if_already_decided(&record.id).await;
+
+        self.spawn_timer(record.id.clone());
+
+        Ok((record, rx))
+    }
+
+    /// Record a request that policy answers on arrival: the row is inserted
+    /// already approved in one transaction, so it is never observable as
+    /// pending and a midway failure writes nothing. No waiter and no expiry
+    /// timer, because nothing is ever left outstanding to decide or expire.
+    pub async fn approve_by_policy(
+        &self,
+        input: NewPermission,
+    ) -> Result<(PermissionRequestRecord, PermissionDecisionView)> {
+        let detail_json = serialize_detail(&input.detail)?;
+        let (record, decision) = {
+            let state = self.state.lock().await;
+            state.append_approved_permission_request(
+                NewPermissionRequest {
+                    source: input.source.as_str(),
+                    requester: input.requester.as_deref(),
+                    subject_id: input.subject_id.as_deref(),
+                    detail_json: &detail_json,
+                    expires_at: None,
+                },
+                Some(POLICY_DECIDING_PRINCIPAL),
+                Some(POLICY_APPROVAL_REASON),
+            )?
+        };
+        self.publish_created_event(&record).await;
+        self.publish_decision_event(&record.id, &decision, "permission.approved")
+            .await;
+        Ok((record, decision_view(decision)))
+    }
+
+    async fn insert_request(
+        &self,
+        input: &NewPermission,
+        expires_at: Option<&str>,
+    ) -> Result<PermissionRequestRecord> {
+        let detail_json = serialize_detail(&input.detail)?;
+        let state = self.state.lock().await;
+        state.append_permission_request(NewPermissionRequest {
+            source: input.source.as_str(),
+            requester: input.requester.as_deref(),
+            subject_id: input.subject_id.as_deref(),
+            detail_json: &detail_json,
+            expires_at,
+        })
+    }
+
+    async fn publish_created_event(&self, record: &PermissionRequestRecord) {
         self.publish_event(
             &record.id,
             &record.created_at,
@@ -223,14 +282,6 @@ impl PermissionService {
             }),
         )
         .await;
-
-        // Published first so the created event precedes any decision event the
-        // settle below fires for a request raced inside the waiter window.
-        self.settle_waiter_if_already_decided(&record.id).await;
-
-        self.spawn_timer(record.id.clone());
-
-        Ok((record, rx))
     }
 
     /// Approve a pending request. Returns the persisted decision view.
@@ -395,6 +446,17 @@ impl PermissionService {
             PermissionOutcome::Canceled { .. } => "permission.cancelled",
             PermissionOutcome::Expired => "permission.expired",
         };
+        self.publish_decision_event(id, &decision, kind).await;
+
+        Ok(decision_view(decision))
+    }
+
+    async fn publish_decision_event(
+        &self,
+        id: &str,
+        decision: &PermissionDecisionRecord,
+        kind: &str,
+    ) {
         let mut payload = json!({
             "id": id,
             "permission_id": id,
@@ -405,15 +467,6 @@ impl PermissionService {
         link_request_subject(&self.state, id, &mut payload).await;
         self.publish_event(id, &decision.created_at, kind, payload)
             .await;
-
-        Ok(PermissionDecisionView {
-            id: decision.id,
-            request_id: decision.request_id,
-            created_at: decision.created_at,
-            decision: decision.decision,
-            deciding_principal: decision.deciding_principal,
-            reason: decision.reason,
-        })
     }
 
     fn spawn_timer(&self, id: String) {
@@ -489,6 +542,29 @@ impl PermissionService {
     async fn publish_event(&self, id: &str, created_at: &str, kind: &str, data: Value) {
         persist_and_publish_permission_event(&self.state, &self.events, id, created_at, kind, data)
             .await;
+    }
+}
+
+/// Serialize a request's detail for the `detail_json` column. Shared by the
+/// pending and decided-on-arrival insert paths.
+fn serialize_detail(detail: &Value) -> Result<String> {
+    serde_json::to_string(detail).map_err(|err| {
+        tracing::error!(error = %err, "failed to serialize permission detail JSON");
+        StackError::StateInvalidJson {
+            field: "permission_requests.detail_json",
+            reason: err.to_string(),
+        }
+    })
+}
+
+fn decision_view(decision: PermissionDecisionRecord) -> PermissionDecisionView {
+    PermissionDecisionView {
+        id: decision.id,
+        request_id: decision.request_id,
+        created_at: decision.created_at,
+        decision: decision.decision,
+        deciding_principal: decision.deciding_principal,
+        reason: decision.reason,
     }
 }
 
@@ -605,13 +681,21 @@ mod tests {
         action: PermissionTimeoutAction,
         timeout: Duration,
     ) -> (tempfile::TempDir, PermissionService) {
+        fresh_service_with(action, timeout, AcpPromptAction::Ask)
+    }
+
+    fn fresh_service_with(
+        action: PermissionTimeoutAction,
+        timeout: Duration,
+        acp_prompt_action: AcpPromptAction,
+    ) -> (tempfile::TempDir, PermissionService) {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let path = tempdir.path().join("state.sqlite");
         let store = StateStore::open(&path).expect("open");
         store.migrate().expect("migrate");
         let state = Arc::new(TokioMutex::new(store));
         let events = EventHub::new();
-        let service = PermissionService::new(state, events, timeout, action);
+        let service = PermissionService::new(state, events, timeout, action, acp_prompt_action);
         (tempdir, service)
     }
 
@@ -782,6 +866,57 @@ mod tests {
             matches!(outcome, PermissionOutcome::Canceled { .. }),
             "the selected option is unrecoverable, so the turn must end unanswered: {outcome:?}"
         );
+    }
+
+    /// A request policy answers on arrival is durable in one step: the row is
+    /// approved, the decision names the policy as the decider, and nothing is
+    /// left pending or scheduled to expire.
+    #[tokio::test]
+    async fn policy_approval_records_an_approved_decision() {
+        let (_dir, service) = fresh_service_with(
+            PermissionTimeoutAction::Deny,
+            Duration::from_secs(300),
+            AcpPromptAction::Approve,
+        );
+        let (record, decision) = service
+            .approve_by_policy(NewPermission {
+                source: PermissionSource::Acp,
+                requester: Some("session:sess_policy".to_owned()),
+                subject_id: Some("sess_policy".to_owned()),
+                detail: json!({}),
+            })
+            .await
+            .expect("policy approval");
+
+        assert_eq!(decision.request_id, record.id);
+        assert_eq!(decision.decision, "approved");
+        assert_eq!(decision.deciding_principal.as_deref(), Some("policy"));
+        assert_eq!(decision.reason.as_deref(), Some("auto-approved by policy"));
+        assert_eq!(
+            record.expires_at, None,
+            "a request decided on arrival has nothing to expire"
+        );
+
+        let view = service.get(&record.id).await.expect("get");
+        assert_eq!(view.status, "approved");
+        assert_eq!(view.source, "acp");
+        assert!(service.pending(10).await.expect("pending").is_empty());
+
+        let kinds: Vec<String> = {
+            let state = service.state.lock().await;
+            state
+                .query_permission_events(crate::state::EventFilter {
+                    limit: 10,
+                    permission_id: Some(&record.id),
+                    ..crate::state::EventFilter::default()
+                })
+                .expect("query permission events")
+                .into_iter()
+                .map(|row| row.kind)
+                .collect()
+        };
+        assert!(kinds.iter().any(|kind| kind == "permission.created"));
+        assert!(kinds.iter().any(|kind| kind == "permission.approved"));
     }
 
     #[tokio::test]

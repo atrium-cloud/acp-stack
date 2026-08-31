@@ -573,7 +573,7 @@ async fn break_for_persistence_error(child: &mut tokio::process::Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::PermissionTimeoutAction;
+    use crate::config::{AcpPromptAction, PermissionTimeoutAction};
     use crate::runtime::mediation::commands::policy::resolve_cwd_under_workspace;
     use crate::runtime::mediation::permissions::{NewPermission, PermissionSource};
     use crate::state::{CommandOrigin, NewCommandRecord};
@@ -596,6 +596,7 @@ mod tests {
             EventHub::new(),
             Duration::from_secs(60),
             PermissionTimeoutAction::Deny,
+            AcpPromptAction::Ask,
         );
         Fixture {
             tempdir,
