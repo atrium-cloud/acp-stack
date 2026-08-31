@@ -576,6 +576,7 @@ fn execute_agent_test(
             )
         })?;
     let sandbox = config.workspace.sandbox.clone();
+    let shell = config.workspace.default_shell.clone();
     let network_provider = crate::extensions::resolve_network_provider(config);
     let report = runtime.block_on(async move {
         run_agent_test_inner(
@@ -587,6 +588,7 @@ fn execute_agent_test(
             timeout,
             progress_timeout,
             sandbox,
+            shell,
             network_provider,
         )
         .await
@@ -884,6 +886,7 @@ async fn run_agent_test_inner(
     prompt_timeout: Duration,
     progress_timeout: Duration,
     sandbox: crate::config::SandboxConfig,
+    shell: String,
     network_provider: Option<crate::extensions::NetworkProviderExtension>,
 ) -> AgentTestInnerReport {
     let sink = Arc::new(AgentTestSessionEventSink::new());
@@ -895,6 +898,7 @@ async fn run_agent_test_inner(
         sink.clone(),
         AcpPermissionPolicy::AutoApprove,
         &sandbox,
+        &shell,
         network_provider.as_ref(),
         None,
     )

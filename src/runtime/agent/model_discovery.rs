@@ -305,6 +305,7 @@ pub async fn fetch_session_config_with_timeout(
         Arc::new(NoopSink),
         AcpPermissionPolicy::Cancel,
         &config.workspace.sandbox,
+        &config.workspace.default_shell,
         crate::extensions::resolve_network_provider(config).as_ref(),
         None,
     )
@@ -375,6 +376,7 @@ pub async fn fetch_agent_capabilities_async(
         Arc::new(NoopSink),
         AcpPermissionPolicy::Cancel,
         &config.workspace.sandbox,
+        &config.workspace.default_shell,
         crate::extensions::resolve_network_provider(config).as_ref(),
         None,
     )

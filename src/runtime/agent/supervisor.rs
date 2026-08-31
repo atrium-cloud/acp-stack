@@ -390,6 +390,7 @@ struct RestartContext {
     event_hub: EventHub,
     permissions: Option<crate::runtime::mediation::permissions::PermissionService>,
     sandbox: crate::config::SandboxConfig,
+    shell: String,
     network_provider: Option<crate::extensions::NetworkProviderExtension>,
 }
 
@@ -407,6 +408,9 @@ pub struct AgentStartRequest<'a> {
     pub event_hub: EventHub,
     pub permissions: Option<crate::runtime::mediation::permissions::PermissionService>,
     pub sandbox: crate::config::SandboxConfig,
+    /// `[workspace].default_shell`: the interpreter client terminals run
+    /// argv-less agent command lines under.
+    pub shell: String,
     pub network_provider: Option<crate::extensions::NetworkProviderExtension>,
 }
 
@@ -488,6 +492,7 @@ impl AgentSupervisor {
             event_hub: request.event_hub.clone(),
             permissions: request.permissions.clone(),
             sandbox: request.sandbox.clone(),
+            shell: request.shell.clone(),
             network_provider: request.network_provider.clone(),
         };
         match self.do_start(request).await {
@@ -536,6 +541,7 @@ impl AgentSupervisor {
             request.event_hub,
             request.permissions,
             request.sandbox,
+            request.shell,
             request.network_provider,
         )
         .await

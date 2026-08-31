@@ -56,6 +56,7 @@ async fn shutdown_waits_for_connection_task_before_flushing_sink() {
             sink_dyn,
             AcpPermissionPolicy::Cancel,
             &Default::default(),
+            "/bin/sh",
             None,
             None,
         )
@@ -161,6 +162,7 @@ async fn shutdown_drains_notification_queued_before_capture_blocks() {
             sink_dyn,
             AcpPermissionPolicy::Cancel,
             &Default::default(),
+            "/bin/sh",
             None,
             None,
         )
@@ -218,6 +220,7 @@ async fn cancel_session_settles_prompt_with_cancelled_stop_reason() {
         null_sink(),
         AcpPermissionPolicy::Cancel,
         &Default::default(),
+        "/bin/sh",
         None,
         None,
     )

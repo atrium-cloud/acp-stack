@@ -12,6 +12,7 @@ async fn spawn_completes_initialize_and_captures_capabilities() {
         null_sink(),
         AcpPermissionPolicy::Cancel,
         &Default::default(),
+        "/bin/sh",
         None,
         None,
     )
@@ -35,6 +36,7 @@ async fn spawn_sends_client_identity() {
         null_sink(),
         AcpPermissionPolicy::Cancel,
         &Default::default(),
+        "/bin/sh",
         None,
         None,
     )
@@ -55,6 +57,7 @@ async fn spawn_rejects_an_incompatible_protocol_version() {
         null_sink(),
         AcpPermissionPolicy::Cancel,
         &Default::default(),
+        "/bin/sh",
         None,
         None,
     )
@@ -85,6 +88,7 @@ async fn unadvertised_http_mcp_transport_is_skipped_not_fatal() {
         null_sink(),
         AcpPermissionPolicy::Cancel,
         &Default::default(),
+        "/bin/sh",
         None,
         None,
     )
@@ -119,6 +123,7 @@ async fn shutdown_terminates_the_child() {
         null_sink(),
         AcpPermissionPolicy::Cancel,
         &Default::default(),
+        "/bin/sh",
         None,
         None,
     )
@@ -155,6 +160,7 @@ async fn terminate_probe_terminates_the_child() {
         null_sink(),
         AcpPermissionPolicy::Cancel,
         &Default::default(),
+        "/bin/sh",
         None,
         None,
     )
@@ -207,6 +213,7 @@ async fn spawn_forwards_only_reserved_runtime_context_and_explicit_env() {
         null_sink(),
         AcpPermissionPolicy::Cancel,
         &Default::default(),
+        "/bin/sh",
         None,
         None,
     )

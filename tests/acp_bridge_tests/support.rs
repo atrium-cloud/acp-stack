@@ -94,6 +94,7 @@ pub(crate) async fn run_terminal_probe(
         sink_dyn,
         AcpPermissionPolicy::Cancel,
         &Default::default(),
+        "/bin/sh",
         None,
         command_log,
     )

@@ -15,6 +15,7 @@ pub(super) async fn spawn_agent_bridge(
     event_hub: EventHub,
     permissions: Option<crate::runtime::mediation::permissions::PermissionService>,
     sandbox: crate::config::SandboxConfig,
+    shell: String,
     network_provider: Option<crate::extensions::NetworkProviderExtension>,
 ) -> Result<(AgentCapabilitiesDto, AcpBridge)> {
     let cwd = resolve_agent_cwd(agent, workspace_root);
@@ -52,6 +53,7 @@ pub(super) async fn spawn_agent_bridge(
         sink,
         permissions.into(),
         &sandbox,
+        &shell,
         network_provider.as_ref(),
         Some(crate::runtime::agent::acp_bridge::TerminalCommandLog {
             state: state.clone(),
@@ -268,6 +270,7 @@ async fn monitor_bridge_exit(
         restart_context.event_hub.clone(),
         restart_context.permissions.clone(),
         restart_context.sandbox.clone(),
+        restart_context.shell.clone(),
         restart_context.network_provider.clone(),
     )
     .await

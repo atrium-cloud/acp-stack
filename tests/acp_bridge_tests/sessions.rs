@@ -18,6 +18,7 @@ async fn new_session_round_trips_and_prompt_emits_notifications() {
         sink_dyn,
         AcpPermissionPolicy::Cancel,
         &Default::default(),
+        "/bin/sh",
         None,
         None,
     )
@@ -75,6 +76,7 @@ async fn prompt_rejects_unadvertised_image_content() {
         null_sink(),
         AcpPermissionPolicy::Cancel,
         &Default::default(),
+        "/bin/sh",
         None,
         None,
     )
@@ -132,6 +134,7 @@ async fn cancelled_permission_does_not_block_dispatch_and_is_persisted() {
         null_sink(),
         AcpPermissionPolicy::Service(permissions),
         &Default::default(),
+        "/bin/sh",
         None,
         None,
     )
@@ -181,6 +184,7 @@ async fn new_session_returns_custom_model_config_option_id() {
         null_sink(),
         AcpPermissionPolicy::Cancel,
         &Default::default(),
+        "/bin/sh",
         None,
         None,
     )
@@ -215,6 +219,7 @@ async fn new_session_advertises_config_options_to_strict_agent() {
         null_sink(),
         AcpPermissionPolicy::Cancel,
         &Default::default(),
+        "/bin/sh",
         None,
         None,
     )
@@ -251,6 +256,7 @@ async fn set_config_option_sends_boolean_values() {
         null_sink(),
         AcpPermissionPolicy::Cancel,
         &Default::default(),
+        "/bin/sh",
         None,
         None,
     )

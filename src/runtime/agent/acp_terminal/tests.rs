@@ -1,5 +1,9 @@
 use super::*;
 
+/// Stands in for `[workspace].default_shell` in contexts whose subject is not
+/// the shell choice itself.
+const TEST_SHELL: &str = "/bin/sh";
+
 #[test]
 fn keep_newest_retains_tail_at_char_boundary() {
     assert_eq!(keep_newest("hello", 10), ("hello", false));
@@ -175,6 +179,7 @@ async fn create_terminal_defaults_cwd_to_session_cwd() {
         workspace_root: root.path().to_path_buf(),
         home: root.path().to_path_buf(),
         sandbox: crate::config::SandboxConfig::default(),
+        shell: TEST_SHELL.to_owned(),
         network_provider: None,
         command_log: None,
         sink: Arc::new(CwdStubSink {
@@ -238,6 +243,7 @@ async fn create_terminal_start_failure_finalizes_command_row() {
         workspace_root: std::env::temp_dir(),
         home: std::env::temp_dir(),
         sandbox: crate::config::SandboxConfig::default(),
+        shell: TEST_SHELL.to_owned(),
         network_provider: None,
         command_log: Some(TerminalCommandLog {
             state: state.clone(),
@@ -278,6 +284,7 @@ async fn kill_finalizes_command_row_as_canceled() {
         workspace_root: std::env::temp_dir(),
         home: std::env::temp_dir(),
         sandbox: crate::config::SandboxConfig::default(),
+        shell: TEST_SHELL.to_owned(),
         network_provider: None,
         command_log: Some(TerminalCommandLog {
             state: state.clone(),
@@ -320,6 +327,227 @@ async fn kill_finalizes_command_row_as_canceled() {
         })
         .expect("query events");
     assert_eq!(events.len(), 1, "expected one command.cancelled event");
+}
+
+#[tokio::test]
+async fn create_terminal_without_args_runs_the_command_through_a_shell() {
+    use agent_client_protocol::schema::v1::SessionId;
+
+    let root = tempfile::tempdir().expect("workspace root");
+    let context = TerminalHandlerContext {
+        registry: Arc::new(TerminalRegistry::default()),
+        workspace_root: root.path().to_path_buf(),
+        home: root.path().to_path_buf(),
+        sandbox: crate::config::SandboxConfig::default(),
+        shell: TEST_SHELL.to_owned(),
+        network_provider: None,
+        command_log: None,
+        sink: Arc::new(NoopStubSink),
+    };
+    // Whole shell line in `command` with no argv, exactly what goose sends.
+    let request =
+        CreateTerminalRequest::new(SessionId::new("sess_agent"), "printf hello && printf world")
+            .cwd(Some(root.path().to_path_buf()));
+    let response = handle_create_terminal(&context, request)
+        .await
+        .expect("terminal created");
+
+    let handle = context
+        .registry
+        .get("sess_agent", &response.terminal_id.0)
+        .await
+        .expect("handle");
+    let status = handle.wait_for_exit().await;
+    assert_eq!(status.exit_code, Some(0));
+    assert_eq!(handle.buffer.lock().await.data, "helloworld");
+}
+
+#[tokio::test]
+async fn create_terminal_with_args_execs_the_program_verbatim() {
+    use agent_client_protocol::schema::v1::SessionId;
+
+    let root = tempfile::tempdir().expect("workspace root");
+    let context = TerminalHandlerContext {
+        registry: Arc::new(TerminalRegistry::default()),
+        workspace_root: root.path().to_path_buf(),
+        home: root.path().to_path_buf(),
+        sandbox: crate::config::SandboxConfig::default(),
+        shell: TEST_SHELL.to_owned(),
+        network_provider: None,
+        command_log: None,
+        sink: Arc::new(NoopStubSink),
+    };
+    // A shell would treat `&&` as an operator; exact exec passes it through as
+    // one literal argument.
+    let request = CreateTerminalRequest::new(SessionId::new("sess_agent"), "/bin/echo")
+        .args(vec!["hello && echo world".to_owned()])
+        .cwd(Some(root.path().to_path_buf()));
+    let response = handle_create_terminal(&context, request)
+        .await
+        .expect("terminal created");
+
+    let handle = context
+        .registry
+        .get("sess_agent", &response.terminal_id.0)
+        .await
+        .expect("handle");
+    let status = handle.wait_for_exit().await;
+    assert_eq!(status.exit_code, Some(0));
+    assert_eq!(
+        handle.buffer.lock().await.data.trim_end(),
+        "hello && echo world"
+    );
+}
+
+#[tokio::test]
+async fn create_terminal_runs_the_configured_workspace_shell() {
+    use agent_client_protocol::schema::v1::SessionId;
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().expect("workspace root");
+    // A stand-in interpreter that reports the argv it was handed, so the
+    // assertion pins the configured path rather than any system shell.
+    let shell_path = root.path().join("marker-shell");
+    std::fs::write(
+        &shell_path,
+        "#!/bin/sh\nprintf 'marker-shell ran: %s' \"$2\"\n",
+    )
+    .expect("write marker shell");
+    std::fs::set_permissions(&shell_path, std::fs::Permissions::from_mode(0o755))
+        .expect("mark marker shell executable");
+
+    let context = TerminalHandlerContext {
+        registry: Arc::new(TerminalRegistry::default()),
+        workspace_root: root.path().to_path_buf(),
+        home: root.path().to_path_buf(),
+        sandbox: crate::config::SandboxConfig::default(),
+        shell: shell_path.to_string_lossy().into_owned(),
+        network_provider: None,
+        command_log: None,
+        sink: Arc::new(NoopStubSink),
+    };
+    let request = CreateTerminalRequest::new(SessionId::new("sess_agent"), "printf ignored")
+        .cwd(Some(root.path().to_path_buf()));
+    let response = handle_create_terminal(&context, request)
+        .await
+        .expect("terminal created");
+
+    let handle = context
+        .registry
+        .get("sess_agent", &response.terminal_id.0)
+        .await
+        .expect("handle");
+    assert_eq!(handle.wait_for_exit().await.exit_code, Some(0));
+    assert_eq!(
+        handle.buffer.lock().await.data,
+        "marker-shell ran: printf ignored"
+    );
+}
+
+#[test]
+fn terminal_invocation_selects_exec_form_from_argv_presence() {
+    let (program, args) = terminal_invocation("/bin/bash", "printf hi", &[]);
+    assert_eq!(program, PathBuf::from("/bin/bash"));
+    assert_eq!(args, vec!["-c".to_owned(), "printf hi".to_owned()]);
+
+    // A configured shell never displaces an agent-supplied argv.
+    let (program, args) = terminal_invocation("/bin/bash", "/bin/echo", &["hi".to_owned()]);
+    assert_eq!(program, PathBuf::from("/bin/echo"));
+    assert_eq!(args, vec!["hi".to_owned()]);
+}
+
+#[tokio::test]
+async fn create_terminal_rejects_a_blank_command() {
+    use agent_client_protocol::schema::v1::SessionId;
+
+    let state_dir = tempfile::tempdir().expect("tempdir");
+    let store = StateStore::open(state_dir.path().join("state.sqlite")).expect("state open");
+    store.migrate().expect("migrate");
+    let state = Arc::new(TokioMutex::new(store));
+
+    let root = tempfile::tempdir().expect("workspace root");
+    let context = TerminalHandlerContext {
+        registry: Arc::new(TerminalRegistry::default()),
+        workspace_root: root.path().to_path_buf(),
+        home: root.path().to_path_buf(),
+        sandbox: crate::config::SandboxConfig::default(),
+        shell: TEST_SHELL.to_owned(),
+        network_provider: None,
+        command_log: Some(TerminalCommandLog {
+            state: state.clone(),
+            event_hub: EventHub::new(),
+        }),
+        sink: Arc::new(NoopStubSink),
+    };
+    // Whitespace only: without the guard this would reach the shell as `-c ""`
+    // and report a successful no-op run.
+    let request = CreateTerminalRequest::new(SessionId::new("sess_agent"), "   ")
+        .cwd(Some(root.path().to_path_buf()));
+    let error = handle_create_terminal(&context, request)
+        .await
+        .expect_err("blank command must be refused");
+    assert_eq!(error.code, AcpError::invalid_params().code);
+
+    // Refused before any row or child exists, so nothing is left behind.
+    let commands = state
+        .lock()
+        .await
+        .query_commands(crate::state::CommandFilter {
+            limit: 10,
+            ..Default::default()
+        })
+        .expect("query commands");
+    assert!(commands.is_empty(), "blank command must not log a row");
+}
+
+#[tokio::test]
+async fn shell_wrapped_terminal_logs_the_agent_requested_command() {
+    use agent_client_protocol::schema::v1::SessionId;
+
+    let state_dir = tempfile::tempdir().expect("tempdir");
+    let store = StateStore::open(state_dir.path().join("state.sqlite")).expect("state open");
+    store.migrate().expect("migrate");
+    let state = Arc::new(TokioMutex::new(store));
+
+    let root = tempfile::tempdir().expect("workspace root");
+    let context = TerminalHandlerContext {
+        registry: Arc::new(TerminalRegistry::default()),
+        workspace_root: root.path().to_path_buf(),
+        home: root.path().to_path_buf(),
+        sandbox: crate::config::SandboxConfig::default(),
+        shell: TEST_SHELL.to_owned(),
+        network_provider: None,
+        command_log: Some(TerminalCommandLog {
+            state: state.clone(),
+            event_hub: EventHub::new(),
+        }),
+        sink: Arc::new(NoopStubSink),
+    };
+    let request = CreateTerminalRequest::new(SessionId::new("sess_agent"), "printf audited")
+        .cwd(Some(root.path().to_path_buf()));
+    let response = handle_create_terminal(&context, request)
+        .await
+        .expect("terminal created");
+    context
+        .registry
+        .get("sess_agent", &response.terminal_id.0)
+        .await
+        .expect("handle")
+        .wait_for_exit()
+        .await;
+
+    // The audit row is the agent's intent, not the interpreter the runtime
+    // chose to run it under.
+    let commands = state
+        .lock()
+        .await
+        .query_commands(crate::state::CommandFilter {
+            limit: 10,
+            ..Default::default()
+        })
+        .expect("query commands");
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0].command, "printf audited");
 }
 
 #[tokio::test]

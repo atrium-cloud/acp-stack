@@ -770,6 +770,7 @@ async fn start_agent_with_config(
             event_hub: state.event_hub.clone(),
             permissions: Some(state.permissions.clone()),
             sandbox: config.workspace.sandbox.clone(),
+            shell: config.workspace.default_shell.clone(),
             network_provider: crate::extensions::resolve_network_provider(config),
         })
         .await?;

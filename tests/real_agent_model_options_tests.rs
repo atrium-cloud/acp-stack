@@ -93,6 +93,7 @@ async fn assert_real_agent_advertises_model(
         Arc::new(NoopSessionEventSink),
         AcpPermissionPolicy::Cancel,
         &Default::default(),
+        "/bin/sh",
         None,
         None,
     )
@@ -135,6 +136,7 @@ async fn print_real_agent_mode_values(agent: AgentConfig, env: HashMap<String, S
         Arc::new(NoopSessionEventSink),
         AcpPermissionPolicy::Cancel,
         &Default::default(),
+        "/bin/sh",
         None,
         None,
     )
@@ -171,6 +173,7 @@ async fn send_real_agent_prompt(agent: AgentConfig, env: HashMap<String, String>
         Arc::new(NoopSessionEventSink),
         AcpPermissionPolicy::Cancel,
         &Default::default(),
+        "/bin/sh",
         None,
         None,
     )
@@ -255,6 +258,7 @@ async fn real_terminal_uname_probe(agent: AgentConfig, env: HashMap<String, Stri
         Arc::new(NoopSessionEventSink),
         AcpPermissionPolicy::Cancel,
         &Default::default(),
+        "/bin/sh",
         None,
         Some(acp_stack::runtime::agent::acp_bridge::TerminalCommandLog {
             state: state.clone(),

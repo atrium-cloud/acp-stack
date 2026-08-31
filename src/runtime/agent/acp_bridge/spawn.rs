@@ -37,6 +37,7 @@ impl AcpBridge {
         sink: Arc<dyn SessionEventSink>,
         permissions: AcpPermissionPolicy,
         sandbox: &crate::config::SandboxConfig,
+        shell: &str,
         network_provider: Option<&crate::extensions::NetworkProviderExtension>,
         command_log: Option<TerminalCommandLog>,
     ) -> Result<Self> {
@@ -63,6 +64,7 @@ impl AcpBridge {
             workspace_root: cwd.clone(),
             home: home.to_path_buf(),
             sandbox: sandbox.clone(),
+            shell: shell.to_owned(),
             network_provider: network_provider.cloned(),
             command_log,
             sink: sink.clone(),

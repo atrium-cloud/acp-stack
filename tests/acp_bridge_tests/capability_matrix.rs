@@ -12,6 +12,7 @@ async fn list_sessions_returns_agent_sessions() {
         null_sink(),
         AcpPermissionPolicy::Cancel,
         &Default::default(),
+        "/bin/sh",
         None,
         None,
     )
@@ -41,6 +42,7 @@ async fn list_sessions_follows_pagination() {
         null_sink(),
         AcpPermissionPolicy::Cancel,
         &Default::default(),
+        "/bin/sh",
         None,
         None,
     )
@@ -68,6 +70,7 @@ async fn list_sessions_returns_unsupported_capability_when_agent_disables_flag()
         null_sink(),
         AcpPermissionPolicy::Cancel,
         &Default::default(),
+        "/bin/sh",
         None,
         None,
     )
@@ -100,6 +103,7 @@ async fn list_sessions_rejects_repeated_cursor() {
         null_sink(),
         AcpPermissionPolicy::Cancel,
         &Default::default(),
+        "/bin/sh",
         None,
         None,
     )
@@ -133,6 +137,7 @@ async fn load_session_returns_unsupported_capability_when_agent_disables_flag() 
         null_sink(),
         AcpPermissionPolicy::Cancel,
         &Default::default(),
+        "/bin/sh",
         None,
         None,
     )
@@ -170,6 +175,7 @@ async fn resume_session_returns_unsupported_capability_when_agent_disables_flag(
         null_sink(),
         AcpPermissionPolicy::Cancel,
         &Default::default(),
+        "/bin/sh",
         None,
         None,
     )
@@ -206,6 +212,7 @@ async fn close_session_returns_unsupported_capability_when_agent_disables_flag()
         null_sink(),
         AcpPermissionPolicy::Cancel,
         &Default::default(),
+        "/bin/sh",
         None,
         None,
     )
@@ -240,6 +247,7 @@ async fn delete_session_returns_unsupported_capability_when_agent_disables_flag(
         null_sink(),
         AcpPermissionPolicy::Cancel,
         &Default::default(),
+        "/bin/sh",
         None,
         None,
     )
@@ -273,6 +281,7 @@ async fn delete_session_round_trips_when_the_agent_advertises_the_capability() {
         null_sink(),
         AcpPermissionPolicy::Cancel,
         &Default::default(),
+        "/bin/sh",
         None,
         None,
     )
@@ -300,6 +309,7 @@ async fn fork_session_returns_child_session() {
         null_sink(),
         AcpPermissionPolicy::Cancel,
         &Default::default(),
+        "/bin/sh",
         None,
         None,
     )
@@ -332,6 +342,7 @@ async fn fork_session_returns_unsupported_capability_when_agent_disables_flag() 
         null_sink(),
         AcpPermissionPolicy::Cancel,
         &Default::default(),
+        "/bin/sh",
         None,
         None,
     )
@@ -371,6 +382,7 @@ async fn fork_session_sends_message_id_when_capability_is_present() {
         null_sink(),
         AcpPermissionPolicy::Cancel,
         &Default::default(),
+        "/bin/sh",
         None,
         None,
     )
@@ -403,6 +415,7 @@ async fn fork_session_rejects_message_id_when_capability_is_missing() {
         null_sink(),
         AcpPermissionPolicy::Cancel,
         &Default::default(),
+        "/bin/sh",
         None,
         None,
     )

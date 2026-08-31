@@ -38,6 +38,13 @@ The initialize request advertises the client capabilities `acp-stack` implements
 - The row is finalized with the exit status.
 - Agent shell activity is therefore visible in `acps logs`, command history, and live subscriptions alongside operator-submitted commands.
 
+The argv decides how the request is executed. A `terminal/create` that carries `args` execs `command` as the program with that argv exactly. A `terminal/create` with an empty `args` runs the whole `command` string through `[workspace].default_shell -c`, the same interpreter the command gateway runs operator commands under. That is how agents which send a full shell line (pipes, operators, quoting) in `command` execute as they intend. Both forms pass through the same sandbox wrapper, and the command log records the agent-requested command line either way.
+
+Two consequences follow from argv presence being the selector:
+
+- A `command` whose program path contains whitespace is shell-interpreted when `args` is empty, so `/opt/my tool/run` is word-split. Send such a program with a non-empty `args` array to select exact exec.
+- A `command` that is empty or whitespace only is refused with an invalid-params error, before any command row or child process exists.
+
 ### Terminal Ownership
 
 - A single owning task per terminal holds the child process and pumps output chunks while selecting over natural exit and a kill channel.

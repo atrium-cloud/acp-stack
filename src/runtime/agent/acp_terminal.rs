@@ -491,6 +491,9 @@ pub(crate) struct TerminalHandlerContext {
     /// time.
     pub(crate) home: PathBuf,
     pub(crate) sandbox: crate::config::SandboxConfig,
+    /// `[workspace].default_shell`, the same interpreter the command gateway
+    /// runs operator commands under.
+    pub(crate) shell: String,
     pub(crate) network_provider: Option<crate::extensions::NetworkProviderExtension>,
     /// `None` (e.g. discovery probes) means terminals work but leave no
     /// `commands` rows behind.
@@ -531,10 +534,21 @@ pub(crate) async fn handle_create_terminal(
             }))
         })?;
 
+    // Rejected before the invocation branch: an empty command would otherwise
+    // reach the shell as `-c ""` and report a successful no-op run instead of
+    // surfacing the malformed request.
+    if request.command.trim().is_empty() {
+        return Err(AcpError::invalid_params().data(serde_json::json!({
+            "reason": "`command` must not be empty",
+        })));
+    }
+
     let env = terminal_environment(&context.home, &request.env);
+    let (requested_program, requested_args) =
+        terminal_invocation(&context.shell, &request.command, &request.args);
     let (program, args) = sandboxed_program(
-        Path::new(&request.command),
-        &request.args,
+        &requested_program,
+        &requested_args,
         &context.sandbox,
         context.network_provider.as_ref(),
         &context.workspace_root,
@@ -698,6 +712,26 @@ async fn lookup(
         .get(session_id, terminal_id)
         .await
         .ok_or_else(|| AcpError::resource_not_found(None))
+}
+
+/// Resolve what `terminal/create` actually execs. An empty argv is the
+/// discriminator: agents such as goose put a whole shell line (pipes,
+/// operators, quoting) in `command` and send no `args`, so exec'ing the string
+/// as a program name fails with ENOENT. The ACP terminal spec shapes the
+/// request as executable-plus-argv but says nothing about shell
+/// interpretation, and editor clients in the ecosystem run these lines through
+/// a shell, which is why those agents work elsewhere. The interpreter is the
+/// workspace's `default_shell`, so an agent's shell line behaves the same as
+/// an operator command through the command gateway. Agents that do send an
+/// argv get exact program+argv exec, unchanged.
+fn terminal_invocation(shell: &str, command: &str, args: &[String]) -> (PathBuf, Vec<String>) {
+    if args.is_empty() {
+        return (
+            PathBuf::from(shell),
+            vec!["-c".to_owned(), command.to_owned()],
+        );
+    }
+    (PathBuf::from(command), args.to_vec())
 }
 
 fn render_command_line(command: &str, args: &[String]) -> String {
