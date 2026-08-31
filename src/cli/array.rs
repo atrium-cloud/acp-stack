@@ -91,7 +91,7 @@ pub enum ArrayCommand {
 
 #[derive(Debug, Args)]
 pub struct ArrayAddArgs {
-    /// Agent registry id, for example codex, opencode, claude-code, goose, kimi, or hermes.
+    /// Agent registry id, for example codex, opencode, claude, goose, kimi, or hermes.
     agent: String,
 }
 

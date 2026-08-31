@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn claude_strips_managed_and_blocked_fields_but_keeps_unmanaged() {
     let inspected = inspect_native_config(
-        "claude-code",
+        "claude",
         Some("settings.json"),
         r#"{
               "model":"claude-sonnet",
@@ -49,7 +49,7 @@ fn claude_strips_managed_and_blocked_fields_but_keeps_unmanaged() {
 #[test]
 fn claude_blocks_security_and_credential_controls_and_flags_command_helpers() {
     let inspected = inspect_native_config(
-        "claude-code",
+        "claude",
         Some("settings.json"),
         r#"{
               "defaultMode":"bypassPermissions",
@@ -96,7 +96,7 @@ fn claude_blocks_security_and_credential_controls_and_flags_command_helpers() {
 #[test]
 fn claude_blocks_literal_telemetry_credentials_and_flags_otel_helper() {
     let inspected = inspect_native_config(
-        "claude-code",
+        "claude",
         Some("settings.json"),
         r#"{
               "env": {
@@ -788,8 +788,8 @@ fn invalid_jsonc_and_oversize_inputs_are_redacted_errors() {
 #[test]
 fn rejects_auth_state_and_project_scope_filenames() {
     for (harness, filename) in [
-        ("claude-code", ".claude.json"),
-        ("claude-code", "settings.local.json"),
+        ("claude", ".claude.json"),
+        ("claude", "settings.local.json"),
         ("codex", "auth.json"),
         ("codex", ".codex/config.toml"),
         ("opencode", "auth.json"),
@@ -820,7 +820,7 @@ fn rejects_auth_state_and_project_scope_filenames() {
 #[test]
 fn strips_unknown_credentials_and_managed_agent_controls() {
     let inspected = inspect_native_config(
-        "claude-code",
+        "claude",
         Some("settings.json"),
         r#"{
                 "env": {

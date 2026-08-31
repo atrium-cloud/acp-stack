@@ -96,7 +96,7 @@ fn embedded_registry_advertises_tested_headless_support() {
             "pi",
             "goose",
             "codex",
-            "claude-code",
+            "claude",
             "kimi",
             "hermes",
             "kilo",
@@ -121,7 +121,7 @@ fn embedded_registry_advertises_tested_headless_support() {
         // Claude Code and Hermes discover their own dirs, so their skills get
         // symlinked out of the shared one; the rest read `~/.agents/skills` natively.
         match entry.id.as_str() {
-            "claude-code" => assert_eq!(
+            "claude" => assert_eq!(
                 entry.agent_skills_link_dir.as_deref(),
                 Some("~/.claude/skills")
             ),
@@ -165,7 +165,7 @@ fn embedded_registry_contains_only_curated_examples() {
             "pi",
             "goose",
             "codex",
-            "claude-code",
+            "claude",
             "kimi",
             "hermes",
             "kilo",
@@ -289,9 +289,7 @@ fn embedded_registry_contains_only_curated_examples() {
         Some("codex-{arch}-unknown-linux-musl")
     );
     assert_eq!(codex.support_doc.as_deref(), Some("docs/agents/codex.md"));
-    let claude_code = catalog
-        .lookup("claude-code")
-        .expect("Claude Code entry exists");
+    let claude_code = catalog.lookup("claude").expect("Claude Code entry exists");
     assert_eq!(claude_code.kind, RegistryKind::Adapter);
     assert!(claude_code.headless_compatible);
     assert!(claude_code.set_provider);

@@ -530,14 +530,14 @@ fn claude_snapshot_journal_excludes_auth_state_and_digest_ignores_it() {
         operation: NativeConfigOperation {
             operation_id: "nci_claude_snapshot".to_owned(),
             status: NativeConfigOperationStatus::Failed,
-            harness: "claude-code".to_owned(),
+            harness: "claude".to_owned(),
             revision: "revision".to_owned(),
             agent_config: native_config_projection(&config),
             restart: NativeConfigRestartMetadata {
                 required: true,
                 queued: true,
                 restarted: false,
-                target_id: "claude-code".to_owned(),
+                target_id: "claude".to_owned(),
             },
             error: Some(NativeConfigOperationError {
                 code: "agent.native_config_rollback_failed".to_owned(),

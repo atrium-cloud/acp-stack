@@ -660,7 +660,7 @@ mod tests {
 
     #[test]
     fn build_agent_check_report_skips_adapter_provided_harness() {
-        let entry = embedded_entry("claude-code");
+        let entry = embedded_entry("claude");
         let resolver =
             MockResolver::new().with_npm("@agentclientprotocol/claude-agent-acp", "1.2.3");
         let rows = vec![installer_row("adapter", Some("1.2.3"))];

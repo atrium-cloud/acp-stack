@@ -108,7 +108,7 @@ fn init_claude_code_explicit_profile_model_skips_acp_discovery() {
             "dev",
             "init",
             "--agent",
-            "claude-code",
+            "claude",
             "--provider",
             "moonshotai",
             "--model",
@@ -118,13 +118,11 @@ fn init_claude_code_explicit_profile_model_skips_acp_discovery() {
         ])
         .assert()
         .success()
-        .stdout(predicates::str::contains(
-            "agent: Claude Code (claude-code)",
-        ));
+        .stdout(predicates::str::contains("agent: Claude Code (claude)"));
 
     let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
         .expect("config should be readable");
-    assert!(config.contains(r#"id = "claude-code""#));
+    assert!(config.contains(r#"id = "claude""#));
     assert!(config.contains(r#"id = "moonshotai""#));
     assert!(config.contains(r#"model = "kimi-k2.7-code""#));
 
@@ -456,7 +454,7 @@ fn init_claude_code_profile_provider_filters_builtin_model_aliases() {
             "dev",
             "init",
             "--agent",
-            "claude-code",
+            "claude",
             "--provider",
             "moonshotai",
             "--skip-workspace-init",

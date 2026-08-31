@@ -145,7 +145,7 @@ impl AgentSessionConfigCategory {
     }
 
     // ACP reserves the `thought_level` category but not the option id, and
-    // shipping adapters disagree on it (claude-code-acp uses `effort`,
+    // shipping adapters disagree on it (claude-agent-acp uses `effort`,
     // codex-acp uses `reasoning_effort`), so the fallback accepts both.
     pub(crate) fn matches_id(self, id: &str) -> bool {
         match self {

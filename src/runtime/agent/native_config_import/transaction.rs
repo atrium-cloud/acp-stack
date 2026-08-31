@@ -21,7 +21,7 @@ pub fn native_config_projection(config: &Config) -> NativeConfigProjection {
 
 pub fn native_config_path(harness: &str, home: &Path) -> Result<PathBuf> {
     match harness {
-        "claude-code" => Ok(home.join(".claude").join("settings.json")),
+        "claude" => Ok(home.join(".claude").join("settings.json")),
         "codex" => Ok(home.join(".codex").join("config.toml")),
         "opencode" => Ok(home.join(".config").join("opencode").join("opencode.json")),
         "amp" => Ok(home.join(".config").join("amp").join("settings.json")),
@@ -77,7 +77,7 @@ pub fn native_config_transaction_paths(
     home: &Path,
 ) -> Vec<PathBuf> {
     let mut paths = vec![config_path.to_path_buf(), native_path.to_path_buf()];
-    if harness == "claude-code" {
+    if harness == "claude" {
         paths.push(home.join(".claude.json"));
     }
     paths.sort();

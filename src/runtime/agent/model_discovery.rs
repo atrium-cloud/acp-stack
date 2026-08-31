@@ -586,11 +586,11 @@ mod tests {
     #[test]
     fn claude_code_profiled_and_custom_skip_discovery_validation() {
         assert!(model_value_is_explicit_without_discovery(&agent(
-            "claude-code",
+            "claude",
             mapped_provider("moonshotai")
         )));
         assert!(model_value_is_explicit_without_discovery(&agent(
-            "claude-code",
+            "claude",
             custom_provider()
         )));
     }

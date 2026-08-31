@@ -396,14 +396,14 @@ fn renames_session_target_id_for_legacy_agent_switch() {
         .expect("secondary session inserted");
 
     let renamed = store
-        .rename_session_target_id("opencode", "claude-code")
+        .rename_session_target_id("opencode", "claude")
         .expect("target ids should be renamed");
     assert_eq!(renamed, 1);
 
     let primary_rows = store
         .query_sessions(acp_stack::state::SessionFilter {
             limit: 10,
-            target_id: Some("claude-code"),
+            target_id: Some("claude"),
             ..Default::default()
         })
         .expect("renamed target query");
@@ -500,11 +500,11 @@ fn rename_session_target_id_rejects_agent_session_id_collision() {
         .expect("old target session inserted");
     store
         .insert_session_for_target(
-            "claude-code",
+            "claude",
             "shared_acp".to_owned(),
             NewSessionRecord {
                 id: "sess_new".to_owned(),
-                agent_id: "claude-code".to_owned(),
+                agent_id: "claude".to_owned(),
                 cwd: "/tmp/new".to_owned(),
                 title: None,
                 metadata_json: "{}".to_owned(),
@@ -512,7 +512,7 @@ fn rename_session_target_id_rejects_agent_session_id_collision() {
         )
         .expect("new target session inserted");
 
-    let result = store.rename_session_target_id("opencode", "claude-code");
+    let result = store.rename_session_target_id("opencode", "claude");
     assert!(
         matches!(
             result,

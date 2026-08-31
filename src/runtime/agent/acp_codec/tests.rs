@@ -591,7 +591,7 @@ fn effort_values_match_by_thought_level_category_and_by_id_fallback() {
         "reasoning_effort"
     );
 
-    // `effort` is claude-code-acp's spelling, and it carries no category.
+    // `effort` is claude-agent-acp's spelling, and it carries no category.
     let by_id: Vec<SessionConfigOption> = serde_json::from_str(
         r#"[
                 {

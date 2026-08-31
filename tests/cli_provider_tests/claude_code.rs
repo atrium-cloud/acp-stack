@@ -668,7 +668,7 @@ fn claude_code_provider_use_succeeds_and_omits_available_models_when_catalog_off
 
 fn claude_code_config() -> String {
     VALID_CONFIG
-        .replace(r#"id = "opencode""#, r#"id = "claude-code""#)
+        .replace(r#"id = "opencode""#, r#"id = "claude""#)
         .replace(r#"name = "OpenCode""#, r#"name = "Claude Code""#)
         .replace(r#"command = "opencode""#, r#"command = "claude-agent-acp""#)
         .replace(r#"args = ["acp"]"#, r#"args = []"#)

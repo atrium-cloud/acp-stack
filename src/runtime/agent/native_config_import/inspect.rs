@@ -4,12 +4,8 @@ use super::*;
 
 pub(super) fn inspect_claude(content: &str, revision: String) -> Result<InspectedNativeConfig> {
     let mut root = parse_json_object(content)?;
-    let mut builder = InspectionBuilder::new(
-        "claude-code",
-        NativeConfigFormat::Json,
-        revision,
-        content.len(),
-    );
+    let mut builder =
+        InspectionBuilder::new("claude", NativeConfigFormat::Json, revision, content.len());
 
     if let Some(value) = root.remove("model") {
         builder.add_string_candidate("model", "model", ManagedFieldKind::Model, value, |value| {

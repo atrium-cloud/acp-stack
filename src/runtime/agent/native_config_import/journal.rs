@@ -484,7 +484,7 @@ fn snapshot_kind_for_path(
         Ok(DurableSnapshotKind::Canonical)
     } else if path == native_path {
         Ok(DurableSnapshotKind::Native)
-    } else if harness == "claude-code" && path == home.join(".claude.json") {
+    } else if harness == "claude" && path == home.join(".claude.json") {
         Ok(DurableSnapshotKind::ClaudeState)
     } else {
         Err(native_error("agent.native_config_journal_invalid"))
@@ -501,9 +501,7 @@ fn path_for_snapshot_kind(
     match kind {
         DurableSnapshotKind::Canonical => Ok(config_path.to_path_buf()),
         DurableSnapshotKind::Native => Ok(native_path.to_path_buf()),
-        DurableSnapshotKind::ClaudeState if harness == "claude-code" => {
-            Ok(home.join(".claude.json"))
-        }
+        DurableSnapshotKind::ClaudeState if harness == "claude" => Ok(home.join(".claude.json")),
         DurableSnapshotKind::ClaudeState => {
             Err(native_error("agent.native_config_journal_invalid"))
         }

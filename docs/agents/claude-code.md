@@ -6,7 +6,7 @@ Install path:
 
 ```toml
 [agent]
-id = "claude-code"
+id = "claude"
 command = "claude-agent-acp"
 ```
 

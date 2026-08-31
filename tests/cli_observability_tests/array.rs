@@ -36,10 +36,10 @@ fn array_add_rejects_noncanonical_agent_alias() {
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
 
     acps_command(tempdir.path())
-        .args(["array", "add", "claude"])
+        .args(["array", "add", "claude-code"])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("claude"));
+        .stderr(predicates::str::contains("claude-code"));
 }
 
 #[test]

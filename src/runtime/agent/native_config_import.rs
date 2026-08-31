@@ -424,7 +424,7 @@ pub fn inspect_native_config(
     }
     let revision = sha256_hex(content.as_bytes());
     match harness {
-        "claude-code" => inspect_claude(content, revision),
+        "claude" => inspect_claude(content, revision),
         "codex" => inspect_codex(content, revision),
         "opencode" => inspect_opencode(content, Some(filename), revision),
         "amp" => inspect_amp(content, revision),
@@ -436,7 +436,7 @@ pub fn inspect_native_config(
 
 fn validate_native_config_filename(harness: &str, filename: &str) -> Result<()> {
     let accepted = match harness {
-        "claude-code" => filename == "settings.json",
+        "claude" => filename == "settings.json",
         "codex" => filename == "config.toml",
         "opencode" => matches!(filename, "opencode.json" | "opencode.jsonc"),
         "amp" => filename == "settings.json",

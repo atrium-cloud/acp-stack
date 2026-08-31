@@ -227,7 +227,7 @@ fn parses_custom_provider_defaults() {
 #[test]
 fn parses_custom_provider_anthropic_messages_api() {
     let claude_code_config = VALID_CONFIG
-        .replace(r#"id = "opencode""#, r#"id = "claude-code""#)
+        .replace(r#"id = "opencode""#, r#"id = "claude""#)
         .replace(r#"name = "OpenCode""#, r#"name = "Claude Code""#)
         .replace(r#"command = "opencode""#, r#"command = "claude-agent-acp""#)
         .replace(r#"args = ["acp"]"#, r#"args = []"#)

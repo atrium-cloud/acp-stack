@@ -126,8 +126,8 @@ fn provider_readiness_reports_native_auth_only_for_known_native_auth_provider() 
 
     assert_eq!(
         provider_readiness_label(
-            &readiness_config("claude-code"),
-            &summary_for("claude-code", "amazon-bedrock"),
+            &readiness_config("claude"),
+            &summary_for("claude", "amazon-bedrock"),
             &secret_store
         ),
         "agent-native auth"
@@ -148,14 +148,14 @@ fn provider_readiness_reports_native_auth_only_for_known_native_auth_provider() 
 fn provider_readiness_reports_claude_code_vertex_companion_refs() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let secret_store = SecretStore::open_or_create(tempdir.path()).expect("secret store");
-    let summary = summary_for("claude-code", "google-vertex-anthropic");
+    let summary = summary_for("claude", "google-vertex-anthropic");
 
     assert_eq!(
-        provider_readiness_label(&readiness_config("claude-code"), &summary, &secret_store),
+        provider_readiness_label(&readiness_config("claude"), &summary, &secret_store),
         "missing ANTHROPIC_VERTEX_PROJECT_ID, CLOUD_ML_REGION"
     );
     assert!(!provider_has_available_secret_refs(
-        &readiness_config("claude-code"),
+        &readiness_config("claude"),
         &summary,
         &secret_store
     ));
@@ -164,11 +164,11 @@ fn provider_readiness_reports_claude_code_vertex_companion_refs() {
 #[test]
 fn claude_code_custom_provider_defaults_to_anthropic_messages() {
     assert_eq!(
-        default_init_custom_provider_api("claude-code"),
+        default_init_custom_provider_api("claude"),
         CustomProviderApi::AnthropicMessages
     );
     assert_eq!(
-        parse_init_custom_provider_api(None, default_init_custom_provider_api("claude-code"))
+        parse_init_custom_provider_api(None, default_init_custom_provider_api("claude"))
             .expect("default parses"),
         CustomProviderApi::AnthropicMessages
     );
@@ -295,7 +295,7 @@ fn declared_defer_gate_defers_missing_provider_ref_but_not_flat_only_refs() {
         .expect("declared deferral soft-passes the mapped-provider ref");
         // An agent-native-auth provider's refs can never arrive through the
         // managed push, so the declaration must not defer them.
-        let native_auth_config = readiness_config("claude-code");
+        let native_auth_config = readiness_config("claude");
         collect_missing_provider_refs(
             true,
             &secret_store,

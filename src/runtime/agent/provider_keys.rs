@@ -21,7 +21,7 @@ pub use self::resolve::{
 
 const EMBEDDED_ENV_VARS: &str = include_str!("../../../data/env_vars.toml");
 const EMBEDDED_PROVIDERS: &str = include_str!("../../../data/providers.toml");
-pub const CLAUDE_CODE_AGENT_ID: &str = "claude-code";
+pub const CLAUDE_CODE_AGENT_ID: &str = "claude";
 pub const CODEX_AGENT_ID: &str = "codex";
 pub const HERMES_AGENT_ID: &str = "hermes";
 pub const KILO_AGENT_ID: &str = "kilo";
@@ -570,7 +570,7 @@ impl ProviderKeyMapping {
         if profile.agent_native_auth {
             if mapping.api_key_env_vars.contains_key(CLAUDE_CODE_AGENT_ID) {
                 return provider_mapping_error(format!(
-                    "provider `{primary_id}` uses Claude Code native auth but declares a claude-code API-key env var"
+                    "provider `{primary_id}` uses Claude Code native auth but declares a `{CLAUDE_CODE_AGENT_ID}` API-key env var"
                 ));
             }
             for provider_id in &mapping.id {
@@ -1204,7 +1204,7 @@ fn is_supported_agent_id(agent_id: &str) -> bool {
         agent_id,
         "amp"
             | "antigravity"
-            | "claude-code"
+            | "claude"
             | "codex"
             | "goose"
             | "hermes"

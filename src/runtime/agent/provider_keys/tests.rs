@@ -213,20 +213,17 @@ fn provider_metadata_scopes_supported_agents() {
     assert!(provider_id_supports_agent("openai", "codex"));
     assert!(provider_id_supports_agent("openrouter", "codex"));
     assert!(!provider_id_supports_agent("anthropic", "codex"));
-    assert!(provider_id_supports_agent("anthropic", "claude-code"));
-    assert!(provider_id_supports_agent("amazon-bedrock", "claude-code"));
+    assert!(provider_id_supports_agent("anthropic", "claude"));
+    assert!(provider_id_supports_agent("amazon-bedrock", "claude"));
     assert!(provider_id_supports_agent(
         "google-vertex-anthropic",
-        "claude-code"
+        "claude"
     ));
-    assert!(provider_id_supports_agent(
-        "microsoft-foundry",
-        "claude-code"
-    ));
-    assert!(provider_id_supports_agent("moonshotai", "claude-code"));
+    assert!(provider_id_supports_agent("microsoft-foundry", "claude"));
+    assert!(provider_id_supports_agent("moonshotai", "claude"));
     assert!(provider_id_supports_agent(
         "xiaomi-token-plan-sgp",
-        "claude-code"
+        "claude"
     ));
     assert!(!provider_id_supports_agent("xai", "codex"));
     assert!(!provider_id_supports_agent("openai", "amp"));
@@ -248,26 +245,26 @@ fn provider_metadata_scopes_supported_agents() {
         Some("OPENROUTER_API_KEY")
     );
     assert_eq!(
-        env_var_for_agent_provider_id("claude-code", "moonshotai"),
+        env_var_for_agent_provider_id("claude", "moonshotai"),
         Some("MOONSHOT_API_KEY")
     );
-    assert!(provider_id_supports_agent("moonshotai-cn", "claude-code"));
+    assert!(provider_id_supports_agent("moonshotai-cn", "claude"));
     assert_eq!(
-        env_var_for_agent_provider_id("claude-code", "moonshotai-cn"),
+        env_var_for_agent_provider_id("claude", "moonshotai-cn"),
         Some("MOONSHOT_API_KEY")
     );
-    assert!(provider_id_supports_agent("kimi-coding", "claude-code"));
-    assert!(provider_id_supports_agent("kimi-for-coding", "claude-code"));
+    assert!(provider_id_supports_agent("kimi-coding", "claude"));
+    assert!(provider_id_supports_agent("kimi-for-coding", "claude"));
     assert_eq!(
-        agent_provider_id_for_provider_id("claude-code", "kimi-coding"),
+        agent_provider_id_for_provider_id("claude", "kimi-coding"),
         Some("kimi-coding-plan")
     );
     assert_eq!(
-        env_var_for_agent_provider_id("claude-code", "kimi-coding"),
+        env_var_for_agent_provider_id("claude", "kimi-coding"),
         Some("KIMI_API_KEY")
     );
     assert_eq!(
-        env_var_for_agent_provider_id("claude-code", "kimi-for-coding"),
+        env_var_for_agent_provider_id("claude", "kimi-for-coding"),
         Some("KIMI_API_KEY")
     );
     assert_eq!(
@@ -275,7 +272,7 @@ fn provider_metadata_scopes_supported_agents() {
         Some("KIMI_API_KEY")
     );
     assert_eq!(
-        env_var_for_agent_provider_id("claude-code", "amazon-bedrock"),
+        env_var_for_agent_provider_id("claude", "amazon-bedrock"),
         None
     );
 }
@@ -388,34 +385,31 @@ fn cloud_provider_refs_include_documented_non_key_fields() {
 #[test]
 fn claude_code_provider_refs_use_agent_specific_profiles() {
     assert_eq!(
-        required_env_refs_for_agent_provider_id("claude-code", "google-vertex-anthropic", None),
+        required_env_refs_for_agent_provider_id("claude", "google-vertex-anthropic", None),
         ["ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION"]
     );
     assert_eq!(
         required_env_refs_for_agent_provider_id(
-            "claude-code",
+            "claude",
             "microsoft-foundry",
             Some("ANTHROPIC_FOUNDRY_API_KEY")
         ),
         ["ANTHROPIC_FOUNDRY_API_KEY", "ANTHROPIC_FOUNDRY_BASE_URL"]
     );
-    assert!(provider_uses_agent_native_auth(
-        "claude-code",
-        "amazon-bedrock"
-    ));
+    assert!(provider_uses_agent_native_auth("claude", "amazon-bedrock"));
     // The explicit optional list stops Pi-only auth overrides leaking in via
     // provider-level fallback.
-    let bedrock_optional = optional_env_refs_for_agent_provider_id("claude-code", "amazon-bedrock");
+    let bedrock_optional = optional_env_refs_for_agent_provider_id("claude", "amazon-bedrock");
     assert!(bedrock_optional.contains(&"AWS_PROFILE"));
     assert!(!bedrock_optional.contains(&"AWS_BEDROCK_SKIP_AUTH"));
     assert!(!bedrock_optional.contains(&"AWS_BEDROCK_FORCE_HTTP1"));
     assert!(!bedrock_optional.contains(&"AWS_BEDROCK_FORCE_CACHE"));
     assert!(provider_uses_agent_native_auth(
-        "claude-code",
+        "claude",
         "google-vertex-anthropic"
     ));
     assert!(!provider_uses_agent_native_auth(
-        "claude-code",
+        "claude",
         "microsoft-foundry"
     ));
     // Codex's built-in openai lane is key-driven, yet still refused an endpoint
@@ -431,7 +425,7 @@ fn claude_code_provider_refs_use_agent_specific_profiles() {
         "openrouter"
     ));
 
-    let summaries = providers_for_agent("claude-code");
+    let summaries = providers_for_agent("claude");
     let bedrock = summaries
         .iter()
         .find(|summary| summary.id == "amazon-bedrock")
@@ -698,10 +692,7 @@ fn claude_code_native_auth_profiles_resolve_no_api_key() {
         let profile = claude_code_profile_for_provider_id(provider_id)
             .unwrap_or_else(|| panic!("{provider_id} profile should exist"));
         assert!(profile.agent_native_auth);
-        assert_eq!(
-            env_var_for_agent_provider_id("claude-code", provider_id),
-            None
-        );
+        assert_eq!(env_var_for_agent_provider_id("claude", provider_id), None);
     }
 }
 
@@ -755,9 +746,9 @@ agents = ["pi"]
 default_model = "some-model"
 "#,
     )
-    .expect_err("claude_code profile without claude-code support fails");
+    .expect_err("claude_code profile without claude support fails");
 
-    assert!(err.to_string().contains("does not support `claude-code`"));
+    assert!(err.to_string().contains("does not support `claude`"));
 }
 
 #[test]
@@ -767,7 +758,7 @@ fn invalid_mapping_rejects_claude_code_role_models_without_default_model() {
 [[providers]]
 id = ["solo"]
 name = "Solo"
-agents = ["claude-code"]
+agents = ["claude"]
 
 [providers.claude_code]
 default_opus_model = "opus-model"
@@ -785,16 +776,16 @@ fn invalid_mapping_rejects_claude_code_native_auth_with_api_key_env_var() {
 [[providers]]
 id = ["solo"]
 name = "Solo"
-agents = ["claude-code"]
+agents = ["claude"]
 
 [providers.api_key_env_vars]
-claude-code = "SOLO_API_KEY"
+claude = "SOLO_API_KEY"
 
 [providers.claude_code]
 agent_native_auth = true
 "#,
     )
-    .expect_err("native auth with claude-code api key env var fails");
+    .expect_err("native auth with claude api key env var fails");
 
     assert!(err.to_string().contains("native auth"));
 }
@@ -810,7 +801,7 @@ provider_ids = ["solo"]
 [[providers]]
 id = ["solo"]
 name = "Solo"
-agents = ["claude-code"]
+agents = ["claude"]
 
 [providers.claude_code]
 agent_native_auth = true
@@ -916,11 +907,11 @@ fn endpoint_override_pairs_are_data_driven() {
     ));
     // Keyed Claude Code lanes reroute; native-auth lanes ignore ANTHROPIC_BASE_URL.
     assert!(agent_provider_accepts_endpoint_override(
-        "claude-code",
+        "claude",
         "moonshotai"
     ));
     assert!(agent_provider_accepts_endpoint_override(
-        "claude-code",
+        "claude",
         "anthropic"
     ));
     // A mapped provider the agent does not run has no native slot to write into.

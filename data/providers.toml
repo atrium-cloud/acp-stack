@@ -41,7 +41,7 @@
 [[providers]]
 id = ["anthropic"]
 name = "Anthropic"
-agents = ["pi", "opencode", "goose", "claude-code", "hermes"]
+agents = ["pi", "opencode", "goose", "claude", "hermes"]
 base_url = "https://api.anthropic.com/v1"
 
 # First-party Anthropic API needs no provisioning extras; the empty sub-table
@@ -77,7 +77,7 @@ api_mode = "codex_responses"
 [[providers]]
 id = ["deepseek"]
 name = "DeepSeek"
-agents = ["pi", "opencode", "claude-code", "hermes"]
+agents = ["pi", "opencode", "claude", "hermes"]
 base_url = "https://api.deepseek.com"
 models_url = "https://api.deepseek.com/models"
 
@@ -186,7 +186,7 @@ api_mode = "chat_completions"
 id = ["zai"]
 name = "Z.AI"
 # does not appear to have a status page
-agents = ["pi", "opencode", "claude-code", "hermes"]
+agents = ["pi", "opencode", "claude", "hermes"]
 base_url = "https://api.z.ai/api/paas/v4"
 # No models_url: GET /api/paas/v4/models answers 401 but is absent from
 # Z.AI's API reference and OpenAPI spec (checked 2026-08-01), so the
@@ -298,7 +298,7 @@ togetherai = "opencode"
 [[providers]]
 id = ["kimi-coding", "kimi-for-coding", "kimi-coding-plan", "kimi", "kimi-code"]
 name = "Kimi For Coding"
-agents = ["pi", "opencode", "claude-code", "hermes", "kimi"]
+agents = ["pi", "opencode", "claude", "hermes", "kimi"]
 base_url = "https://api.kimi.com/coding/v1"
 # No models_url: probed 2026-08-20 with a real subscription key — the coding
 # surface has no model-list route (/coding/* variants all 404) and the platform
@@ -318,7 +318,7 @@ env = { CLAUDE_CODE_EFFORT_LEVEL = "high", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "26
 [providers.provider_ids]
 kimi-coding = "pi"
 kimi-for-coding = "opencode"
-kimi-coding-plan = "claude-code"
+kimi-coding-plan = "claude"
 kimi = "hermes"
 kimi-code = "kimi"
 
@@ -344,7 +344,7 @@ kimi-coding-global = "kimi"
 [[providers]]
 id = ["minimax"]
 name = "MiniMax"
-agents = ["pi", "opencode", "claude-code", "hermes"]
+agents = ["pi", "opencode", "claude", "hermes"]
 base_url = "https://api.minimax.io/anthropic/v1"
 
 [providers.claude_code]
@@ -362,7 +362,7 @@ hermes = "https://api.minimax.io/anthropic"
 [[providers]]
 id = ["minimax-cn"]
 name = "MiniMax (China)"
-agents = ["pi", "opencode", "claude-code", "hermes"]
+agents = ["pi", "opencode", "claude", "hermes"]
 base_url = "https://api.minimaxi.com/anthropic/v1"
 
 [providers.claude_code]
@@ -392,7 +392,7 @@ agents = ["pi"]
 id = ["xiaomi"]
 name = "Xiaomi"
 # does not appear to have a status page
-agents = ["pi", "opencode", "claude-code", "hermes"]
+agents = ["pi", "opencode", "claude", "hermes"]
 base_url = "https://api.xiaomimimo.com/v1"
 # Probed 2026-08-20: 401 unauthenticated, so the response shape is unverified;
 # the best-effort fetch degrades to a logged skip if it turns out wrong.
@@ -409,7 +409,7 @@ api_mode = "chat_completions"
 id = ["xiaomi-token-plan-cn"]
 name = "Xiaomi Token Plan (China)"
 # does not appear to have a status page
-agents = ["pi", "opencode", "claude-code"]
+agents = ["pi", "opencode", "claude"]
 base_url = "https://token-plan-cn.xiaomimimo.com/v1"
 
 [providers.claude_code]
@@ -420,7 +420,7 @@ default_model = "mimo-v2.5-pro[1m]"
 id = ["xiaomi-token-plan-ams"]
 name = "Xiaomi Token Plan (Europe)"
 # does not appear to have a status page
-agents = ["pi", "opencode", "claude-code"]
+agents = ["pi", "opencode", "claude"]
 base_url = "https://token-plan-ams.xiaomimimo.com/v1"
 
 [providers.claude_code]
@@ -431,7 +431,7 @@ default_model = "mimo-v2.5-pro[1m]"
 id = ["xiaomi-token-plan-sgp"]
 name = "Xiaomi Token Plan (Singapore)"
 # does not appear to have a status page
-agents = ["pi", "opencode", "claude-code"]
+agents = ["pi", "opencode", "claude"]
 base_url = "https://token-plan-sgp.xiaomimimo.com/v1"
 
 [providers.claude_code]
@@ -448,7 +448,7 @@ optional_env_vars = ["GOOGLE_APPLICATION_CREDENTIALS"]
 [[providers]]
 id = ["google-vertex-anthropic"]
 name = "Vertex (Anthropic)"
-agents = ["pi", "opencode", "claude-code"]
+agents = ["pi", "opencode", "claude"]
 companion_env_vars = ["GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION"]
 optional_env_vars = ["GOOGLE_APPLICATION_CREDENTIALS"]
 
@@ -463,7 +463,7 @@ optional_env_vars = ["GOOGLE_APPLICATION_CREDENTIALS", "ANTHROPIC_VERTEX_BASE_UR
 [[providers]]
 id = ["amazon-bedrock"]
 name = "Amazon Bedrock"
-agents = ["pi", "opencode", "claude-code"]
+agents = ["pi", "opencode", "claude"]
 optional_env_vars = [
   "AWS_PROFILE",
   "AWS_ACCESS_KEY_ID",
@@ -508,7 +508,7 @@ optional_env_vars = [
 [[providers]]
 id = ["microsoft-foundry"]
 name = "Microsoft Foundry"
-agents = ["claude-code"]
+agents = ["claude"]
 
 # Companion/optional env vars fall back to the ANTHROPIC_FOUNDRY_API_KEY
 # lists in env_vars.toml.
@@ -950,7 +950,7 @@ api_mode = "codex_responses"
 [[providers]]
 id = ["minimax-cn-coding-plan"]
 name = "MiniMax Token Plan (minimaxi.com)"
-agents = ["opencode", "claude-code"]
+agents = ["opencode", "claude"]
 base_url = "https://api.minimaxi.com/anthropic/v1"
 
 [providers.claude_code]
@@ -961,7 +961,7 @@ env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "
 [[providers]]
 id = ["minimax-coding-plan"]
 name = "MiniMax Token Plan (minimax.io)"
-agents = ["opencode", "claude-code"]
+agents = ["opencode", "claude"]
 base_url = "https://api.minimax.io/anthropic/v1"
 
 [providers.claude_code]
@@ -996,7 +996,7 @@ base_url = "https://api-inference.modelscope.cn/v1"
 [[providers]]
 id = ["moonshotai"]
 name = "Moonshot AI"
-agents = ["opencode", "claude-code", "kimi"]
+agents = ["opencode", "claude", "kimi"]
 base_url = "https://api.moonshot.ai/v1"
 models_url = "https://api.moonshot.ai/v1/models"
 
@@ -1011,7 +1011,7 @@ env = { ENABLE_TOOL_SEARCH = "false", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1048576
 [[providers]]
 id = ["moonshotai-cn"]
 name = "Moonshot AI (China)"
-agents = ["opencode", "claude-code", "kimi"]
+agents = ["opencode", "claude", "kimi"]
 base_url = "https://api.moonshot.cn/v1"
 
 [providers.claude_code]
@@ -1335,7 +1335,7 @@ base_url = "https://zenmux.ai/api/v1"
 [[providers]]
 id = ["zhipuai"]
 name = "Zhipu AI"
-agents = ["opencode", "claude-code"]
+agents = ["opencode", "claude"]
 base_url = "https://open.bigmodel.cn/api/paas/v4"
 
 [providers.claude_code]

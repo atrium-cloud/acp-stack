@@ -87,7 +87,7 @@ pub(crate) fn canonical_temp_home(tempdir: &tempfile::TempDir) -> PathBuf {
 pub(crate) fn claude_code_entry(
     catalog: &RegistryCatalog,
 ) -> &crate::runtime::install::agent_registry::RegistryEntry {
-    catalog.lookup("claude-code").expect("claude-code entry")
+    catalog.lookup("claude").expect("claude entry")
 }
 
 pub(crate) fn opencode_entry(

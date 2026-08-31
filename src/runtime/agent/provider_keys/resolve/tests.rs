@@ -226,7 +226,7 @@ fn secretless_resolution_skips_store_only_for_empty_or_native_auth_envs() {
     assert!(resolved.env.is_empty());
     assert!(resolved.providers.is_empty());
 
-    let mut config = resolver_config("claude-code");
+    let mut config = resolver_config("claude");
     config.agent.provider = Some(mapped_provider("amazon-bedrock", None));
     let resolved = resolve_agent_environment_without_secrets(&config).expect("native auth");
     assert_eq!(resolved.providers[0].provider_id, "amazon-bedrock");
@@ -243,7 +243,7 @@ fn secretless_resolution_skips_store_only_for_empty_or_native_auth_envs() {
 
 #[test]
 fn native_auth_snapshot_reports_injected_profile_environment() {
-    let mut config = resolver_config("claude-code");
+    let mut config = resolver_config("claude");
     config.agent.provider = Some(mapped_provider("google-vertex-anthropic", None));
     config.agent.env = vec![
         "ANTHROPIC_VERTEX_PROJECT_ID".to_owned(),

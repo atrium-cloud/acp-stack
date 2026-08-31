@@ -365,7 +365,7 @@ aarch64 = "aarch64"
 # Claude Code
 
 [[agents]]
-id = "claude-code"
+id = "claude"
 name = "Claude Code"
 kind = "adapter"
 headless_compatible = true

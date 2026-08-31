@@ -481,7 +481,7 @@ mod tests {
     fn attach_installed_versions_ignores_a_harness_row_when_the_adapter_bundles_it() {
         let mut capabilities = capabilities_with(json!({}));
         capabilities.attach_installed_versions(
-            "claude-code",
+            "claude",
             &adapter_components("claude-agent-acp", &[STEP_ADAPTER]),
             &[
                 installer_run(STEP_HARNESS, Some("1.0.0")),

@@ -407,7 +407,7 @@ mod tests {
     }
 
     fn claude_moonshot_config() -> Config {
-        let mut config = config_with_agent("claude-code", &["MOONSHOT_API_KEY"]);
+        let mut config = config_with_agent("claude", &["MOONSHOT_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "moonshotai".to_owned(),
             model: None,
@@ -443,7 +443,7 @@ mod tests {
     #[test]
     fn claude_code_endpoint_keeps_a_trailing_slash_profile_path() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let mut config = config_with_agent("claude-code", &["KIMI_API_KEY"]);
+        let mut config = config_with_agent("claude", &["KIMI_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "kimi-coding-plan".to_owned(),
             model: None,
@@ -467,7 +467,7 @@ mod tests {
     #[test]
     fn claude_code_endpoint_for_the_anthropic_lane_is_the_bare_origin() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let mut config = config_with_agent("claude-code", &["ANTHROPIC_API_KEY"]);
+        let mut config = config_with_agent("claude", &["ANTHROPIC_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "anthropic".to_owned(),
             model: None,
@@ -527,7 +527,7 @@ mod tests {
     #[test]
     fn claude_code_moonshot_writes_endpoint_model_and_helper_without_secret_value() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let mut config = config_with_agent("claude-code", &["MOONSHOT_API_KEY"]);
+        let mut config = config_with_agent("claude", &["MOONSHOT_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "moonshotai".to_owned(),
             model: None,
@@ -613,7 +613,7 @@ mod tests {
             "moonshotai",
             &["kimi-k3", "kimi-k3[1m]", "kimi-k2.7-code"],
         );
-        let mut config = config_with_agent("claude-code", &["MOONSHOT_API_KEY"]);
+        let mut config = config_with_agent("claude", &["MOONSHOT_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "moonshotai".to_owned(),
             model: None,
@@ -640,7 +640,7 @@ mod tests {
             "deepseek",
             &["deepseek-v4-pro", "deepseek-v4-flash"],
         );
-        let mut config = config_with_agent("claude-code", &["DEEPSEEK_API_KEY"]);
+        let mut config = config_with_agent("claude", &["DEEPSEEK_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "deepseek".to_owned(),
             model: None,
@@ -665,7 +665,7 @@ mod tests {
     fn claude_code_provider_removal_drops_available_models() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         seed_provider_model_cache(tempdir.path(), "moonshotai", &["kimi-k3"]);
-        let mut config = config_with_agent("claude-code", &["MOONSHOT_API_KEY"]);
+        let mut config = config_with_agent("claude", &["MOONSHOT_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "moonshotai".to_owned(),
             model: None,
@@ -692,7 +692,7 @@ mod tests {
     #[test]
     fn claude_code_without_cache_omits_available_models() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let mut config = config_with_agent("claude-code", &["MOONSHOT_API_KEY"]);
+        let mut config = config_with_agent("claude", &["MOONSHOT_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "moonshotai".to_owned(),
             model: None,
@@ -713,7 +713,7 @@ mod tests {
     fn claude_code_anthropic_first_party_never_writes_available_models() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         seed_provider_model_cache(tempdir.path(), "anthropic", &["should-not-appear"]);
-        let mut config = config_with_agent("claude-code", &["ANTHROPIC_API_KEY"]);
+        let mut config = config_with_agent("claude", &["ANTHROPIC_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "anthropic".to_owned(),
             model: None,
@@ -734,7 +734,7 @@ mod tests {
     fn claude_code_reprovision_after_provider_change_drops_stale_available_models() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         seed_provider_model_cache(tempdir.path(), "moonshotai", &["kimi-k3"]);
-        let mut config = config_with_agent("claude-code", &["MOONSHOT_API_KEY"]);
+        let mut config = config_with_agent("claude", &["MOONSHOT_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "moonshotai".to_owned(),
             model: None,
@@ -768,7 +768,7 @@ mod tests {
     fn claude_code_cleanup_removes_available_models() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         seed_provider_model_cache(tempdir.path(), "moonshotai", &["kimi-k3"]);
-        let mut config = config_with_agent("claude-code", &["MOONSHOT_API_KEY"]);
+        let mut config = config_with_agent("claude", &["MOONSHOT_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "moonshotai".to_owned(),
             model: None,
@@ -792,7 +792,7 @@ mod tests {
     #[test]
     fn claude_code_zai_writes_profile_role_model_defaults() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let mut config = config_with_agent("claude-code", &["ZAI_API_KEY"]);
+        let mut config = config_with_agent("claude", &["ZAI_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "zai".to_owned(),
             model: None,
@@ -840,7 +840,7 @@ mod tests {
     #[test]
     fn claude_code_zhipuai_writes_china_endpoint_and_zhipu_key() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let mut config = config_with_agent("claude-code", &["ZHIPU_API_KEY"]);
+        let mut config = config_with_agent("claude", &["ZHIPU_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "zhipuai".to_owned(),
             model: None,
@@ -871,7 +871,7 @@ mod tests {
     #[test]
     fn claude_code_deepseek_uses_flash_for_haiku_and_subagents() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let mut config = config_with_agent("claude-code", &["DEEPSEEK_API_KEY"]);
+        let mut config = config_with_agent("claude", &["DEEPSEEK_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "deepseek".to_owned(),
             model: None,
@@ -915,7 +915,7 @@ mod tests {
     #[test]
     fn claude_code_kimi_for_coding_uses_coding_endpoint_and_kimi_key() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let mut config = config_with_agent("claude-code", &["KIMI_API_KEY"]);
+        let mut config = config_with_agent("claude", &["KIMI_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "kimi-coding".to_owned(),
             model: None,
@@ -956,7 +956,7 @@ mod tests {
             r#"{"apiKeyHelper":"printenv OLD_KEY","env":{"KEEP_ME":"yes","ANTHROPIC_BASE_URL":"https://old.example"}}"#,
         )
         .expect("write existing settings");
-        let mut config = config_with_agent("claude-code", &[]);
+        let mut config = config_with_agent("claude", &[]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "amazon-bedrock".to_owned(),
             model: Some("us.anthropic.claude-sonnet-4-5-20250929-v1:0".to_owned()),
@@ -996,7 +996,7 @@ mod tests {
             r#"{"hasCompletedOnboarding":true,"keep":true}"#,
         )
         .expect("write onboarding");
-        let mut config = config_with_agent("claude-code", &["MOONSHOT_API_KEY"]);
+        let mut config = config_with_agent("claude", &["MOONSHOT_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "moonshotai".to_owned(),
             model: Some("kimi-k2.7-code".to_owned()),
@@ -1058,7 +1058,7 @@ mod tests {
             r#"{"apiKeyHelper":"printenv USER_KEY","env":{"ANTHROPIC_BASE_URL":"https://user.example/anthropic","ANTHROPIC_MODEL":"user-model","KEEP_ME":"yes"}}"#,
         )
         .expect("write settings");
-        let mut config = config_with_agent("claude-code", &["MOONSHOT_API_KEY"]);
+        let mut config = config_with_agent("claude", &["MOONSHOT_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "moonshotai".to_owned(),
             model: Some("kimi-k2.7-code".to_owned()),
@@ -1088,7 +1088,7 @@ mod tests {
         let onboarding_path = tempdir.path().join(".claude.json");
         std::fs::write(&onboarding_path, r#"{"hasCompletedOnboarding":true}"#)
             .expect("write onboarding");
-        let mut config = config_with_agent("claude-code", &["MOONSHOT_API_KEY"]);
+        let mut config = config_with_agent("claude", &["MOONSHOT_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "moonshotai".to_owned(),
             model: Some("kimi-k2.7-code".to_owned()),
