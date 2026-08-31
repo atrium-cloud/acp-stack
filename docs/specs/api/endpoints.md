@@ -769,6 +769,7 @@ The `agent.inference_*` codes carry a sanitized public message of the form `"inf
 - Errors: `502 agent.request_failed` — the live prompt did not settle as `cancelled`.
 - Notes:
     - Cancels an in-flight prompt. ACP `session/cancel` goes out first, then the runtime waits up to 20 seconds for the live prompt row to reach a terminal status.
+    - Any pending ACP permission request for the session is settled as `cancelled` while that wait runs, as the ACP cancellation contract requires. An agent parked on a permission it raised ends its turn once that answer arrives.
     - Success means the prompt row is already `cancelled` when the response returns.
     - A prompt that instead reaches `completed` or `errored` means the agent ended the turn on its own terms, and the call fails. The prompt row keeps whatever status the agent produced.
     - A prompt still running when the wait expires also fails the call, and the turn stays live: the row stays non-terminal, a new prompt for that session is refused with `409 session.prompt_in_flight`, and cancel can be retried.

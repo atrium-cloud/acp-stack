@@ -163,6 +163,8 @@ Other projections off the same stream:
 
 ACP permission requests flow into the same permission system used by mediated commands. The durable wait runs outside the ACP dispatch loop, so other updates and requests continue while a decision is pending. Protocol cancellation atomically cancels a still-pending permission and returns the standard request-cancelled error; an operator or timeout decision that wins the race is returned normally.
 
+Cancelling a session settles its still-pending requests as `cancelled` and answers the agent with the cancelled outcome, which is what lets an agent parked on a permission end its turn. The sweep runs for as long as the runtime waits for the turn to settle, so a request raised after the cancel notification is answered in kind.
+
 ## MCP Servers
 
 Configured MCP servers are attached to ACP sessions when the agent and SDK support session MCP configuration. Secret refs for MCP env vars and headers are resolved at attach time; the resolved values stay out of logs and API responses.

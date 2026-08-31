@@ -176,8 +176,9 @@ impl AgentSupervisor {
         Ok(record)
     }
 
-    /// `POST /v1/sessions/{id}/cancel`. ACP `session/cancel` goes out, then the
-    /// live prompt must actually settle as `cancelled` within
+    /// `POST /v1/sessions/{id}/cancel`. ACP `session/cancel` goes out, the
+    /// session's outstanding permission requests are answered `cancelled`, then
+    /// the live prompt must actually settle as `cancelled` within
     /// [`PROMPT_CANCEL_SETTLE_BUDGET`] for this to succeed. The agent owns the
     /// turn: firing our own cancellation token here would write `cancelled`
     /// rows for an agent that ignored the notification and is still working.
@@ -185,6 +186,7 @@ impl AgentSupervisor {
         &self,
         session_id: &str,
         state: &Arc<TokioMutex<StateStore>>,
+        permissions: &PermissionService,
     ) -> Result<()> {
         // Held only across collect-and-send: a prompt submitted concurrently either
         // lands before the ids are collected or is rejected as in-flight. It is
@@ -210,7 +212,9 @@ impl AgentSupervisor {
             .await?;
         drop(dispatch_guard);
 
-        let observed = self.await_prompt_settle(&live_prompts, state).await?;
+        let observed = self
+            .await_prompt_settle(session_id, &live_prompts, state, permissions)
+            .await?;
         let verdict = cancel_settle_verdict(&observed);
         if verdict != CancelSettleVerdict::Cancelled {
             tracing::warn!(
@@ -285,14 +289,42 @@ impl AgentSupervisor {
     /// marks a prompt that never settled. The state mutex is taken per pass and
     /// released across the sleep so the prompt task can write its own terminal
     /// row while we wait for it.
+    ///
+    /// Every pass first answers the session's outstanding
+    /// `session/request_permission` calls with the `cancelled` outcome, which
+    /// the ACP cancellation contract requires of the client. An agent parked on
+    /// a permission it raised cannot end its turn until that answer arrives, so
+    /// without the sweep the wait below could only ever time out. It repeats
+    /// per pass because the agent may raise a fresh request in the window
+    /// between the notification going out and the turn unwinding.
     async fn await_prompt_settle(
         &self,
+        session_id: &str,
         prompt_ids: &[String],
         state: &Arc<TokioMutex<StateStore>>,
+        permissions: &PermissionService,
     ) -> Result<Vec<Option<PromptStatus>>> {
         let deadline = tokio::time::Instant::now() + PROMPT_CANCEL_SETTLE_BUDGET;
         let mut observed: Vec<Option<PromptStatus>> = vec![None; prompt_ids.len()];
+        let mut sweep_failure_logged = false;
         loop {
+            // A failed sweep is left to the next pass rather than ending the
+            // wait early: the route answers on the settle verdict, and a
+            // failure that persists reaches the caller as that verdict once the
+            // budget expires. Logged once per wait so a persistent failure
+            // does not warn on every 50ms pass.
+            if let Err(error) = permissions
+                .cancel_pending_for_session(session_id, CANCELLED_SESSION_PERMISSION_REASON)
+                .await
+                && !sweep_failure_logged
+            {
+                tracing::warn!(
+                    error = %error,
+                    session_id,
+                    "failed to settle pending permissions while waiting out a session cancel"
+                );
+                sweep_failure_logged = true;
+            }
             {
                 let guard = state.lock().await;
                 for (slot, prompt_id) in observed.iter_mut().zip(prompt_ids) {

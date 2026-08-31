@@ -32,6 +32,9 @@ const PROMPT_CANCEL_SETTLE_BUDGET: Duration = Duration::from_secs(20);
 /// only place the settle becomes observable.
 const PROMPT_CANCEL_SETTLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// Decision reason recorded on permission requests settled by a session cancel.
+const CANCELLED_SESSION_PERMISSION_REASON: &str = "session-cancelled";
+
 /// Small fixed delay before an `on-crash` restart. This keeps a fast-crashing
 /// harness from tight-looping while preserving the current single-retry
 /// restart-policy shape (`never` vs `on-crash`).
@@ -82,6 +85,7 @@ use crate::runtime::agent::model_discovery::{
 };
 use crate::runtime::agent::provider_keys::ResolvedProviderSnapshot;
 use crate::runtime::agent::session_changes::SessionChangesHandle;
+use crate::runtime::mediation::permissions::PermissionService;
 use crate::secrets::SecretStore;
 use crate::state::{
     EVENT_KIND_MCP_SESSION_SKIPPED, EVENT_KIND_PROMPT_ERRORED, EVENT_KIND_PROMPT_INFERENCE_FAILED,

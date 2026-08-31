@@ -109,6 +109,47 @@ pub(crate) async fn handle_prompt(
     // client's `session/cancel` is processed while the turn is still open.
     // An inline await (as `--prompt-stall-after-update` does) would park the
     // loop instead and the notification would never be read.
+    if args.prompt_await_permission {
+        let rounds = args.prompt_await_permission_rounds;
+        let permission_connection = connection.clone();
+        return connection.spawn(async move {
+            let mut outcome = RequestPermissionOutcome::Cancelled;
+            for round in 0..rounds {
+                let permission_request = RequestPermissionRequest::new(
+                    request.session_id.clone(),
+                    ToolCallUpdate::new(
+                        format!("tool_permission_await_{round}"),
+                        ToolCallUpdateFields::new(),
+                    ),
+                    vec![PermissionOption::new(
+                        "allow",
+                        "Allow",
+                        PermissionOptionKind::AllowOnce,
+                    )],
+                );
+                let permission = permission_connection.send_request(permission_request);
+                // The only thing that ends this turn is the client's answer: an
+                // adapter parked on a permission cannot act on `session/cancel`
+                // until the outstanding request is resolved.
+                outcome = match permission.block_task().await {
+                    Ok(response) => response.outcome,
+                    // A client that cancels the request itself reports `-32800`,
+                    // which carries the same meaning as the cancelled outcome.
+                    Err(error)
+                        if error.code == agent_client_protocol::ErrorCode::RequestCancelled =>
+                    {
+                        RequestPermissionOutcome::Cancelled
+                    }
+                    Err(error) => return responder.respond_with_error(error),
+                };
+            }
+            let stop_reason = match outcome {
+                RequestPermissionOutcome::Cancelled => StopReason::Cancelled,
+                _ => StopReason::EndTurn,
+            };
+            respond_to_prompt(request, responder, stop_reason)
+        });
+    }
     if args.prompt_never_settle {
         return connection.spawn(async move {
             let _responder_held_open = responder;

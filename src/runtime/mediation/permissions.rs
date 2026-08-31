@@ -135,6 +135,16 @@ struct PendingOp {
     waiter: oneshot::Sender<PermissionOutcome>,
 }
 
+/// Rows read when settling one session's pending requests. The query is scoped
+/// to that session, so this bound only guards a runaway agent holding more
+/// outstanding requests than an operator could ever answer.
+const SESSION_PENDING_PERMISSION_SCAN_LIMIT: u32 = 1000;
+
+/// Reason recorded on the waiter when the durable row was already decided
+/// before the waiter existed. The decision row keeps the real deciding
+/// principal and reason; this only labels the late hand-off.
+const RACED_DECISION_REASON: &str = "decided before the waiter was registered";
+
 #[derive(Clone)]
 pub struct PermissionService {
     state: Arc<TokioMutex<StateStore>>,
@@ -194,7 +204,10 @@ impl PermissionService {
             let mut pending = self.pending.lock().await;
             pending.insert(record.id.clone(), PendingOp { waiter: tx });
         }
-
+        // The row is durable before the waiter exists, so a decider running in
+        // that window (the session-cancel sweep polls several times a second)
+        // settles it and finds nothing to fire. Re-read the row and answer the
+        // waiter here, or the caller would await a decision nobody can send.
         self.publish_event(
             &record.id,
             &record.created_at,
@@ -210,6 +223,10 @@ impl PermissionService {
             }),
         )
         .await;
+
+        // Published first so the created event precedes any decision event the
+        // settle below fires for a request raced inside the waiter window.
+        self.settle_waiter_if_already_decided(&record.id).await;
 
         self.spawn_timer(record.id.clone());
 
@@ -262,6 +279,32 @@ impl PermissionService {
         }
     }
 
+    /// Settle every pending ACP-source request raised by `session_id` as
+    /// cancelled, returning how many this call actually settled. Requests
+    /// another decider won in the meantime are skipped, so the sweep is safe to
+    /// repeat while waiting out a cancel.
+    pub async fn cancel_pending_for_session(
+        &self,
+        session_id: &str,
+        reason: &str,
+    ) -> Result<usize> {
+        let pending = {
+            let state = self.state.lock().await;
+            state.query_pending_permissions_for_subject(
+                PermissionSource::Acp.as_str(),
+                session_id,
+                SESSION_PENDING_PERMISSION_SCAN_LIMIT,
+            )?
+        };
+        let mut settled = 0;
+        for row in pending {
+            if self.cancel_if_pending(&row.id, reason).await? {
+                settled += 1;
+            }
+        }
+        Ok(settled)
+    }
+
     pub async fn pending(&self, limit: u32) -> Result<Vec<PermissionRequestView>> {
         let state = self.state.lock().await;
         let rows = state.query_pending_permissions(limit)?;
@@ -276,6 +319,54 @@ impl PermissionService {
             .get_permission_request(id)?
             .ok_or_else(|| StackError::PermissionNotFound { id: id.to_owned() })?;
         PermissionRequestView::from_record(record)
+    }
+
+    /// Fire the waiter for a request that was already decided before its waiter
+    /// was registered. A no-op on the ordinary path, where the row is still
+    /// pending and the decider that comes later fires the waiter itself.
+    async fn settle_waiter_if_already_decided(&self, id: &str) {
+        let status = {
+            let state = self.state.lock().await;
+            match state.get_permission_request(id) {
+                Ok(Some(record)) => Some(PermissionStatus::from_wire(&record.status)),
+                Ok(None) => {
+                    tracing::warn!(permission_id = %id, "fresh permission request missing on re-read");
+                    None
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, permission_id = %id, "failed to re-read a fresh permission request");
+                    None
+                }
+            }
+        };
+        let Some(status) = status else {
+            // The same fallback the expiry timer uses for a failed transition:
+            // answer the waiter so the caller cannot hang. Any durable row
+            // stays pending for the real decision path, and its timer still
+            // spawns because the caller continues past this settle.
+            if let Some(op) = self.pending.lock().await.remove(id) {
+                let _ = op.waiter.send(PermissionOutcome::Expired);
+            }
+            return;
+        };
+        let outcome = match status {
+            PermissionStatus::Pending => return,
+            // A raced approval's selected option is not recoverable from the
+            // request row, and guessing one could deliver the approval as a
+            // rejection; answering cancelled ends the turn without acting.
+            PermissionStatus::Approved | PermissionStatus::Canceled => {
+                PermissionOutcome::Canceled {
+                    reason: RACED_DECISION_REASON.to_owned(),
+                }
+            }
+            PermissionStatus::Denied => PermissionOutcome::Denied {
+                reason: Some(RACED_DECISION_REASON.to_owned()),
+            },
+            PermissionStatus::Expired => PermissionOutcome::Expired,
+        };
+        if let Some(op) = self.pending.lock().await.remove(id) {
+            let _ = op.waiter.send(outcome);
+        }
     }
 
     async fn resolve(
@@ -507,13 +598,20 @@ mod tests {
     use super::*;
 
     fn fresh_service(action: PermissionTimeoutAction) -> (tempfile::TempDir, PermissionService) {
+        fresh_service_with_timeout(action, Duration::from_millis(60))
+    }
+
+    fn fresh_service_with_timeout(
+        action: PermissionTimeoutAction,
+        timeout: Duration,
+    ) -> (tempfile::TempDir, PermissionService) {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let path = tempdir.path().join("state.sqlite");
         let store = StateStore::open(&path).expect("open");
         store.migrate().expect("migrate");
         let state = Arc::new(TokioMutex::new(store));
         let events = EventHub::new();
-        let service = PermissionService::new(state, events, Duration::from_millis(60), action);
+        let service = PermissionService::new(state, events, timeout, action);
         (tempdir, service)
     }
 
@@ -543,6 +641,149 @@ mod tests {
         ));
     }
 
+    /// The durable row exists before its waiter is registered, so a decider
+    /// running in that window (the session-cancel sweep polls several times a
+    /// second) settles the row and finds no waiter to fire. The caller must
+    /// still receive an outcome, or it parks forever on a decision that has
+    /// already been made. Built by hand because the window is too narrow to
+    /// hit reliably from concurrent callers.
+    #[tokio::test]
+    async fn a_request_decided_before_its_waiter_exists_still_answers_the_caller() {
+        let (_dir, service) =
+            fresh_service_with_timeout(PermissionTimeoutAction::Deny, Duration::from_secs(300));
+        // Holding the waiter registry parks `request` exactly at the window: its
+        // row is already durable, its waiter does not exist yet.
+        let registry_guard = service.pending.lock().await;
+        let requesting = tokio::spawn({
+            let service = service.clone();
+            async move {
+                service
+                    .request(NewPermission {
+                        source: PermissionSource::Acp,
+                        requester: Some("session:sess_race".to_owned()),
+                        subject_id: Some("sess_race".to_owned()),
+                        detail: json!({}),
+                    })
+                    .await
+            }
+        });
+
+        let deadline = tokio::time::Instant::now() + RACED_WAITER_BUDGET;
+        let id = loop {
+            let pending = {
+                let state = service.state.lock().await;
+                state
+                    .query_pending_permissions_for_subject(
+                        PermissionSource::Acp.as_str(),
+                        "sess_race",
+                        SESSION_PENDING_PERMISSION_SCAN_LIMIT,
+                    )
+                    .expect("query pending")
+            };
+            if let Some(row) = pending.first() {
+                break row.id.clone();
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the request never inserted its row"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+        // Decide it durably with no waiter to fire, which is all a sweep can do
+        // in this window.
+        {
+            let state = service.state.lock().await;
+            state
+                .decide_permission(
+                    &id,
+                    PermissionStatus::Canceled,
+                    Some("system"),
+                    Some("session-cancelled"),
+                )
+                .expect("decide");
+        }
+        drop(registry_guard);
+
+        let (_record, receiver) = requesting.await.expect("join").expect("request");
+        let outcome = tokio::time::timeout(RACED_WAITER_BUDGET, receiver)
+            .await
+            .expect("a request decided inside the window must still answer its caller")
+            .expect("recv");
+        assert!(
+            matches!(outcome, PermissionOutcome::Canceled { .. }),
+            "settled as {outcome:?}"
+        );
+        assert!(
+            !service.pending.lock().await.contains_key(&id),
+            "the fired waiter must be removed"
+        );
+    }
+
+    /// A fired waiter resolves immediately; this only keeps a regression from
+    /// hanging the suite.
+    const RACED_WAITER_BUDGET: Duration = Duration::from_secs(5);
+
+    #[tokio::test]
+    async fn a_request_approved_before_its_waiter_exists_is_answered_cancelled() {
+        let (_dir, service) =
+            fresh_service_with_timeout(PermissionTimeoutAction::Deny, Duration::from_secs(300));
+        // Same window as the cancel race above: row durable, waiter not yet
+        // registered, but the decision that lands is an approval.
+        let registry_guard = service.pending.lock().await;
+        let requesting = tokio::spawn({
+            let service = service.clone();
+            async move {
+                service
+                    .request(NewPermission {
+                        source: PermissionSource::Acp,
+                        requester: Some("session:sess_race_approve".to_owned()),
+                        subject_id: Some("sess_race_approve".to_owned()),
+                        detail: json!({}),
+                    })
+                    .await
+            }
+        });
+
+        let deadline = tokio::time::Instant::now() + RACED_WAITER_BUDGET;
+        let id = loop {
+            let pending = {
+                let state = service.state.lock().await;
+                state
+                    .query_pending_permissions_for_subject(
+                        PermissionSource::Acp.as_str(),
+                        "sess_race_approve",
+                        SESSION_PENDING_PERMISSION_SCAN_LIMIT,
+                    )
+                    .expect("query pending")
+            };
+            if let Some(row) = pending.first() {
+                break row.id.clone();
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the request never inserted its row"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+        {
+            let state = service.state.lock().await;
+            state
+                .decide_permission(&id, PermissionStatus::Approved, Some("operator"), None)
+                .expect("decide");
+        }
+        drop(registry_guard);
+
+        let (_record, receiver) = requesting.await.expect("join").expect("request");
+        let outcome = tokio::time::timeout(RACED_WAITER_BUDGET, receiver)
+            .await
+            .expect("a request approved inside the window must still answer its caller")
+            .expect("recv");
+        assert!(
+            matches!(outcome, PermissionOutcome::Canceled { .. }),
+            "the selected option is unrecoverable, so the turn must end unanswered: {outcome:?}"
+        );
+    }
+
     #[tokio::test]
     async fn request_then_deny_resolves_waiter() {
         let (_dir, service) = fresh_service(PermissionTimeoutAction::Deny);
@@ -563,6 +804,53 @@ mod tests {
 
         let outcome = rx.await.expect("recv");
         assert!(matches!(outcome, PermissionOutcome::Denied { reason: Some(r) } if r == "no"));
+    }
+
+    #[tokio::test]
+    async fn session_sweep_cancels_only_that_session_acp_requests() {
+        // A long timeout keeps the expiry timer out of the way: the sweep, not
+        // the clock, must be what settles these rows.
+        let (_dir, service) =
+            fresh_service_with_timeout(PermissionTimeoutAction::Deny, Duration::from_secs(300));
+        let mut ids = Vec::new();
+        for (source, subject) in [
+            (PermissionSource::Acp, "sess_a"),
+            (PermissionSource::Acp, "sess_b"),
+            (PermissionSource::Command, "sess_a"),
+        ] {
+            let (record, rx) = service
+                .request(NewPermission {
+                    source,
+                    requester: Some(format!("session:{subject}")),
+                    subject_id: Some(subject.to_owned()),
+                    detail: json!({}),
+                })
+                .await
+                .expect("request");
+            // Holding the receivers keeps the waiters alive for the duration.
+            ids.push((record.id, rx));
+        }
+
+        let settled = service
+            .cancel_pending_for_session("sess_a", "session-cancelled")
+            .await
+            .expect("sweep");
+        assert_eq!(settled, 1, "only the ACP request for sess_a is swept");
+        assert_eq!(
+            service.get(&ids[0].0).await.expect("get").status,
+            "cancelled"
+        );
+        assert_eq!(service.get(&ids[1].0).await.expect("get").status, "pending");
+        assert_eq!(service.get(&ids[2].0).await.expect("get").status, "pending");
+
+        // Repeat sweeps are safe: nothing is left to settle.
+        assert_eq!(
+            service
+                .cancel_pending_for_session("sess_a", "session-cancelled")
+                .await
+                .expect("second sweep"),
+            0
+        );
     }
 
     #[tokio::test]

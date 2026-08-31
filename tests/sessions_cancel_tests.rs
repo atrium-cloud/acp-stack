@@ -22,6 +22,9 @@ const CANCEL_TIMEOUT_BUDGET: Duration = Duration::from_secs(40);
 /// Comfortably above the placebo's 100ms settle delay: a turn still running after
 /// this margin proves it did not inherit an earlier cancel's marker.
 const AUTO_CANCEL_MARGIN: Duration = Duration::from_millis(600);
+/// Well under the supervisor's 20s cancel budget: a cancel that only returns
+/// after the budget expires fails this rather than passing slowly.
+const CANCEL_NO_STALL_BUDGET: Duration = Duration::from_secs(10);
 
 #[tokio::test]
 async fn cancel_waits_for_a_delayed_agent_acknowledgement() {
@@ -109,6 +112,125 @@ async fn cancel_fails_when_the_agent_finishes_the_turn_instead() {
     let record = prompt_record(&harness, &session_id, &prompt_id).await;
     assert_eq!(record["status"], "completed", "record = {record}");
     assert_eq!(record["stop_reason"], "end_turn", "record = {record}");
+}
+
+/// ACP requires the client to answer outstanding `session/request_permission`
+/// calls with the `cancelled` outcome when it cancels a turn. An agent parked on
+/// such a request has no other way to unwind, so a cancel that skipped this
+/// would stall for the whole settle budget and leave the request pending.
+#[tokio::test]
+async fn cancel_settles_a_pending_permission_and_the_turn() {
+    let harness = Harness::spawn_with(|config| {
+        config
+            .agent
+            .args
+            .push("--prompt-await-permission".to_owned());
+    })
+    .await;
+    let session_id = create_session(&harness).await;
+    let prompt_id = submit_prompt(&harness, &session_id, "ask before acting").await;
+    let permission_id = await_pending_permission(&harness, &session_id).await;
+
+    let cancel = tokio::time::timeout(
+        CANCEL_NO_STALL_BUDGET,
+        cancel_session(&harness, &session_id),
+    )
+    .await
+    .expect("cancel returned well inside the settle budget");
+    assert_eq!(cancel.status(), StatusCode::OK);
+
+    let permission = permission_record(&harness, &permission_id).await;
+    assert_eq!(permission["status"], "cancelled", "{permission}");
+    let record = prompt_record(&harness, &session_id, &prompt_id).await;
+    assert_eq!(record["status"], "cancelled", "record = {record}");
+    assert_eq!(record["stop_reason"], "cancelled", "record = {record}");
+    assert!(
+        pending_permissions(&harness).await.is_empty(),
+        "the cancelled request must leave the pending queue"
+    );
+}
+
+/// An agent may raise a fresh permission request after the cancel notification
+/// has gone out; the client keeps answering for as long as the turn is open.
+/// The second round here is only ever created once the first is answered, so it
+/// lands mid-wait and can only be settled by a repeated sweep.
+#[tokio::test]
+async fn cancel_settles_a_permission_raised_after_the_notification() {
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.extend([
+            "--prompt-await-permission".to_owned(),
+            "--prompt-await-permission-rounds".to_owned(),
+            "2".to_owned(),
+        ]);
+    })
+    .await;
+    let session_id = create_session(&harness).await;
+    let prompt_id = submit_prompt(&harness, &session_id, "ask twice").await;
+    let first_permission = await_pending_permission(&harness, &session_id).await;
+
+    let cancel = tokio::time::timeout(
+        CANCEL_NO_STALL_BUDGET,
+        cancel_session(&harness, &session_id),
+    )
+    .await
+    .expect("cancel returned well inside the settle budget");
+    assert_eq!(cancel.status(), StatusCode::OK);
+
+    let record = prompt_record(&harness, &session_id, &prompt_id).await;
+    assert_eq!(record["status"], "cancelled", "record = {record}");
+    assert_eq!(record["stop_reason"], "cancelled", "record = {record}");
+    // The second round proves the sweep repeated: its row cannot exist until
+    // the first was answered, which happened after the cancel went out.
+    let settled = settled_permissions_for_session(&harness, &session_id).await;
+    assert_eq!(settled.len(), 2, "both rounds must be settled: {settled:?}");
+    assert!(settled.contains(&first_permission), "{settled:?}");
+    assert!(
+        pending_permissions(&harness).await.is_empty(),
+        "no request may be left pending"
+    );
+}
+
+/// The cancel answers the turn's own permission requests, not every request the
+/// daemon happens to be holding. A mediated command awaiting its own approval is
+/// a separate decision an operator still owns.
+#[tokio::test]
+async fn cancel_leaves_a_command_permission_pending() {
+    let harness = Harness::spawn_with(|config| {
+        config
+            .agent
+            .args
+            .push("--prompt-await-permission".to_owned());
+        config.permissions.mode = "supervised".to_owned();
+        config.permissions.review = vec!["sudo *".to_owned()];
+    })
+    .await;
+    let session_id = create_session(&harness).await;
+    submit_prompt(&harness, &session_id, "ask before acting").await;
+    await_pending_permission(&harness, &session_id).await;
+
+    let command = http()
+        .post(format!("{}/v1/commands", harness.base_url))
+        .header("Authorization", session_bearer())
+        .json(&json!({ "command": "sudo apt update" }))
+        .send()
+        .await
+        .expect("submit command");
+    assert_eq!(command.status(), StatusCode::OK);
+    let body: Value = command.json().await.expect("command json");
+    let command_id = body["data"]["id"].as_str().expect("command id").to_owned();
+    let command_permission = await_pending_permission_for_subject(&harness, &command_id).await;
+
+    let cancel = tokio::time::timeout(
+        CANCEL_NO_STALL_BUDGET,
+        cancel_session(&harness, &session_id),
+    )
+    .await
+    .expect("cancel returned well inside the settle budget");
+    assert_eq!(cancel.status(), StatusCode::OK);
+
+    let permission = permission_record(&harness, &command_permission).await;
+    assert_eq!(permission["status"], "pending", "{permission}");
+    assert_eq!(permission["source"], "command", "{permission}");
 }
 
 #[tokio::test]
@@ -248,6 +370,95 @@ async fn prompt_record(harness: &Harness, session_id: &str, prompt_id: &str) -> 
         .await
         .expect("prompt status json");
     body["data"].clone()
+}
+
+async fn pending_permissions(harness: &Harness) -> Vec<Value> {
+    let body: Value = http()
+        .get(format!("{}/v1/permissions/pending", harness.base_url))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("pending permissions")
+        .json()
+        .await
+        .expect("pending permissions json");
+    body["data"]["permissions"]
+        .as_array()
+        .expect("permissions array")
+        .clone()
+}
+
+async fn permission_record(harness: &Harness, permission_id: &str) -> Value {
+    let body: Value = http()
+        .get(format!(
+            "{}/v1/permissions/{permission_id}",
+            harness.base_url
+        ))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("permission record")
+        .json()
+        .await
+        .expect("permission record json");
+    body["data"].clone()
+}
+
+/// Permission ids this session had settled as cancelled, read from the durable
+/// `permission.cancelled` events.
+async fn settled_permissions_for_session(harness: &Harness, session_id: &str) -> Vec<String> {
+    let body: Value = http()
+        .get(format!(
+            "{}/v1/logs/permissions?kind=permission.cancelled",
+            harness.base_url
+        ))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("permission events")
+        .json()
+        .await
+        .expect("permission events json");
+    body["data"]["events"]
+        .as_array()
+        .expect("events array")
+        .iter()
+        .filter_map(|event| {
+            let payload: Value =
+                serde_json::from_str(event["payload_json"].as_str()?).expect("payload json");
+            (payload["subject_id"].as_str() == Some(session_id))
+                .then(|| payload["permission_id"].as_str().map(str::to_owned))?
+        })
+        .collect()
+}
+
+/// Block until the agent's `session/request_permission` for this session is
+/// durable and pending, which is the interleaving under test.
+async fn await_pending_permission(harness: &Harness, session_id: &str) -> String {
+    let id = await_pending_permission_for_subject(harness, session_id).await;
+    let record = permission_record(harness, &id).await;
+    assert_eq!(record["source"], "acp", "{record}");
+    id
+}
+
+/// Block until a pending permission request names `subject_id`, whatever raised
+/// it: an ACP request carries its session id, a mediated command its command id.
+async fn await_pending_permission_for_subject(harness: &Harness, subject_id: &str) -> String {
+    let deadline = tokio::time::Instant::now() + POLL_BUDGET;
+    loop {
+        let pending = pending_permissions(harness).await;
+        if let Some(row) = pending
+            .iter()
+            .find(|row| row["subject_id"].as_str() == Some(subject_id))
+        {
+            return row["id"].as_str().expect("permission id").to_owned();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no pending permission for `{subject_id}`"
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
 }
 
 async fn session_event_kinds(harness: &Harness, session_id: &str) -> Vec<String> {

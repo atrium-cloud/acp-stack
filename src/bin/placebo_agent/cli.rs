@@ -114,6 +114,18 @@ pub(crate) struct AcpArgs {
     pub(crate) prompt_never_settle: bool,
     #[arg(long)]
     pub(crate) request_permission_then_cancel: bool,
+    /// Hold the turn open on a `session/request_permission` the agent never
+    /// cancels itself: the turn settles only once the client answers, mirroring
+    /// an adapter parked on an operator decision. A `cancelled` outcome settles
+    /// the turn as cancelled; a selected option ends it as a normal turn.
+    #[arg(long)]
+    pub(crate) prompt_await_permission: bool,
+    /// How many permission requests the turn raises in sequence, each one only
+    /// after the previous is answered. Rounds past the first land after a
+    /// `session/cancel` has already gone out, exercising a client that keeps
+    /// answering for as long as the turn is open.
+    #[arg(long, default_value_t = 1)]
+    pub(crate) prompt_await_permission_rounds: u32,
     #[arg(long)]
     pub(crate) session_list_paginated: bool,
     #[arg(long)]

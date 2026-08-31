@@ -62,6 +62,18 @@ impl PermissionStatus {
     pub fn is_terminal(self) -> bool {
         !matches!(self, PermissionStatus::Pending)
     }
+
+    /// Read a stored status value. An unrecognized value reads as `Pending`,
+    /// which is how every transition in this module already treats it.
+    pub fn from_wire(value: &str) -> Self {
+        match value {
+            "approved" => PermissionStatus::Approved,
+            "denied" => PermissionStatus::Denied,
+            "expired" => PermissionStatus::Expired,
+            "cancelled" => PermissionStatus::Canceled,
+            _ => PermissionStatus::Pending,
+        }
+    }
 }
 
 pub(super) fn row_to_permission_request(
@@ -81,13 +93,7 @@ pub(super) fn row_to_permission_request(
 }
 
 fn parse_permission_status(value: &str) -> PermissionStatus {
-    match value {
-        "approved" => PermissionStatus::Approved,
-        "denied" => PermissionStatus::Denied,
-        "expired" => PermissionStatus::Expired,
-        "cancelled" => PermissionStatus::Canceled,
-        _ => PermissionStatus::Pending,
-    }
+    PermissionStatus::from_wire(value)
 }
 
 fn status_str(value: PermissionStatus) -> &'static str {
@@ -331,6 +337,34 @@ impl StateStore {
             "#,
         )?;
         let rows = statement.query_map(params![limit], row_to_permission_request)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Pending requests of one source raised by one subject. Scoped in SQL
+    /// rather than filtered from `query_pending_permissions`, whose limit is a
+    /// global oldest-first window: with enough pending rows daemon-wide, a
+    /// subject's own request would fall outside it and never be seen.
+    pub fn query_pending_permissions_for_subject(
+        &self,
+        source: &str,
+        subject_id: &str,
+        limit: u32,
+    ) -> Result<Vec<PermissionRequestRecord>> {
+        let limit = i64::from(limit);
+        let mut statement = self.connection().prepare(
+            r#"
+            SELECT id, created_at, updated_at, status, source,
+                   requester, subject_id, detail_json, expires_at
+            FROM permission_requests
+            WHERE status = 'pending' AND source = ?1 AND subject_id = ?2
+            ORDER BY created_at ASC, id ASC
+            LIMIT ?3
+            "#,
+        )?;
+        let rows = statement.query_map(
+            params![source, subject_id, limit],
+            row_to_permission_request,
+        )?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
