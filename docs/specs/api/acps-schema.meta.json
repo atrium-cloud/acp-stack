@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "version": "0.1.10",
+  "version": "0.1.11",
   "schema": "acps-schema.json",
   "definitions": {
     "request": 65,
