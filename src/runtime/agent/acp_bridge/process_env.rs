@@ -22,7 +22,7 @@ pub(crate) const KIMI_CODE_DEFAULT_MODEL: &str = "kimi-for-coding";
 // not exist there.
 pub(crate) const KIMI_MOONSHOT_DEFAULT_MODEL: &str = "kimi-k3";
 pub(super) const KIMI_CODE_BASE_URL: &str = "https://api.kimi.com/coding/v1";
-pub(super) const KIMI_CODE_GLOBAL_BASE_URL: &str = "https://api.kimi.ai/coding/v1";
+pub(super) const KIMI_CODE_GLOBAL_BASE_URL: &str = "https://api.kimi.com/coding/v1";
 pub(super) const KIMI_MOONSHOT_BASE_URL: &str = "https://api.moonshot.ai/v1";
 pub(super) const KIMI_MOONSHOT_CN_BASE_URL: &str = "https://api.moonshot.cn/v1";
 // Alias ids of the "Kimi For Coding" providers.toml row; `[agent.provider]`

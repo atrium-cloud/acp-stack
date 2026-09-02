@@ -6,7 +6,7 @@
 # [Amp manual](https://ampcode.com/manual)
 # [models.dev](https://models.dev/api.json)
 # [Hermes Agent providers docs](https://hermes-agent.nousresearch.com/docs/integrations/providers)
-# Last updated on 2026-08-20
+# Last updated on 2026-09-02
 #
 # A `[providers.claude_code]` sub-table carries Claude Code-specific headless
 # provisioning metadata (endpoint, model defaults, env). When the sub-table
@@ -333,10 +333,10 @@ hermes = "https://api.kimi.com/coding"
 id = ["kimi-coding-global"]
 name = "Kimi For Coding (Global)"
 agents = ["kimi"]
-base_url = "https://api.kimi.ai/coding/v1"
-# Global-region subscription endpoint (api.kimi.ai); same coding surface as
-# the mainland row, so it shares the KIMI_API_KEY credential and has no
-# model-list route either.
+base_url = "https://api.kimi.com/coding/v1"
+# Same coding surface as the main row: Kimi documents api.kimi.com as the
+# only coding host, so this lane shares the KIMI_API_KEY credential and has
+# no model-list route either.
 
 [providers.provider_ids]
 kimi-coding-global = "kimi"
@@ -675,11 +675,6 @@ name = "Azure Cognitive Services"
 agents = ["opencode"]
 
 [[providers]]
-id = ["bailing"]
-name = "Bailing"
-agents = ["opencode"]
-
-[[providers]]
 id = ["baseten"]
 name = "Baseten"
 agents = ["pi", "opencode"]
@@ -931,9 +926,11 @@ id = ["meta", "meta-ai"]
 name = "Meta"
 agents = ["opencode", "hermes"]
 base_url = "https://api.meta.ai/v1"
-# Probed 2026-08-20: 401 unauthenticated, so the response shape is unverified;
-# the best-effort fetch degrades to a logged skip if it turns out wrong.
-models_url = "https://api.llama.com/compat/v1/models"
+# The Llama API host (api.llama.com) was retired; dev.meta.ai documents only
+# api.meta.ai/v1 with Bearer auth. Probed 2026-09-02: 401 unauthenticated, so
+# the response shape is unverified; the best-effort fetch degrades to a
+# logged skip if it turns out wrong.
+models_url = "https://api.meta.ai/v1/models"
 
 # Hermes reaches the Meta Model API as `meta-ai`; models.dev (OpenCode) uses
 # `meta`. Hermes reads MODEL_API_KEY, models.dev lists META_MODEL_API_KEY.
