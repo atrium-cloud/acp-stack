@@ -105,8 +105,15 @@ pub(crate) async fn agent_switch_handler(
     )?;
     // The journal must gate dispatch first, or the fresh-path validation below rejects a
     // same-target retry of an interrupted switch as "already configured".
+    let provider_reconfigure_requested = body.provider.is_some() || body.api_key_ref.is_some();
     let resume_journal = match load_switch_journal(&state.runtime_paths.config_path)? {
-        Some(journal) => match classify_switch_journal(&journal, &body.agent_id, &fresh_config)? {
+        Some(journal) => match classify_switch_journal(
+            &journal,
+            &body.agent_id,
+            &fresh_config,
+            body.provider.as_deref(),
+            body.api_key_ref.as_deref(),
+        )? {
             SwitchJournalAction::NoOp => {
                 return Ok(completed_switch_response(
                     &fresh_config,
@@ -140,6 +147,19 @@ pub(crate) async fn agent_switch_handler(
             &fresh_config,
             &fresh_config.agent.id,
         ));
+    }
+    // Harness and provider are separate choices, bounded only by the per-agent support matrix, so a
+    // body naming the current primary target with `provider` set reconfigures that target in place.
+    if fresh_config.array.primary_target == body.agent_id && provider_reconfigure_requested {
+        return reconfigure_primary_target_provider(
+            &state,
+            &home,
+            &registry,
+            fresh_config,
+            body,
+            resume_journal,
+        )
+        .await;
     }
     if fresh_config.array.target(&body.agent_id).is_some() {
         return switch_to_existing_array_target(
@@ -433,6 +453,135 @@ async fn switch_to_existing_array_target(
     }))
 }
 
+/// Reconfigure the provider of the target that is already primary. The harness
+/// does not move, so this arm runs neither the installer nor skills porting:
+/// only provider resolution, the config commit, and the runtime re-apply.
+async fn reconfigure_primary_target_provider(
+    state: &AppState,
+    home: &std::path::Path,
+    registry: &RegistryCatalog,
+    fresh_config: Config,
+    body: AgentSwitchRequest,
+    resume_journal: Option<SwitchJournal>,
+) -> std::result::Result<ApiSuccess<AgentSwitchResponse>, StackError> {
+    if body.drop_configs {
+        return Err(StackError::InvalidParam {
+            field: "drop",
+            reason: "--drop is not supported when reconfiguring the current target's provider"
+                .to_owned(),
+        });
+    }
+    let Some(provider_id) = body.provider.as_deref() else {
+        return Err(StackError::InvalidParam {
+            field: "api_key_ref",
+            reason:
+                "an API-key ref for the current target needs the provider it belongs to; pass `provider` as well"
+                    .to_owned(),
+        });
+    };
+    let target_entry = registry.lookup_required(&fresh_config.agent.id)?;
+    let mut candidate_config = fresh_config.clone();
+    let required_env_refs = crate::runtime::agent::provider_keys::apply_mapped_agent_provider(
+        &mut candidate_config,
+        provider_id,
+        body.api_key_ref.clone(),
+    )?;
+    // MUST run after provider resolution so the pair-level refusal sees the provider the target would actually run.
+    crate::runtime::agent::switch::ensure_endpoint_override_survives_target(
+        home,
+        &target_entry.id,
+        target_entry.set_provider_base_url,
+        Some(provider_id),
+    )?;
+    let canonical = candidate_config.to_canonical_toml()?;
+    // A retry that resolves to the bytes already committed has nothing to write and nothing to restart.
+    if resume_journal.is_none() && canonical == fresh_config.to_canonical_toml()? {
+        return Ok(completed_switch_response(
+            &fresh_config,
+            &fresh_config.agent.id,
+        ));
+    }
+    let mut candidate_config = crate::config::load_config_from_str(&canonical)?;
+    candidate_config.agent.adapter = adapter_from_registry_entry(target_entry);
+    // The credential the new provider resolves through must exist before anything is written.
+    let _env = open_agent_env(&state.runtime_paths.home, &candidate_config)?;
+
+    crate::runtime::agent::provider_model_catalog::refresh_provider_models_best_effort(
+        home,
+        &candidate_config,
+    )
+    .await;
+    let provisioned =
+        crate::runtime::agent::agent_headless_config::provision_agent_headless_config(
+            &candidate_config,
+            home,
+        )?
+        .into_iter()
+        .map(ProvisionedAgentConfigJson::from)
+        .collect::<Vec<_>>();
+
+    let target_id = fresh_config.array.primary_target.clone();
+    let target = state.agent_target(&target_id)?;
+    let was_running = target.supervisor.snapshot().await.state.as_wire_str() == "running";
+    let mut journal = SwitchJournal {
+        old_target_id: target_id.clone(),
+        new_target_id: target_id.clone(),
+        target_agent_id: candidate_config.agent.id.clone(),
+        candidate_fingerprint: candidate_fingerprint(&canonical),
+        was_running,
+        phase: SwitchJournalPhase::Planned,
+    };
+    let restart_started = commit_switch_and_apply_runtime(
+        SwitchCommit {
+            state,
+            old_target_id: &target_id,
+            candidate_config: &candidate_config,
+            canonical: &canonical,
+            was_running,
+            resume_journal: resume_journal.as_ref(),
+            rename_sessions: false,
+        },
+        &mut journal,
+    )
+    .await?;
+    journal.phase = SwitchJournalPhase::Completed;
+    persist_switch_journal(&state.runtime_paths.config_path, &journal)?;
+
+    Ok(ApiSuccess::new(AgentSwitchResponse {
+        old_agent_id: candidate_config.agent.id.clone(),
+        agent_id: candidate_config.agent.id.clone(),
+        provider_status: "set",
+        provider: candidate_config
+            .agent
+            .provider
+            .as_ref()
+            .map(|provider| provider.id.clone()),
+        api_key_ref: candidate_config
+            .agent
+            .provider
+            .as_ref()
+            .and_then(|provider| provider.api_key_ref.clone()),
+        required_env_refs,
+        secret_migrations: Vec::new(),
+        install: None,
+        restarted: was_running,
+        restart_started,
+        // The provider change clears the configured model, so an agent that
+        // needs one explicitly needs it again.
+        set_model: target_entry.set_model,
+        models: Vec::new(),
+        follow_up: target_entry
+            .set_model
+            .then_some("acps agent set --model <model-id>"),
+        provisioned,
+        skills_port: None,
+        skills_link: None,
+        skills_link_error: None,
+        cleaned_configs: Vec::new(),
+        cleanup_errors: Vec::new(),
+    }))
+}
+
 /// How a pending-switch journal entry steers the current request.
 enum SwitchJournalAction {
     /// Journal Completed, same target, disk agrees: the retry is a provably
@@ -454,12 +603,25 @@ fn classify_switch_journal(
     journal: &SwitchJournal,
     requested: &str,
     fresh_config: &Config,
+    requested_provider: Option<&str>,
+    requested_api_key_ref: Option<&str>,
 ) -> Result<SwitchJournalAction> {
+    let provider_reconfigure_requested =
+        requested_provider.is_some() || requested_api_key_ref.is_some();
     let same_target = journal.requested_target_matches(requested);
+    let candidate_on_disk =
+        candidate_fingerprint(&fresh_config.to_canonical_toml()?) == journal.candidate_fingerprint;
     // Config canonicalization rewrites the on-disk primary target id to the agent id, so the committed marker is the agent id.
-    let committed_on_disk = fresh_config.agent.id == journal.target_agent_id;
+    // A provider reconfigure keeps that id either way, so its only commit marker is the candidate's bytes.
+    let committed_on_disk = if journal.is_same_target_reconfigure() {
+        candidate_on_disk
+    } else {
+        fresh_config.agent.id == journal.target_agent_id
+    };
     if journal.phase == SwitchJournalPhase::Completed {
-        if same_target && committed_on_disk {
+        // A body carrying provider flags asks for a selection this journal cannot vouch for,
+        // so it is planned afresh and converges on its own byte comparison.
+        if same_target && committed_on_disk && !provider_reconfigure_requested {
             return Ok(SwitchJournalAction::NoOp);
         }
         return Ok(SwitchJournalAction::FreshStart);
@@ -476,8 +638,7 @@ fn classify_switch_journal(
     if committed_on_disk {
         // The config write is the commit marker, so verify the bytes match the journaled candidate:
         // an operator edit between attempts must not be adopted as the in-flight switch's outcome.
-        let on_disk = fresh_config.to_canonical_toml()?;
-        if candidate_fingerprint(&on_disk) != journal.candidate_fingerprint {
+        if !candidate_on_disk {
             return Err(StackError::AgentSwitchConflict {
                 reason: format!(
                     "the on-disk config for `{}` does not match the interrupted switch's candidate; repair the config or the switch journal before retrying",
@@ -485,9 +646,62 @@ fn classify_switch_journal(
                 ),
             });
         }
+        // A reconfigure's provider flags are the whole intent of the request, so a post-commit
+        // retry carrying a different selection must conflict the way the pre-commit fingerprint
+        // check does rather than silently converge on the journaled provider.
+        if journal.is_same_target_reconfigure()
+            && let Some(provider_id) = requested_provider
+        {
+            let (requested_id, requested_ref) = requested_provider_selection(
+                &fresh_config.agent.id,
+                provider_id,
+                requested_api_key_ref,
+            );
+            let committed = fresh_config.agent.provider.as_ref();
+            let committed_id = committed.map(|provider| provider.id.as_str());
+            let committed_ref = committed.and_then(|provider| provider.api_key_ref.as_deref());
+            if committed_id != Some(requested_id.as_str())
+                || committed_ref != requested_ref.as_deref()
+            {
+                return Err(StackError::AgentSwitchConflict {
+                    reason: format!(
+                        "the interrupted reconfigure of `{}` already committed provider `{}` (api-key ref `{}`); retry with that selection to converge it, or repair the switch journal before changing providers",
+                        journal.new_target_id,
+                        committed_id.unwrap_or("none"),
+                        committed_ref.unwrap_or("none"),
+                    ),
+                });
+            }
+        }
         return Ok(SwitchJournalAction::ResumeCommitted);
     }
     Ok(SwitchJournalAction::ResumeFromCommitBoundary)
+}
+
+/// The provider selection a reconfigure retry asks for, resolved the way
+/// `apply_mapped_agent_provider` commits it: an explicit ref wins, a
+/// native-auth provider stores none, anything else falls back to the
+/// provider's default env mapping.
+fn requested_provider_selection(
+    agent_id: &str,
+    provider_id: &str,
+    api_key_ref: Option<&str>,
+) -> (String, Option<String>) {
+    let resolved_ref = api_key_ref.map(str::to_owned).or_else(|| {
+        (!crate::runtime::agent::provider_keys::provider_uses_agent_native_auth(
+            agent_id,
+            provider_id,
+        ))
+        .then(|| {
+            crate::runtime::agent::provider_keys::env_var_for_agent_provider_id(
+                agent_id,
+                provider_id,
+            )
+        })
+        .flatten()
+        .map(str::to_owned)
+    });
+    (provider_id.to_owned(), resolved_ref)
 }
 
 /// Inputs to the shared switch commit boundary.

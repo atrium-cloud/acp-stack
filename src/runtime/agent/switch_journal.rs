@@ -55,6 +55,11 @@ impl SwitchJournal {
     pub fn is_incomplete(&self) -> bool {
         self.phase != SwitchJournalPhase::Completed
     }
+
+    /// Whether this journal records a reconfigure of the target that was already primary, which keeps both target ids identical.
+    pub fn is_same_target_reconfigure(&self) -> bool {
+        self.old_target_id == self.new_target_id
+    }
 }
 
 pub fn switch_journal_path(config_path: &Path) -> Result<PathBuf> {
@@ -186,6 +191,18 @@ mod tests {
         assert!(journal.requested_target_matches("work-kimi"));
         assert!(journal.requested_target_matches("kimi"));
         assert!(!journal.requested_target_matches("amp"));
+    }
+
+    #[test]
+    fn same_target_reconfigure_is_detected_by_matching_target_ids() {
+        assert!(!sample_journal(SwitchJournalPhase::Planned).is_same_target_reconfigure());
+        let reconfigure = SwitchJournal {
+            old_target_id: "opencode".to_owned(),
+            new_target_id: "opencode".to_owned(),
+            target_agent_id: "opencode".to_owned(),
+            ..sample_journal(SwitchJournalPhase::Planned)
+        };
+        assert!(reconfigure.is_same_target_reconfigure());
     }
 
     #[test]

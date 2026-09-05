@@ -9,6 +9,8 @@ mod common;
 mod array_targets;
 #[path = "agent_switch_tests/native_config.rs"]
 mod native_config;
+#[path = "agent_switch_tests/provider_reconfigure.rs"]
+mod provider_reconfigure;
 #[path = "agent_switch_tests/secrets_drop.rs"]
 mod secrets_drop;
 #[path = "agent_switch_tests/skills.rs"]

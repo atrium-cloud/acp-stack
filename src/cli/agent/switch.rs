@@ -22,7 +22,7 @@ pub(super) fn run_agent_switch(args: AgentSwitchArgs) -> Result<()> {
     let config = Config::load_from_default_path()?;
     let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
     if let Some(target) = config.array.target(&args.agent) {
-        print_existing_target_switch_plan(&config, target)?;
+        print_existing_target_switch_plan(&config, target, &args)?;
     } else {
         let plan = plan_agent_switch(
             &home,
@@ -124,13 +124,27 @@ pub(super) fn run_agent_switch(args: AgentSwitchArgs) -> Result<()> {
     Ok(())
 }
 
-fn print_existing_target_switch_plan(config: &Config, target: &ArrayTargetConfig) -> Result<()> {
+fn print_existing_target_switch_plan(
+    config: &Config,
+    target: &ArrayTargetConfig,
+    args: &AgentSwitchArgs,
+) -> Result<()> {
     let agent = &target.id;
     if config.array.primary_target == *agent {
-        return Err(StackError::InvalidParam {
-            field: "agent",
-            reason: format!("agent `{agent}` is already the default target"),
-        });
+        let Some(provider) = args.provider.as_deref() else {
+            return Err(StackError::InvalidParam {
+                field: "agent",
+                reason: format!("agent `{agent}` is already the default target"),
+            });
+        };
+        println!("agent provider plan: {agent} keeps its harness");
+        println!("set from input: provider {provider}");
+        if let Some(api_key_ref) = args.api_key_ref.as_deref() {
+            println!("set from input: api_key_ref {api_key_ref}");
+        }
+        println!("migrated as-is: workspace, MCP, permissions, auth, and secrets config");
+        println!("clears the configured model");
+        return Ok(());
     }
     let required_env_refs = &target.agent.env;
     println!(

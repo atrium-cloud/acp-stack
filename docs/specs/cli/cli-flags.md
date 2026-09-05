@@ -403,7 +403,7 @@ acps agent install [--yes] [--admin-key <key>]
 
 ## `acps agent switch`
 
-Migrates to another supported harness through the running daemon.
+Migrates to another supported harness through the running daemon, or moves the current harness onto another provider.
 
 ### Synopsis
 
@@ -415,7 +415,7 @@ acps agent switch <agent> [--drop] [--provider <provider-id>] [--api-key-ref <re
 
 - `<agent>`: target agent, positional.
 - `--drop`: remove only the source agent-owned config after the target switch succeeds. Does not delete runtime MCP declarations, secrets, binaries, adapters, or sessions.
-- `--provider <provider-id>`, `--api-key-ref <ref>`: provider selection for the target.
+- `--provider <provider-id>`, `--api-key-ref <ref>`: provider selection for the target. Naming the agent that is already the default target with `--provider` reconfigures that agent's provider in place, within the providers the agent supports.
 - `--admin-key <key>`: required for non-interactive runs; interactive runs prompt without echoing it.
 
 ### Output
@@ -427,6 +427,7 @@ acps agent switch <agent> [--drop] [--provider <provider-id>] [--api-key-ref <re
 - Switch preserves runtime-scoped config: workspace, MCP declarations, permissions, secrets config, and sessions. By default it also preserves source agent-owned config, secrets, and installed harnesses/adapters, so switching back is fast.
 - A switch is journaled in `agent-switch.json` beside the canonical config, so a failure after the config write — e.g. the new agent's first start — does not strand the daemon.
 - Retrying the same target resumes the interrupted switch and converges it (`provider_status: "resumed"`). Retrying a finished switch is a no-op success (`provider_status: "no_op"`). Requesting a different target while a switch is incomplete fails with `409 agent.switch_conflict`.
+- Naming the current default target with `--provider` keeps the harness and commits the new provider (`provider_status: "set"`), restarting the agent only when it was already running. Repeating the same selection with no intervening config change is a no-op success. Retrying an interrupted reconfigure with different provider flags fails with `409 agent.switch_conflict`. `--drop`, and `--api-key-ref` without `--provider`, stay refused for the current default target.
 
 ## `acps agent provider`
 

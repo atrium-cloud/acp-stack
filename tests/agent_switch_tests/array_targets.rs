@@ -120,66 +120,6 @@ async fn agent_switch_same_target_bare_body_is_noop() {
 }
 
 #[tokio::test]
-async fn agent_switch_same_target_with_provider_flag_is_rejected() {
-    let tempdir = TempDir::new().expect("tempdir");
-    let harness =
-        AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
-    let client = http().await;
-
-    let response = client
-        .post(format!("{}/v1/agent/switch", harness.base_url))
-        .header("Authorization", admin_bearer())
-        .json(&json!({ "agent_id": "opencode", "provider": "openrouter" }))
-        .send()
-        .await
-        .expect("switch with provider flag");
-    let status = response.status();
-    let body: Value = response.json().await.expect("switch json");
-    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
-    assert_eq!(body["error"]["code"], "request.invalid_param");
-}
-
-#[tokio::test]
-async fn agent_switch_same_target_with_api_key_ref_flag_is_rejected() {
-    let tempdir = TempDir::new().expect("tempdir");
-    let harness =
-        AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
-    let client = http().await;
-
-    let response = client
-        .post(format!("{}/v1/agent/switch", harness.base_url))
-        .header("Authorization", admin_bearer())
-        .json(&json!({ "agent_id": "opencode", "api_key_ref": "OPENCODE_API_KEY" }))
-        .send()
-        .await
-        .expect("switch with api_key_ref flag");
-    let status = response.status();
-    let body: Value = response.json().await.expect("switch json");
-    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
-    assert_eq!(body["error"]["code"], "request.invalid_param");
-}
-
-#[tokio::test]
-async fn agent_switch_same_target_with_drop_is_rejected() {
-    let tempdir = TempDir::new().expect("tempdir");
-    let harness =
-        AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
-    let client = http().await;
-
-    let response = client
-        .post(format!("{}/v1/agent/switch", harness.base_url))
-        .header("Authorization", admin_bearer())
-        .json(&json!({ "agent_id": "opencode", "drop": true }))
-        .send()
-        .await
-        .expect("switch with drop flag");
-    let status = response.status();
-    let body: Value = response.json().await.expect("switch json");
-    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
-    assert_eq!(body["error"]["code"], "request.invalid_param");
-}
-
-#[tokio::test]
 async fn agent_switch_existing_kimi_target_reports_canonical_secret_ref() {
     let tempdir = TempDir::new().expect("tempdir");
     let mut secrets =

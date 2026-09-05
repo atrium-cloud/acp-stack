@@ -375,10 +375,19 @@ The API withholds secret values from every response. Auth keys live outside the 
 - Errors:
     - `409 agent.switch_conflict` — a same-target retry before the config write whose recomputed candidate does not match the journaled fingerprint.
     - `500 agent.switch_journal_corrupt` — an unreadable journal.
-    - `400 request.invalid_param` — a same-target request carrying `provider`/`api_key_ref` or `drop` with explicit-intent violations.
+    - `400 request.invalid_param` — a same-target request carrying `drop`, a same-target `api_key_ref` without `provider`, or a provider the named agent does not support.
 - Notes:
     - The route validates provider compatibility, copies compatible provider secret refs when the target expects a different default ref, installs the target harness, provisions agent-owned config without a model, discovers ACP-advertised model values when the target supports model selection, writes canonical config, restarts the supervised agent only if it was already running, and optionally removes source agent-owned config.
     - `drop` does not delete secrets, installed harnesses/adapters, or sessions.
+
+#### Same-Target Provider Reconfigure
+
+A body naming the target that is already primary and carrying `provider` moves that target onto another provider, bounded by the per-agent support matrix. The harness stays in place, so the request runs provider resolution, the endpoint-override survival check, the config commit, agent-owned config provisioning, and the runtime re-apply.
+
+- Response: `provider_status` of `set`, `old_agent_id` equal to `agent_id`, `provider` and `api_key_ref` from the committed config, `restarted`/`restart_started` from the commit, and `install`/`skills_port`/`skills_link` omitted because the harness is unchanged.
+- The provider change clears the configured model, so `set_model` and the `acps agent set --model <model-id>` follow-up report whatever the agent's registry entry declares.
+- With no intervening config change, a repeat of the same selection is a side-effect-free `no_op`: the canonical candidate is compared against the on-disk canonical config and an identical result commits nothing.
+- A missing credential for the new provider, a provider the agent does not support, and a stranded endpoint override are all rejected before anything is written.
 
 #### Switch Journal And Retry Semantics
 
@@ -388,10 +397,12 @@ The switch is journaled at `agent-switch.json` beside the canonical config so re
 - The phase advances `planned` (written before the session rename and config write) → `committed` (after the config write and runtime refresh) → `runtime_applied` (after the stop/start re-apply) → `completed` (after optional source cleanup). The completed journal is retained and overwritten by the next switch.
 - A same-target retry of an incomplete switch whose config write already landed resumes at the runtime re-apply with the journaled `was_running`. The pre-commit steps (install, provisioning, model discovery) keep their original results. The response reports `provider_status: "resumed"` with the pre-commit fields (`install`, `provisioned`, `models`, `secret_migrations`) omitted or empty.
 - A same-target retry before the config write re-runs the full pipeline, but only if the recomputed candidate matches the journaled fingerprint; a mismatch is `409 agent.switch_conflict`.
-- A retry of a completed switch is a side-effect-free no-op success reporting `provider_status: "no_op"` with `restarted: false` — no rewrite, no stop/start.
+- A same-target provider reconfigure records both target ids identically, and the agent id it commits is the one already on disk, so its commit marker is the candidate fingerprint rather than the agent id.
+- A post-commit retry of an interrupted provider reconfigure must name the committed provider selection. A retry carrying different provider flags fails with `409 agent.switch_conflict` instead of silently adopting the journaled selection.
+- A retry of a completed switch is a side-effect-free no-op success reporting `provider_status: "no_op"` with `restarted: false` — no rewrite, no stop/start. A retry that carries `provider`/`api_key_ref` is planned afresh instead, so a new selection for the same target still applies.
 - Any different-target switch while a journal is incomplete, and any unreadable journal (`500 agent.switch_journal_corrupt`), fails rather than abandoning or compounding the in-flight switch.
 - A bare same-target request (no `provider`, `api_key_ref`, or `drop`) with no incomplete journal to resume — journal absent, or completed for a target this request does not name — is accepted as already converged. It returns the same side-effect-free `provider_status: "no_op"` success as a completed-journal retry, without re-running install, provisioning, or the runtime re-apply.
-- A same-target request that does carry `provider`/`api_key_ref` or `drop` keeps its explicit-intent `400 request.invalid_param` rejection.
+- A same-target request carrying `provider` reconfigures that target's provider in place; one carrying `drop`, or `api_key_ref` without `provider`, keeps its explicit-intent `400 request.invalid_param` rejection.
 - On a post-commit resume, `--drop` source cleanup cannot be reconstructed (the source target was renamed away) and is reported in `cleanup_errors` instead of running.
 
 ### `POST /v1/agent/config/native/inspect`
