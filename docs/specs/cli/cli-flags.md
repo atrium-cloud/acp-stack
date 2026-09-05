@@ -506,12 +506,14 @@ acps agent config import <path> [--managed-field <id>]... [--ack-executable-sett
 
 #### Supported sources and destinations
 
-- Claude Code `settings.json` → `~/.claude/settings.json`.
+- Claude Code `settings.json` or `settings.local.json` → `~/.claude/settings.json`. A project-scope `settings.local.json` imports as user-scope settings.
 - Codex CLI `config.toml` → `~/.codex/config.toml`.
 - OpenCode `opencode.json` or `opencode.jsonc` → normalized JSON at `~/.config/opencode/opencode.json`.
 - Amp Code `settings.json` → `~/.config/amp/settings.json`. Amp is provider-opaque and keeps its model in ACP session config rather than settings, so its import carries only MCP servers.
 - Pi `settings.json` → `~/.pi/agent/settings.json`. Pi imports its `defaultProvider`/`defaultModel` selection and carries no MCP. Only `settings.json` is accepted: `models.json`/`auth.json` hold literal credentials with `!shell-command` exec, and `trust.json`/`mcp.json` are out of scope.
 - Goose `config.yaml` → `~/.config/goose/config.yaml`. Goose imports its `GOOSE_PROVIDER`/`GOOSE_MODEL` selection plus `extensions` MCP servers. Only `config.yaml` is accepted: `secrets.yaml` and `permission.yaml` hold credentials and per-tool approvals.
+- Kimi Code `config.toml` → `~/.kimi-code/config.toml`. Kimi imports the provider and model behind `default_model`, resolved by the referenced `[providers.<name>]` entry's `type` and `base_url` against the catalog rows Kimi runs. Only `config.toml` is accepted: `mcp.json` is out of scope and MCP reaches Kimi over ACP.
+- Hermes Agent `config.yaml` → `~/.hermes/config.yaml`. Hermes imports `model.provider` and `model.default`; `mcp_servers` stays native in the residual. A `custom`, `ollama`, `vllm`, `llamacpp`, or `auto` provider is reported incompatible.
 
 ## `acps subagent`
 

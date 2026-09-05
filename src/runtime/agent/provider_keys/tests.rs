@@ -1158,6 +1158,36 @@ fn kimi_anthropic_wire_rows_declare_an_origin_base() {
 }
 
 #[test]
+fn provider_id_for_agent_vendor_base_url_matches_rows_by_base() {
+    assert_eq!(
+        provider_id_for_agent_vendor_base_url("kimi", "https://openrouter.ai/api/v1"),
+        Some("openrouter")
+    );
+    assert_eq!(
+        provider_id_for_agent_vendor_base_url("kimi", "https://openrouter.ai/api/v1/"),
+        Some("openrouter")
+    );
+    assert_eq!(
+        provider_id_for_agent_vendor_base_url("kimi", "https://api.kimi.com/coding/v1"),
+        Some("kimi-coding")
+    );
+    assert_eq!(
+        provider_id_for_agent_vendor_base_url("kimi", "https://api.anthropic.com"),
+        Some("anthropic")
+    );
+    // The row base is per agent: pi's Anthropic base is the origin, hermes' kimi base drops /v1.
+    assert_eq!(
+        provider_id_for_agent_vendor_base_url("pi", "https://api.anthropic.com"),
+        Some("anthropic")
+    );
+    assert_eq!(
+        provider_id_for_agent_vendor_base_url("kimi", "https://api.mistral.ai/v1"),
+        None
+    );
+    assert_eq!(provider_id_for_agent_vendor_base_url("kimi", ""), None);
+}
+
+#[test]
 fn invalid_mapping_rejects_kimi_provider_without_profile() {
     let err = ProviderKeyMapping::from_toml(
         r#"

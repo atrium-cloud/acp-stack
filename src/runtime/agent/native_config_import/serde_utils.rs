@@ -22,9 +22,9 @@ pub(super) fn parse_toml_table(content: &str) -> Result<TomlMap<String, TomlValu
     }
 }
 
-/// Parse a Goose `config.yaml` root into a JSON object for the JSON-shaped
-/// classification pipeline; a non-string YAML mapping key is rejected as invalid.
-pub(super) fn parse_goose_root(content: &str) -> Result<JsonMap<String, JsonValue>> {
+/// Parse a YAML config root into a JSON object for the JSON-shaped classification
+/// pipeline; a non-string YAML mapping key is rejected as invalid.
+pub(super) fn parse_yaml_root(content: &str) -> Result<JsonMap<String, JsonValue>> {
     let value: YamlValue =
         serde_norway::from_str(content).map_err(|_| native_error("agent.native_config_invalid"))?;
     match yaml_value_to_json(value)? {
@@ -107,7 +107,7 @@ fn json_number_to_yaml(number: serde_json::Number) -> YamlValue {
     }
 }
 
-pub(super) fn goose_yaml_bytes(root: JsonMap<String, JsonValue>) -> Result<Vec<u8>> {
+pub(super) fn yaml_bytes(root: JsonMap<String, JsonValue>) -> Result<Vec<u8>> {
     let value = json_value_to_yaml(JsonValue::Object(root));
     let text =
         serde_norway::to_string(&value).map_err(|_| native_error("agent.native_config_invalid"))?;

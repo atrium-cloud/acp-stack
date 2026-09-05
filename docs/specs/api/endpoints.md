@@ -402,16 +402,20 @@ The switch is journaled at `agent-switch.json` beside the canonical config so re
 - Notes:
     - Parses an uploaded global config and returns a redacted review manifest.
     - The configured harness determines both parser and destination:
-        - Claude Code `settings.json` → `~/.claude/settings.json`
+        - Claude Code `settings.json` or `settings.local.json` → `~/.claude/settings.json` (a project-scope `settings.local.json` imports as user-scope settings)
         - Codex CLI `config.toml` → `~/.codex/config.toml`
         - OpenCode `opencode.json` or `opencode.jsonc` → normalized JSON at `~/.config/opencode/opencode.json`
         - Amp Code `settings.json` → `~/.config/amp/settings.json`
         - Pi `settings.json` → `~/.pi/agent/settings.json`
         - Goose `config.yaml` → `~/.config/goose/config.yaml`
+        - Kimi Code `config.toml` → `~/.kimi-code/config.toml`
+        - Hermes Agent `config.yaml` → `~/.hermes/config.yaml`
     - Amp imports MCP servers only (it is provider-opaque and its model lives in ACP session config, not settings).
     - Pi imports its `defaultProvider`/`defaultModel` selection but no MCP (Pi has no first-class MCP in its settings file). Pi accepts only `settings.json`: `models.json`/`auth.json` carry literal credentials and `!shell-command` exec semantics, and `trust.json`/`mcp.json` are out of scope.
     - Goose imports its `GOOSE_PROVIDER`/`GOOSE_MODEL` selection and `extensions` MCP servers (stdio `cmd`/`args`/`env_keys` and remote `streamable_http` uris). `builtin`/`platform`/`frontend`/`inline_python` extensions and any literal `envs` block, `GOOSE_MODE`/`GOOSE_ALLOWLIST` are permissions, and the `GOOSE_PLANNER_*` keys are managed-unsupported. Goose accepts only `config.yaml`: `secrets.yaml` holds keyring-fallback API keys and `permission.yaml` carries per-tool approval levels.
     - The imported provider and model flow through canonical `acps` config, never persisted as `GOOSE_PROVIDER`/`GOOSE_MODEL` in the residual. Provisioning re-derives those from canonical config into the same `config.yaml`.
+    - Kimi Code imports the provider and model behind `default_model`: the alias's `[models.<alias>]` entry names a `[providers.<name>]` row, which maps to a catalog provider when its `type` and `base_url` match a row Kimi runs (a missing or unmatched `base_url` is incompatible). `default_model`, `models`, and `secondary_model` are consumed; `providers` and `services` are credentials; `default_permission_mode`, `default_plan_mode`, and `permission` are permissions; `hooks` stays in the residual as executable settings. MCP servers live in `mcp.json`, which is out of scope, and reach Kimi over ACP.
+    - Hermes Agent imports `model.provider` and the model under `model.default` (or its `model` / `name` aliases, flattened from a `{provider, model}` mapping). `mcp_servers` stays native: the adapter advertises no ACP MCP passthrough, so Hermes loads the table from `config.yaml` gateway-wide and the residual keeps it verbatim. `model.base_url` and `providers.acps-managed` are consumed; `model.api_key` and header tables, `secrets`, `terminal.sudo_password`, and any `providers.<name>` entry carrying `api_key`, `key_cmd`, or `extra_headers` are credentials; `model.auth_mode` and `model.entra` are authentication state; `terminal` is sandbox; `toolsets` is dropped with a warning. A `custom`, `custom:<entry>`, `ollama`, `vllm`, `llamacpp`, or `auto` provider is reported incompatible; `custom:acps-managed` is acps's own provisioning ref and is dropped with a warning while the model still imports.
 
 ### `POST /v1/agent/config/native/import`
 

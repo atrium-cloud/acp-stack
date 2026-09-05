@@ -19,6 +19,7 @@ use crate::error::{Result, StackError};
 use crate::fs_util::{
     atomic_write_owner_only, create_dir_owner_only, parent_dir, prepare_owner_managed_file_path,
 };
+use crate::runtime::agent::acp_bridge::KIMI_CODE_AGENT_ID;
 use crate::runtime::agent::agent_headless_config::provision_agent_headless_config;
 use crate::runtime::agent::agent_headless_config::{
     AMP_PERMISSION_ROOTS, AMP_POLICY_ROOTS, CLAUDE_CODE_AUTH_ROOTS,
@@ -26,14 +27,21 @@ use crate::runtime::agent::agent_headless_config::{
     CLAUDE_CODE_EXECUTABLE_COMMAND_ROOTS, CLAUDE_CODE_MANAGED_ENV_KEYS,
     CLAUDE_CODE_MANAGED_UNSUPPORTED_ROOTS, CLAUDE_CODE_PERMISSION_ROOTS, CLAUDE_CODE_POLICY_ROOTS,
     CODEX_AUTH_ROOTS, CODEX_MANAGED_UNSUPPORTED_ROOTS, CODEX_PERMISSION_ROOTS,
-    GOOSE_MANAGED_UNSUPPORTED_ROOTS, GOOSE_PERMISSION_ROOTS, OPENCODE_MANAGED_UNSUPPORTED_ROOTS,
-    OPENCODE_PERMISSION_ROOTS, OPENCODE_POLICY_ROOTS, PI_EXECUTABLE_COMMAND_ROOTS,
-    PI_EXECUTABLE_PLUGIN_ROOTS, PI_PERMISSION_ROOTS,
+    GOOSE_MANAGED_UNSUPPORTED_ROOTS, GOOSE_PERMISSION_ROOTS, HERMES_AGENT_ID,
+    HERMES_CREDENTIAL_ROOTS, HERMES_CUSTOM_PROVIDER_ID, HERMES_IGNORED_ROOTS,
+    HERMES_LOCAL_SERVER_PROVIDER_IDS, HERMES_MANAGED_ENTRY_KEY, HERMES_MANAGED_PROVIDER_REF,
+    HERMES_MODEL_AUTH_KEYS, HERMES_MODEL_BASE_URL_KEY, HERMES_MODEL_CREDENTIAL_KEYS,
+    HERMES_MODEL_KEY, HERMES_MODEL_NAME_KEYS, HERMES_MODEL_PROVIDER_KEY,
+    HERMES_PROVIDER_ENTRY_CREDENTIAL_KEYS, HERMES_PROVIDERS_KEY, HERMES_SANDBOX_ROOTS,
+    KIMI_CREDENTIAL_ROOTS, KIMI_MANAGED_ROOTS, KIMI_PERMISSION_ROOTS,
+    OPENCODE_MANAGED_UNSUPPORTED_ROOTS, OPENCODE_PERMISSION_ROOTS, OPENCODE_POLICY_ROOTS,
+    PI_EXECUTABLE_COMMAND_ROOTS, PI_EXECUTABLE_PLUGIN_ROOTS, PI_PERMISSION_ROOTS,
 };
 use crate::runtime::agent::mcp::validate_mcp_secret_refs;
 use crate::runtime::agent::provider_keys::{
     agent_provider_id_for_provider_id, apply_catalog_mapped_agent_provider,
     apply_mapped_agent_provider, canonical_provider_id_for_agent_native_id,
+    kimi_profile_for_provider_id, provider_id_for_agent_vendor_base_url,
 };
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::secrets::SecretStore;
@@ -430,13 +438,17 @@ pub fn inspect_native_config(
         "amp" => inspect_amp(content, revision),
         "pi" => inspect_pi(content, revision),
         "goose" => inspect_goose(content, revision),
+        KIMI_CODE_AGENT_ID => inspect_kimi(content, revision),
+        HERMES_AGENT_ID => inspect_hermes(content, revision),
         _ => Err(native_error("agent.native_config_harness_unsupported")),
     }
 }
 
 fn validate_native_config_filename(harness: &str, filename: &str) -> Result<()> {
     let accepted = match harness {
-        "claude" => filename == "settings.json",
+        // `settings.local.json` shares the schema; importing it promotes project-scope
+        // settings to the user scope.
+        "claude" => matches!(filename, "settings.json" | "settings.local.json"),
         "codex" => filename == "config.toml",
         "opencode" => matches!(filename, "opencode.json" | "opencode.jsonc"),
         "amp" => filename == "settings.json",
@@ -446,6 +458,9 @@ fn validate_native_config_filename(harness: &str, filename: &str) -> Result<()> 
         // `config.yaml` only: `secrets.yaml` holds keyring-fallback API keys and `permission.yaml`
         // carries per-tool approval levels, neither of which acps may import.
         "goose" => filename == "config.yaml",
+        // `config.toml` only: `mcp.json` is the MCP-only file and has no native destination.
+        KIMI_CODE_AGENT_ID => filename == "config.toml",
+        HERMES_AGENT_ID => filename == "config.yaml",
         _ => return Err(native_error("agent.native_config_harness_unsupported")),
     };
     if !accepted {
@@ -561,6 +576,11 @@ pub fn rebase_prepared_native_config_import(
                 candidate.agent.env.push(entry.clone());
             }
         }
+        // The union re-admits the lane ref prepare dropped; the launch env resolves every
+        // declared ref, so a stale one fails the launch.
+        crate::runtime::agent::provider_keys::reconcile_kimi_lane_env_declarations(
+            &mut candidate.agent,
+        );
     }
     if prepared
         .selected_managed_field_ids

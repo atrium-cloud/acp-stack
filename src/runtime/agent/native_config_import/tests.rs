@@ -1,5 +1,32 @@
 use super::*;
 
+#[test]
+fn native_config_paths_cover_every_importable_harness() {
+    let home = Path::new("/home/u");
+    for (harness, expected) in [
+        ("claude", "/home/u/.claude/settings.json"),
+        ("codex", "/home/u/.codex/config.toml"),
+        ("opencode", "/home/u/.config/opencode/opencode.json"),
+        ("amp", "/home/u/.config/amp/settings.json"),
+        ("pi", "/home/u/.pi/agent/settings.json"),
+        ("goose", "/home/u/.config/goose/config.yaml"),
+        ("kimi", "/home/u/.kimi-code/config.toml"),
+        ("hermes", "/home/u/.hermes/config.yaml"),
+    ] {
+        assert_eq!(
+            native_config_path(harness, home).expect(harness),
+            Path::new(expected),
+            "{harness}"
+        );
+    }
+    assert_eq!(
+        native_config_path("kilo", home)
+            .expect_err("kilo has no import")
+            .error_code(),
+        "agent.native_config_harness_unsupported"
+    );
+}
+
 fn opencode_config(provider: &str, model: &str) -> Config {
     let mut config = crate::config::load_config_from_str(include_str!(
         "../../../../tests/fixtures/valid-opencode-stack.toml"

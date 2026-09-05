@@ -791,6 +791,28 @@ pub fn kimi_profile_for_provider_id(provider_id: &str) -> Option<&'static KimiPr
         .and_then(|provider| provider.kimi.as_ref())
 }
 
+/// The primary id of the first row `agent_id` runs whose vendor base equals `base_url`; a
+/// trailing slash on either side does not distinguish two endpoints. Rows sharing a base (the
+/// Kimi For Coding subscription and its Global variant) resolve to whichever is listed first.
+pub fn provider_id_for_agent_vendor_base_url(
+    agent_id: &str,
+    base_url: &str,
+) -> Option<&'static str> {
+    let wanted = base_url.trim().trim_end_matches('/');
+    if wanted.is_empty() {
+        return None;
+    }
+    ProviderKeyMapping::load_embedded()
+        .providers
+        .iter()
+        .find(|provider| {
+            provider
+                .vendor_base_url(agent_id)
+                .is_some_and(|vendor| vendor.trim_end_matches('/') == wanted)
+        })
+        .map(|provider| provider.primary_id())
+}
+
 pub fn provider_uses_agent_native_auth(agent_id: &str, provider_id: &str) -> bool {
     agent_id == CLAUDE_CODE_AGENT_ID
         && claude_code_profile_for_provider_id(provider_id)

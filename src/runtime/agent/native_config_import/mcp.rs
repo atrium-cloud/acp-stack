@@ -714,7 +714,7 @@ impl InspectionBuilder {
         // harnesses; re-parsed via the same non-string-key guard used on input.
         let text = std::str::from_utf8(&residual)
             .map_err(|_| native_error("agent.native_config_invalid"))?;
-        let root = parse_goose_root(text)?;
+        let root = parse_yaml_root(text)?;
         let value = JsonValue::Object(root);
         collect_json_paths(&value, "", &mut self.inspection.unmanaged_field_paths);
         self.finish(residual)

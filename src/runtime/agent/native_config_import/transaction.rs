@@ -27,6 +27,8 @@ pub fn native_config_path(harness: &str, home: &Path) -> Result<PathBuf> {
         "amp" => Ok(home.join(".config").join("amp").join("settings.json")),
         "pi" => Ok(home.join(".pi").join("agent").join("settings.json")),
         "goose" => Ok(home.join(".config").join("goose").join("config.yaml")),
+        KIMI_CODE_AGENT_ID => Ok(home.join(".kimi-code").join("config.toml")),
+        HERMES_AGENT_ID => Ok(home.join(".hermes").join("config.yaml")),
         _ => Err(native_error("agent.native_config_harness_unsupported")),
     }
 }

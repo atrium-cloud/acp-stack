@@ -43,6 +43,11 @@ use self::opencode::*;
 use self::pi::*;
 
 pub(crate) use self::codex::CODEX_OPENROUTER_PROVIDER_ID;
+pub(crate) use self::hermes::{
+    HERMES_CUSTOM_PROVIDER_ID, HERMES_MANAGED_ENTRY_KEY, HERMES_MANAGED_PROVIDER_REF,
+    HERMES_MODEL_BASE_URL_KEY, HERMES_MODEL_DEFAULT_KEY, HERMES_MODEL_KEY,
+    HERMES_MODEL_PROVIDER_KEY, HERMES_PROVIDERS_KEY,
+};
 pub(crate) use self::opencode::{OPENCODE_AGENT_ID, OPENCODE_DISABLED_SMALL_MODEL};
 pub(crate) use crate::runtime::agent::provider_keys::{HERMES_AGENT_ID, KILO_AGENT_ID};
 
@@ -202,6 +207,35 @@ pub(crate) const GOOSE_MANAGED_UNSUPPORTED_ROOTS: &[&str] = &[
     "GOOSE_PLANNER_MODEL",
     "GOOSE_PLANNER_PROVIDER",
 ];
+
+/// Kimi Code approval roots: the default permission and plan modes gate unprompted tool calls,
+/// and `permission` carries the rule set and dangerous-command guard.
+pub(crate) const KIMI_PERMISSION_ROOTS: &[&str] =
+    &["default_permission_mode", "default_plan_mode", "permission"];
+/// Kimi Code tables whose entries carry literal credentials: every `[providers.*]` entry
+/// (`api_key`, `oauth`, `custom_headers`) and the Moonshot `[services.*]` entries.
+pub(crate) const KIMI_CREDENTIAL_ROOTS: &[&str] = &["providers", "services"];
+/// Kimi Code keys acps consumes into canonical config; the launch env replaces them.
+pub(crate) const KIMI_MANAGED_ROOTS: &[&str] = &["default_model", "models", "secondary_model"];
+
+/// Hermes `terminal` selects the execution backend (local, ssh, docker) and its hosts.
+pub(crate) const HERMES_SANDBOX_ROOTS: &[&str] = &["terminal"];
+/// Hermes secret-manager integrations (`bitwarden`, `onepassword`, `command`).
+pub(crate) const HERMES_CREDENTIAL_ROOTS: &[&str] = &["secrets"];
+/// Hermes `model` keys carrying a literal credential or header table.
+pub(crate) const HERMES_MODEL_CREDENTIAL_KEYS: &[&str] =
+    &["api_key", "default_headers", "extra_headers"];
+/// Hermes `model` keys selecting an authentication flow rather than a key.
+pub(crate) const HERMES_MODEL_AUTH_KEYS: &[&str] = &["auth_mode", "entra"];
+/// Keys that make a user-owned `providers.<name>` entry credential-bearing.
+pub(crate) const HERMES_PROVIDER_ENTRY_CREDENTIAL_KEYS: &[&str] =
+    &["api_key", "key_cmd", "extra_headers"];
+/// Hermes `model` keys naming the model, in upstream precedence order.
+pub(crate) const HERMES_MODEL_NAME_KEYS: &[&str] = &[HERMES_MODEL_DEFAULT_KEY, "model", "name"];
+/// Hermes provider ids that alias the custom-endpoint lane.
+pub(crate) const HERMES_LOCAL_SERVER_PROVIDER_IDS: &[&str] = &["ollama", "vllm", "llamacpp"];
+/// Deprecated upstream and ignored at load, so importing it would only mislead.
+pub(crate) const HERMES_IGNORED_ROOTS: &[&str] = &["toolsets"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProvisionedAgentConfig {

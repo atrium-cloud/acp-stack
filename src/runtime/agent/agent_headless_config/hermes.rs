@@ -1,15 +1,15 @@
 use super::*;
 
-const HERMES_MODEL_KEY: &str = "model";
-const HERMES_MODEL_PROVIDER_KEY: &str = "provider";
-const HERMES_MODEL_DEFAULT_KEY: &str = "default";
-const HERMES_MODEL_BASE_URL_KEY: &str = "base_url";
-const HERMES_PROVIDERS_KEY: &str = "providers";
-const HERMES_CUSTOM_PROVIDER_ID: &str = "custom";
-const HERMES_MANAGED_ENTRY_KEY: &str = "acps-managed";
+pub(crate) const HERMES_MODEL_KEY: &str = "model";
+pub(crate) const HERMES_MODEL_PROVIDER_KEY: &str = "provider";
+pub(crate) const HERMES_MODEL_DEFAULT_KEY: &str = "default";
+pub(crate) const HERMES_MODEL_BASE_URL_KEY: &str = "base_url";
+pub(crate) const HERMES_PROVIDERS_KEY: &str = "providers";
+pub(crate) const HERMES_CUSTOM_PROVIDER_ID: &str = "custom";
+pub(crate) const HERMES_MANAGED_ENTRY_KEY: &str = "acps-managed";
 // `model.provider` references the managed named entry as `custom:<entry-key>`;
 // keep this ref in sync with HERMES_MANAGED_ENTRY_KEY.
-const HERMES_MANAGED_PROVIDER_REF: &str = "custom:acps-managed";
+pub(crate) const HERMES_MANAGED_PROVIDER_REF: &str = "custom:acps-managed";
 
 fn hermes_config_path(home: &Path) -> PathBuf {
     home.join(".hermes").join("config.yaml")
