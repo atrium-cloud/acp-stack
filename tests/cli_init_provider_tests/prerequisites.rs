@@ -255,7 +255,7 @@ fn init_rejects_stale_unsupported_provider_block_for_kimi() {
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     let config = format!(
-        "{}\n\n[agent.provider]\nid = \"openai\"\nmodel = \"openai/gpt-5.5\"\napi_key_ref = \"OPENAI_API_KEY\"\n",
+        "{}\n\n[agent.provider]\nid = \"mistral\"\nmodel = \"mistral-large\"\napi_key_ref = \"MISTRAL_API_KEY\"\n",
         VALID_CONFIG
             .replace(r#"id = "opencode""#, r#"id = "kimi""#)
             .replace(r#"name = "OpenCode""#, r#"name = "Kimi Code""#)
@@ -269,7 +269,7 @@ fn init_rejects_stale_unsupported_provider_block_for_kimi() {
         .assert()
         .failure()
         .stderr(predicates::str::contains(
-            "provider `openai` is not supported for agent `kimi`",
+            "provider `mistral` is not supported for agent `kimi`",
         ));
 }
 

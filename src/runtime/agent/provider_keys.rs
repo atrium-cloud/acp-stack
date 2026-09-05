@@ -73,6 +73,9 @@ pub const CODEX_OPENAI_PROVIDER_ID: &str = "openai";
 
 /// Wire transports Hermes accepts on a named `providers:` entry.
 const HERMES_API_MODES: [&str; 3] = ["chat_completions", "anthropic_messages", "codex_responses"];
+/// `KIMI_MODEL_PROVIDER_TYPE` values; `kimi` is Kimi Code's own wire and is never exported.
+pub const KIMI_PROVIDER_TYPES: [&str; 4] = ["kimi", "anthropic", "openai", "openai_responses"];
+pub const KIMI_NATIVE_PROVIDER_TYPE: &str = "kimi";
 
 static PROVIDER_KEY_MAPPING: LazyLock<ProviderKeyMapping> = LazyLock::new(|| {
     ProviderKeyMapping::from_toml_parts(EMBEDDED_ENV_VARS, EMBEDDED_PROVIDERS)
@@ -120,6 +123,8 @@ pub struct ProviderEnvMapping {
     pub claude_code: Option<ClaudeCodeProviderProfile>,
     #[serde(default)]
     pub hermes: Option<HermesProviderProfile>,
+    #[serde(default)]
+    pub kimi: Option<KimiProviderProfile>,
 }
 
 /// Claude Code-specific headless provisioning metadata for one provider. The env-var lists are
@@ -154,6 +159,15 @@ pub struct ClaudeCodeProviderProfile {
 pub struct HermesProviderProfile {
     #[serde(default)]
     pub api_mode: Option<String>,
+}
+
+/// Kimi Code launch metadata for one provider: the wire Kimi speaks to the row's base and the
+/// model seeded when nothing configures one.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct KimiProviderProfile {
+    pub provider_type: String,
+    #[serde(default)]
+    pub default_model: Option<String>,
 }
 
 impl ProviderEnvMapping {
@@ -474,6 +488,13 @@ impl ProviderKeyMapping {
                     "provider `{primary_id}` supports `{HERMES_AGENT_ID}` but declares no [providers.hermes] profile"
                 ));
             }
+            if let Some(profile) = &mapping.kimi {
+                Self::validate_kimi_profile(mapping, profile)?;
+            } else if mapping.agents.iter().any(|agent| agent == KIMI_AGENT_ID) {
+                return provider_mapping_error(format!(
+                    "provider `{primary_id}` supports `{KIMI_AGENT_ID}` but declares no [providers.kimi] profile"
+                ));
+            }
         }
 
         for mapping in &self.api_keys {
@@ -606,6 +627,48 @@ impl ProviderKeyMapping {
         }
         Ok(())
     }
+
+    fn validate_kimi_profile(
+        mapping: &ProviderEnvMapping,
+        profile: &KimiProviderProfile,
+    ) -> Result<()> {
+        let primary_id = mapping.primary_id();
+        if !mapping.agents.iter().any(|agent| agent == KIMI_AGENT_ID) {
+            return provider_mapping_error(format!(
+                "provider `{primary_id}` declares a Kimi profile but does not support `{KIMI_AGENT_ID}`"
+            ));
+        }
+        let provider_type = profile.provider_type.as_str();
+        validate_token(
+            &format!("providers.{primary_id}.kimi.provider_type"),
+            provider_type,
+        )?;
+        if !KIMI_PROVIDER_TYPES.contains(&provider_type) {
+            return provider_mapping_error(format!(
+                "provider `{primary_id}` kimi.provider_type must be one of {}, got `{provider_type}`",
+                KIMI_PROVIDER_TYPES.join(", ")
+            ));
+        }
+        if let Some(default_model) = profile.default_model.as_deref() {
+            validate_token(
+                &format!("providers.{primary_id}.kimi.default_model"),
+                default_model,
+            )?;
+        }
+        // The launch env exports the base verbatim, so a kimi row needs a literal one: a
+        // missing base cannot launch, and a templated one would reach the wire unresolved.
+        let Some(base) = mapping.vendor_base_url(KIMI_AGENT_ID) else {
+            return provider_mapping_error(format!(
+                "provider `{primary_id}` supports `{KIMI_AGENT_ID}` but declares no base_url"
+            ));
+        };
+        if !base_url_template_placeholders(base).is_empty() {
+            return provider_mapping_error(format!(
+                "provider `{primary_id}` kimi base `{base}` must be literal; the launch env exports it verbatim"
+            ));
+        }
+        Ok(())
+    }
 }
 
 pub fn mapping_for_env_var(env_var: &str) -> Option<&'static ApiKeyProviderMapping> {
@@ -722,6 +785,12 @@ pub fn hermes_api_mode_for_provider_id(provider_id: &str) -> Option<&'static str
         .and_then(|profile| profile.api_mode.as_deref())
 }
 
+pub fn kimi_profile_for_provider_id(provider_id: &str) -> Option<&'static KimiProviderProfile> {
+    ProviderKeyMapping::load_embedded()
+        .provider_mapping(provider_id)
+        .and_then(|provider| provider.kimi.as_ref())
+}
+
 pub fn provider_uses_agent_native_auth(agent_id: &str, provider_id: &str) -> bool {
     agent_id == CLAUDE_CODE_AGENT_ID
         && claude_code_profile_for_provider_id(provider_id)
@@ -793,10 +862,8 @@ pub fn agent_provider_accepts_endpoint_override(agent_id: &str, provider_id: &st
             .agent_native_provider_id(agent_id)
             .and_then(goose_host_env_for_native_provider_id)
             .is_some(),
-        // Kimi fixes each lane's base in its launch environment.
-        KIMI_AGENT_ID => {
-            crate::runtime::agent::acp_bridge::kimi_provider_profile(Some(provider_id)).is_some()
-        }
+        // Kimi exports the row base in its launch environment, so any profiled row reroutes.
+        KIMI_AGENT_ID => provider.kimi.is_some() && provider.vendor_base_url(agent_id).is_some(),
         _ => provider.vendor_base_url(agent_id).is_some(),
     }
 }

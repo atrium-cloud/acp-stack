@@ -30,11 +30,11 @@ model = "k3"
 
 ## Providers
 
-Kimi Code selects between mapped provider lanes. The credential and endpoint differ per lane; each lane accepts only its own, and the runtime fixes each lane's endpoint at launch. Lane ids and key refs are declared in [../../data/providers.toml](../../data/providers.toml) and [../../data/env_vars.toml](../../data/env_vars.toml).
+Kimi Code runs every provider row in [../../data/providers.toml](../../data/providers.toml) that lists `kimi` under `agents`. Each row's `[providers.kimi]` sub-table declares the wire Kimi speaks to the row's base (`provider_type`: `kimi`, `anthropic`, `openai`, or `openai_responses`) and an optional `default_model`; the credential comes from [../../data/env_vars.toml](../../data/env_vars.toml). The runtime derives the endpoint, key, and wire from the row at launch.
 
-- Kimi For Coding (`kimi-for-coding`, `kimi-code`, and aliases): the subscription surface.
-- Kimi For Coding (Global) (`kimi-coding-global`): the global-region subscription surface.
-- Moonshot AI (`moonshotai`; `moonshotai-cn` for the China endpoint): the pay-as-you-go platform.
+- Kimi For Coding (`kimi-for-coding`, `kimi-code`, and aliases) and Kimi For Coding (Global) (`kimi-coding-global`): the subscription surfaces, on the `kimi` wire with `kimi-for-coding` as the default model.
+- Moonshot AI (`moonshotai`; `moonshotai-cn` for the China endpoint): the pay-as-you-go platform, on the `kimi` wire with `kimi-k3` as the default model.
+- OpenAI-compatible rows (`openrouter`, `deepseek`, `zai`, `opencode`, `opencode-go`, and the rest of the `openai` / `openai_responses` rows) and Anthropic-wire rows (`anthropic`, `minimax`, `minimax-cn`): no default model, so `--model` is required.
 
 Select a lane with `acps init --agent kimi --provider <id>` or `acps agent provider use <id>`. The selection swaps the `[agent].env` credential declaration to the lane's key.
 
@@ -55,17 +55,18 @@ The API key stays in the encrypted secret store. At launch, `acp-stack`:
 
 - passes its value as `KIMI_MODEL_API_KEY`
 - selects the model through `KIMI_MODEL_NAME`
-- sets `KIMI_MODEL_BASE_URL` to the selected lane's endpoint; a managed-state endpoint override replaces its origin and keeps the lane's path (`/v1` on the Moonshot platform, `/coding/v1` on the subscription lanes), see [Endpoint overrides](../specs/extensions.md#endpoint-overrides)
+- sets `KIMI_MODEL_BASE_URL` to the selected row's base (the `kimi` entry under `[providers.base_urls]` when present, else `base_url`); a managed-state endpoint override replaces its origin and keeps the row's path (`/v1` on the Moonshot platform, `/coding/v1` on the subscription lanes), see [Endpoint overrides](../specs/extensions.md#endpoint-overrides)
+- sets `KIMI_MODEL_PROVIDER_TYPE` to the row's `provider_type` on the `anthropic`, `openai`, and `openai_responses` wires; the `kimi` wire is Kimi Code's default and is left unset
 
 Reserve `[agent].env` for the credential ref; `acp-stack` owns the `KIMI_MODEL_*` launch vars.
 
 ## Models
 
-- When `--model` is not passed, `acps init` pins a per-lane default: `kimi-for-coding` on the subscription lanes (available on every Kimi plan) and `kimi-k3` on the Moonshot platform. A model already present in config is kept.
+- When `--model` is not passed, `acps init` pins the row's `default_model`: `kimi-for-coding` on the subscription lanes (available on every Kimi plan) and `kimi-k3` on the Moonshot platform. A model already present in config is kept. A row without a default lists the provider catalog when it publishes one and otherwise needs `--model`.
 - K3 requires a Moderato plan or above on the subscription lanes. Eligible users select it with `acps init --agent kimi --provider kimi-code --model k3` or `acps agent set --model k3`.
 - Model ids are accepted as supplied, without ACP discovery, because Kimi requires the model environment to initialize. Kimi Code validates the id when the process starts.
-- If a hand-edited config omits the model, the runtime launches with the lane default.
-- Mode values are discovered over ACP. Select one with `acps agent set --mode <mode>`. A non-interactive init without `--mode` selects `yolo` (the registry `default_mode`): Kimi's default mode raises an ACP permission request for every tool call, which the daemon path parks on an operator decision.
+- If a hand-edited config omits the model, the runtime launches with the row's `default_model`; a row without one refuses to launch until `[agent.provider].model` is set.
+- Mode values are discovered over ACP. Select one with `acps agent set --mode <mode>`. A non-interactive init without `--mode` selects `yolo` (the registry `default_mode`): Kimi's default mode raises an ACP permission request for every tool call, which the daemon path parks on an operator decision. On a row without a `default_model`, an init that also lacks `--model` skips mode discovery entirely, since the harness cannot start without a model.
 - Reasoning effort is discovered the same way. Kimi advertises a `thinking` (`thought_level`) option offering `off` plus the model's declared effort levels. Set it with `acps agent set --effort <effort>`.
 
 ## Sessions and capabilities

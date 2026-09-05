@@ -120,7 +120,7 @@ fn registry_derivation_marks_kimi_provider_applicable_with_model() {
     assert_eq!(
         applicability_of(&signals, InitCategory::Provider),
         Some(true),
-        "kimi selects between the subscription and Moonshot platform lanes"
+        "kimi selects between the catalog's kimi-enabled lanes"
     );
     assert_eq!(applicability_of(&signals, InitCategory::Model), Some(true));
     assert_eq!(applicability_of(&signals, InitCategory::Mode), Some(true));

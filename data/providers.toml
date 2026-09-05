@@ -30,7 +30,15 @@
 # one cannot be rerouted. `[providers.base_urls]` overrides it per agent id
 # where an agent's client expects a different path (pi and hermes Anthropic
 # clients append `/v1/messages` themselves). Claude Code lanes use the
-# `[providers.claude_code]` base_url; Kimi lanes are fixed in the runtime.
+# `[providers.claude_code]` base_url.
+#
+# A `[providers.kimi]` sub-table carries Kimi Code launch metadata and is
+# required on every kimi-enabled row: `provider_type` is the wire Kimi speaks
+# to the row's base (`kimi`, `anthropic`, `openai`, or `openai_responses`,
+# exported as KIMI_MODEL_PROVIDER_TYPE except for `kimi`), and the optional
+# `default_model` seeds the model when init or a hand-edited config leaves it
+# unset. The Anthropic wire takes the origin without `/v1`, so those rows
+# declare a `kimi` entry under `[providers.base_urls]`.
 #
 # `models_url` is the provider's OpenAI-compatible model listing endpoint:
 # `GET <models_url>` with `Authorization: Bearer <api key>` returning
@@ -41,7 +49,7 @@
 [[providers]]
 id = ["anthropic"]
 name = "Anthropic"
-agents = ["pi", "opencode", "goose", "claude", "hermes"]
+agents = ["pi", "opencode", "goose", "claude", "hermes", "kimi"]
 base_url = "https://api.anthropic.com/v1"
 
 # First-party Anthropic API needs no provisioning extras; the empty sub-table
@@ -51,9 +59,13 @@ base_url = "https://api.anthropic.com/v1"
 [providers.hermes]
 api_mode = "anthropic_messages"
 
+[providers.kimi]
+provider_type = "anthropic"
+
 [providers.base_urls]
 pi = "https://api.anthropic.com"
 hermes = "https://api.anthropic.com"
+kimi = "https://api.anthropic.com"
 
 [[providers]]
 id = ["ant-ling"]
@@ -68,16 +80,19 @@ agents = ["pi"]
 [[providers]]
 id = ["openai"]
 name = "OpenAI"
-agents = ["pi", "opencode", "goose", "codex", "hermes"]
+agents = ["pi", "opencode", "goose", "codex", "hermes", "kimi"]
 base_url = "https://api.openai.com/v1"
 
 [providers.hermes]
 api_mode = "codex_responses"
 
+[providers.kimi]
+provider_type = "openai_responses"
+
 [[providers]]
 id = ["deepseek"]
 name = "DeepSeek"
-agents = ["pi", "opencode", "claude", "hermes"]
+agents = ["pi", "opencode", "claude", "hermes", "kimi"]
 base_url = "https://api.deepseek.com"
 models_url = "https://api.deepseek.com/models"
 
@@ -91,6 +106,9 @@ env = { CLAUDE_CODE_SUBAGENT_MODEL = "deepseek-v4-flash", CLAUDE_CODE_EFFORT_LEV
 
 [providers.hermes]
 api_mode = "chat_completions"
+
+[providers.kimi]
+provider_type = "openai"
 
 [[providers]]
 id = ["google"]
@@ -148,21 +166,27 @@ base_url = "https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID
 [[providers]]
 id = ["xai"]
 name = "xAI"
-agents = ["pi", "opencode", "goose", "hermes"]
+agents = ["pi", "opencode", "goose", "hermes", "kimi"]
 base_url = "https://api.x.ai/v1"
 
 [providers.hermes]
 api_mode = "codex_responses"
 
+[providers.kimi]
+provider_type = "openai_responses"
+
 [[providers]]
 id = ["openrouter"]
 name = "OpenRouter"
-agents = ["pi", "opencode", "goose", "codex", "hermes", "kilo"]
+agents = ["pi", "opencode", "goose", "codex", "hermes", "kilo", "kimi"]
 base_url = "https://openrouter.ai/api/v1"
 models_url = "https://openrouter.ai/api/v1/models"
 
 [providers.hermes]
 api_mode = "chat_completions"
+
+[providers.kimi]
+provider_type = "openai"
 
 [[providers]]
 id = ["vercel-ai-gateway", "vercel", "ai-gateway"]
@@ -186,7 +210,7 @@ api_mode = "chat_completions"
 id = ["zai"]
 name = "Z.AI"
 # does not appear to have a status page
-agents = ["pi", "opencode", "claude", "hermes"]
+agents = ["pi", "opencode", "claude", "hermes", "kimi"]
 base_url = "https://api.z.ai/api/paas/v4"
 # No models_url: GET /api/paas/v4/models answers 401 but is absent from
 # Z.AI's API reference and OpenAPI spec (checked 2026-08-01), so the
@@ -206,6 +230,9 @@ hermes = "GLM_API_KEY"
 [providers.hermes]
 api_mode = "chat_completions"
 
+[providers.kimi]
+provider_type = "openai"
+
 # Pi's China variant of the Z.AI Coding Plan; kept as a separate entry from
 # the models.dev `zai-coding-plan` (opencode) entry, matching the
 # minimax/minimax-cn regional-variant pattern.
@@ -218,7 +245,7 @@ agents = ["pi"]
 id = ["opencode"]
 name = "OpenCode Zen"
 # does not appear to have a status page
-agents = ["pi", "opencode", "hermes"]
+agents = ["pi", "opencode", "hermes", "kimi"]
 base_url = "https://opencode.ai/zen/v1"
 # Verified 2026-08-20: 200 with the standard {"data":[{"id":...}]} shape,
 # served even unauthenticated.
@@ -233,11 +260,14 @@ hermes = "OPENCODE_ZEN_API_KEY"
 [providers.hermes]
 api_mode = "chat_completions"
 
+[providers.kimi]
+provider_type = "openai"
+
 [[providers]]
 id = ["opencode-go"]
 name = "OpenCode Go"
 # does not appear to have a status page
-agents = ["pi", "opencode", "hermes"]
+agents = ["pi", "opencode", "hermes", "kimi"]
 base_url = "https://opencode.ai/zen/go/v1"
 # Verified 2026-08-20: 200 with the standard {"data":[{"id":...}]} shape,
 # served even unauthenticated.
@@ -249,6 +279,9 @@ hermes = "OPENCODE_GO_API_KEY"
 [providers.hermes]
 api_mode = "chat_completions"
 
+[providers.kimi]
+provider_type = "openai"
+
 [[providers]]
 id = ["radius"]
 name = "Radius"
@@ -257,7 +290,7 @@ agents = ["pi"]
 [[providers]]
 id = ["huggingface"]
 name = "Hugging Face"
-agents = ["pi", "opencode", "hermes"]
+agents = ["pi", "opencode", "hermes", "kimi"]
 base_url = "https://router.huggingface.co/v1"
 # Verified 2026-08-20: 200 with the standard {"data":[{"id":...}]} shape,
 # served even unauthenticated.
@@ -265,6 +298,9 @@ models_url = "https://router.huggingface.co/v1/models"
 
 [providers.hermes]
 api_mode = "chat_completions"
+
+[providers.kimi]
+provider_type = "openai"
 
 [[providers]]
 id = ["fireworks", "fireworks-ai", "fw"]
@@ -325,6 +361,12 @@ kimi-code = "kimi"
 [providers.hermes]
 api_mode = "anthropic_messages"
 
+# `kimi-for-coding` is available on every subscription tier; `k3` is gated to
+# Moderato and up.
+[providers.kimi]
+provider_type = "kimi"
+default_model = "kimi-for-coding"
+
 [providers.base_urls]
 pi = "https://api.kimi.com/coding"
 hermes = "https://api.kimi.com/coding"
@@ -341,10 +383,14 @@ base_url = "https://api.kimi.com/coding/v1"
 [providers.provider_ids]
 kimi-coding-global = "kimi"
 
+[providers.kimi]
+provider_type = "kimi"
+default_model = "kimi-for-coding"
+
 [[providers]]
 id = ["minimax"]
 name = "MiniMax"
-agents = ["pi", "opencode", "claude", "hermes"]
+agents = ["pi", "opencode", "claude", "hermes", "kimi"]
 base_url = "https://api.minimax.io/anthropic/v1"
 
 [providers.claude_code]
@@ -355,14 +401,18 @@ env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "
 [providers.hermes]
 api_mode = "anthropic_messages"
 
+[providers.kimi]
+provider_type = "anthropic"
+
 [providers.base_urls]
 pi = "https://api.minimax.io/anthropic"
 hermes = "https://api.minimax.io/anthropic"
+kimi = "https://api.minimax.io/anthropic"
 
 [[providers]]
 id = ["minimax-cn"]
 name = "MiniMax (China)"
-agents = ["pi", "opencode", "claude", "hermes"]
+agents = ["pi", "opencode", "claude", "hermes", "kimi"]
 base_url = "https://api.minimaxi.com/anthropic/v1"
 
 [providers.claude_code]
@@ -372,6 +422,12 @@ env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "
 
 [providers.hermes]
 api_mode = "anthropic_messages"
+
+[providers.kimi]
+provider_type = "anthropic"
+
+[providers.base_urls]
+kimi = "https://api.minimaxi.com/anthropic"
 
 [[providers]]
 id = ["qwen-token-plan"]
@@ -392,7 +448,7 @@ agents = ["pi"]
 id = ["xiaomi"]
 name = "Xiaomi"
 # does not appear to have a status page
-agents = ["pi", "opencode", "claude", "hermes"]
+agents = ["pi", "opencode", "claude", "hermes", "kimi"]
 base_url = "https://api.xiaomimimo.com/v1"
 # Probed 2026-08-20: 401 unauthenticated, so the response shape is unverified;
 # the best-effort fetch degrades to a logged skip if it turns out wrong.
@@ -404,6 +460,9 @@ default_model = "mimo-v2.5-pro[1m]"
 
 [providers.hermes]
 api_mode = "chat_completions"
+
+[providers.kimi]
+provider_type = "openai"
 
 [[providers]]
 id = ["xiaomi-token-plan-cn"]
@@ -1005,6 +1064,11 @@ set_subagent_model = true
 # (Moonshot's docs list it only as a stale var to delete).
 env = { ENABLE_TOOL_SEARCH = "false", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1048576", CLAUDE_CODE_EFFORT_LEVEL = "max" }
 
+# The platform catalog has no `kimi-for-coding`; `kimi-k3` is its coding model.
+[providers.kimi]
+provider_type = "kimi"
+default_model = "kimi-k3"
+
 [[providers]]
 id = ["moonshotai-cn"]
 name = "Moonshot AI (China)"
@@ -1018,6 +1082,10 @@ set_subagent_model = true
 # ENABLE_TOOL_SEARCH=false is a local defensive choice, not Moonshot-documented
 # (Moonshot's docs list it only as a stale var to delete).
 env = { ENABLE_TOOL_SEARCH = "false", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1048576", CLAUDE_CODE_EFFORT_LEVEL = "max" }
+
+[providers.kimi]
+provider_type = "kimi"
+default_model = "kimi-k3"
 
 [[providers]]
 id = ["morph"]
@@ -1058,7 +1126,7 @@ base_url = "https://api.nova.amazon.com/v1"
 [[providers]]
 id = ["novita-ai"]
 name = "NovitaAI"
-agents = ["opencode", "hermes"]
+agents = ["opencode", "hermes", "kimi"]
 base_url = "https://api.novita.ai/openai"
 # Verified 2026-08-20: 200 with the standard {"data":[{"id":...}]} shape,
 # served even unauthenticated. Note the /openai base, not /v1.
@@ -1067,10 +1135,13 @@ models_url = "https://api.novita.ai/openai/models"
 [providers.hermes]
 api_mode = "chat_completions"
 
+[providers.kimi]
+provider_type = "openai"
+
 [[providers]]
 id = ["nvidia"]
 name = "Nvidia" # NIM
-agents = ["pi", "opencode", "hermes"]
+agents = ["pi", "opencode", "hermes", "kimi"]
 base_url = "https://integrate.api.nvidia.com/v1"
 # Verified 2026-08-20: 200 with the standard {"data":[{"id":...}]} shape,
 # served even unauthenticated.
@@ -1079,10 +1150,13 @@ models_url = "https://integrate.api.nvidia.com/v1/models"
 [providers.hermes]
 api_mode = "chat_completions"
 
+[providers.kimi]
+provider_type = "openai"
+
 [[providers]]
 id = ["ollama-cloud"]
 name = "Ollama Cloud"
-agents = ["opencode", "hermes"]
+agents = ["opencode", "hermes", "kimi"]
 base_url = "https://ollama.com/v1"
 # Verified 2026-08-20: 200 with the standard {"data":[{"id":...}]} shape,
 # served even unauthenticated.
@@ -1090,6 +1164,9 @@ models_url = "https://ollama.com/v1/models"
 
 [providers.hermes]
 api_mode = "chat_completions"
+
+[providers.kimi]
+provider_type = "openai"
 
 [[providers]]
 id = ["orcarouter"]

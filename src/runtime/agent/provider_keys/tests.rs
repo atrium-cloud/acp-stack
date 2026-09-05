@@ -896,7 +896,7 @@ fn endpoint_override_pairs_are_data_driven() {
     assert!(!agent_provider_accepts_endpoint_override(
         "goose", "cerebras"
     ));
-    // Kimi lanes are fixed in the runtime; a provider outside them has no lane.
+    // Kimi lanes are data-driven from the provider rows; a provider without a row has no lane.
     assert!(agent_provider_accepts_endpoint_override(
         "kimi",
         "moonshotai"
@@ -915,7 +915,8 @@ fn endpoint_override_pairs_are_data_driven() {
         "anthropic"
     ));
     // A mapped provider the agent does not run has no native slot to write into.
-    assert!(!agent_provider_accepts_endpoint_override(
+    assert!(!agent_provider_accepts_endpoint_override("kimi", "mistral"));
+    assert!(agent_provider_accepts_endpoint_override(
         "kimi",
         "openrouter"
     ));
@@ -1009,8 +1010,12 @@ fn vendor_base_urls_prefer_the_agent_entry() {
         Some("https://api.jiekou.ai/openai")
     );
     assert_eq!(
-        vendor_base_url_for_agent_provider_id("kimi", "openrouter"),
+        vendor_base_url_for_agent_provider_id("kimi", "mistral"),
         None
+    );
+    assert_eq!(
+        vendor_base_url_for_agent_provider_id("kimi", "minimax"),
+        Some("https://api.minimax.io/anthropic")
     );
     // Per-account segments stay as placeholders until the stored companions fill them.
     assert_eq!(
@@ -1100,23 +1105,155 @@ base_url = "https://api.example.com/{EXAMPLE_ACCOUNT_ID/v1"
     assert!(error.to_string().contains("unbalanced"), "{error}");
 }
 
-/// The runtime-fixed lane bases must agree with the provider rows a relay operator reads.
 #[test]
-fn kimi_lane_constants_match_the_provider_rows() {
-    use crate::runtime::agent::acp_bridge::kimi_provider_profile;
-    for provider_id in [
-        "kimi-code",
-        "kimi-coding-global",
-        "moonshotai",
-        "moonshotai-cn",
+fn kimi_profiles_are_data_driven() {
+    for (provider_id, provider_type, default_model) in [
+        ("kimi-code", "kimi", Some("kimi-for-coding")),
+        ("kimi-coding-global", "kimi", Some("kimi-for-coding")),
+        ("moonshotai", "kimi", Some("kimi-k3")),
+        ("moonshotai-cn", "kimi", Some("kimi-k3")),
+        ("openrouter", "openai", None),
+        ("openai", "openai_responses", None),
+        ("anthropic", "anthropic", None),
+        ("minimax", "anthropic", None),
     ] {
-        let (lane_base, _, _) = kimi_provider_profile(Some(provider_id)).expect("kimi lane");
+        let profile = kimi_profile_for_provider_id(provider_id)
+            .unwrap_or_else(|| panic!("`{provider_id}` has a kimi profile"));
+        assert_eq!(profile.provider_type, provider_type, "{provider_id}");
         assert_eq!(
-            vendor_base_url_for_agent_provider_id("kimi", provider_id),
-            Some(lane_base),
+            profile.default_model.as_deref(),
+            default_model,
+            "{provider_id}"
+        );
+        assert!(
+            agent_provider_accepts_endpoint_override(KIMI_AGENT_ID, provider_id),
             "{provider_id}"
         );
     }
+    assert_eq!(kimi_profile_for_provider_id("mistral"), None);
+    assert!(!agent_provider_accepts_endpoint_override(
+        KIMI_AGENT_ID,
+        "mistral"
+    ));
+}
+
+/// The Anthropic wire takes the origin, so those rows carry a kimi base without `/v1`.
+#[test]
+fn kimi_anthropic_wire_rows_declare_an_origin_base() {
+    for provider in ProviderKeyMapping::load_embedded().providers() {
+        let Some(profile) = provider.kimi.as_ref() else {
+            continue;
+        };
+        let base = provider
+            .vendor_base_url(KIMI_AGENT_ID)
+            .unwrap_or_else(|| panic!("`{}` has a kimi base", provider.primary_id()));
+        if profile.provider_type == "anthropic" {
+            assert!(
+                !base.trim_end_matches('/').ends_with("/v1"),
+                "`{}` anthropic-wire base `{base}` must omit /v1",
+                provider.primary_id()
+            );
+        }
+    }
+}
+
+#[test]
+fn invalid_mapping_rejects_kimi_provider_without_profile() {
+    let err = ProviderKeyMapping::from_toml(
+        r#"
+[[providers]]
+id = ["solo"]
+name = "Solo"
+agents = ["kimi"]
+base_url = "https://api.solo.example/v1"
+"#,
+    )
+    .expect_err("kimi-enabled provider without profile fails");
+
+    assert!(
+        err.to_string()
+            .contains("declares no [providers.kimi] profile")
+    );
+}
+
+#[test]
+fn invalid_mapping_rejects_unknown_kimi_provider_type() {
+    let err = ProviderKeyMapping::from_toml(
+        r#"
+[[providers]]
+id = ["solo"]
+name = "Solo"
+agents = ["kimi"]
+base_url = "https://api.solo.example/v1"
+
+[providers.kimi]
+provider_type = "bogus"
+"#,
+    )
+    .expect_err("unknown kimi provider_type fails");
+
+    assert!(
+        err.to_string()
+            .contains("kimi.provider_type must be one of")
+    );
+}
+
+#[test]
+fn invalid_mapping_rejects_kimi_profile_without_agent_support_or_base() {
+    let err = ProviderKeyMapping::from_toml(
+        r#"
+[[providers]]
+id = ["solo"]
+name = "Solo"
+agents = ["opencode"]
+
+[providers.kimi]
+provider_type = "openai"
+"#,
+    )
+    .expect_err("kimi profile on a non-kimi provider fails");
+    assert!(err.to_string().contains("does not support `kimi`"));
+
+    let err = ProviderKeyMapping::from_toml(
+        r#"
+[[providers]]
+id = ["solo"]
+name = "Solo"
+agents = ["kimi"]
+
+[providers.kimi]
+provider_type = "openai"
+"#,
+    )
+    .expect_err("kimi row without base fails");
+    assert!(err.to_string().contains("declares no base_url"));
+}
+
+#[test]
+fn invalid_mapping_rejects_kimi_profile_with_a_templated_base() {
+    let env_vars = r#"
+[[api_keys]]
+env_var = "EXAMPLE_API_KEY"
+provider_ids = ["example"]
+companion_env_vars = ["EXAMPLE_ACCOUNT_ID"]
+optional_env_vars = []
+"#;
+    let err = ProviderKeyMapping::from_toml_parts(
+        env_vars,
+        r#"
+[[providers]]
+id = ["example"]
+name = "Example"
+agents = ["kimi"]
+base_url = "https://api.example.com/{EXAMPLE_ACCOUNT_ID}/v1"
+
+[providers.kimi]
+provider_type = "openai"
+"#,
+    )
+    .expect_err("kimi row with a templated base fails");
+
+    assert!(err.to_string().contains("must be literal"), "{err}");
 }
 
 #[test]

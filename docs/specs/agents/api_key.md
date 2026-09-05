@@ -33,11 +33,10 @@ Each harness reads resolved credentials its own way. Env var names and base comp
 ### Kimi Code
 
 - Kimi Code does not read `KIMI_API_KEY` directly.
-- `acp-stack` keeps the active lane's ref in encrypted storage:
-    - `KIMI_API_KEY` for the Kimi For Coding subscription
-    - `MOONSHOT_API_KEY` for the Moonshot platform
+- `acp-stack` keeps the active row's ref in encrypted storage:
+    - the row's Kimi key ref from `data/env_vars.toml` (`KIMI_API_KEY` for the Kimi For Coding subscription, `MOONSHOT_API_KEY` for the Moonshot platform, `OPENROUTER_API_KEY` for OpenRouter, and so on for every row listing `kimi`)
     - the declared `api_key_ref` for a custom provider
-- `acp-stack` exposes the value to `kimi acp` as `KIMI_MODEL_API_KEY`, together with the selected model and the lane's endpoint.
+- `acp-stack` exposes the value to `kimi acp` as `KIMI_MODEL_API_KEY`, together with the selected model, the row's endpoint, and the row's wire as `KIMI_MODEL_PROVIDER_TYPE`.
 
 ### Hermes Agent
 

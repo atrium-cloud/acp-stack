@@ -7,7 +7,7 @@ use crate::dev_gates::{
 };
 use crate::error::{Result, StackError};
 use crate::runtime::agent::acp_bridge::AgentSessionConfigCategory;
-use crate::runtime::agent::acp_bridge::{KIMI_CODE_AGENT_ID, kimi_default_model_for_provider};
+use crate::runtime::agent::acp_bridge::{KIMI_CODE_AGENT_ID, kimi_lane_for_provider_id};
 use crate::runtime::agent::agent_headless_config::{
     HERMES_AGENT_ID, provision_agent_headless_config,
 };
@@ -197,7 +197,8 @@ pub(super) fn configure_model_and_mode_for_init(
     }
     let mut outcome = ModelModeOutcome::default();
     // Kimi cannot initialize its ACP process without a model, so the model
-    // lane MUST settle here before the mode lane may spawn the harness.
+    // lane MUST settle here before the mode lane may spawn the harness. A lane
+    // without a seeded default falls through to the provider-catalog lane.
     let mut model_lane_resolved = false;
     if set_model
         && config.agent.id == KIMI_CODE_AGENT_ID
@@ -210,22 +211,20 @@ pub(super) fn configure_model_and_mode_for_init(
                 .provider
                 .as_ref()
                 .is_some_and(|provider| provider.model.is_some());
-        if !model_settled {
-            // The subscription tier ships `kimi-for-coding`, which does not
-            // exist on the Moonshot platform.
-            let provider_id = config
-                .agent
-                .provider
-                .as_ref()
-                .map(|provider| provider.id.as_str());
-            write_model_into_config(
-                config,
-                kimi_default_model_for_provider(provider_id).to_owned(),
-                set_provider,
-            );
+        let lane_default = config
+            .agent
+            .provider
+            .as_ref()
+            .filter(|provider| provider.custom.is_none())
+            .and_then(|provider| kimi_lane_for_provider_id(Some(&provider.id)))
+            .and_then(|lane| lane.default_model);
+        if model_settled {
+            model_lane_resolved = true;
+        } else if let Some(default_model) = lane_default {
+            write_model_into_config(config, default_model.to_owned(), set_provider);
             outcome.model_action = ModelModeAction::Set;
+            model_lane_resolved = true;
         }
-        model_lane_resolved = true;
     }
     // A custom-provider model id is not an ACP-advertised value, so the model
     // lane is skipped; mode is provider-independent and still runs.

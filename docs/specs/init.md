@@ -157,7 +157,7 @@ The operator-facing sequence, in order:
         - Apply `--provider`, `--api-key-ref`, `--model`, `--mode`, `--effort`, and custom-provider flags.
         - A custom provider's id must not be one the mapped-provider registry already knows, including ids the registry maps for other harnesses: registry ids are reserved instance-wide, so codex with an Anthropic-compatible endpoint uses a distinct id such as `anthropic-1`.
         - Passing a registry id with `--custom-provider`, or selecting a registry id that has no key mapping for the chosen agent, is rejected with that remediation.
-        - Kimi Code skips model discovery: `--model` is accepted as supplied, and without it init pins the selected provider lane's default (`kimi-for-coding` on the subscription lanes, `kimi-k3` on the Moonshot platform) unless config already has a model.
+        - Kimi Code skips model discovery: `--model` is accepted as supplied, and without it init pins the selected provider row's `default_model` (`kimi-for-coding` on the subscription lanes, `kimi-k3` on the Moonshot platform) unless config already has a model. A row without a `default_model` reads the provider catalog like goose and otherwise needs `--model`.
         - Provider selection follows the standard provider-backed rules; at runtime, a legacy config without `[agent.provider]` launches on the Kimi For Coding subscription lane.
     - Custom agents:
         - Skip provider/model/mode/effort discovery; interactive runs still prompt generic session config options from one provisional session.

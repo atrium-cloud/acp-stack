@@ -58,7 +58,7 @@ pub use self::capabilities::{
     IgnoredFeature, PartitionedMcpServers, SkippedMcpServer,
 };
 pub(crate) use self::process_env::{
-    KIMI_API_KEY_ENV, KIMI_CODE_AGENT_ID, kimi_default_model_for_provider, kimi_provider_profile,
+    KIMI_API_KEY_ENV, KIMI_CODE_AGENT_ID, kimi_lane_for_provider_id,
 };
 pub(super) use self::spawn::agent_process_path;
 pub(crate) use self::spawn::resolve_command_path;

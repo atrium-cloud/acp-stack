@@ -16,9 +16,9 @@ use crate::dev_gates::{
 use crate::error::{Result, StackError};
 use crate::runtime::agent::acp_bridge::{
     AcpBridge, AcpPermissionPolicy, AgentCapabilitiesDto, AgentSessionConfigCategory,
-    KIMI_CODE_AGENT_ID, SessionEventSink, session_config_id_for_value, session_config_values,
-    session_mode_selection_for_value, session_mode_values, session_model_selection_for_value,
-    session_model_values,
+    KIMI_CODE_AGENT_ID, SessionEventSink, kimi_lane_for_provider_id, session_config_id_for_value,
+    session_config_values, session_mode_selection_for_value, session_mode_values,
+    session_model_selection_for_value, session_model_values,
 };
 use crate::runtime::agent::agent_headless_config::{CODEX_OPENROUTER_PROVIDER_ID, HERMES_AGENT_ID};
 use crate::runtime::agent::provider_keys::{
@@ -155,9 +155,17 @@ pub fn model_applies_from_disk_only(agent: &AgentConfig) -> bool {
 }
 
 /// goose resolves its model from its own config while starting a session, so a provisional
-/// discovery session cannot be spawned for it until a model is configured.
+/// discovery session cannot be spawned for it until a model is configured. Kimi needs one in its
+/// launch environment; a lane that seeds no default leaves the operator's choice as the only
+/// source.
 pub fn session_new_requires_a_configured_model(agent: &AgentConfig) -> bool {
     agent.id == GOOSE_AGENT_ID
+        || (agent.id == KIMI_CODE_AGENT_ID
+            && agent.provider.as_ref().is_some_and(|provider| {
+                provider.custom.is_none()
+                    && kimi_lane_for_provider_id(Some(&provider.id))
+                        .is_some_and(|lane| lane.default_model.is_none())
+            }))
 }
 
 /// Configured model with session-create precedence: a root `agent.model` outranks the provider slot.
@@ -176,14 +184,19 @@ pub fn configured_model_value(agent: &AgentConfig) -> Option<&str> {
 
 /// True when a discovery spawn would reach an agent that cannot answer `session/new` yet. goose
 /// reads the model from its provisioned config, which carries the provider slot only, so a root
-/// `agent.model` does not unblock it.
+/// `agent.model` does not unblock it; Kimi's launch env reads the root slot first, so it does.
 pub fn discovery_is_blocked_without_a_model(agent: &AgentConfig) -> bool {
-    session_new_requires_a_configured_model(agent)
-        && agent
-            .provider
-            .as_ref()
-            .and_then(|provider| provider.model.as_deref())
-            .is_none_or(|model| model.trim().is_empty())
+    if !session_new_requires_a_configured_model(agent) {
+        return false;
+    }
+    if agent.id == KIMI_CODE_AGENT_ID {
+        return configured_model_value(agent).is_none();
+    }
+    agent
+        .provider
+        .as_ref()
+        .and_then(|provider| provider.model.as_deref())
+        .is_none_or(|model| model.trim().is_empty())
 }
 
 fn missing_model_for_discovery_error(agent: &AgentConfig) -> StackError {
@@ -679,6 +692,45 @@ mod tests {
             "opencode",
             mapped_provider("openrouter")
         )));
+    }
+
+    /// A Kimi row without a seeded `default_model` leaves the launch env without a model, so it
+    /// gates discovery the way goose does; a row with a default does not.
+    #[test]
+    fn kimi_discovery_is_blocked_only_on_rows_without_a_default_model() {
+        assert!(session_new_requires_a_configured_model(&agent(
+            KIMI_CODE_AGENT_ID,
+            mapped_provider("openrouter")
+        )));
+        assert!(discovery_is_blocked_without_a_model(&agent(
+            KIMI_CODE_AGENT_ID,
+            mapped_provider("openrouter")
+        )));
+        let mut root_model = agent(KIMI_CODE_AGENT_ID, mapped_provider("openrouter"));
+        root_model.model = Some("moonshotai/kimi-k3".to_owned());
+        assert!(
+            !discovery_is_blocked_without_a_model(&root_model),
+            "the launch env reads a root model, so it unblocks discovery"
+        );
+        assert!(!session_new_requires_a_configured_model(&agent(
+            KIMI_CODE_AGENT_ID,
+            mapped_provider("kimi-code")
+        )));
+        assert!(!session_new_requires_a_configured_model(&agent(
+            KIMI_CODE_AGENT_ID,
+            mapped_provider("moonshotai")
+        )));
+        let mut custom = agent(KIMI_CODE_AGENT_ID, mapped_provider("openrouter"));
+        custom.provider.as_mut().expect("provider").custom =
+            Some(crate::config::AgentCustomProviderConfig {
+                name: "Custom".to_owned(),
+                base_url: "https://api.custom.example/v1".to_owned(),
+                api: crate::config::CustomProviderApi::default(),
+                model_name: None,
+                context: 131072,
+                output_max_tokens: 32768,
+            });
+        assert!(!session_new_requires_a_configured_model(&custom));
     }
 
     #[test]
