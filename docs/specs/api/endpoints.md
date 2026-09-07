@@ -525,9 +525,9 @@ All skill routes load config leniently, dropping individually invalid `[[skills.
 
 - Tier: `session`
 - Request: none.
-- Response: `{ "agent_id", "config_options" }` — the full advertised option set from a fresh provisional `session/new`, in the same entry shape as `GET /v1/sessions/{id}/config-options`. Includes the categories the typed lanes do not carry (`model_config`, `_`-prefixed customs, category-less options) and boolean kinds.
+- Response: `{ "agent_id", "config_options" }` — the full advertised option set from a fresh provisional session, in the same entry shape as `GET /v1/sessions/{id}/config-options`. Includes the categories the typed lanes do not carry (`model_config`, `_`-prefixed customs, category-less options) and boolean kinds. The probe applies the configured model, and the options it returns are overlaid onto the `session/new` set by option id, so an adapter answering with only the options it touched still yields the full set.
 - Errors: discovery failure is a hard error here. There is no catalog fallback, and an empty list would be indistinguishable from an agent that advertises nothing.
-- Notes: each call spawns a provisional agent probe (same cost and timeout as `/v1/models`), so callers should not poll it. The typed `modes`/`efforts` arrays on `/v1/models` remain the pickers for the `agent.mode`/`agent.effort` settings and are not deprecated by this superset.
+- Notes: each call spawns a provisional agent probe (same cost and timeout as `/v1/models`) that applies the configured model before reading the options, so callers should not poll it. The typed `modes`/`efforts` arrays on `/v1/models` remain the pickers for the `agent.mode`/`agent.effort` settings and are not deprecated by this superset.
 
 ### `GET /v1/agent/update/status`
 
@@ -578,9 +578,9 @@ All skill routes load config leniently, dropping individually invalid `[[skills.
 ### `GET /v1/models`
 
 - Tier: `session` (also mounted on the `init` tier of `acps init serve`, where the bootstrap bearer token replaces the session key, so a hosted backend renders pickers while init is still running).
-- Request: optional `?target_id=<id>` (alias `?target=`) query param selecting a non-default Array target.
+- Request: optional `?target_id=<id>` (alias `?target=`) query param selecting a non-default Array target, and optional `?model=<value>` naming the model the discovery probe applies.
 - Response: `{ "agent_id", "source", "models": [{ "value", "display_name"?, "efforts"? }], "modes": [...], "efforts": [...], "catalog_error"? }`.
-    - `efforts` carries the agent's ACP-advertised reasoning-effort values (the `thought_level` session config option) and is empty when the agent exposes no such option.
+    - `efforts` carries the agent's ACP-advertised reasoning-effort values (the `thought_level` session config option) and is empty when the agent exposes no such option. On the `acp_advertised` source, adapters advertise those values per model, so the list belongs to `?model=` when one is given, to the configured model otherwise, and to the model the probed harness booted with when neither is set. Entries in `models` carry no `efforts` there; one `?model=` call per model reports them. Where the harness pins the effort in its own config (Codex with OpenRouter), the catalog supplies `efforts` for the configured model and `?model=` does not redirect it.
     - On the catalog path each model may carry its own `efforts`, the reasoning-effort values the provider's listing reports for that model (OpenRouter's `reasoning.supported_efforts`); the key is absent for models without any.
     - `source` is `"provider_catalog"` when models come from the provider's live model listing (`models_url` in the embedded provider metadata, fetched with the stored API key and cached at `~/.config/acp-stack/provider-models.json`) and `"acp_advertised"` when they come from the agent's ACP `session/new` config options.
     - `catalog_error` is present when the provider declares a model listing endpoint but the catalog is unavailable (fetch failed and nothing cached). The response then falls back to ACP-advertised values, which is an empty `models` list for agents whose model is taken verbatim from on-disk config (Hermes Agent).
@@ -589,6 +589,7 @@ All skill routes load config leniently, dropping individually invalid `[[skills.
     - The catalog serves only mapped providers of agents whose harness takes the model verbatim from on-disk config (Claude Code profiled providers, Codex with OpenRouter, Hermes Agent). Custom providers have no listing endpoint, and agents with real ACP discovery keep their advertised list.
     - On the catalog path an ACP discovery failure degrades to `modes: []` and `efforts: []` instead of failing the request.
     - `?target_id=<id>` (alias `?target=`) discovers against that Array target instead of the default (primary) target. The id is validated the way other agent-target inputs are, so with Array mode off any non-primary id (and an unknown id generally) is a `400 request.invalid_param`, never a silent fallback to the default.
+    - `?model=<value>` is applied in the probe session before the options are read. A value the agent does not advertise, a harness that reads its model pin from on-disk config, or a rejected set each leave the probe on its own model and are logged rather than failing the request.
     - On the init tier the picker reads the on-disk config, which a fresh init writes early in the run (before agent install). A call made before init has staged the config returns `409 init.config_not_ready`; retry once setup has progressed past config staging.
 
 ## Array

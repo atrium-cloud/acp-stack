@@ -14,7 +14,7 @@ use crate::runtime::agent::agent_headless_config::{
     provision_agent_headless_config, provision_agent_headless_config_transition,
 };
 use crate::runtime::agent::model_discovery::{
-    effort_value_is_explicit_without_discovery, fetch_session_config,
+    configured_model_value, effort_value_is_explicit_without_discovery, fetch_session_config,
     model_value_is_explicit_without_discovery, resolve_advertised_model_value,
     validate_catalog_effort_value,
 };
@@ -597,7 +597,9 @@ pub(in crate::cli) fn resolve_agent_model_value(
     if agent_model_is_explicit_without_discovery(config) {
         return Ok(model_id.to_owned());
     }
-    let response = read_agent_new_session_response(home, config)?;
+    // The model being resolved is not yet settled, and the advertised model list does not vary by
+    // applied model, so the probe selects none.
+    let response = read_agent_new_session_response(home, config, None)?;
     resolve_advertised_model_value(&response, provider_id, model_id)
 }
 
@@ -659,32 +661,53 @@ fn is_claude_code_builtin_model_alias(value: &str) -> bool {
     )
 }
 
+/// Model and mode values are offered independently of the applied model, so they are checked
+/// against `session/new`, which lists all of them; an adapter answering a set with only the
+/// options it touched would otherwise reject a value the agent does offer. Effort levels are
+/// per-model, so that lane applies the configured model and reads the refreshed advertisement.
 pub(in crate::cli) fn validate_agent_session_config_value(
     home: &Path,
     config: &Config,
     category: AgentSessionConfigCategory,
     value: &str,
 ) -> Result<()> {
-    let response = read_agent_new_session_response(home, config)?;
     match category {
         AgentSessionConfigCategory::Model => {
+            let response = read_agent_new_session_response(home, config, None)?;
             session_model_selection_for_value(&response, value).map(|_| ())
         }
         AgentSessionConfigCategory::Mode => {
+            let response = read_agent_new_session_response(home, config, None)?;
             session_mode_selection_for_value(&response, value).map(|_| ())
         }
         AgentSessionConfigCategory::Effort => {
+            let response = read_agent_applied_session_response(
+                home,
+                config,
+                configured_model_value(&config.agent),
+            )?;
             session_config_id_for_value(response.config_options.as_deref(), category, value)
                 .map(|_| ())
         }
     }
 }
 
+/// The `session/new` advertisement, listing every value the agent offers.
 fn read_agent_new_session_response(
     home: &Path,
     config: &Config,
+    model: Option<&str>,
 ) -> Result<agent_client_protocol::schema::v1::NewSessionResponse> {
-    fetch_session_config(home, config)
+    fetch_session_config(home, config, model).map(|discovered| discovered.response)
+}
+
+/// The advertisement describing `model`, which the probe selects before reading the options.
+fn read_agent_applied_session_response(
+    home: &Path,
+    config: &Config,
+    model: Option<&str>,
+) -> Result<agent_client_protocol::schema::v1::NewSessionResponse> {
+    fetch_session_config(home, config, model).map(|discovered| discovered.applied())
 }
 
 #[cfg(test)]

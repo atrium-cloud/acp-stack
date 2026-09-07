@@ -181,6 +181,12 @@ pub(crate) async fn handle_set_config_option(
     connection: ConnectionTo<Client>,
 ) -> agent_client_protocol::Result<()> {
     let mut state = state.lock().await;
+    if state.args.fail_set_config_option {
+        return responder.respond_with_error(Error::new(
+            -32000,
+            "placebo agent refuses session/set_config_option".to_owned(),
+        ));
+    }
     if let SessionConfigOptionValue::ValueId { value } = &request.value
         && state.args.expect_model_config.as_deref() == Some(value.0.as_ref())
         && request.config_id.0.as_ref() == state.args.model_config_option_id.as_str()
@@ -194,9 +200,13 @@ pub(crate) async fn handle_set_config_option(
         ),
         request.value.clone(),
     );
-    let refreshed = state
+    let mut refreshed = state
         .config_options(request.session_id.0.as_ref())
         .unwrap_or_default();
+    if state.args.set_config_option_omits_model {
+        refreshed
+            .retain(|option| option.category.as_ref() != Some(&SessionConfigOptionCategory::Model));
+    }
     if state.args.emit_config_option_update {
         connection.send_notification(SessionNotification::new(
             request.session_id.clone(),

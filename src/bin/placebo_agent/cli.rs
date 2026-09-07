@@ -141,6 +141,12 @@ pub(crate) struct AcpArgs {
     /// Extra boolean config option: `<id>[@<category>]=<true|false>`. Repeatable.
     #[arg(long)]
     pub(crate) config_option_boolean: Vec<String>,
+    /// Model-dependent select config option:
+    /// `<model-value>=<id>[@<category>]=<current>:<v1>,<v2>,...`. Repeatable. Replaces the
+    /// `--config-option-select` entry with the same id while `<model-value>` is the applied
+    /// model, mirroring adapters that advertise per-model reasoning-effort lists.
+    #[arg(long)]
+    pub(crate) config_option_select_for_model: Vec<String>,
     /// Advertise native session modes on `session/new`: repeatable mode id. When
     /// any is given, the response carries a `modes` (SessionModeState) instead of
     /// a mode config option, exercising the native `session/set_mode` lane.
@@ -157,6 +163,13 @@ pub(crate) struct AcpArgs {
     /// `config_option_update` session notification carrying the full list.
     #[arg(long)]
     pub(crate) emit_config_option_update: bool,
+    /// Answer every `session/set_config_option` with a JSON-RPC error.
+    #[arg(long)]
+    pub(crate) fail_set_config_option: bool,
+    /// Answer `session/set_config_option` without the model-category option, the way adapters
+    /// that return only the options affected by the change do.
+    #[arg(long)]
+    pub(crate) set_config_option_omits_model: bool,
     /// Strict-agent mode: `session/set_config_option` responds with an empty
     /// list, so the notification (see `--emit-config-option-update`) is the
     /// only carrier of the refreshed state.

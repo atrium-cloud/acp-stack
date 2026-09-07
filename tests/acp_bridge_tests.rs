@@ -11,6 +11,8 @@ mod support;
 mod capability_matrix;
 #[path = "acp_bridge_tests/filesystem.rs"]
 mod filesystem;
+#[path = "acp_bridge_tests/model_discovery.rs"]
+mod model_discovery;
 #[path = "acp_bridge_tests/sessions.rs"]
 mod sessions;
 #[path = "acp_bridge_tests/sink_ordering.rs"]

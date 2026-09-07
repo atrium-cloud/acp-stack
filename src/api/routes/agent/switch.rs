@@ -221,13 +221,16 @@ pub(crate) async fn agent_switch_handler(
         && !crate::runtime::agent::model_discovery::discovery_is_blocked_without_a_model(
             &candidate_config.agent,
         ) {
-        let response = fetch_session_config_with_timeout(
+        // Only the model list is read here, and that list is the same for every model, so the
+        // probe applies none.
+        let discovered = fetch_session_config_with_timeout(
             &home,
             &candidate_config,
+            None,
             DEFAULT_MODELS_DISCOVERY_TIMEOUT,
         )
         .await?;
-        advertised_values_for_category(&response, AgentSessionConfigCategory::Model)?
+        advertised_values_for_category(&discovered.response, AgentSessionConfigCategory::Model)?
             .into_iter()
             // ACP advertises bare values with no separate label, so there is no display name to carry.
             .map(|value| ModelJson {

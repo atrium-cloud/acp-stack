@@ -495,8 +495,9 @@ pub(super) fn configure_model_and_mode_for_init(
                     error,
                 )
             })?;
-        let response = match fetch_session_config(home, config) {
-            Ok(response) => response,
+        let probe_model = configured_model_value(config);
+        let discovered = match fetch_session_config(home, config, probe_model.as_deref()) {
+            Ok(discovered) => discovered,
             // A mode/effort-only lane with no explicit flag is pure enrichment,
             // so a harness that cannot complete a provisional session must not
             // fail an otherwise good init.
@@ -541,20 +542,23 @@ pub(super) fn configure_model_and_mode_for_init(
         // A harness that pins the effort on disk advertises none over ACP, so
         // the empty advertisement is expected there, not a registry correction.
         let catalog_effort_lane = effort_value_is_explicit_without_discovery(&config.agent);
+        // The picker lists every model `session/new` offered; a post-set option list may carry
+        // only the applied one.
+        let model_options = discovered.response.clone();
         emit_discovery_applicability_corrections(
-            &response,
+            &model_options,
             set_model,
             set_mode,
             set_effort && !catalog_effort_lane,
         );
-        let model_before = configured_model_value(config);
+        let model_before = probe_model;
         if model_lane_active {
             outcome.model_action = configure_model_for_init(
                 args,
                 home,
                 config,
                 config_path,
-                &response,
+                &model_options,
                 &agent_name,
                 set_provider,
             )
@@ -563,7 +567,7 @@ pub(super) fn configure_model_and_mode_for_init(
         // Adapters advertise effort levels (and some generic options) for the
         // model they read from disk, so a changed model needs a fresh
         // advertisement before those lanes read it.
-        let mut response = response;
+        let mut response = discovered.applied();
         let mut effort_lane_live = effort_lane_active;
         let mut generic_prompts_live = interactive;
         if configured_model_value(config) != model_before
@@ -571,8 +575,10 @@ pub(super) fn configure_model_and_mode_for_init(
         {
             provision_agent_headless_config(config, home)
                 .inspect_err(|error| signal_lane_failure(false, false, effort_lane_live, error))?;
-            match fetch_session_config(home, config) {
-                Ok(refreshed) => response = refreshed,
+            // The model just chosen, so the refreshed effort list belongs to it.
+            let chosen_model = configured_model_value(config);
+            match fetch_session_config(home, config, chosen_model.as_deref()) {
+                Ok(refreshed) => response = refreshed.applied(),
                 Err(error) if args.effort.is_none() => {
                     let reason = format!(
                         "{} rediscovery after the model change skipped: {error}",
@@ -782,7 +788,7 @@ pub(super) fn verify_agent_acp_connection(
             });
         }
     }
-    fetch_session_config(home, config)
+    fetch_session_config(home, config, configured_model_value(config).as_deref())
         .map(|_| ())
         .map_err(|error| StackError::AgentInitializeFailed {
             reason: format!(

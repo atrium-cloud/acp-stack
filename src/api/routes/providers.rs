@@ -8,7 +8,7 @@ use crate::envelope::ApiSuccess;
 use crate::error::{Result, StackError};
 use crate::runtime::agent::acp_bridge::AgentSessionConfigCategory;
 use crate::runtime::agent::model_discovery::{
-    DEFAULT_MODELS_DISCOVERY_TIMEOUT, advertised_values_for_category,
+    DEFAULT_MODELS_DISCOVERY_TIMEOUT, advertised_values_for_category, configured_model_value,
     effort_value_is_explicit_without_discovery, fetch_session_config_with_timeout,
     harness_accepted_efforts, model_value_is_explicit_without_discovery,
 };
@@ -83,9 +83,11 @@ pub(crate) struct ModelsResponse {
     modes: Vec<String>,
     /// Reasoning-effort values for the configured model: the ACP-advertised
     /// `thought_level` session config option, or the provider catalog's list
-    /// when the harness takes the effort from on-disk config. Empty when
-    /// neither source reports any (or, on the catalog fallback path, when ACP
-    /// discovery failed).
+    /// when the harness takes the effort from on-disk config. On the
+    /// `acp_advertised` source the values belong to the `model` query param when
+    /// one is given, else the configured model, else the model the probed
+    /// harness booted with. Empty when neither source reports any (or, on the
+    /// catalog fallback path, when ACP discovery failed).
     efforts: Vec<String>,
     /// Set when the provider declares a model listing endpoint but the
     /// catalog is unavailable (fetch failed and no cache).
@@ -115,6 +117,12 @@ pub(crate) struct ModelsParams {
     /// (primary) target.
     #[serde(default, alias = "target")]
     pub(crate) target_id: Option<String>,
+    /// Model to apply in the discovery probe, so the ACP-advertised `efforts`
+    /// report that model's reasoning-effort values instead of the configured
+    /// model's. Absent, the configured model is applied. The catalog effort
+    /// lane keeps reporting the configured model's values.
+    #[serde(default)]
+    pub(crate) model: Option<String>,
 }
 
 /// Pick the target configuration a models request discovers against. Absent
@@ -157,7 +165,7 @@ pub(crate) async fn models_handler(
     // and Array config edits are visible without a daemon restart.
     let config = state.refresh_array_runtime_from_disk().await?;
     let config = resolve_models_target_config(config, query.target_id.as_deref())?;
-    models_response_for_config(&state.runtime_paths.home, &config)
+    models_response_for_config(&state.runtime_paths.home, &config, query.model.as_deref())
         .await
         .map(ApiSuccess::new)
 }
@@ -168,8 +176,12 @@ pub(crate) async fn models_handler(
 pub(crate) async fn models_response_for_config(
     home: &std::path::Path,
     config: &Config,
+    request_model: Option<&str>,
 ) -> Result<ModelsResponse> {
     let agent_id = config.agent.id.clone();
+    // Adapters advertise reasoning-effort values per model, so the probe applies
+    // the caller's model where one is named and the configured model otherwise.
+    let probe_model = request_model.or_else(|| configured_model_value(&config.agent));
 
     // The provider catalog only serves agents whose harness takes the model
     // verbatim from its on-disk config; agents with real ACP discovery
@@ -209,16 +221,20 @@ pub(crate) async fn models_response_for_config(
         let (modes, advertised_efforts) = match fetch_session_config_with_timeout(
             home,
             config,
+            probe_model,
             DEFAULT_MODELS_DISCOVERY_TIMEOUT,
         )
         .await
         {
-            Ok(response) => (
-                advertised_values_for_category(&response, AgentSessionConfigCategory::Mode)
-                    .unwrap_or_default(),
-                advertised_values_for_category(&response, AgentSessionConfigCategory::Effort)
-                    .unwrap_or_default(),
-            ),
+            Ok(discovered) => {
+                let applied = discovered.applied();
+                (
+                    advertised_values_for_category(&applied, AgentSessionConfigCategory::Mode)
+                        .unwrap_or_default(),
+                    advertised_values_for_category(&applied, AgentSessionConfigCategory::Effort)
+                        .unwrap_or_default(),
+                )
+            }
             Err(error) => {
                 tracing::warn!(error = %error, "config-option discovery failed; serving catalog models without modes or efforts");
                 (Vec::new(), Vec::new())
@@ -227,14 +243,9 @@ pub(crate) async fn models_response_for_config(
         // A harness that pins the effort on disk advertises none over ACP, so
         // the catalog is the only source for the configured model's values.
         let catalog_effort_lane = effort_value_is_explicit_without_discovery(&config.agent);
-        // Same precedence as catalog validation and session create: root `agent.model` first.
-        let configured_model = config.agent.model.as_deref().or_else(|| {
-            config
-                .agent
-                .provider
-                .as_ref()
-                .and_then(|provider| provider.model.as_deref())
-        });
+        // The catalog lane reports the configured model's values, which a probe
+        // model named for the ACP lane must not redirect.
+        let configured_model = configured_model_value(&config.agent);
         let efforts = if catalog_effort_lane {
             models
                 .iter()
@@ -265,12 +276,22 @@ pub(crate) async fn models_response_for_config(
         });
     }
 
-    let response =
-        fetch_session_config_with_timeout(home, config, DEFAULT_MODELS_DISCOVERY_TIMEOUT).await?;
+    let discovered = fetch_session_config_with_timeout(
+        home,
+        config,
+        probe_model,
+        DEFAULT_MODELS_DISCOVERY_TIMEOUT,
+    )
+    .await?;
+    // The model list comes from `session/new`, which offers every model; a post-set option list
+    // may carry only the applied one. Modes and efforts describe the applied model instead.
+    let applied = discovered.applied();
     // A missing `model` advertisement is an error for discovery-backed agents,
     // so the operator learns discovery failed instead of seeing an empty picker.
-    let models = match advertised_values_for_category(&response, AgentSessionConfigCategory::Model)
-    {
+    let models = match advertised_values_for_category(
+        &discovered.response,
+        AgentSessionConfigCategory::Model,
+    ) {
         // hermes-agent-acp advertises composite `provider/model` ids, which
         // `agent set --model` would write verbatim into config.yaml.
         Ok(_) if config.agent.id == HERMES_AGENT_ID => Vec::new(),
@@ -282,9 +303,9 @@ pub(crate) async fn models_response_for_config(
         }
         Err(error) => return Err(error),
     };
-    let modes = advertised_values_for_category(&response, AgentSessionConfigCategory::Mode)
+    let modes = advertised_values_for_category(&applied, AgentSessionConfigCategory::Mode)
         .unwrap_or_default();
-    let efforts = advertised_values_for_category(&response, AgentSessionConfigCategory::Effort)
+    let efforts = advertised_values_for_category(&applied, AgentSessionConfigCategory::Effort)
         .unwrap_or_default();
 
     Ok(ModelsResponse {

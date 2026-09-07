@@ -2,6 +2,68 @@ use std::fs;
 
 use crate::common::cli::*;
 
+/// Model values are checked against `session/new`, so an adapter that answers a
+/// `session/set_config_option` with only the options its change touched must not make a model the
+/// agent does offer look unadvertised. This drives a real placebo rather than the config-options
+/// fixture, which returns before any session is opened.
+#[test]
+fn agent_set_accepts_a_model_when_the_set_response_omits_the_model_option() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let workspace = tempdir.path().join("workspace");
+    fs::create_dir_all(&workspace).expect("workspace should be created");
+    let placebo_args = r#"args = ["acp", "--config-option-select", "model@model=fixture/model-a:fixture/model-a,fixture/model-b", "--config-option-select", "reasoning_effort@thought_level=medium:low,medium", "--set-config-option-omits-model"]"#;
+    // Amp takes no provider, so `agent set --model` reaches discovery without a credential first.
+    let config = VALID_CONFIG
+        .replace(r#"id = "opencode""#, r#"id = "amp""#)
+        .replace(r#"name = "OpenCode""#, r#"name = "Amp Code""#)
+        .replace(
+            r#"command = "opencode""#,
+            &format!("command = {:?}", env!("CARGO_BIN_EXE_placebo-agent")),
+        )
+        .replace(r#"args = ["acp"]"#, placebo_args)
+        .replace(r#"env = ["OPENCODE_API_KEY"]"#, "env = []")
+        .replace(
+            r#"
+[agent.install]
+type = "shell"
+shell = "curl -fsSL https://opencode.ai/install | bash"
+creates = "opencode"
+"#,
+            "",
+        )
+        .replace(
+            r#"root = "/workspace""#,
+            &format!("root = {:?}", workspace.to_string_lossy()),
+        )
+        .replace(
+            r#"uploads = "/workspace/uploads""#,
+            &format!(
+                "uploads = {:?}",
+                workspace.join("uploads").to_string_lossy()
+            ),
+        )
+        .replace(
+            r#"cwd = "/workspace""#,
+            &format!("cwd = {:?}", workspace.to_string_lossy()),
+        );
+    fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
+    // Spawning the agent resolves its launch environment, which opens the secret store.
+    seed_init_secrets(tempdir.path(), &[("AMP_API_KEY", "test-amp-key")]);
+
+    acps_command(tempdir.path())
+        .env_remove("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH")
+        .args(["agent", "set", "--model", "fixture/model-b"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent: amp"))
+        .stdout(predicates::str::contains("model: fixture/model-b"));
+
+    let config = fs::read_to_string(config_dir.join("acps-config.toml")).expect("config readable");
+    assert!(config.contains(r#"model = "fixture/model-b""#));
+}
+
 #[test]
 fn agent_set_kimi_accepts_exact_model_without_acp_discovery() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");

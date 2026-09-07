@@ -619,6 +619,111 @@ async fn models_serves_stale_cache_without_catalog_error() {
     );
 }
 
+/// The endpoint promises the full advertised set, so options a partial `session/set_config_option`
+/// response left out must survive the model the probe applies.
+#[tokio::test]
+async fn agent_config_options_keeps_options_a_partial_set_response_omits() {
+    let _fixture_guard = EnvVarGuard::unset("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH");
+    let mut config = test_config();
+    config.agent.model = Some("fixture/model-b".to_owned());
+    config.agent.args = vec![
+        "acp".to_owned(),
+        "--config-option-select".to_owned(),
+        "model@model=fixture/model-a:fixture/model-a,fixture/model-b".to_owned(),
+        "--config-option-select".to_owned(),
+        "reasoning_effort@thought_level=medium:low,medium".to_owned(),
+        "--config-option-boolean".to_owned(),
+        "fast@model_config=false".to_owned(),
+        "--set-config-option-omits-model".to_owned(),
+    ];
+    let harness = AgentHarness::spawn_with_config(config).await;
+
+    let response = http()
+        .await
+        .get(format!("{}/v1/agent/config-options", harness.base_url))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("send");
+    let status = response.status();
+    let body_text = response.text().await.unwrap_or_default();
+    assert_eq!(status, StatusCode::OK, "body: {body_text}");
+    let body: Value = serde_json::from_str(&body_text).expect("config options json");
+    let options = body["data"]["config_options"]
+        .as_array()
+        .expect("options array");
+
+    let ids: Vec<&str> = options
+        .iter()
+        .filter_map(|option| option["id"].as_str())
+        .collect();
+    assert!(
+        ids.contains(&"model") && ids.contains(&"fast") && ids.contains(&"reasoning_effort"),
+        "the set response omits the model option, so the overlay must restore it: {body}"
+    );
+    let model = options
+        .iter()
+        .find(|option| option["id"] == "model")
+        .expect("model option present");
+    assert_eq!(
+        model["options"].as_array().map(Vec::len),
+        Some(2),
+        "the session/new model choices survive: {body}"
+    );
+}
+
+/// Adapters advertise reasoning-effort values per model, so `?model=` must reach the discovery
+/// probe rather than reporting the model the harness booted with.
+#[tokio::test]
+async fn models_reports_the_requested_models_efforts() {
+    let _fixture_guard = EnvVarGuard::unset("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH");
+    let mut config = test_config();
+    config.agent.args = vec![
+        "acp".to_owned(),
+        "--config-option-select".to_owned(),
+        "model@model=fixture/model-a:fixture/model-a,fixture/model-b".to_owned(),
+        "--config-option-select".to_owned(),
+        "reasoning_effort@thought_level=medium:low,medium".to_owned(),
+        "--config-option-select-for-model".to_owned(),
+        "fixture/model-b=reasoning_effort@thought_level=high:high,xhigh".to_owned(),
+    ];
+    let harness = AgentHarness::spawn_with_config(config).await;
+    let client = http().await;
+
+    let requested = client
+        .get(format!(
+            "{}/v1/models?model=fixture/model-b",
+            harness.base_url
+        ))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("send");
+    let status = requested.status();
+    let body_text = requested.text().await.unwrap_or_default();
+    assert_eq!(status, StatusCode::OK, "body: {body_text}");
+    let body: Value = serde_json::from_str(&body_text).expect("models json");
+    assert_eq!(body["data"]["source"], "acp_advertised");
+    assert_eq!(body["data"]["efforts"], json!(["high", "xhigh"]), "{body}");
+
+    // Without the query param the probe applies the configured model, which this config leaves
+    // unset, so the harness's boot model answers.
+    let default_body: Value = client
+        .get(format!("{}/v1/models", harness.base_url))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("send")
+        .json()
+        .await
+        .expect("models json");
+    assert_eq!(
+        default_body["data"]["efforts"],
+        json!(["low", "medium"]),
+        "{default_body}"
+    );
+}
+
 #[tokio::test]
 async fn models_rejects_admin_key() {
     // Strict tiering: an admin key is not a session-key superset.

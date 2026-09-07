@@ -6,7 +6,7 @@ use crate::envelope::ApiSuccess;
 use crate::error::StackError;
 use crate::runtime::agent::config_options::{SessionConfigOptionSnapshot, project_config_options};
 use crate::runtime::agent::model_discovery::{
-    DEFAULT_MODELS_DISCOVERY_TIMEOUT, fetch_session_config_with_timeout,
+    DEFAULT_MODELS_DISCOVERY_TIMEOUT, configured_model_value, fetch_session_config_with_timeout,
 };
 
 /// `GET /v1/agent/config-options`: every session config option the configured
@@ -27,9 +27,15 @@ pub(crate) async fn agent_config_options_handler(
     let (config, _) = state.default_agent_target().await?;
     let agent_id = config.agent.id.clone();
     let home = state.runtime_paths.home.clone();
-    let response =
-        fetch_session_config_with_timeout(&home, &config, DEFAULT_MODELS_DISCOVERY_TIMEOUT).await?;
-    let config_options = project_config_options(response.config_options.as_deref().unwrap_or(&[]));
+    let discovered = fetch_session_config_with_timeout(
+        &home,
+        &config,
+        configured_model_value(&config.agent),
+        DEFAULT_MODELS_DISCOVERY_TIMEOUT,
+    )
+    .await?;
+    let applied = discovered.applied();
+    let config_options = project_config_options(applied.config_options.as_deref().unwrap_or(&[]));
     Ok(ApiSuccess::new(AgentConfigOptionsResponse {
         agent_id,
         config_options,

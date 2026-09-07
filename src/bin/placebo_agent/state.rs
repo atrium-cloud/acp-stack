@@ -117,23 +117,29 @@ impl PlaceboState {
                 .category(SessionConfigOptionCategory::Model),
             );
         }
+        let overrides = self.select_overrides_for_model(self.applied_model_value(session_id));
+        let mut advertised_select_ids = Vec::new();
         for spec in &self.args.config_option_select {
             let Some((id, category, current, values)) = parse_select_spec(spec) else {
                 continue;
             };
-            let current = self.applied_value_id(session_id, &id).unwrap_or(current);
-            options.push(
-                SessionConfigOption::select(
-                    id.clone(),
-                    id.clone(),
-                    current,
-                    values
-                        .into_iter()
-                        .map(|value| SessionConfigSelectOption::new(value.clone(), value))
-                        .collect::<Vec<_>>(),
-                )
-                .category(category),
-            );
+            let (category, current, values) = overrides
+                .iter()
+                .find_map(|(override_id, category, current, values)| {
+                    (override_id == &id)
+                        .then(|| (category.clone(), current.clone(), values.clone()))
+                })
+                .unwrap_or((category, current, values));
+            advertised_select_ids.push(id.clone());
+            options.push(self.select_option(session_id, id, category, current, values));
+        }
+        // An override naming an id no `--config-option-select` declares is advertised on its own,
+        // so a mistyped id fails the asserting test visibly instead of vanishing.
+        for (id, category, current, values) in overrides {
+            if advertised_select_ids.contains(&id) {
+                continue;
+            }
+            options.push(self.select_option(session_id, id, category, current, values));
         }
         for spec in &self.args.config_option_boolean {
             let Some((id, category, default)) = parse_boolean_spec(spec) else {
@@ -149,6 +155,60 @@ impl PlaceboState {
             options.push(SessionConfigOption::boolean(id.clone(), id, current).category(category));
         }
         Some(options)
+    }
+
+    /// The session's current model value: what `session/set_config_option` applied, else the
+    /// advertised default from `--model-config-option`.
+    fn applied_model_value(&self, session_id: &str) -> Option<String> {
+        self.applied_value_id(session_id, &self.args.model_config_option_id)
+            .or_else(|| self.args.model_config_option.clone())
+    }
+
+    /// The `--config-option-select-for-model` entries that apply while `model` is the applied
+    /// model, parsed into the same shape `--config-option-select` yields.
+    fn select_overrides_for_model(
+        &self,
+        model: Option<String>,
+    ) -> Vec<(
+        String,
+        Option<SessionConfigOptionCategory>,
+        String,
+        Vec<String>,
+    )> {
+        let Some(model) = model else {
+            return Vec::new();
+        };
+        self.args
+            .config_option_select_for_model
+            .iter()
+            .filter_map(|spec| {
+                let (spec_model, select_spec) = spec.split_once('=')?;
+                (spec_model == model).then_some(select_spec)
+            })
+            .filter_map(parse_select_spec)
+            .collect()
+    }
+
+    /// One advertised select, with a value applied on this session outranking the spec's default.
+    fn select_option(
+        &self,
+        session_id: &str,
+        id: String,
+        category: Option<SessionConfigOptionCategory>,
+        current: String,
+        values: Vec<String>,
+    ) -> SessionConfigOption {
+        let current = self.applied_value_id(session_id, &id).unwrap_or(current);
+        SessionConfigOption::select(
+            id.clone(),
+            id,
+            current,
+            values
+                .into_iter()
+                .map(|value| SessionConfigSelectOption::new(value.clone(), value))
+                .collect::<Vec<_>>(),
+        )
+        .category(category)
     }
 
     fn applied_value_id(&self, session_id: &str, id: &str) -> Option<String> {

@@ -758,6 +758,14 @@
             ],
             "description": "Array target id to discover against instead of the default\n(primary) target.",
             "default": null
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Model to apply in the discovery probe, so the ACP-advertised `efforts`\nreport that model's reasoning-effort values instead of the configured\nmodel's. Absent, the configured model is applied. The catalog effort\nlane keeps reporting the configured model's values.",
+            "default": null
           }
         }
       },
@@ -5068,7 +5076,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Reasoning-effort values for the configured model: the ACP-advertised\n`thought_level` session config option, or the provider catalog's list\nwhen the harness takes the effort from on-disk config. Empty when\nneither source reports any (or, on the catalog fallback path, when ACP\ndiscovery failed)."
+            "description": "Reasoning-effort values for the configured model: the ACP-advertised\n`thought_level` session config option, or the provider catalog's list\nwhen the harness takes the effort from on-disk config. On the\n`acp_advertised` source the values belong to the `model` query param when\none is given, else the configured model, else the model the probed\nharness booted with. Empty when neither source reports any (or, on the\ncatalog fallback path, when ACP discovery failed)."
           },
           "catalog_error": {
             "type": [

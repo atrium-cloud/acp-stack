@@ -266,13 +266,20 @@ pub(super) async fn apply_files_and_runtime(
         let model = native_config_projection(&prepared.canonical_config)
             .model
             .ok_or_else(|| native_error("agent.native_config_model_invalid"))?;
-        let response = fetch_session_config_with_timeout(
+        // The model is validated against the advertised list, so the probe applies none: a
+        // reduced post-set option list could reject a model the agent does offer.
+        let discovered = fetch_session_config_with_timeout(
             &state.runtime_paths.home,
             &prepared.canonical_config,
+            None,
             DEFAULT_MODELS_DISCOVERY_TIMEOUT,
         )
         .await?;
-        validate_advertised_value(&response, AgentSessionConfigCategory::Model, &model)?;
+        validate_advertised_value(
+            &discovered.response,
+            AgentSessionConfigCategory::Model,
+            &model,
+        )?;
     }
     let fresh = state.refresh_array_runtime_from_disk().await?;
     if restart {

@@ -208,8 +208,14 @@ pub(super) fn apply_for_init(
                 .ok_or(StackError::NativeAgentConfig {
                     code: "agent.native_config_model_invalid",
                 })?;
-            let response = fetch_session_config(home, &prepared.canonical_config)?;
-            validate_advertised_value(&response, AgentSessionConfigCategory::Model, &model)?;
+            // The model is validated against the advertised list, so the probe applies none: a
+            // reduced post-set option list could reject a model the agent does offer.
+            let discovered = fetch_session_config(home, &prepared.canonical_config, None)?;
+            validate_advertised_value(
+                &discovered.response,
+                AgentSessionConfigCategory::Model,
+                &model,
+            )?;
         }
         capture_native_config_file_digests(&paths, home)
     })();

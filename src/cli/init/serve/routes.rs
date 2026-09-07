@@ -270,8 +270,8 @@ async fn session_input_handler(
 
 /// Init-tier `GET /v1/models`: the session-tier discovery with the same
 /// fresh-from-disk config read, resolved without an `AppState` (the bootstrap
-/// server has none). `?target_id=` (alias `target`) picks the Array target
-/// exactly as on the session tier.
+/// server has none). `?target_id=` (alias `target`) picks the Array target and
+/// `?model=` picks the probe model, exactly as on the session tier.
 async fn bootstrap_models_handler(Query(query): Query<ModelsParams>) -> Response {
     let config_path = match config::default_config_path() {
         Ok(path) => path,
@@ -300,7 +300,7 @@ async fn bootstrap_models_handler(Query(query): Query<ModelsParams>) -> Response
         Ok(config) => config,
         Err(error) => return error.into_response(),
     };
-    match models_response_for_config(&home, &config).await {
+    match models_response_for_config(&home, &config, query.model.as_deref()).await {
         Ok(models) => ApiSuccess::new(models).into_response(),
         Err(error) => error.into_response(),
     }

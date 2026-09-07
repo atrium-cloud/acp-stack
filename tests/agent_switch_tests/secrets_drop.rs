@@ -230,9 +230,10 @@ async fn model_discovery_timeout_shuts_down_provisional_agent() {
         pid_path.to_string_lossy().into_owned(),
     ];
 
-    let err = fetch_session_config_with_timeout(tempdir.path(), &config, Duration::from_millis(50))
-        .await
-        .expect_err("discovery should time out");
+    let err =
+        fetch_session_config_with_timeout(tempdir.path(), &config, None, Duration::from_millis(50))
+            .await
+            .expect_err("discovery should time out");
     assert_eq!(err.error_code(), "agent.initialize_failed");
     assert!(
         err.to_string().contains("model discovery exceeded"),

@@ -16,14 +16,14 @@ use crate::dev_gates::{
 use crate::error::{Result, StackError};
 use crate::runtime::agent::acp_bridge::{
     AcpBridge, AcpPermissionPolicy, AgentCapabilitiesDto, AgentSessionConfigCategory,
-    KIMI_CODE_AGENT_ID, SessionEventSink, kimi_lane_for_provider_id, session_config_id_for_value,
-    session_config_values, session_mode_selection_for_value, session_mode_values,
-    session_model_selection_for_value, session_model_values,
+    AgentSessionModelSelection, KIMI_CODE_AGENT_ID, SessionEventSink, kimi_lane_for_provider_id,
+    session_config_id_for_value, session_config_values, session_mode_selection_for_value,
+    session_mode_values, session_model_selection_for_value, session_model_values,
 };
 use crate::runtime::agent::agent_headless_config::{CODEX_OPENROUTER_PROVIDER_ID, HERMES_AGENT_ID};
 use crate::runtime::agent::provider_keys::{
-    CLAUDE_CODE_AGENT_ID, CODEX_AGENT_ID, GOOSE_AGENT_ID, is_claude_code_profiled_provider,
-    models_url_for_provider_id, resolve_agent_environment,
+    CLAUDE_CODE_AGENT_ID, CODEX_AGENT_ID, GOOSE_AGENT_ID, agent_provider_id_for_provider_id,
+    is_claude_code_profiled_provider, models_url_for_provider_id, resolve_agent_environment,
     resolve_agent_environment_without_secrets,
 };
 use crate::runtime::agent::provider_model_catalog::cached_models;
@@ -250,9 +250,16 @@ pub fn catalog_model_values(home: &Path, config: &Config) -> Result<Vec<String>>
     Ok(models.into_iter().map(|model| model.value).collect())
 }
 
-/// Spawn the configured agent, open one provisional ACP session, and
-/// return the raw `session/new` response.
-pub fn fetch_session_config(home: &Path, config: &Config) -> Result<NewSessionResponse> {
+/// Spawn the configured agent, open one provisional ACP session, and return its
+/// `session/new` response. `model` is applied in the probe session so the
+/// advertised per-model options describe that model rather than the harness's
+/// boot model; pass `configured_model_value(&config.agent)` when the caller has
+/// no more specific choice.
+pub fn fetch_session_config(
+    home: &Path,
+    config: &Config,
+    model: Option<&str>,
+) -> Result<DiscoveredSessionConfig> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -260,8 +267,46 @@ pub fn fetch_session_config(home: &Path, config: &Config) -> Result<NewSessionRe
     runtime.block_on(fetch_session_config_with_timeout(
         home,
         config,
+        model,
         DEFAULT_MODELS_DISCOVERY_TIMEOUT,
     ))
+}
+
+/// What one provisional discovery session advertised. The two option sets are kept apart because
+/// they answer different questions: `session/new` lists every model the agent offers, while the
+/// set response describes the applied model and may carry only the options the change touched.
+#[derive(Debug)]
+pub struct DiscoveredSessionConfig {
+    /// The `session/new` response, before any model was applied.
+    pub response: NewSessionResponse,
+    /// Options returned by the model `session/set_config_option`. Absent when no model was
+    /// applied, when the harness reads its pin from disk, or when the adapter answered empty.
+    pub refreshed_options: Option<Vec<SessionConfigOption>>,
+}
+
+impl DiscoveredSessionConfig {
+    /// The advertisement describing the applied model. Post-set options are overlaid onto the
+    /// `session/new` set by option id rather than replacing it: adapters may answer a set with
+    /// only the options the change touched, and dropping the rest would lose the model option and
+    /// every untouched custom. Per-model values, reasoning effort above all, must be read here.
+    pub fn applied(&self) -> NewSessionResponse {
+        let Some(refreshed) = self.refreshed_options.as_ref() else {
+            return self.response.clone();
+        };
+        let mut applied = self.response.clone();
+        let mut options = applied.config_options.clone().unwrap_or_default();
+        for option in refreshed {
+            match options
+                .iter_mut()
+                .find(|existing| existing.id.0 == option.id.0)
+            {
+                Some(existing) => *existing = option.clone(),
+                None => options.push(option.clone()),
+            }
+        }
+        applied.config_options = Some(options);
+        applied
+    }
 }
 
 /// Async variant used by the HTTP API. Timeout, request errors, and success all
@@ -270,8 +315,9 @@ pub fn fetch_session_config(home: &Path, config: &Config) -> Result<NewSessionRe
 pub async fn fetch_session_config_with_timeout(
     home: &Path,
     config: &Config,
+    model: Option<&str>,
     timeout_duration: Duration,
-) -> Result<NewSessionResponse> {
+) -> Result<DiscoveredSessionConfig> {
     if let Some(path) = fixture_path(FIXTURE_CONFIG_OPTIONS_ENV) {
         let body = std::fs::read_to_string(&path).map_err(|source| StackError::ConfigRead {
             path: path.clone(),
@@ -282,7 +328,10 @@ pub async fn fetch_session_config_with_timeout(
                 path,
                 reason: format!("ACP session config options fixture is invalid: {source}"),
             })?;
-        return Ok(NewSessionResponse::new("fixture").config_options(options));
+        return Ok(DiscoveredSessionConfig {
+            response: NewSessionResponse::new("fixture").config_options(options),
+            refreshed_options: None,
+        });
     }
 
     if let Some(path) = fixture_path(FIXTURE_NEW_SESSION_RESPONSE_ENV) {
@@ -290,9 +339,14 @@ pub async fn fetch_session_config_with_timeout(
             path: path.clone(),
             source,
         })?;
-        return serde_json::from_str(&body).map_err(|source| StackError::AgentConfigProvision {
-            path,
-            reason: format!("ACP session/new fixture is invalid: {source}"),
+        let response =
+            serde_json::from_str(&body).map_err(|source| StackError::AgentConfigProvision {
+                path,
+                reason: format!("ACP session/new fixture is invalid: {source}"),
+            })?;
+        return Ok(DiscoveredSessionConfig {
+            response,
+            refreshed_options: None,
         });
     }
 
@@ -323,13 +377,23 @@ pub async fn fetch_session_config_with_timeout(
         None,
     )
     .await?;
-    let discovery =
-        match tokio::time::timeout(timeout_duration, bridge.new_session(cwd, Vec::new())).await {
-            Ok(result) => result,
-            Err(_) => Err(StackError::AgentInitializeFailed {
-                reason: format!("model discovery exceeded the {timeout_duration:?} timeout"),
-            }),
-        };
+    // One budget covers `session/new` and the model application: the pair is a
+    // single discovery round trip, and a second timeout could leave the probe
+    // running past the first one's expiry.
+    let probe = async {
+        let response = bridge.new_session(cwd, Vec::new()).await?;
+        let refreshed_options = apply_probe_model(&bridge, &config.agent, model, &response).await;
+        Ok(DiscoveredSessionConfig {
+            response,
+            refreshed_options,
+        })
+    };
+    let discovery = match tokio::time::timeout(timeout_duration, probe).await {
+        Ok(result) => result,
+        Err(_) => Err(StackError::AgentInitializeFailed {
+            reason: format!("model discovery exceeded the {timeout_duration:?} timeout"),
+        }),
+    };
     let shutdown = bridge.terminate_probe().await;
     match (discovery, shutdown) {
         (Ok(response), Ok(_)) => Ok(response),
@@ -340,6 +404,92 @@ pub async fn fetch_session_config_with_timeout(
                 "model discovery failed: {discovery_err}; probe teardown also failed: {teardown_err}"
             ),
         }),
+    }
+}
+
+/// Select `model` in the probe session, mirroring the session-create order, so the refreshed
+/// advertisement describes that model. Adapters list reasoning-effort values per model, so a
+/// probe that never applies one reports the harness's boot model instead of the caller's.
+/// Discovery is an enrichment path, so every failure here logs and keeps the `session/new`
+/// response untouched rather than failing the call.
+async fn apply_probe_model(
+    bridge: &AcpBridge,
+    agent: &AgentConfig,
+    model: Option<&str>,
+    response: &NewSessionResponse,
+) -> Option<Vec<SessionConfigOption>> {
+    let model = model.filter(|model| !model.trim().is_empty())?;
+    if model_applies_from_disk_only(agent) {
+        // The harness read this pin at process start, so the set can only fail spuriously.
+        tracing::debug!(
+            agent = %agent.id,
+            model,
+            "model provisioned on disk; discovery skips session/set_config_option"
+        );
+        return None;
+    }
+    // Adapters advertise their own provider ids, so the probe resolves against the agent-native id
+    // exactly as the CLI resolution sites do: an unmapped provider qualifies nothing, rather than
+    // constraining the match to a canonical id the adapter never advertises.
+    let provider_id = agent
+        .provider
+        .as_ref()
+        .and_then(|provider| agent_provider_id_for_provider_id(&agent.id, &provider.id));
+    let (config_id, resolved) = match resolve_advertised_model_selection(
+        response,
+        provider_id,
+        model,
+    ) {
+        Ok(selection) => selection,
+        Err(error) => {
+            tracing::warn!(
+                agent = %agent.id,
+                model,
+                %error,
+                "discovery model probe: the agent advertises no matching model value; reading the boot model's options"
+            );
+            return None;
+        }
+    };
+    if advertised_current_value(response.config_options.as_deref(), &config_id).as_deref()
+        == Some(resolved.as_str())
+    {
+        // The session already booted on this model, so its options describe it already.
+        return None;
+    }
+    let applied = match bridge
+        .set_session_config_option(response.session_id.clone(), &config_id, &resolved)
+        .await
+    {
+        Ok(applied) => applied,
+        Err(error) => {
+            tracing::warn!(
+                agent = %agent.id,
+                model = %resolved,
+                %error,
+                "discovery model probe: session/set_config_option failed; reading the boot model's options"
+            );
+            return None;
+        }
+    };
+    // Lax adapters answer with an empty list and carry the refresh only in a notification, which
+    // a probe session never reads; their `session/new` options stay the best available snapshot.
+    (!applied.config_options.is_empty()).then_some(applied.config_options)
+}
+
+/// The value a select config option currently reports, so an already-current model needs no set.
+fn advertised_current_value(
+    options: Option<&[SessionConfigOption]>,
+    config_id: &str,
+) -> Option<String> {
+    use agent_client_protocol::schema::v1::SessionConfigKind;
+
+    let option = options?
+        .iter()
+        .find(|option| option.id.0.as_ref() == config_id)?;
+    match &option.kind {
+        SessionConfigKind::Select(select) => Some(select.current_value.0.to_string()),
+        _ => None,
     }
 }
 
@@ -446,20 +596,30 @@ pub fn resolve_advertised_model_value(
     provider_id: Option<&str>,
     model_id: &str,
 ) -> Result<String> {
+    resolve_advertised_model_selection(response, provider_id, model_id).map(|(_, value)| value)
+}
+
+/// [`resolve_advertised_model_value`] paired with the id of the config option carrying the
+/// resolved value. One resolution pass yields both, so applying the model needs no second lookup.
+pub fn resolve_advertised_model_selection(
+    response: &NewSessionResponse,
+    provider_id: Option<&str>,
+    model_id: &str,
+) -> Result<(String, String)> {
     let values = session_model_values(response)?;
-    let exact_is_advertised = session_model_selection_for_value(response, model_id).is_ok();
+    let exact = advertised_model_config_id(response, model_id);
     if let Some(provider_id) = provider_id
-        && exact_is_advertised
+        && let Some(config_id) = exact.clone()
         && advertised_model_provider_matches(model_id, provider_id)
     {
-        return Ok(model_id.to_owned());
+        return Ok((config_id, model_id.to_owned()));
     }
     if let Some(provider_id) = provider_id {
         let provider_qualified = format!("{provider_id}/{model_id}");
         if values.iter().any(|value| value == &provider_qualified)
-            && session_model_selection_for_value(response, &provider_qualified).is_ok()
+            && let Some(config_id) = advertised_model_config_id(response, &provider_qualified)
         {
-            return Ok(provider_qualified);
+            return Ok((config_id, provider_qualified));
         }
     }
     let mut base_matches = values
@@ -470,14 +630,24 @@ pub fn resolve_advertised_model_value(
     base_matches.sort();
     base_matches.dedup();
     if base_matches.len() == 1
-        && session_model_selection_for_value(response, &base_matches[0]).is_ok()
+        && let Some(config_id) = advertised_model_config_id(response, &base_matches[0])
     {
-        return Ok(base_matches.remove(0));
+        return Ok((config_id, base_matches.remove(0)));
     }
-    if exact_is_advertised {
-        return Ok(model_id.to_owned());
+    if let Some(config_id) = exact {
+        return Ok((config_id, model_id.to_owned()));
     }
-    session_model_selection_for_value(response, model_id).map(|_| model_id.to_owned())
+    // Nothing matched; the selection lookup owns the "not advertised" error wording.
+    let AgentSessionModelSelection::ConfigOption { config_id } =
+        session_model_selection_for_value(response, model_id)?;
+    Ok((config_id, model_id.to_owned()))
+}
+
+fn advertised_model_config_id(response: &NewSessionResponse, value: &str) -> Option<String> {
+    match session_model_selection_for_value(response, value) {
+        Ok(AgentSessionModelSelection::ConfigOption { config_id }) => Some(config_id),
+        Err(_) => None,
+    }
 }
 
 fn advertised_model_base_matches(value: &str, provider_id: Option<&str>, model_id: &str) -> bool {
@@ -737,7 +907,7 @@ mod tests {
     fn a_discovery_session_is_refused_before_the_model_less_agent_is_spawned() {
         let home = tempfile::tempdir().expect("tempdir");
 
-        let error = fetch_session_config(home.path(), &goose_config(None))
+        let error = fetch_session_config(home.path(), &goose_config(None), None)
             .expect_err("a model-less goose must never be spawned for discovery");
 
         assert!(
