@@ -11,7 +11,7 @@ use crate::runtime::agent::provider_keys::{
     AgentProviderSummary, CLAUDE_CODE_AGENT_ID, env_ref_is_satisfiable_for_config,
     env_var_for_agent_provider_id, provider_id_is_known, provider_id_supports_agent,
     provider_uses_agent_native_auth, providers_for_agent, push_delivers_env_ref_for_config,
-    reconcile_kimi_lane_env_declarations, required_env_refs_for_agent_provider_id,
+    reconcile_provider_env_declarations, required_env_refs_for_agent_provider_id,
 };
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::secrets::{SecretStore, SharedSecretStore, lock_shared_secret_store};

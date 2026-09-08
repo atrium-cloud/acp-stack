@@ -51,27 +51,159 @@ restart = "on-crash"
 }
 
 #[test]
-fn kimi_lane_reconcile_swaps_credential_declarations() {
+fn provider_env_reconcile_swaps_kimi_lane_declarations() {
     let mut config = resolver_config("kimi");
     config.agent.env = vec!["KIMI_API_KEY".to_owned(), "EXTRA_REF".to_owned()];
     config.agent.provider = Some(mapped_provider("moonshotai", None));
 
-    reconcile_kimi_lane_env_declarations(&mut config.agent);
+    reconcile_provider_env_declarations(&mut config.agent);
     assert_eq!(config.agent.env, ["EXTRA_REF", "MOONSHOT_API_KEY"]);
 
     config.agent.provider = None;
-    reconcile_kimi_lane_env_declarations(&mut config.agent);
+    reconcile_provider_env_declarations(&mut config.agent);
     assert_eq!(config.agent.env, ["EXTRA_REF", "KIMI_API_KEY"]);
 }
 
 #[test]
-fn kimi_lane_reconcile_leaves_other_agents_alone() {
+fn provider_env_reconcile_keeps_refs_no_provider_of_the_agent_owns() {
     let mut config = resolver_config("opencode");
-    config.agent.env = vec!["KIMI_API_KEY".to_owned()];
-    config.agent.provider = Some(mapped_provider("moonshotai", None));
+    config.agent.env = vec!["OPENAI_API_KEY".to_owned(), "TEAM_PROXY_TOKEN".to_owned()];
+    config.agent.provider = Some(mapped_provider("openai", None));
 
-    reconcile_kimi_lane_env_declarations(&mut config.agent);
-    assert_eq!(config.agent.env, ["KIMI_API_KEY"]);
+    reconcile_provider_env_declarations(&mut config.agent);
+
+    assert_eq!(config.agent.env, ["OPENAI_API_KEY", "TEAM_PROXY_TOKEN"]);
+}
+
+#[test]
+fn provider_env_reconcile_keeps_templated_entries_for_an_inactive_provider() {
+    let mut config = resolver_config("opencode");
+    config.agent.env = vec![
+        "OPENCODE_API_KEY=${VAULT_OPENCODE}".to_owned(),
+        "OPENROUTER_API_KEY".to_owned(),
+    ];
+    config.agent.provider = Some(mapped_provider("openrouter", None));
+
+    reconcile_provider_env_declarations(&mut config.agent);
+
+    assert_eq!(
+        config.agent.env,
+        ["OPENCODE_API_KEY=${VAULT_OPENCODE}", "OPENROUTER_API_KEY"]
+    );
+}
+
+#[test]
+fn switching_the_primary_provider_drops_the_outgoing_id_and_env_ref() {
+    let mut config = resolver_config("opencode");
+    config.agent.env = vec!["OPENCODE_API_KEY".to_owned()];
+    config.agent.provider = Some(mapped_provider("opencode-go", None));
+    config.agent.providers = Some(AgentProvidersConfig {
+        active: vec!["opencode-go".to_owned()],
+        selected_aliases: BTreeMap::from([("opencode-go".to_owned(), "go_1".to_owned())]),
+    });
+
+    apply_mapped_agent_provider(&mut config, "openrouter", None).expect("switch provider");
+    let config = revalidated(&config);
+
+    assert_eq!(config.agent.env, ["OPENROUTER_API_KEY"]);
+    let providers = config.agent.providers.expect("providers block");
+    assert_eq!(providers.active, ["openrouter"]);
+    // A retained alias selection would keep the dropped provider's credential undeletable.
+    assert!(providers.selected_aliases.is_empty());
+}
+
+#[test]
+fn switching_between_providers_sharing_an_api_key_ref_keeps_the_ref() {
+    let mut config = resolver_config("opencode");
+    config.agent.env = vec!["OPENCODE_API_KEY".to_owned()];
+    config.agent.provider = Some(mapped_provider("opencode-go", None));
+    config.agent.providers = Some(AgentProvidersConfig {
+        active: vec!["opencode-go".to_owned()],
+        selected_aliases: BTreeMap::new(),
+    });
+
+    apply_mapped_agent_provider(&mut config, "opencode", None).expect("switch provider");
+
+    assert_eq!(config.agent.env, ["OPENCODE_API_KEY"]);
+    assert_eq!(
+        config.agent.providers.expect("providers block").active,
+        ["opencode"]
+    );
+}
+
+#[test]
+fn switching_the_primary_provider_keeps_a_ref_the_subagent_still_needs() {
+    use crate::config::AgentSubagentConfig;
+    let mut config = resolver_config("opencode");
+    config.agent.env = vec!["OPENCODE_API_KEY".to_owned()];
+    config.agent.provider = Some(mapped_provider("opencode-go", None));
+    config.agent.subagent = Some(AgentSubagentConfig {
+        disabled: false,
+        provider: Some(mapped_provider("opencode-go", None)),
+    });
+    config.agent.providers = Some(AgentProvidersConfig {
+        active: vec!["opencode-go".to_owned()],
+        selected_aliases: BTreeMap::new(),
+    });
+
+    apply_mapped_agent_provider(&mut config, "openrouter", None).expect("switch provider");
+    let config = revalidated(&config);
+
+    assert_eq!(config.agent.env, ["OPENCODE_API_KEY", "OPENROUTER_API_KEY"]);
+    assert_eq!(
+        config.agent.providers.expect("providers block").active,
+        ["opencode-go", "openrouter"]
+    );
+}
+
+/// The launch env takes its key from the credential catalog when nothing is declared,
+/// so a switch must not put a bare ref in front of that channel.
+#[test]
+fn switching_without_a_declared_provider_ref_declares_nothing() {
+    let mut config = resolver_config("opencode");
+    config.agent.env = vec!["TEAM_PROXY_TOKEN".to_owned()];
+    config.agent.provider = Some(mapped_provider("opencode-go", None));
+
+    reconcile_provider_env_declarations(&mut config.agent);
+
+    assert_eq!(config.agent.env, ["TEAM_PROXY_TOKEN"]);
+}
+
+#[test]
+fn switching_to_a_native_auth_provider_drops_the_outgoing_key_ref() {
+    let mut config = resolver_config("claude");
+    config.agent.env = vec![
+        "ANTHROPIC_API_KEY".to_owned(),
+        "ANTHROPIC_VERTEX_PROJECT_ID".to_owned(),
+        "CLOUD_ML_REGION".to_owned(),
+    ];
+    config.agent.provider = Some(mapped_provider("anthropic", None));
+
+    apply_mapped_agent_provider(&mut config, "google-vertex-anthropic", None)
+        .expect("switch provider");
+
+    assert_eq!(
+        config.agent.env,
+        ["ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION"]
+    );
+}
+
+#[test]
+fn reselecting_the_same_provider_leaves_the_config_byte_identical() {
+    let mut config = resolver_config("opencode");
+    apply_mapped_agent_provider(&mut config, "openrouter", None).expect("select provider");
+    let settled = config.to_canonical_toml().expect("canonical toml");
+
+    apply_mapped_agent_provider(&mut config, "openrouter", None).expect("reselect provider");
+
+    assert_eq!(config.to_canonical_toml().expect("canonical toml"), settled);
+}
+
+/// Round-trip a mutated config the way every write path does, so a switch that leaves
+/// the config unable to validate fails the test instead of the caller.
+fn revalidated(config: &Config) -> Config {
+    load_config_from_str(&config.to_canonical_toml().expect("canonical toml"))
+        .expect("switched config validates")
 }
 
 fn mapped_provider(provider_id: &str, api_key_ref: Option<&str>) -> AgentProviderConfig {

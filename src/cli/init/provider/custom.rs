@@ -66,7 +66,7 @@ pub(crate) fn apply_custom_provider_to_config(
             output_max_tokens,
         }),
     });
-    reconcile_kimi_lane_env_declarations(&mut config.agent);
+    reconcile_provider_env_declarations(&mut config.agent);
     let canonical = config.to_canonical_toml()?;
     let validated = config::load_config_from_str(&canonical)?;
     *config = validated;

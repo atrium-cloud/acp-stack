@@ -9,6 +9,9 @@ use crate::runtime::agent::provider_keys::{
 };
 
 pub(crate) const KIMI_CODE_AGENT_ID: &str = "kimi";
+/// The lane's own API-key ref. Production code reaches it through the provider mapping;
+/// the tests below assert against it directly.
+#[cfg(test)]
 pub(crate) const KIMI_API_KEY_ENV: &str = "KIMI_API_KEY";
 pub(super) const KIMI_MODEL_API_KEY_ENV: &str = "KIMI_MODEL_API_KEY";
 pub(super) const KIMI_MODEL_NAME_ENV: &str = "KIMI_MODEL_NAME";

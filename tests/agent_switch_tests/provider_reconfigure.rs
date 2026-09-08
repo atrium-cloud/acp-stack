@@ -8,7 +8,7 @@ use tempfile::TempDir;
 use acp_stack::runtime::agent::switch_journal::{
     SwitchJournalPhase, load_switch_journal, persist_switch_journal, switch_journal_path,
 };
-use acp_stack::secrets::SecretStore;
+use acp_stack::secrets::{ManagedCredentialSelection, SecretStore};
 
 use crate::common::agent::{AgentHarness, admin_bearer, http, session_bearer, test_config};
 
@@ -20,6 +20,31 @@ fn seed_provider_secrets(home: &std::path::Path) {
             ("OPENAI_API_KEY", "openai-secret"),
         ])
         .expect("provider secrets");
+}
+
+/// Push one provider's credential through the managed-state extension channel, the
+/// way a hosted operator does: no flat secret, one provider per namespace revision.
+fn apply_managed_provider_credential(
+    home: &std::path::Path,
+    revision: i64,
+    provider_id: &str,
+    env_name: &str,
+    value: &str,
+) {
+    let mut secrets = SecretStore::open_or_create(home).expect("secret store");
+    secrets
+        .apply_managed_state_credential(
+            "managed-provider-state",
+            "provider-credential",
+            revision,
+            Some(ManagedCredentialSelection {
+                provider_id: provider_id.to_owned(),
+                values: std::collections::BTreeMap::from([(env_name.to_owned(), value.to_owned())]),
+                source_refs: std::collections::BTreeMap::new(),
+                base_url: None,
+            }),
+        )
+        .expect("apply managed credential");
 }
 
 async fn switch_request(harness: &AgentHarness, body: Value) -> (StatusCode, Value) {
@@ -159,6 +184,115 @@ async fn agent_switch_same_target_second_provider_change_applies() {
 
     let on_disk = std::fs::read_to_string(&harness.config_path).expect("config after");
     assert!(on_disk.contains(r#"id = "openai""#), "config: {on_disk}");
+}
+
+/// The outgoing provider's key can be gone by the time the switch runs: a managed
+/// namespace holds one credential at a time, so re-applying it with the incoming
+/// provider removes the outgoing one. The switch must prune the ref it leaves behind
+/// instead of failing on a secret nothing runs on any more.
+#[tokio::test]
+async fn agent_switch_same_target_prunes_the_outgoing_provider_env_ref() {
+    let tempdir = TempDir::new().expect("tempdir");
+    seed_provider_secrets(tempdir.path());
+    {
+        let mut secrets = SecretStore::open_or_create(tempdir.path()).expect("secret store");
+        secrets
+            .set_many([
+                ("OPENCODE_API_KEY", "opencode-secret"),
+                ("OPENROUTER_API_KEY", "openrouter-secret"),
+            ])
+            .expect("switch secrets");
+    }
+    let harness =
+        AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
+
+    let (status, body) = switch_request(
+        &harness,
+        json!({ "agent_id": "opencode", "provider": "opencode-go" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let on_disk = std::fs::read_to_string(&harness.config_path).expect("config after first switch");
+    assert!(on_disk.contains("OPENCODE_API_KEY"), "config: {on_disk}");
+
+    // The managed namespace has moved on: the outgoing provider's key is gone.
+    {
+        let mut secrets = SecretStore::open_or_create(tempdir.path()).expect("secret store");
+        secrets.delete("OPENCODE_API_KEY").expect("drop outgoing");
+    }
+
+    let (status, body) = switch_request(
+        &harness,
+        json!({ "agent_id": "opencode", "provider": "openrouter" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["data"]["provider"], "openrouter");
+
+    let on_disk = std::fs::read_to_string(&harness.config_path).expect("config after switch");
+    assert!(
+        !on_disk.contains("OPENCODE_API_KEY"),
+        "the outgoing provider's env ref must not survive the switch: {on_disk}"
+    );
+    assert!(
+        !on_disk.contains("opencode-go"),
+        "the outgoing provider must not stay active: {on_disk}"
+    );
+}
+
+/// The same prune with both keys held only as managed credentials: the namespace
+/// carries one provider at a time, so applying the incoming provider's credential
+/// removes the outgoing one before the switch that follows it ever runs.
+#[tokio::test]
+async fn agent_switch_same_target_prunes_a_replaced_managed_credential_ref() {
+    let tempdir = TempDir::new().expect("tempdir");
+    seed_provider_secrets(tempdir.path());
+    apply_managed_provider_credential(
+        tempdir.path(),
+        1,
+        "opencode-go",
+        "OPENCODE_API_KEY",
+        "managed-opencode-secret",
+    );
+    let harness =
+        AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
+
+    let (status, body) = switch_request(
+        &harness,
+        json!({ "agent_id": "opencode", "provider": "opencode-go" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let on_disk = std::fs::read_to_string(&harness.config_path).expect("config after first switch");
+    assert!(on_disk.contains("OPENCODE_API_KEY"), "config: {on_disk}");
+
+    // The namespace's next revision carries the incoming provider, which drops the
+    // outgoing provider's credential from the catalog.
+    apply_managed_provider_credential(
+        tempdir.path(),
+        2,
+        "openrouter",
+        "OPENROUTER_API_KEY",
+        "managed-openrouter-secret",
+    );
+
+    let (status, body) = switch_request(
+        &harness,
+        json!({ "agent_id": "opencode", "provider": "openrouter" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["data"]["provider"], "openrouter");
+
+    let on_disk = std::fs::read_to_string(&harness.config_path).expect("config after switch");
+    assert!(
+        !on_disk.contains("OPENCODE_API_KEY"),
+        "the replaced credential's env ref must not survive the switch: {on_disk}"
+    );
+    assert!(
+        !on_disk.contains("opencode-go"),
+        "the outgoing provider must not stay active: {on_disk}"
+    );
 }
 
 #[tokio::test]

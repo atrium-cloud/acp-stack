@@ -662,6 +662,20 @@ pub fn apply_mapped_agent_provider(
             ),
         });
     }
+    let outgoing_provider_id = config
+        .agent
+        .provider
+        .as_ref()
+        .map(|provider| provider.id.clone());
+    // A live subagent's provider MUST stay in the active set: config validation rejects a
+    // subagent provider that is missing from it.
+    let subagent_provider_id = config
+        .agent
+        .subagent
+        .as_ref()
+        .filter(|subagent| !subagent.disabled)
+        .and_then(|subagent| subagent.provider.as_ref())
+        .map(|provider| provider.id.clone());
     let required_env_refs = required_env_refs_for_agent_provider_id(
         &config.agent.id,
         provider_id,
@@ -679,41 +693,134 @@ pub fn apply_mapped_agent_provider(
         api_key_ref,
         custom: None,
     });
-    if let Some(providers) = config.agent.providers.as_mut()
-        && !providers.active.iter().any(|active| active == provider_id)
-    {
-        providers.active.push(provider_id.to_owned());
+    if let Some(providers) = config.agent.providers.as_mut() {
+        // The switched-out provider keeps resolving at spawn while it stays active, so a
+        // managed namespace that has since replaced its credential fails every launch.
+        if let Some(outgoing) = outgoing_provider_id.as_deref().filter(|outgoing| {
+            *outgoing != provider_id && Some(*outgoing) != subagent_provider_id.as_deref()
+        }) {
+            providers.active.retain(|active| active != outgoing);
+            // A retained alias selection keeps `target_uses_provider` true and would wrongly
+            // block deleting the dropped provider's credential.
+            providers.selected_aliases.remove(outgoing);
+        }
+        if !providers.active.iter().any(|active| active == provider_id) {
+            providers.active.push(provider_id.to_owned());
+        }
     }
-    reconcile_kimi_lane_env_declarations(&mut config.agent);
+    reconcile_provider_env_declarations(&mut config.agent);
     Ok(required_env_refs)
 }
 
-/// Drop kimi-lane env refs the active provider does not require: the launch env
-/// resolves every `[agent].env` entry, so a leftover ref from a previously selected
-/// Kimi lane fails the launch on a secret the active lane never uses.
-pub fn reconcile_kimi_lane_env_declarations(agent: &mut AgentConfig) {
-    if agent.id != crate::runtime::agent::acp_bridge::KIMI_CODE_AGENT_ID {
-        return;
+/// Env refs the agent's active provider set resolves at spawn: each active provider's
+/// emitted API-key ref plus its companion and optional refs, and the refs the config
+/// names explicitly (which may be an accepted alternative to the mapping default).
+fn active_provider_env_refs(agent: &AgentConfig) -> BTreeSet<String> {
+    let mut refs = BTreeSet::new();
+    for provider_id in effective_active_provider_ids(agent) {
+        if !provider_id_is_known(&provider_id) {
+            refs.extend(agent_custom_provider_api_key_ref(agent, &provider_id).map(str::to_owned));
+            continue;
+        }
+        refs.extend(env_var_for_agent_provider_id(&agent.id, &provider_id).map(str::to_owned));
+        refs.extend(
+            companion_env_refs_for_agent_provider_id(&agent.id, &provider_id)
+                .into_iter()
+                .map(str::to_owned),
+        );
+        refs.extend(
+            optional_env_refs_for_agent_provider_id(&agent.id, &provider_id)
+                .into_iter()
+                .map(str::to_owned),
+        );
     }
-    let lane_refs: BTreeSet<&'static str> = providers_for_agent(&agent.id)
-        .into_iter()
-        .filter_map(|summary| summary.default_api_key_ref)
-        .collect();
-    let active_ref = agent
+    refs.extend(configured_provider_api_key_refs(agent));
+    refs
+}
+
+/// API-key refs named directly by the primary and subagent provider blocks.
+fn configured_provider_api_key_refs(agent: &AgentConfig) -> Vec<String> {
+    agent
         .provider
-        .as_ref()
-        .and_then(|provider| {
-            provider.api_key_ref.clone().or_else(|| {
-                env_var_for_agent_provider_id(&agent.id, &provider.id).map(str::to_owned)
-            })
-        })
-        .unwrap_or_else(|| crate::runtime::agent::acp_bridge::KIMI_API_KEY_ENV.to_owned());
+        .iter()
+        .chain(
+            agent
+                .subagent
+                .as_ref()
+                .filter(|subagent| !subagent.disabled)
+                .and_then(|subagent| subagent.provider.as_ref()),
+        )
+        .filter_map(|provider| provider.api_key_ref.clone())
+        .collect()
+}
+
+/// Env refs owned by some provider this agent supports. Optional refs are excluded:
+/// they are never required to launch, so a declared one is an operator override that
+/// no provider selection may drop.
+fn agent_provider_owned_env_refs(agent_id: &str) -> BTreeSet<String> {
+    let mut refs = BTreeSet::new();
+    for summary in providers_for_agent(agent_id) {
+        refs.extend(summary.default_api_key_ref.map(str::to_owned));
+        refs.extend(
+            summary
+                .companion_env_refs
+                .into_iter()
+                .map(|env_ref| env_ref.to_owned()),
+        );
+    }
+    refs
+}
+
+/// Refs the current primary provider needs declared in `[agent].env`, falling back to
+/// the agent-scoped refs when no provider is configured.
+fn primary_provider_declaration_refs(agent: &AgentConfig) -> Vec<String> {
+    let Some(provider) = agent.provider.as_ref() else {
+        return env_refs_for_agent_id(&agent.id)
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+    };
+    if provider.custom.is_some() || !provider_id_is_known(&provider.id) {
+        return provider.api_key_ref.iter().cloned().collect();
+    }
+    let api_key_ref = if provider_uses_agent_native_auth(&agent.id, &provider.id) {
+        None
+    } else {
+        provider
+            .api_key_ref
+            .clone()
+            .or_else(|| env_var_for_agent_provider_id(&agent.id, &provider.id).map(str::to_owned))
+    };
+    required_env_refs_for_agent_provider_id(&agent.id, &provider.id, api_key_ref.as_deref())
+}
+
+/// Drop provider-owned env refs no active provider resolves, then declare the ones the
+/// current selection needs. The launch env resolves every bare `[agent].env` entry, so a
+/// ref left behind by a previous selection fails the launch on a secret nothing uses.
+///
+/// Only bare refs owned by a provider this agent supports are candidates: a templated
+/// entry carries an operator-supplied value, and a ref a remaining active provider still
+/// resolves (a shared API key, a subagent's provider) stays declared.
+pub fn reconcile_provider_env_declarations(agent: &mut AgentConfig) {
+    let owned = agent_provider_owned_env_refs(&agent.id);
+    let declared_owned_ref = agent.env.iter().any(|entry| {
+        let name = crate::config::env_entry_var_name(entry);
+        name == entry.as_str() && owned.contains(name)
+    });
+    let active = active_provider_env_refs(agent);
     agent.env.retain(|entry| {
         let name = crate::config::env_entry_var_name(entry);
-        name == active_ref || !lane_refs.contains(name)
+        name != entry.as_str() || active.contains(name) || !owned.contains(name)
     });
-    if !crate::config::agent_env_declares(&agent.env, &active_ref) {
-        agent.env.push(active_ref);
+    // A config that never declared a provider ref takes its key from the credential
+    // catalog; adding one here would put a bare ref in front of the managed channel.
+    if !declared_owned_ref {
+        return;
+    }
+    for env_ref in primary_provider_declaration_refs(agent) {
+        if !crate::config::agent_env_declares(&agent.env, &env_ref) {
+            agent.env.push(env_ref);
+        }
     }
 }
 
@@ -769,7 +876,7 @@ pub fn apply_catalog_mapped_agent_provider(
             providers.active = vec![provider_id.to_owned()];
         }
     }
-    reconcile_kimi_lane_env_declarations(agent);
+    reconcile_provider_env_declarations(agent);
     Ok(required_env_refs)
 }
 

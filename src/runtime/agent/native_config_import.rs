@@ -578,7 +578,7 @@ pub fn rebase_prepared_native_config_import(
         }
         // The union re-admits the lane ref prepare dropped; the launch env resolves every
         // declared ref, so a stale one fails the launch.
-        crate::runtime::agent::provider_keys::reconcile_kimi_lane_env_declarations(
+        crate::runtime::agent::provider_keys::reconcile_provider_env_declarations(
             &mut candidate.agent,
         );
     }

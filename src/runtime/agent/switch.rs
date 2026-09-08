@@ -267,7 +267,7 @@ fn configure_switch_provider(
         }
         config.agent.provider = Some(provider);
         append_missing_refs(&mut config.agent.env, &refs);
-        crate::runtime::agent::provider_keys::reconcile_kimi_lane_env_declarations(
+        crate::runtime::agent::provider_keys::reconcile_provider_env_declarations(
             &mut config.agent,
         );
         return Ok((
@@ -337,7 +337,7 @@ fn configure_switch_provider(
                 selected_aliases: BTreeMap::from([(current_provider.id.clone(), alias.clone())]),
             });
         }
-        crate::runtime::agent::provider_keys::reconcile_kimi_lane_env_declarations(
+        crate::runtime::agent::provider_keys::reconcile_provider_env_declarations(
             &mut config.agent,
         );
         return Ok((
@@ -364,7 +364,7 @@ fn configure_switch_provider(
     )?;
     config.agent.provider = Some(provider);
     append_missing_refs(&mut config.agent.env, &refs);
-    crate::runtime::agent::provider_keys::reconcile_kimi_lane_env_declarations(&mut config.agent);
+    crate::runtime::agent::provider_keys::reconcile_provider_env_declarations(&mut config.agent);
     Ok((
         AgentSwitchProviderStatus::Reused {
             provider_id: config
