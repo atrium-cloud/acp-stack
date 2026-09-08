@@ -36,8 +36,9 @@ use crate::secrets::{SharedSecretStore, lock_shared_secret_store};
 use crate::state::default_state_path;
 
 use super::prompt::{
-    self, ConfirmAnswer, HostedPromptDriver, HostedPromptKind, HostedPromptOutcome,
-    HostedPromptRequest, HostedPromptStyle,
+    self, ConfirmAnswer, DiscoveryRevision, DiscoveryWait, HostedPromptDriver, HostedPromptKind,
+    HostedPromptOutcome, HostedPromptRequest, HostedPromptStyle, RevisableOutcome, RevisedAnswer,
+    SKIP_OPTION_ID,
 };
 use super::state_signal::InitStateSignal;
 #[cfg(test)]

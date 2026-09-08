@@ -107,11 +107,12 @@ pub(super) const INSTALL_RETRY_TOTAL_BUDGET: Duration = Duration::from_secs(20 *
 
 /// Exponential backoff for the 1-based `attempt` that just failed, clamped to `INSTALL_RETRY_MAX_DELAY`.
 pub(super) fn install_retry_backoff(attempt: u32) -> Duration {
-    let exponent = attempt.saturating_sub(1).min(INSTALL_RETRY_MAX_EXPONENT);
-    INSTALL_RETRY_BASE_DELAY
-        .checked_mul(1u32 << exponent)
-        .unwrap_or(INSTALL_RETRY_MAX_DELAY)
-        .min(INSTALL_RETRY_MAX_DELAY)
+    crate::time_util::exponential_backoff_delay(
+        attempt,
+        INSTALL_RETRY_BASE_DELAY,
+        INSTALL_RETRY_MAX_DELAY,
+        INSTALL_RETRY_MAX_EXPONENT,
+    )
 }
 
 /// Whether an install failure is worth retrying: the listed failures are deterministic given the same recipe and host, so they fail identically on every attempt.

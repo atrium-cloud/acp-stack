@@ -7369,10 +7369,11 @@
           },
           "status": {
             "type": "string",
-            "description": "Session status after the request was applied. `cancelled`, `closed`, and\n`errored` are terminal, as is `completed_awaiting_ack` until the result\nis acknowledged.",
+            "description": "Session status after the request was applied. `awaiting_discovery_close`\nis the parked wait for the client's close signal. `cancelled`, `closed`,\nand `errored` are terminal, as is `completed_awaiting_ack` until the\nresult is acknowledged.",
             "enum": [
               "running",
               "waiting_for_input",
+              "awaiting_discovery_close",
               "completed_awaiting_ack",
               "errored",
               "cancelled",
@@ -7409,10 +7410,11 @@
           },
           "status": {
             "type": "string",
-            "description": "Current session status. `waiting_for_input` is the steady state while a\nprompt is pending; `cancelled`, `closed`, and `errored` are terminal, as\nis `completed_awaiting_ack` until the result is acknowledged.",
+            "description": "Current session status. `waiting_for_input` is the steady state while a\nprompt is pending, `awaiting_discovery_close` the parked wait for the\nclient's close signal; `cancelled`, `closed`, and `errored` are terminal,\nas is `completed_awaiting_ack` until the result is acknowledged.",
             "enum": [
               "running",
               "waiting_for_input",
+              "awaiting_discovery_close",
               "completed_awaiting_ack",
               "errored",
               "cancelled",
@@ -7460,6 +7462,17 @@
             "type": "integer",
             "format": "uint64",
             "minimum": 0
+          },
+          "discovery": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/response/PublicDiscoveryPhase"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The discovery phase, present only while it is open. Absent before the\nfirst discovery answer, after the phase closes, and on a terminal session."
           }
         },
         "required": [
@@ -7586,6 +7599,54 @@
           "code",
           "message"
         ]
+      },
+      "PublicDiscoveryPhase": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "type": "string",
+            "description": "`awaiting_close` means the run is parked on the client's close signal.",
+            "enum": [
+              "open",
+              "awaiting_close"
+            ]
+          },
+          "revisable": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/PublicRevisablePrompt"
+            }
+          }
+        },
+        "required": [
+          "state",
+          "revisable"
+        ],
+        "description": "The window in which an earlier discovery answer may still be revised."
+      },
+      "PublicRevisablePrompt": {
+        "type": "object",
+        "properties": {
+          "request_id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "description": "Machine-readable prompt identity, from `HostedPromptKind::as_str`."
+          },
+          "config_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set on `config_option` entries, which are one lane per advertised option."
+          }
+        },
+        "required": [
+          "request_id",
+          "kind"
+        ],
+        "description": "One revisable prompt, addressed by id. The option sets are not repeated here:\na reconnecting client re-reads them from the init-tier `GET /v1/models` and\nthe recorded `input_required` events."
       },
       "InputAcceptedResponse": {
         "type": "object",

@@ -13,6 +13,21 @@ impl HostedPromptDriver for SessionPromptDriver {
         Ok(HostedPromptOutcome::Handled(selection))
     }
 
+    fn select_revisable(
+        &self,
+        request: HostedPromptRequest,
+    ) -> Result<HostedPromptOutcome<RevisableOutcome<Option<usize>>>> {
+        let Some(input) = self.session.request_input_revisable(request.clone())? else {
+            return Ok(HostedPromptOutcome::Unhandled);
+        };
+        Ok(HostedPromptOutcome::Handled(match input {
+            HostedInput::Answer(answer) => {
+                RevisableOutcome::Answered(parse_optional_index(&answer.value, &request)?)
+            }
+            HostedInput::Revision(revision) => RevisableOutcome::Revised(revision),
+        }))
+    }
+
     fn confirm(&self, request: HostedPromptRequest) -> Result<HostedPromptOutcome<bool>> {
         Ok(match self.confirm_with_deferral(request)? {
             HostedPromptOutcome::Handled(answer) => HostedPromptOutcome::Handled(answer.value),
@@ -106,74 +121,41 @@ impl HostedPromptDriver for SessionPromptDriver {
         let Some(answer) = self.session.request_input(request)? else {
             return Ok(HostedPromptOutcome::Unhandled);
         };
-        let Some(answer) = answer.value.as_object() else {
-            return Err(StackError::InvalidParam {
+        Ok(HostedPromptOutcome::Handled(resolve_config_option_answer(
+            &answer.value,
+            &advertised,
+        )?))
+    }
+
+    fn config_option_revisable(
+        &self,
+        request: HostedPromptRequest,
+    ) -> Result<HostedPromptOutcome<RevisableOutcome<Option<crate::config::AgentConfigOptionValue>>>>
+    {
+        let advertised = request
+            .config_option
+            .clone()
+            .ok_or_else(|| StackError::InvalidParam {
                 field: "init",
-                reason: "config-option input must carry `config_id` and `value`".to_owned(),
-            });
+                reason: "config-option input omitted its advertised option".to_owned(),
+            })?;
+        let Some(input) = self.session.request_input_revisable(request)? else {
+            return Ok(HostedPromptOutcome::Unhandled);
         };
-        let Some(config_id) = answer.get("config_id").and_then(Value::as_str) else {
-            return Err(StackError::InvalidParam {
-                field: "init",
-                reason: "config-option input must carry a string `config_id`".to_owned(),
-            });
-        };
-        if config_id != advertised.id {
-            return Err(StackError::InvalidParam {
-                field: "init",
-                reason: format!(
-                    "config-option input names `{config_id}`, expected `{}`",
-                    advertised.id
-                ),
-            });
-        }
-        let Some(value) = answer.get("value") else {
-            return Err(StackError::InvalidParam {
-                field: "init",
-                reason: "config-option input omitted `value`".to_owned(),
-            });
-        };
-        if value.is_null() {
-            return Ok(HostedPromptOutcome::Handled(None));
-        }
-        let configured = match advertised.kind.as_str() {
-            crate::runtime::agent::config_options::SNAPSHOT_KIND_BOOLEAN => value
-                .as_bool()
-                .map(crate::config::AgentConfigOptionValue::Bool)
-                .ok_or_else(|| StackError::InvalidParam {
-                    field: "init",
-                    reason: format!("config option `{}` requires a boolean value", advertised.id),
-                })?,
-            crate::runtime::agent::config_options::SNAPSHOT_KIND_SELECT => {
-                let selected = value.as_str().ok_or_else(|| StackError::InvalidParam {
-                    field: "init",
-                    reason: format!("config option `{}` requires a string value", advertised.id),
-                })?;
-                let advertised_value = advertised
-                    .options
-                    .as_deref()
-                    .unwrap_or_default()
-                    .iter()
-                    .any(|choice| choice.value == selected);
-                if !advertised_value {
-                    return Err(StackError::InvalidParam {
-                        field: "init",
-                        reason: format!(
-                            "config option `{}` does not advertise `{selected}`",
-                            advertised.id
-                        ),
-                    });
-                }
-                crate::config::AgentConfigOptionValue::Text(selected.to_owned())
-            }
-            _ => {
-                return Err(StackError::InvalidParam {
-                    field: "init",
-                    reason: format!("config option `{}` has an unsupported type", advertised.id),
-                });
-            }
-        };
-        Ok(HostedPromptOutcome::Handled(Some(configured)))
+        Ok(HostedPromptOutcome::Handled(match input {
+            HostedInput::Answer(answer) => RevisableOutcome::Answered(
+                resolve_config_option_answer(&answer.value, &advertised)?,
+            ),
+            HostedInput::Revision(revision) => RevisableOutcome::Revised(revision),
+        }))
+    }
+
+    fn await_discovery_close(&self) -> Result<DiscoveryWait> {
+        self.session.await_discovery_close()
+    }
+
+    fn supersede_discovery_lanes(&self, kinds: &[HostedPromptKind]) {
+        self.session.supersede_discovery_lanes(kinds);
     }
 
     fn progress(&self, message: String) {
@@ -301,23 +283,46 @@ fn prompt_style_label(style: HostedPromptStyle) -> &'static str {
     }
 }
 
-fn parse_optional_index(value: &Value, request: &HostedPromptRequest) -> Result<Option<usize>> {
+/// The identity fields a select answer may address an option by.
+pub(super) struct OptionIdentity<'a> {
+    pub(super) value: &'a str,
+    pub(super) label: &'a str,
+}
+
+/// The identities of an already-streamed prompt's options, so the session can
+/// validate a revision against exactly what that prompt offered.
+pub(super) fn option_identities(options: &[PublicInputOption]) -> Vec<OptionIdentity<'_>> {
+    options
+        .iter()
+        .map(|option| OptionIdentity {
+            value: option.value.as_str(),
+            label: option.label.as_str(),
+        })
+        .collect()
+}
+
+/// Resolve an `index` / `{index}` / `{value}` / label / null answer against an
+/// option list. The only definition of the select answer grammar, shared by the
+/// driver's first-answer path and the session's revision validator.
+pub(super) fn resolve_option_index(
+    value: &Value,
+    options: &[OptionIdentity<'_>],
+) -> Result<Option<usize>> {
     if value.is_null() {
         return Ok(None);
     }
     if let Some(index) = value.as_u64() {
-        return validate_index(index as usize, request);
+        return validate_index(index as usize, options.len());
     }
     if let Some(index) = value.get("index").and_then(Value::as_u64) {
-        return validate_index(index as usize, request);
+        return validate_index(index as usize, options.len());
     }
     // Bare strings deliberately stay label-only: letting a label also match an
     // id would make a reworded label silently resolve to the wrong row.
     if let Some(id) = value.get("value").and_then(Value::as_str) {
-        let index = request
-            .items
+        let index = options
             .iter()
-            .position(|item| item.value == id)
+            .position(|option| option.value == id)
             .ok_or_else(|| StackError::InvalidParam {
                 field: "init",
                 reason: format!("selection `{id}` does not match any option"),
@@ -325,10 +330,9 @@ fn parse_optional_index(value: &Value, request: &HostedPromptRequest) -> Result<
         return Ok(Some(index));
     }
     if let Some(label) = value.as_str() {
-        let index = request
-            .items
+        let index = options
             .iter()
-            .position(|item| item.label == label)
+            .position(|option| option.label == label)
             .ok_or_else(|| StackError::InvalidParam {
                 field: "init",
                 reason: format!("selection `{label}` does not match any option"),
@@ -341,8 +345,97 @@ fn parse_optional_index(value: &Value, request: &HostedPromptRequest) -> Result<
     })
 }
 
-fn validate_index(index: usize, request: &HostedPromptRequest) -> Result<Option<usize>> {
-    if index >= request.items.len() {
+/// Resolve a `{config_id, value}` answer against the option the prompt
+/// advertised. Shared by the driver's first-answer path and the session's
+/// revision validator.
+pub(super) fn resolve_config_option_answer(
+    answer: &Value,
+    advertised: &crate::runtime::agent::config_options::SessionConfigOptionSnapshot,
+) -> Result<Option<crate::config::AgentConfigOptionValue>> {
+    let Some(answer) = answer.as_object() else {
+        return Err(StackError::InvalidParam {
+            field: "init",
+            reason: "config-option input must carry `config_id` and `value`".to_owned(),
+        });
+    };
+    let Some(config_id) = answer.get("config_id").and_then(Value::as_str) else {
+        return Err(StackError::InvalidParam {
+            field: "init",
+            reason: "config-option input must carry a string `config_id`".to_owned(),
+        });
+    };
+    if config_id != advertised.id {
+        return Err(StackError::InvalidParam {
+            field: "init",
+            reason: format!(
+                "config-option input names `{config_id}`, expected `{}`",
+                advertised.id
+            ),
+        });
+    }
+    let Some(value) = answer.get("value") else {
+        return Err(StackError::InvalidParam {
+            field: "init",
+            reason: "config-option input omitted `value`".to_owned(),
+        });
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let configured = match advertised.kind.as_str() {
+        crate::runtime::agent::config_options::SNAPSHOT_KIND_BOOLEAN => value
+            .as_bool()
+            .map(crate::config::AgentConfigOptionValue::Bool)
+            .ok_or_else(|| StackError::InvalidParam {
+                field: "init",
+                reason: format!("config option `{}` requires a boolean value", advertised.id),
+            })?,
+        crate::runtime::agent::config_options::SNAPSHOT_KIND_SELECT => {
+            let selected = value.as_str().ok_or_else(|| StackError::InvalidParam {
+                field: "init",
+                reason: format!("config option `{}` requires a string value", advertised.id),
+            })?;
+            let advertised_value = advertised
+                .options
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .any(|choice| choice.value == selected);
+            if !advertised_value {
+                return Err(StackError::InvalidParam {
+                    field: "init",
+                    reason: format!(
+                        "config option `{}` does not advertise `{selected}`",
+                        advertised.id
+                    ),
+                });
+            }
+            crate::config::AgentConfigOptionValue::Text(selected.to_owned())
+        }
+        _ => {
+            return Err(StackError::InvalidParam {
+                field: "init",
+                reason: format!("config option `{}` has an unsupported type", advertised.id),
+            });
+        }
+    };
+    Ok(Some(configured))
+}
+
+fn parse_optional_index(value: &Value, request: &HostedPromptRequest) -> Result<Option<usize>> {
+    let options: Vec<OptionIdentity<'_>> = request
+        .items
+        .iter()
+        .map(|item| OptionIdentity {
+            value: item.value.as_str(),
+            label: item.label.as_str(),
+        })
+        .collect();
+    resolve_option_index(value, &options)
+}
+
+fn validate_index(index: usize, option_count: usize) -> Result<Option<usize>> {
+    if index >= option_count {
         return Err(StackError::InvalidParam {
             field: "init",
             reason: format!("selection index {index} is out of range"),

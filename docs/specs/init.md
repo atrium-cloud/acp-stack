@@ -150,6 +150,7 @@ The operator-facing sequence, in order:
         - A non-interactive run without `--mode`/`--effort` never enters that lane: it spawns nothing, prints nothing, and writes no value. The exception is an agent whose registry entry declares `default_mode` (kimi: `yolo`): the mode lane runs, and the default lands when the agent advertises it.
         - Explicit `--mode` and `--effort` are validated against the advertised values, and a rejection lists them. Codex with OpenRouter validates `--effort` against the provider catalog's reasoning-effort values for the configured model and pins the value in `~/.codex/config.toml`.
         - When mode and/or effort are the only active lanes and neither flag was passed, a provisional session that cannot be established is reported and skipped rather than failing init; an explicit `--mode`/`--effort` still fails loudly.
+        - A discovery probe that fails on transport, spawn, or timeout is attempted three times with exponential backoff, each retry reported as progress, before the lane is skipped or the run fails. A locally rejected input, such as a malformed flag or an unparseable config, fails at once.
         - Discovery also requires a resolvable provider credential:
             - When hosted init has deferred the provider credential, discovery skips with a progress note; explicit `--model`, `--mode`, and `--effort` values are written without advertised-value validation.
         - Codex with a non-OpenAI provider lists models from the provider's live catalog (fetched during init and cached at `~/.config/acp-stack/provider-models.json`) instead of the adapter's advertised OpenAI presets.
@@ -261,6 +262,10 @@ The hosted flow follows the same init steps as interactive `acps init`, but stre
 - The post-install MCP configuration step streams its prompts only when the start request declared no MCP server. Declaring servers up front still wins and skips the wizard outright.
 - MCP declarations the installed agent's capabilities do not cover are reported only through the result frame's `ignored_features`, never through progress frames.
 - Prompt answers arrive over the WebSocket `input` frame or the REST twin `POST /v1/init/sessions/{id}/input`, interchangeably. The bootstrap server also mounts `GET /v1/models` (with `?target_id=` target selection) so a backend renders pickers while the session runs.
+- Discovery answers stay revisable while the run is live. The phase opens on the first accepted model, mode, effort, or `config_option` answer; after the forward pass the session parks in `awaiting_discovery_close`, and until it closes an `input` naming an earlier discovery prompt replaces that answer. A run that streamed a model prompt parks there even when it settled on no model or its probe gave up, and a model revision sent there runs discovery again. A run that issues no discovery prompt opens no phase and waits for nothing.
+- A revision re-runs the lanes below it. A revised model re-probes the agent and re-issues the mode, effort, and `config_option` prompts with new `request_id`s, and their previous ids stop being addressable. Other lanes re-issue nothing. The revised prompt keeps its own `request_id`, so a client holds one stable address per lane.
+- The close signal is the `close_discovery` frame or `POST /v1/init/sessions/{id}/discovery/close`. It is accepted once the session reports `awaiting_discovery_close`, refused as `init.discovery_busy` while discovery is still in progress, and as `init.discovery_not_open` before the phase opens and after it closes.
+- Revisions ride the ordinary `input` frame and its REST twin. The full contract, including the `init.revision_rejected` refusal and the `discovery` event, is in [endpoints.md](api/endpoints.md).
 
 ### Extension Declarations And In-Stream Credential Deposit
 
@@ -335,6 +340,7 @@ The server bounds its own lifetime so even an abandoned bootstrap eventually fre
 - A WebSocket disconnect restarts the idle clock, so a dropped backend gets the full timeout to reconnect and acknowledge.
 - Expiry also fires from `completed_awaiting_ack`: the stored unacknowledged result is discarded and zeroized, and the process exits non-zero.
 - A parked `errored` session has its own 2-minute `error_ack_timeout` grace that runs regardless of the idle setting and of connected clients.
+- A session parked in `awaiting_discovery_close` runs the idle clock regardless of connected WebSockets, since a socket held open is not evidence the phase will be closed. Reaching `--idle-timeout` there cancels with reason `discovery_close_timeout`.
 - Reaching either limit before any session was created also exits non-zero. The pre-session idle clock runs from the last authenticated API call, not just server start.
 - When a session turns terminal, the server closes any attached WebSocket after forwarding the final event, so a hung client cannot hold the process past `--max-lifetime`.
 - A session status snapshot includes `last_activity_age_secs` — the idle time leading up to that status request, before the request itself counts as activity — so the hosting backend can make its own reap-vs-wait decisions.

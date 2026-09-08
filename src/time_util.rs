@@ -52,6 +52,24 @@ pub fn parse_coarse_duration_suffix(input: &str) -> Option<Duration> {
     }
 }
 
+/// Doubling backoff for the 1-based `attempt` that just failed, clamped to `max`. The single
+/// backoff definition in the runtime, so retry sites stay comparable instead of drifting apart.
+/// `max_exponent` caps the doubling independently of `max`, and is itself clamped so the shift
+/// cannot overflow.
+pub fn exponential_backoff_delay(
+    attempt: u32,
+    base: std::time::Duration,
+    max: std::time::Duration,
+    max_exponent: u32,
+) -> std::time::Duration {
+    const SHIFT_CEILING: u32 = 31;
+    let exponent = attempt
+        .saturating_sub(1)
+        .min(max_exponent)
+        .min(SHIFT_CEILING);
+    base.checked_mul(1u32 << exponent).unwrap_or(max).min(max)
+}
+
 /// Resolve a duration range relative to `now`, rejecting anything preceding the Unix epoch.
 pub fn resolve_since_after_unix_epoch(
     duration: Duration,
@@ -118,6 +136,37 @@ mod tests {
         assert_eq!(parse_coarse_duration_suffix("30s"), None);
         assert_eq!(parse_coarse_duration_suffix("15x"), None);
         assert_eq!(parse_coarse_duration_suffix("-1d"), None);
+    }
+
+    #[test]
+    fn exponential_backoff_delay_doubles_and_caps() {
+        use std::time::Duration as StdDuration;
+        let base = StdDuration::from_secs(2);
+        let max = StdDuration::from_secs(60);
+        assert_eq!(exponential_backoff_delay(1, base, max, 5), base);
+        assert_eq!(
+            exponential_backoff_delay(2, base, max, 5),
+            StdDuration::from_secs(4)
+        );
+        assert_eq!(
+            exponential_backoff_delay(4, base, max, 5),
+            StdDuration::from_secs(16)
+        );
+        // The exponent cap alone holds the delay at 2 * 2^5, with `max` far away.
+        assert_eq!(
+            exponential_backoff_delay(9, base, StdDuration::from_secs(3600), 5),
+            StdDuration::from_secs(64)
+        );
+        // A tighter ceiling clamps ahead of the exponent cap.
+        assert_eq!(
+            exponential_backoff_delay(9, base, StdDuration::from_secs(8), 5),
+            StdDuration::from_secs(8)
+        );
+        // An absurd exponent cannot overflow the shift.
+        assert_eq!(
+            exponential_backoff_delay(u32::MAX, base, max, u32::MAX),
+            max
+        );
     }
 
     #[test]

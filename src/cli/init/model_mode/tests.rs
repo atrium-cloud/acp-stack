@@ -1029,6 +1029,1153 @@ fn goose_mode_and_effort_lanes_are_skipped_while_no_model_is_configured() {
     );
 }
 
+/// Rewrites the discovery fixture at a scripted moment, so a probe can fail and
+/// the next one succeed.
+#[cfg(feature = "test-fixtures")]
+enum FixtureEdit {
+    Remove,
+    /// Rewrite the fixture, advertising these efforts.
+    Write(Vec<String>),
+}
+
+/// Answers every discovery picker and hands back scripted revisions, either in
+/// place of the answer to a named prompt or from the close wait.
+#[cfg(feature = "test-fixtures")]
+struct RevisingDriver {
+    fixture_path: PathBuf,
+    /// Value each typed picker answers with, by wire kind; absent takes the first option.
+    answers: std::sync::Mutex<std::collections::BTreeMap<&'static str, String>>,
+    /// Value each generic option answers with, by option id; absent keeps the advertised default.
+    config_answers:
+        std::sync::Mutex<std::collections::BTreeMap<String, crate::config::AgentConfigOptionValue>>,
+    /// Handed back instead of answering the next prompt of the named wire kind.
+    interrupts: std::sync::Mutex<Vec<(&'static str, DiscoveryRevision)>>,
+    /// Handed back from the close wait, oldest first; an empty script closes the phase.
+    close_script: std::sync::Mutex<std::collections::VecDeque<DiscoveryRevision>>,
+    /// Fixture rewrites keyed by the moment they fire: `model` or `supersede`.
+    fixture_edits: std::sync::Mutex<Vec<(&'static str, FixtureEdit)>>,
+    offered: std::sync::Mutex<Vec<(&'static str, Vec<String>)>>,
+    config_offered: std::sync::Mutex<Vec<String>>,
+    superseded: std::sync::Mutex<Vec<Vec<&'static str>>>,
+    progress: std::sync::Mutex<Vec<String>>,
+    signals: std::sync::Mutex<Vec<InitStateSignal>>,
+    close_waits: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(feature = "test-fixtures")]
+impl RevisingDriver {
+    fn new(fixture_path: &Path) -> Self {
+        Self {
+            fixture_path: fixture_path.to_path_buf(),
+            answers: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            config_answers: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            interrupts: std::sync::Mutex::new(Vec::new()),
+            close_script: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            fixture_edits: std::sync::Mutex::new(Vec::new()),
+            offered: std::sync::Mutex::new(Vec::new()),
+            config_offered: std::sync::Mutex::new(Vec::new()),
+            superseded: std::sync::Mutex::new(Vec::new()),
+            progress: std::sync::Mutex::new(Vec::new()),
+            signals: std::sync::Mutex::new(Vec::new()),
+            close_waits: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn answering(self, kind: prompt::HostedPromptKind, value: &str) -> Self {
+        lock(&self.answers).insert(kind.as_str(), value.to_owned());
+        self
+    }
+
+    fn answering_option(self, id: &str, value: crate::config::AgentConfigOptionValue) -> Self {
+        lock(&self.config_answers).insert(id.to_owned(), value);
+        self
+    }
+
+    fn closing_with(self, revisions: Vec<DiscoveryRevision>) -> Self {
+        lock(&self.close_script).extend(revisions);
+        self
+    }
+
+    fn interrupting(self, kind: prompt::HostedPromptKind, revision: DiscoveryRevision) -> Self {
+        lock(&self.interrupts).push((kind.as_str(), revision));
+        self
+    }
+
+    fn editing_fixture(self, trigger: &'static str, edit: FixtureEdit) -> Self {
+        lock(&self.fixture_edits).push((trigger, edit));
+        self
+    }
+
+    fn fire_fixture_edit(&self, trigger: &'static str) {
+        let mut edits = lock(&self.fixture_edits);
+        let Some(position) = edits.iter().position(|(named, _)| *named == trigger) else {
+            return;
+        };
+        match edits.remove(position).1 {
+            FixtureEdit::Remove => {
+                std::fs::remove_file(&self.fixture_path).expect("remove fixture");
+            }
+            FixtureEdit::Write(efforts) => {
+                let efforts: Vec<&str> = efforts.iter().map(String::as_str).collect();
+                write_phase_fixture(&self.fixture_path, &efforts);
+            }
+        }
+    }
+
+    fn offered_for(&self, kind: prompt::HostedPromptKind) -> Vec<Vec<String>> {
+        lock(&self.offered)
+            .iter()
+            .filter(|(recorded, _)| *recorded == kind.as_str())
+            .map(|(_, values)| values.clone())
+            .collect()
+    }
+
+    fn close_waits(&self) -> usize {
+        self.close_waits.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[cfg(feature = "test-fixtures")]
+fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(feature = "test-fixtures")]
+impl prompt::HostedPromptDriver for RevisingDriver {
+    fn select(
+        &self,
+        request: prompt::HostedPromptRequest,
+    ) -> Result<prompt::HostedPromptOutcome<Option<usize>>> {
+        let kind = request.kind.as_str();
+        let values: Vec<String> = request
+            .items
+            .iter()
+            .map(|item| item.value.clone())
+            .collect();
+        lock(&self.offered).push((kind, values.clone()));
+        if request.kind == prompt::HostedPromptKind::Model {
+            self.fire_fixture_edit("model");
+        }
+        let wanted = lock(&self.answers).get(kind).cloned();
+        let index = match wanted {
+            Some(value) => values.iter().position(|offered| *offered == value),
+            None => Some(0),
+        };
+        Ok(prompt::HostedPromptOutcome::Handled(index))
+    }
+
+    fn select_revisable(
+        &self,
+        request: prompt::HostedPromptRequest,
+    ) -> Result<prompt::HostedPromptOutcome<RevisableOutcome<Option<usize>>>> {
+        let kind = request.kind.as_str();
+        let mut interrupts = lock(&self.interrupts);
+        if let Some(position) = interrupts.iter().position(|(named, _)| *named == kind) {
+            let revision = interrupts.remove(position).1;
+            drop(interrupts);
+            lock(&self.offered).push((
+                kind,
+                request
+                    .items
+                    .iter()
+                    .map(|item| item.value.clone())
+                    .collect(),
+            ));
+            return Ok(prompt::HostedPromptOutcome::Handled(
+                RevisableOutcome::Revised(revision),
+            ));
+        }
+        drop(interrupts);
+        Ok(match self.select(request)? {
+            prompt::HostedPromptOutcome::Handled(value) => {
+                prompt::HostedPromptOutcome::Handled(RevisableOutcome::Answered(value))
+            }
+            prompt::HostedPromptOutcome::Unhandled => prompt::HostedPromptOutcome::Unhandled,
+        })
+    }
+
+    fn config_option(
+        &self,
+        request: prompt::HostedPromptRequest,
+    ) -> Result<prompt::HostedPromptOutcome<Option<crate::config::AgentConfigOptionValue>>> {
+        let option = request.config_option.expect("advertised option metadata");
+        lock(&self.config_offered).push(option.id.clone());
+        let value = lock(&self.config_answers).get(&option.id).cloned();
+        Ok(prompt::HostedPromptOutcome::Handled(value))
+    }
+
+    fn config_option_revisable(
+        &self,
+        request: prompt::HostedPromptRequest,
+    ) -> Result<
+        prompt::HostedPromptOutcome<
+            RevisableOutcome<Option<crate::config::AgentConfigOptionValue>>,
+        >,
+    > {
+        let kind = request.kind.as_str();
+        let mut interrupts = lock(&self.interrupts);
+        if let Some(position) = interrupts.iter().position(|(named, _)| *named == kind) {
+            let revision = interrupts.remove(position).1;
+            drop(interrupts);
+            return Ok(prompt::HostedPromptOutcome::Handled(
+                RevisableOutcome::Revised(revision),
+            ));
+        }
+        drop(interrupts);
+        Ok(match self.config_option(request)? {
+            prompt::HostedPromptOutcome::Handled(value) => {
+                prompt::HostedPromptOutcome::Handled(RevisableOutcome::Answered(value))
+            }
+            prompt::HostedPromptOutcome::Unhandled => prompt::HostedPromptOutcome::Unhandled,
+        })
+    }
+
+    fn await_discovery_close(&self) -> Result<DiscoveryWait> {
+        self.close_waits
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(match lock(&self.close_script).pop_front() {
+            Some(revision) => DiscoveryWait::Revised(revision),
+            None => DiscoveryWait::Closed,
+        })
+    }
+
+    fn supersede_discovery_lanes(&self, kinds: &[prompt::HostedPromptKind]) {
+        lock(&self.superseded).push(kinds.iter().map(|kind| kind.as_str()).collect());
+        self.fire_fixture_edit("supersede");
+    }
+
+    fn confirm(
+        &self,
+        _request: prompt::HostedPromptRequest,
+    ) -> Result<prompt::HostedPromptOutcome<bool>> {
+        Ok(prompt::HostedPromptOutcome::Unhandled)
+    }
+
+    fn text(
+        &self,
+        _request: prompt::HostedPromptRequest,
+    ) -> Result<prompt::HostedPromptOutcome<Option<String>>> {
+        Ok(prompt::HostedPromptOutcome::Unhandled)
+    }
+
+    fn password(
+        &self,
+        _request: prompt::HostedPromptRequest,
+    ) -> Result<prompt::HostedPromptOutcome<Option<String>>> {
+        Ok(prompt::HostedPromptOutcome::Unhandled)
+    }
+
+    fn progress(&self, message: String) {
+        lock(&self.progress).push(message);
+    }
+
+    fn result(&self, _payload: serde_json::Value) {}
+
+    fn state_signal(&self, signal: InitStateSignal) {
+        lock(&self.signals).push(signal);
+    }
+}
+
+#[cfg(feature = "test-fixtures")]
+const PHASE_MODELS: [&str; 2] = ["openrouter/model-a", "openrouter/model-b"];
+
+/// The advertisement every phase test starts from: two models, two modes, the
+/// requested efforts, and one select plus one boolean generic option.
+#[cfg(feature = "test-fixtures")]
+fn write_phase_fixture(path: &Path, efforts: &[&str]) {
+    let mut options = vec![
+        serde_json::json!({
+            "id": "model",
+            "name": "Model",
+            "category": "model",
+            "type": "select",
+            "currentValue": PHASE_MODELS[0],
+            "options": PHASE_MODELS
+                .iter()
+                .map(|value| serde_json::json!({ "value": value, "name": value }))
+                .collect::<Vec<_>>()
+        }),
+        serde_json::json!({
+            "id": "mode",
+            "name": "Mode",
+            "category": "mode",
+            "type": "select",
+            "currentValue": "build",
+            "options": [
+                { "value": "build", "name": "build" },
+                { "value": "plan", "name": "plan" }
+            ]
+        }),
+        serde_json::json!({
+            "id": "agent.persona",
+            "name": "Persona",
+            "category": "_behavior",
+            "type": "select",
+            "currentValue": "balanced",
+            "options": [
+                { "value": "balanced", "name": "Balanced" },
+                { "value": "research", "name": "Research" }
+            ]
+        }),
+        serde_json::json!({
+            "id": "fast",
+            "name": "Fast mode",
+            "type": "boolean",
+            "currentValue": false
+        }),
+    ];
+    if !efforts.is_empty() {
+        options.push(serde_json::json!({
+            "id": "effort",
+            "name": "Effort",
+            "category": "thought_level",
+            "type": "select",
+            "currentValue": efforts[0],
+            "options": efforts
+                .iter()
+                .map(|value| serde_json::json!({ "value": value, "name": value }))
+                .collect::<Vec<_>>()
+        }));
+    }
+    std::fs::write(path, serde_json::Value::Array(options).to_string()).expect("write fixture");
+}
+
+#[cfg(feature = "test-fixtures")]
+fn phase_config() -> Config {
+    let mut config = crate::config::load_config_from_str(include_str!(
+        "../../../../tests/fixtures/valid-opencode-stack.toml"
+    ))
+    .expect("fixture config");
+    config.agent.env = vec!["OPENROUTER_API_KEY".to_owned()];
+    config.agent.provider = Some(crate::config::AgentProviderConfig {
+        id: "openrouter".to_owned(),
+        model: None,
+        api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
+        custom: None,
+    });
+    config
+}
+
+#[cfg(feature = "test-fixtures")]
+fn run_phase(
+    home: &Path,
+    driver: &std::sync::Arc<RevisingDriver>,
+    config: &mut Config,
+) -> Result<ModelModeOutcome> {
+    let mut store = crate::secrets::SecretStore::open_or_create(home).expect("secret store");
+    store
+        .set_many([("OPENROUTER_API_KEY", "test-openrouter-key")])
+        .expect("seed key");
+    let secrets = crate::secrets::new_shared_secret_store(store);
+    let registry = RegistryCatalog::load_embedded().expect("registry");
+    let args = parse_init_args(&[]);
+    prompt::with_hosted_driver(driver.clone(), || {
+        configure_model_and_mode_for_init(
+            &args,
+            home,
+            &registry,
+            config,
+            Path::new("acps-config.toml"),
+            &secrets,
+        )
+    })
+}
+
+#[cfg(feature = "test-fixtures")]
+fn revision(kind: prompt::HostedPromptKind, selected: Option<&str>) -> DiscoveryRevision {
+    DiscoveryRevision {
+        request_id: format!("ireq_{}", kind.as_str()),
+        kind,
+        config_id: None,
+        answer: RevisedAnswer::Select(selected.map(str::to_owned)),
+    }
+}
+
+#[cfg(feature = "test-fixtures")]
+fn config_option_revision(
+    config_id: &str,
+    value: Option<crate::config::AgentConfigOptionValue>,
+) -> DiscoveryRevision {
+    DiscoveryRevision {
+        request_id: format!("ireq_config_option_{config_id}"),
+        kind: prompt::HostedPromptKind::ConfigOption,
+        config_id: Some(config_id.to_owned()),
+        answer: RevisedAnswer::ConfigOption(value),
+    }
+}
+
+/// Sets the fixture env for a phase test and points model-catalog refresh at a
+/// dead port so no test reaches the network.
+#[cfg(feature = "test-fixtures")]
+macro_rules! phase_env {
+    ($fixture_path:expr) => {
+        crate::cli::init::test_env::TestEnvGuard::set(&[
+            (FIXTURE_CONFIG_OPTIONS_ENV, $fixture_path),
+            (
+                crate::dev_gates::PROVIDER_MODELS_BASE_ENV,
+                Path::new("http://127.0.0.1:1"),
+            ),
+        ])
+    };
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn a_driver_without_the_revision_hooks_runs_the_phase_once() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let fixture_path = home.path().join("config-options.json");
+    write_phase_fixture(&fixture_path, &["low", "high"]);
+    let _env = phase_env!(fixture_path.as_path());
+    let mut store = crate::secrets::SecretStore::open_or_create(home.path()).expect("secret store");
+    store
+        .set_many([("OPENROUTER_API_KEY", "test-openrouter-key")])
+        .expect("seed key");
+    let secrets = crate::secrets::new_shared_secret_store(store);
+    let registry = RegistryCatalog::load_embedded().expect("registry");
+    let mut config = phase_config();
+    let args = parse_init_args(&[]);
+    let driver = std::sync::Arc::new(FirstChoiceDriver::default());
+
+    let outcome = prompt::with_hosted_driver(driver.clone(), || {
+        configure_model_and_mode_for_init(
+            &args,
+            home.path(),
+            &registry,
+            &mut config,
+            Path::new("acps-config.toml"),
+            &secrets,
+        )
+    })
+    .expect("a driver that never revises walks the lanes once");
+
+    assert_eq!(outcome.model_action, ModelModeAction::Set);
+    assert_eq!(outcome.mode_action, ModelModeAction::Set);
+    assert_eq!(outcome.effort_action, ModelModeAction::Set);
+    assert_eq!(driver.offered_for(prompt::HostedPromptKind::Model).len(), 1);
+    assert_eq!(driver.offered_for(prompt::HostedPromptKind::Mode).len(), 1);
+    assert_eq!(
+        driver.offered_for(prompt::HostedPromptKind::Effort).len(),
+        1
+    );
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn a_close_after_the_last_lane_ends_the_phase() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let fixture_path = home.path().join("config-options.json");
+    write_phase_fixture(&fixture_path, &["low", "high"]);
+    let _env = phase_env!(fixture_path.as_path());
+    let mut config = phase_config();
+    let driver = std::sync::Arc::new(RevisingDriver::new(&fixture_path));
+
+    let outcome = run_phase(home.path(), &driver, &mut config).expect("the phase closes");
+
+    assert_eq!(outcome.model_action, ModelModeAction::Set);
+    assert_eq!(driver.close_waits(), 1, "one close wait, one close");
+    assert_eq!(driver.offered_for(prompt::HostedPromptKind::Mode).len(), 1);
+    assert_eq!(
+        lock(&driver.config_offered).as_slice(),
+        ["agent.persona", "fast"]
+    );
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn a_run_with_no_discovery_prompt_never_opens_the_phase() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let fixture_path = home.path().join("config-options.json");
+    // No models, modes, efforts, or generic options: nothing is ever asked.
+    std::fs::write(&fixture_path, "[]").expect("write fixture");
+    let _env = phase_env!(fixture_path.as_path());
+    let mut config = phase_config();
+    let driver = std::sync::Arc::new(RevisingDriver::new(&fixture_path));
+
+    run_phase(home.path(), &driver, &mut config).expect("an empty advertisement is not a failure");
+
+    assert_eq!(
+        driver.close_waits(),
+        0,
+        "a run that asked nothing must not wait for a close",
+    );
+    assert!(lock(&driver.offered).is_empty());
+}
+
+#[test]
+fn the_terminal_path_never_blocks_on_close_or_clears_a_lane() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let secrets = crate::secrets::new_shared_secret_store(
+        crate::secrets::SecretStore::open_or_create(home.path()).expect("secret store"),
+    );
+    let registry = RegistryCatalog::load_embedded().expect("registry");
+    let mut config = goose_config(Some("openrouter/model-a"));
+    config.agent.mode = Some("chat".to_owned());
+    config.agent.effort = Some("high".to_owned());
+    let args = parse_init_args(&["--non-interactive"]);
+
+    // No hosted driver at all: the close wait resolves immediately and the loop
+    // runs the lanes exactly once.
+    configure_model_and_mode_for_init(
+        &args,
+        home.path(),
+        &registry,
+        &mut config,
+        Path::new("acps-config.toml"),
+        &secrets,
+    )
+    .expect("the terminal path completes without a client");
+
+    assert_eq!(config.agent.mode.as_deref(), Some("chat"));
+    assert_eq!(config.agent.effort.as_deref(), Some("high"));
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn a_model_revision_reissues_mode_effort_and_generic_options() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let fixture_path = home.path().join("config-options.json");
+    write_phase_fixture(&fixture_path, &["low", "high"]);
+    let _env = phase_env!(fixture_path.as_path());
+    let mut config = phase_config();
+    let driver =
+        std::sync::Arc::new(
+            RevisingDriver::new(&fixture_path).closing_with(vec![revision(
+                prompt::HostedPromptKind::Model,
+                Some(PHASE_MODELS[1]),
+            )]),
+        );
+
+    let outcome = run_phase(home.path(), &driver, &mut config).expect("the revision applies");
+
+    assert_eq!(outcome.model_action, ModelModeAction::Set);
+    assert_eq!(configured_provider_model(&config), Some(PHASE_MODELS[1]));
+    assert_eq!(
+        driver.offered_for(prompt::HostedPromptKind::Mode).len(),
+        2,
+        "a model revision re-issues the mode lane"
+    );
+    assert_eq!(
+        driver.offered_for(prompt::HostedPromptKind::Effort).len(),
+        2
+    );
+    assert_eq!(
+        lock(&driver.config_offered).as_slice(),
+        ["agent.persona", "fast", "agent.persona", "fast"]
+    );
+    assert_eq!(
+        lock(&driver.superseded).as_slice(),
+        [vec!["mode", "effort", "config_option"]]
+    );
+    assert_eq!(driver.close_waits(), 2);
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn a_model_revision_clears_the_effort_chosen_for_the_previous_model() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let fixture_path = home.path().join("config-options.json");
+    write_phase_fixture(&fixture_path, &["low", "high"]);
+    let _env = phase_env!(fixture_path.as_path());
+    let mut config = phase_config();
+    let driver =
+        std::sync::Arc::new(
+            RevisingDriver::new(&fixture_path).closing_with(vec![revision(
+                prompt::HostedPromptKind::Model,
+                Some(PHASE_MODELS[1]),
+            )]),
+        );
+
+    run_phase(home.path(), &driver, &mut config).expect("the revision applies");
+
+    assert!(
+        lock(&driver.signals).contains(&InitStateSignal::CategorySettled {
+            category: InitCategory::Effort,
+            value: None,
+        }),
+        "the previous model's effort must be settled away before the re-probe",
+    );
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn a_model_revision_clears_generic_overrides_for_the_previous_model() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let fixture_path = home.path().join("config-options.json");
+    write_phase_fixture(&fixture_path, &["low", "high"]);
+    let _env = phase_env!(fixture_path.as_path());
+    let mut config = phase_config();
+    // An override for a key no advertisement carries survives the model change.
+    config.agent.config_options.insert(
+        "imported.only".to_owned(),
+        crate::config::AgentConfigOptionValue::Bool(true),
+    );
+    let driver = std::sync::Arc::new(
+        RevisingDriver::new(&fixture_path)
+            .answering_option(
+                "agent.persona",
+                crate::config::AgentConfigOptionValue::Text("research".to_owned()),
+            )
+            .closing_with(vec![revision(
+                prompt::HostedPromptKind::Model,
+                Some(PHASE_MODELS[1]),
+            )]),
+    );
+
+    run_phase(home.path(), &driver, &mut config).expect("the revision applies");
+
+    assert_eq!(
+        config.agent.config_options.get("imported.only"),
+        Some(&crate::config::AgentConfigOptionValue::Bool(true)),
+        "an override the advertisement never carried is not the model lane's to drop",
+    );
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn a_mode_revision_rewrites_the_mode_without_reissuing_downstream_lanes() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let fixture_path = home.path().join("config-options.json");
+    write_phase_fixture(&fixture_path, &["low", "high"]);
+    let _env = phase_env!(fixture_path.as_path());
+    let mut config = phase_config();
+    let driver = std::sync::Arc::new(
+        RevisingDriver::new(&fixture_path)
+            .closing_with(vec![revision(prompt::HostedPromptKind::Mode, Some("plan"))]),
+    );
+
+    let outcome = run_phase(home.path(), &driver, &mut config).expect("the revision applies");
+
+    assert_eq!(config.agent.mode.as_deref(), Some("plan"));
+    assert_eq!(outcome.mode_action, ModelModeAction::Set);
+    assert_eq!(
+        driver.offered_for(prompt::HostedPromptKind::Effort).len(),
+        1
+    );
+    assert_eq!(
+        lock(&driver.config_offered).as_slice(),
+        ["agent.persona", "fast"]
+    );
+    assert!(lock(&driver.superseded).is_empty());
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn an_effort_revision_rewrites_the_effort_without_a_second_probe() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let fixture_path = home.path().join("config-options.json");
+    write_phase_fixture(&fixture_path, &["low", "high"]);
+    let _env = phase_env!(fixture_path.as_path());
+    let mut config = phase_config();
+    let driver =
+        std::sync::Arc::new(
+            RevisingDriver::new(&fixture_path).closing_with(vec![revision(
+                prompt::HostedPromptKind::Effort,
+                Some("high"),
+            )]),
+        );
+
+    let outcome = run_phase(home.path(), &driver, &mut config).expect("the revision applies");
+
+    assert_eq!(config.agent.effort.as_deref(), Some("high"));
+    assert_eq!(outcome.effort_action, ModelModeAction::Set);
+    assert_eq!(driver.offered_for(prompt::HostedPromptKind::Mode).len(), 1);
+    assert!(
+        lock(&driver.superseded).is_empty(),
+        "an effort revision invalidates nothing downstream, so nothing re-probes",
+    );
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn a_config_option_revision_rewrites_only_its_own_override() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let fixture_path = home.path().join("config-options.json");
+    write_phase_fixture(&fixture_path, &["low", "high"]);
+    let _env = phase_env!(fixture_path.as_path());
+    let mut config = phase_config();
+    let driver = std::sync::Arc::new(
+        RevisingDriver::new(&fixture_path)
+            .answering_option("fast", crate::config::AgentConfigOptionValue::Bool(true))
+            .answering_option(
+                "agent.persona",
+                crate::config::AgentConfigOptionValue::Text("balanced".to_owned()),
+            )
+            .closing_with(vec![config_option_revision(
+                "agent.persona",
+                Some(crate::config::AgentConfigOptionValue::Text(
+                    "research".to_owned(),
+                )),
+            )]),
+    );
+
+    let outcome = run_phase(home.path(), &driver, &mut config).expect("the revision applies");
+
+    assert!(outcome.config_options_changed);
+    assert_eq!(
+        config.agent.config_options.get("agent.persona"),
+        Some(&crate::config::AgentConfigOptionValue::Text(
+            "research".to_owned()
+        ))
+    );
+    assert_eq!(
+        config.agent.config_options.get("fast"),
+        Some(&crate::config::AgentConfigOptionValue::Bool(true)),
+        "a sibling override is untouched",
+    );
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn a_revision_to_skip_downgrades_the_lane_action_to_skipped() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let fixture_path = home.path().join("config-options.json");
+    write_phase_fixture(&fixture_path, &["low", "high"]);
+    let _env = phase_env!(fixture_path.as_path());
+    let mut config = phase_config();
+    let driver = std::sync::Arc::new(
+        RevisingDriver::new(&fixture_path)
+            .closing_with(vec![revision(prompt::HostedPromptKind::Mode, None)]),
+    );
+
+    let outcome = run_phase(home.path(), &driver, &mut config).expect("the revision applies");
+
+    assert_eq!(outcome.mode_action, ModelModeAction::Skipped);
+    assert!(
+        config.agent.mode.is_none(),
+        "re-answering a settled lane to nothing must undo the write",
+    );
+    assert!(
+        lock(&driver.signals).contains(&InitStateSignal::CategorySettled {
+            category: InitCategory::Mode,
+            value: None,
+        }),
+    );
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn a_revision_delivered_at_a_prompt_settles_that_lane_before_it_is_reasked() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let fixture_path = home.path().join("config-options.json");
+    write_phase_fixture(&fixture_path, &["low", "high"]);
+    let _env = phase_env!(fixture_path.as_path());
+    let mut config = phase_config();
+    // The client re-answers the mode lane while the effort prompt is pending, so
+    // effort is asked again and mode is not.
+    let driver = std::sync::Arc::new(RevisingDriver::new(&fixture_path).interrupting(
+        prompt::HostedPromptKind::Effort,
+        revision(prompt::HostedPromptKind::Mode, Some("plan")),
+    ));
+
+    let outcome = run_phase(home.path(), &driver, &mut config).expect("the revision applies");
+
+    assert_eq!(config.agent.mode.as_deref(), Some("plan"));
+    assert_eq!(outcome.effort_action, ModelModeAction::Set);
+    assert_eq!(
+        driver.offered_for(prompt::HostedPromptKind::Mode).len(),
+        1,
+        "the lane the revision settled is not asked again"
+    );
+    assert_eq!(
+        driver.offered_for(prompt::HostedPromptKind::Effort).len(),
+        2,
+        "the abandoned prompt is re-issued"
+    );
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn the_latest_revision_per_lane_wins() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let fixture_path = home.path().join("config-options.json");
+    write_phase_fixture(&fixture_path, &["low", "high"]);
+    let _env = phase_env!(fixture_path.as_path());
+    let mut config = phase_config();
+    let driver = std::sync::Arc::new(RevisingDriver::new(&fixture_path).closing_with(vec![
+        revision(prompt::HostedPromptKind::Mode, Some("plan")),
+        revision(prompt::HostedPromptKind::Mode, Some("build")),
+    ]));
+
+    run_phase(home.path(), &driver, &mut config).expect("both revisions apply");
+
+    assert_eq!(
+        config.agent.mode.as_deref(),
+        Some("build"),
+        "the wizard applies exactly what it is handed, in order",
+    );
+    assert_eq!(driver.close_waits(), 3);
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn a_rejected_revision_withdraws_its_lane_instead_of_failing_the_run() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let fixture_path = home.path().join("config-options.json");
+    write_phase_fixture(&fixture_path, &["low", "high"]);
+    let _env = phase_env!(fixture_path.as_path());
+    let mut config = phase_config();
+    let driver =
+        std::sync::Arc::new(
+            RevisingDriver::new(&fixture_path).closing_with(vec![revision(
+                prompt::HostedPromptKind::Model,
+                Some("openrouter/model-z"),
+            )]),
+        );
+
+    let outcome =
+        run_phase(home.path(), &driver, &mut config).expect("a bad revision is not fatal");
+
+    assert_eq!(outcome.model_action, ModelModeAction::Set);
+    assert_eq!(
+        configured_provider_model(&config),
+        Some(PHASE_MODELS[0]),
+        "the previously accepted answer stands",
+    );
+    assert!(
+        lock(&driver.progress)
+            .iter()
+            .any(|message| message.starts_with("`model` revision not applied:")),
+        "progress: {:?}",
+        lock(&driver.progress),
+    );
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn config_options_changed_reports_the_phase_level_diff() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let fixture_path = home.path().join("config-options.json");
+    write_phase_fixture(&fixture_path, &["low", "high"]);
+    let _env = phase_env!(fixture_path.as_path());
+    let mut config = phase_config();
+    // Answered, then re-answered back to no override at all.
+    let driver = std::sync::Arc::new(
+        RevisingDriver::new(&fixture_path)
+            .answering_option(
+                "agent.persona",
+                crate::config::AgentConfigOptionValue::Text("research".to_owned()),
+            )
+            .closing_with(vec![config_option_revision("agent.persona", None)]),
+    );
+
+    let outcome = run_phase(home.path(), &driver, &mut config).expect("the revision applies");
+
+    assert!(
+        !outcome.config_options_changed,
+        "a revision back to the pre-phase state is not a change",
+    );
+    assert!(config.agent.config_options.is_empty());
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn a_failed_refetch_after_a_model_revision_withdraws_the_downstream_lanes() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let fixture_path = home.path().join("config-options.json");
+    write_phase_fixture(&fixture_path, &["low", "high"]);
+    let _env = phase_env!(fixture_path.as_path());
+    let mut config = phase_config();
+    let driver = std::sync::Arc::new(
+        RevisingDriver::new(&fixture_path)
+            .closing_with(vec![revision(
+                prompt::HostedPromptKind::Model,
+                Some(PHASE_MODELS[1]),
+            )])
+            .editing_fixture("supersede", FixtureEdit::Remove),
+    );
+
+    let outcome = run_phase(home.path(), &driver, &mut config).expect("a lost probe is not fatal");
+
+    assert_eq!(configured_provider_model(&config), Some(PHASE_MODELS[1]));
+    assert_eq!(outcome.effort_action, ModelModeAction::Skipped);
+    assert!(config.agent.effort.is_none());
+    assert_eq!(
+        driver.offered_for(prompt::HostedPromptKind::Effort).len(),
+        1,
+        "a withdrawn effort lane is not re-issued"
+    );
+    assert_eq!(
+        driver.offered_for(prompt::HostedPromptKind::Mode).len(),
+        1,
+        "a withdrawn mode lane is not re-issued from the stale advertisement"
+    );
+    assert_eq!(
+        lock(&driver.config_offered).as_slice(),
+        ["agent.persona", "fast"],
+        "withdrawn generic config-option lanes are not re-issued"
+    );
+    assert!(lock(&driver.signals).iter().any(|signal| matches!(
+        signal,
+        InitStateSignal::CategoryApplicability {
+            category: InitCategory::Effort,
+            applicable: false,
+            source: ApplicabilitySource::DiscoveryUnavailable,
+            ..
+        }
+    )),);
+}
+
+#[test]
+fn a_transport_probe_failure_is_retried_to_the_attempt_cap() {
+    let attempts = std::cell::Cell::new(0u32);
+    let retries = std::cell::Cell::new(0u32);
+
+    let result = retry_discovery_probe(
+        |attempt| {
+            attempts.set(attempt);
+            Err::<(), _>(StackError::AgentInitializeFailed {
+                reason: "model discovery exceeded the 30s timeout".to_owned(),
+            })
+        },
+        |_, _, _| retries.set(retries.get() + 1),
+    );
+
+    assert!(result.is_err());
+    assert_eq!(attempts.get(), DISCOVERY_PROBE_ATTEMPTS);
+    assert_eq!(retries.get(), DISCOVERY_PROBE_ATTEMPTS - 1);
+}
+
+#[test]
+fn a_deterministic_probe_failure_is_not_retried() {
+    let attempts = std::cell::Cell::new(0u32);
+
+    let result = retry_discovery_probe(
+        |attempt| {
+            attempts.set(attempt);
+            Err::<(), _>(StackError::AgentConfigProvision {
+                path: PathBuf::from("acps-config.toml"),
+                reason: "the harness rejected the configured credential".to_owned(),
+            })
+        },
+        |_, _, _| panic!("a deterministic failure must not be retried"),
+    );
+
+    assert!(result.is_err());
+    assert_eq!(
+        attempts.get(),
+        1,
+        "an error that fails identically every time costs no backoff",
+    );
+    assert!(!discovery_failure_is_retryable(
+        &StackError::AgentConfigProvision {
+            path: PathBuf::from("acps-config.toml"),
+            reason: "unparseable".to_owned(),
+        }
+    ));
+    assert!(discovery_failure_is_retryable(&StackError::AgentNotRunning));
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn a_lost_probe_after_the_model_change_withdraws_effort_and_generic_lanes() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let fixture_path = home.path().join("config-options.json");
+    write_phase_fixture(&fixture_path, &["low", "high"]);
+    let _env = phase_env!(fixture_path.as_path());
+    let mut config = phase_config();
+    let driver = std::sync::Arc::new(
+        RevisingDriver::new(&fixture_path)
+            .answering(prompt::HostedPromptKind::Model, PHASE_MODELS[1])
+            .editing_fixture("model", FixtureEdit::Remove),
+    );
+
+    let outcome = run_phase(home.path(), &driver, &mut config).expect("a lost probe is not fatal");
+
+    assert_eq!(outcome.effort_action, ModelModeAction::Skipped);
+    assert!(lock(&driver.signals).iter().any(|signal| matches!(
+        signal,
+        InitStateSignal::CategoryApplicability {
+            category: InitCategory::Effort,
+            applicable: false,
+            source: ApplicabilitySource::DiscoveryUnavailable,
+            ..
+        }
+    )),);
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn a_model_revision_reprobes_when_downstream_lanes_were_withdrawn() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let fixture_path = home.path().join("config-options.json");
+    write_phase_fixture(&fixture_path, &["low", "high"]);
+    let _env = phase_env!(fixture_path.as_path());
+    let mut config = phase_config();
+    // The forward probe is lost, then the client re-submits the same model once
+    // the advertisement is back.
+    let driver = std::sync::Arc::new(
+        RevisingDriver::new(&fixture_path)
+            .answering(prompt::HostedPromptKind::Model, PHASE_MODELS[1])
+            .editing_fixture("model", FixtureEdit::Remove)
+            .closing_with(vec![revision(
+                prompt::HostedPromptKind::Model,
+                Some(PHASE_MODELS[1]),
+            )])
+            .editing_fixture(
+                "supersede",
+                FixtureEdit::Write(vec!["low".to_owned(), "high".to_owned()]),
+            ),
+    );
+
+    let outcome = run_phase(home.path(), &driver, &mut config).expect("the re-probe recovers");
+
+    assert_eq!(configured_provider_model(&config), Some(PHASE_MODELS[1]));
+    assert_eq!(
+        outcome.effort_action,
+        ModelModeAction::Set,
+        "a repeated model answer re-probes while the lanes are withdrawn",
+    );
+    assert_eq!(
+        driver.offered_for(prompt::HostedPromptKind::Effort).len(),
+        1
+    );
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn a_model_revision_on_the_pre_spawn_catalog_lane_reprobes_downstream() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let fixture_path = home.path().join("config-options.json");
+    write_phase_fixture(&fixture_path, &["low", "high"]);
+    let _env = phase_env!(fixture_path.as_path());
+    seed_provider_catalog(home.path(), &PHASE_MODELS);
+    let mut config = goose_config(None);
+    // Goose cannot advertise models, so both the first answer and the re-answer
+    // come from the provider catalog.
+    let driver =
+        std::sync::Arc::new(
+            RevisingDriver::new(&fixture_path).closing_with(vec![revision(
+                prompt::HostedPromptKind::Model,
+                Some(PHASE_MODELS[1]),
+            )]),
+        );
+
+    let outcome = run_phase(home.path(), &driver, &mut config).expect("the revision applies");
+
+    assert_eq!(outcome.model_action, ModelModeAction::Set);
+    assert_eq!(configured_provider_model(&config), Some(PHASE_MODELS[1]));
+    assert_eq!(
+        driver.offered_for(prompt::HostedPromptKind::Model),
+        vec![vec![
+            PHASE_MODELS[0].to_owned(),
+            PHASE_MODELS[1].to_owned(),
+            SKIP_OPTION_ID.to_owned(),
+        ]],
+        "the catalog lane offers catalog values and is asked once",
+    );
+    assert_eq!(
+        driver.offered_for(prompt::HostedPromptKind::Mode).len(),
+        2,
+        "the revision re-probes and re-issues the downstream lanes",
+    );
+    assert_eq!(
+        driver.offered_for(prompt::HostedPromptKind::Effort).len(),
+        2
+    );
+    assert_eq!(
+        lock(&driver.superseded).as_slice(),
+        [vec!["mode", "effort", "config_option"]]
+    );
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn a_catalog_model_skip_still_lets_the_client_close_the_phase() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let fixture_path = home.path().join("config-options.json");
+    write_phase_fixture(&fixture_path, &["low", "high"]);
+    let _env = phase_env!(fixture_path.as_path());
+    seed_provider_catalog(home.path(), &PHASE_MODELS);
+    let mut config = goose_config(None);
+    // Skipping the catalog model leaves goose unable to open a session, but the
+    // prompt already opened the phase, so the client still owes a close.
+    let driver = std::sync::Arc::new(
+        RevisingDriver::new(&fixture_path)
+            .answering(prompt::HostedPromptKind::Model, SKIP_OPTION_ID),
+    );
+
+    let outcome =
+        run_phase(home.path(), &driver, &mut config).expect("a skipped model is not fatal");
+
+    assert_eq!(outcome.model_action, ModelModeAction::Skipped);
+    assert_eq!(configured_provider_model(&config), None);
+    assert_eq!(
+        driver.close_waits(),
+        1,
+        "the phase the model prompt opened must be closed, not abandoned",
+    );
+    assert!(lock(&driver.signals).iter().any(|signal| matches!(
+        signal,
+        InitStateSignal::CategoryApplicability {
+            category: InitCategory::Mode,
+            applicable: false,
+            source: ApplicabilitySource::DiscoveryUnavailable,
+            ..
+        }
+    )),);
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn a_model_revision_after_a_catalog_skip_unblocks_discovery() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let fixture_path = home.path().join("config-options.json");
+    write_phase_fixture(&fixture_path, &["low", "high"]);
+    let _env = phase_env!(fixture_path.as_path());
+    seed_provider_catalog(home.path(), &PHASE_MODELS);
+    let mut config = goose_config(None);
+    let driver = std::sync::Arc::new(
+        RevisingDriver::new(&fixture_path)
+            .answering(prompt::HostedPromptKind::Model, SKIP_OPTION_ID)
+            .closing_with(vec![revision(
+                prompt::HostedPromptKind::Model,
+                Some(PHASE_MODELS[1]),
+            )]),
+    );
+
+    let outcome = run_phase(home.path(), &driver, &mut config).expect("the revision unblocks");
+
+    assert_eq!(outcome.model_action, ModelModeAction::Set);
+    assert_eq!(configured_provider_model(&config), Some(PHASE_MODELS[1]));
+    assert_eq!(
+        outcome.mode_action,
+        ModelModeAction::Set,
+        "the probe runs once a model finally lands",
+    );
+    assert_eq!(
+        driver.offered_for(prompt::HostedPromptKind::Effort).len(),
+        1
+    );
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn an_exhausted_probe_still_lets_the_client_close_the_phase() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let fixture_path = home.path().join("config-options.json");
+    write_phase_fixture(&fixture_path, &["low", "high"]);
+    let _env = phase_env!(fixture_path.as_path());
+    seed_provider_catalog(home.path(), &PHASE_MODELS);
+    let mut config = goose_config(None);
+    // The model lands, then the advertisement disappears before the first probe,
+    // so the enrichment-skip arm is taken with the phase already open.
+    let driver = std::sync::Arc::new(
+        RevisingDriver::new(&fixture_path).editing_fixture("model", FixtureEdit::Remove),
+    );
+
+    let outcome = run_phase(home.path(), &driver, &mut config).expect("a lost probe is not fatal");
+
+    assert_eq!(outcome.model_action, ModelModeAction::Set);
+    assert!(!outcome.acp_verified, "no session was ever opened");
+    assert_eq!(
+        driver.close_waits(),
+        1,
+        "the skip arm must close the phase the model prompt opened",
+    );
+}
+
 #[test]
 fn discovery_only_retracts_a_lane_the_registry_claimed() {
     let driver = std::sync::Arc::new(prompt::RecordingPromptDriver::default());

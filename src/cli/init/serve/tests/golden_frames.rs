@@ -286,9 +286,99 @@ fn golden_protocol_error_frame_bytes() {
         r#"{"type":"error","code":"init.ack_rejected","message":"no init result is awaiting acknowledgement"}"#
     );
     assert_eq!(
+        sent(r#"{"type":"close_discovery"}"#),
+        r#"{"type":"error","code":"init.discovery_not_open","message":"no discovery phase is open"}"#
+    );
+    assert_eq!(
         ws_lagged_frame(),
         r#"{"type":"error","code":"init.ws_lagged","message":"websocket client lagged behind init event stream"}"#
     );
+}
+
+#[test]
+fn golden_discovery_refusal_frame_bytes() {
+    let session = test_session("init_golden_discovery_refusal");
+    let handle = spawn_discovery_wizard(
+        session.clone(),
+        vec![
+            revisable_select_request(HostedPromptKind::Model, &["alpha", "beta"]),
+            revisable_select_request(HostedPromptKind::Mode, &["fast", "deep"]),
+        ],
+    );
+    let model = answer_pending(&session, "model", json!(0));
+    wait_for_pending_kind(&session, "mode");
+    let sent = |text: &str| match handle_client_frame(&session, text) {
+        ClientFrameOutcome::Send(frame) => frame,
+        _ => panic!("frame `{text}` must produce a Send outcome"),
+    };
+    assert_eq!(
+        sent(r#"{"type":"close_discovery"}"#),
+        r#"{"type":"error","code":"init.discovery_busy","message":"discovery is still in progress; retry once the session reports `awaiting_discovery_close`"}"#
+    );
+    assert_eq!(
+        sent(&format!(
+            r#"{{"type":"input","request_id":"{}","value":{{"value":"id_absent"}}}}"#,
+            model.request_id
+        )),
+        r#"{"type":"error","code":"init.revision_rejected","message":"invalid parameter `init`: selection `id_absent` does not match any option"}"#
+    );
+
+    session
+        .submit_input(&model.request_id, json!(1))
+        .expect("model revision");
+    close_and_join(&session, handle);
+    assert_eq!(
+        sent(&format!(
+            r#"{{"type":"input","request_id":"{}","value":1}}"#,
+            model.request_id
+        )),
+        r#"{"type":"error","code":"init.revision_rejected","message":"the discovery phase is closed; the recorded answer for `model` stands"}"#
+    );
+}
+
+#[test]
+fn golden_discovery_event_bytes() {
+    let session = test_session("init_golden_discovery");
+    let handle = spawn_discovery_wizard(
+        session.clone(),
+        vec![revisable_select_request(
+            HostedPromptKind::Model,
+            &["alpha", "beta"],
+        )],
+    );
+    answer_pending(&session, "model", json!(0));
+    wait_for_status(&session, "awaiting_discovery_close");
+    assert_eq!(
+        recorded_frame(&session, 4),
+        r#"{"seq":4,"session_id":"init_golden_discovery","state":"awaiting_close","type":"discovery"}"#
+    );
+    close_and_join(&session, handle);
+    assert_eq!(
+        recorded_frame(&session, 5),
+        r#"{"seq":5,"session_id":"init_golden_discovery","state":"closed","type":"discovery"}"#
+    );
+}
+
+#[test]
+fn golden_hello_frame_carries_the_open_discovery_phase() {
+    let session = test_session("init_golden_discovery_hello");
+    let handle = spawn_discovery_wizard(
+        session.clone(),
+        vec![revisable_select_request(
+            HostedPromptKind::Model,
+            &["alpha", "beta"],
+        )],
+    );
+    let model = answer_pending(&session, "model", json!(0));
+    wait_for_status(&session, "awaiting_discovery_close");
+    assert_eq!(
+        session.hello_frame(),
+        format!(
+            r#"{{"type":"hello","session_id":"init_golden_discovery_hello","status":"awaiting_discovery_close","signals":[],"last_seq":4,"pending_input":null,"result_available":false,"error":null,"discovery":{{"state":"awaiting_close","revisable":[{{"request_id":"{}","kind":"model"}}]}}}}"#,
+            model.request_id
+        )
+    );
+    close_and_join(&session, handle);
 }
 
 #[test]

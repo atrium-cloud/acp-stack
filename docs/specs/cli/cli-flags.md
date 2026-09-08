@@ -152,7 +152,7 @@ acps init serve [--token-env <var>] [--token-file <path>] [--idle-timeout <durat
 ### Flags
 
 - Bootstrap token: from `ACP_STACK_INIT_TOKEN`, `--token-env`, or `--token-file`. The token is process-local and is not written to config or state.
-- `--idle-timeout` (default `15m`; `0s` disables): cancel the session once there has been no connected WebSocket client and no API activity for that long.
+- `--idle-timeout` (default `15m`; `0s` disables): cancel the session once there has been no connected WebSocket client and no API activity for that long. It also bounds a session parked in `awaiting_discovery_close`, where it applies regardless of connected clients and expires with reason `discovery_close_timeout`.
 - `--max-lifetime` (disabled by default): cap the absolute server lifetime regardless of activity.
 - Both durations accept `s/m/h/d/w` suffixes.
 

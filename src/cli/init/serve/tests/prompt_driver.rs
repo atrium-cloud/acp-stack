@@ -564,3 +564,179 @@ fn unknown_select_value_is_rejected_as_invalid_param() {
         StackError::InvalidParam { field: "init", .. }
     ));
 }
+
+/// Answer one revisable model select, then submit `value` against that same
+/// prompt as a revision, handing back what the wizard was given.
+fn model_revision_result(
+    value: Value,
+) -> std::result::Result<Vec<DiscoveryRevision>, AnswerRejected> {
+    let session = test_session("init_driver_revision");
+    let handle = spawn_discovery_wizard(
+        session.clone(),
+        vec![revisable_select_request(
+            HostedPromptKind::Model,
+            &["alpha", "beta"],
+        )],
+    );
+    let model = answer_pending(&session, "model", json!(0));
+    wait_for_status(&session, "awaiting_discovery_close");
+    let outcome = session.submit_input(&model.request_id, value);
+    let revisions = close_and_join(&session, handle);
+    outcome.map(|()| revisions)
+}
+
+#[test]
+fn revision_values_parse_through_the_same_grammar_as_answers() {
+    // The table that catches the driver's parser and the session's revision
+    // validator drifting apart now that they share one implementation.
+    // Every form addressing the second option resolves to that option's id; a
+    // null answer resolves to no selection.
+    for (value, expected) in [
+        (json!(1), RevisedAnswer::Select(Some("id_beta".to_owned()))),
+        (
+            json!({"index": 1}),
+            RevisedAnswer::Select(Some("id_beta".to_owned())),
+        ),
+        (
+            json!({"value": "id_beta"}),
+            RevisedAnswer::Select(Some("id_beta".to_owned())),
+        ),
+        (
+            json!("beta"),
+            RevisedAnswer::Select(Some("id_beta".to_owned())),
+        ),
+        (json!(null), RevisedAnswer::Select(None)),
+    ] {
+        select_result(
+            HostedPromptKind::Model,
+            "select model",
+            &["alpha", "beta"],
+            value.clone(),
+        )
+        .unwrap_or_else(|error| panic!("`{value}` must resolve as a first answer: {error}"));
+        let revisions = model_revision_result(value.clone())
+            .unwrap_or_else(|error| panic!("`{value}` must resolve as a revision: {error:?}"));
+        assert_eq!(revisions.len(), 1, "`{value}` was not delivered");
+        assert_eq!(revisions[0].answer, expected, "`{value}` resolved wrong");
+    }
+
+    // The skip sentinel is an ordinary option on the wire, and reaches the
+    // wizard as no selection, exactly as a null answer does.
+    let session = test_session("init_driver_revision_skip");
+    let mut request = revisable_select_request(HostedPromptKind::Model, &["alpha"]);
+    request.items.push(prompt::HostedPromptItem {
+        value: SKIP_OPTION_ID.to_owned(),
+        label: "Skip".to_owned(),
+        hint: String::new(),
+    });
+    let handle = spawn_discovery_wizard(session.clone(), vec![request]);
+    let model = answer_pending(&session, "model", json!(0));
+    wait_for_status(&session, "awaiting_discovery_close");
+    session
+        .submit_input(&model.request_id, json!({"value": SKIP_OPTION_ID}))
+        .expect("a skip revision");
+    let revisions = close_and_join(&session, handle);
+    assert_eq!(revisions[0].answer, RevisedAnswer::Select(None));
+
+    for (value, fragment) in [
+        (json!(5), "out of range"),
+        (json!({"value": "id_absent"}), "does not match any option"),
+        (json!("absent"), "does not match any option"),
+        (json!(true), "must be an index, value, label, or null"),
+    ] {
+        let rejection = model_revision_result(value.clone())
+            .err()
+            .unwrap_or_else(|| panic!("`{value}` must be refused as a revision"));
+        match rejection {
+            AnswerRejected::Revision(message) => {
+                assert!(message.contains(fragment), "message was `{message}`");
+            }
+            AnswerRejected::Input(message) => {
+                panic!("`{value}` must be a revision refusal, got `{message}`")
+            }
+        }
+    }
+}
+
+#[test]
+fn config_option_revisions_validate_against_the_recorded_snapshot() {
+    let session = test_session("init_driver_config_revision");
+    let handle = spawn_discovery_wizard(
+        session.clone(),
+        vec![config_option_test_request(config_option_snapshot(
+            "persona",
+        ))],
+    );
+    let option = answer_pending(
+        &session,
+        "config_option",
+        json!({"config_id": "persona", "value": "balanced"}),
+    );
+    wait_for_status(&session, "awaiting_discovery_close");
+
+    for (value, fragment) in [
+        (
+            json!({"config_id": "persona", "value": "unadvertised"}),
+            "does not advertise",
+        ),
+        (
+            json!({"config_id": "other", "value": "research"}),
+            "expected `persona`",
+        ),
+    ] {
+        let rejection = session
+            .submit_input(&option.request_id, value.clone())
+            .expect_err("the recorded snapshot refuses this revision");
+        match rejection {
+            AnswerRejected::Revision(message) => {
+                assert!(message.contains(fragment), "message was `{message}`");
+            }
+            AnswerRejected::Input(message) => {
+                panic!("`{value}` must be a revision refusal, got `{message}`")
+            }
+        }
+    }
+
+    // A null value clears the override and is a legitimate revision.
+    session
+        .submit_input(
+            &option.request_id,
+            json!({"config_id": "persona", "value": null}),
+        )
+        .expect("a null config-option revision is accepted");
+    let revisions = close_and_join(&session, handle);
+    assert_eq!(revisions.len(), 1);
+    assert_eq!(revisions[0].config_id, Some("persona".to_owned()));
+    assert_eq!(
+        revisions[0].answer,
+        RevisedAnswer::ConfigOption(None),
+        "a null config-option revision drops the override"
+    );
+}
+
+#[test]
+fn a_default_driver_never_yields_a_revision() {
+    // The terminal path and every test double inherit these defaults, which is
+    // what keeps CLI init linear.
+    let driver = prompt::RecordingPromptDriver::default();
+    let outcome = driver
+        .select_revisable(revisable_select_request(
+            HostedPromptKind::Model,
+            &["alpha"],
+        ))
+        .expect("default select_revisable");
+    assert!(matches!(outcome, HostedPromptOutcome::Unhandled));
+    let outcome = driver
+        .config_option_revisable(config_option_test_request(config_option_snapshot(
+            "persona",
+        )))
+        .expect("default config_option_revisable");
+    assert!(matches!(outcome, HostedPromptOutcome::Unhandled));
+    assert!(matches!(
+        driver
+            .await_discovery_close()
+            .expect("default await_discovery_close"),
+        DiscoveryWait::Closed
+    ));
+    driver.supersede_discovery_lanes(&[HostedPromptKind::Mode]);
+}

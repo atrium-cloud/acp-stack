@@ -16,6 +16,10 @@ pub(super) fn build_bootstrap_router(state: BootstrapState, max_request_bytes: u
             post(session_cancel_handler),
         )
         .route(
+            "/v1/init/sessions/{id}/discovery/close",
+            post(session_discovery_close_handler),
+        )
+        .route(
             "/v1/init/sessions/{id}/native-config/cancel",
             post(session_native_config_cancel_handler),
         )
@@ -237,11 +241,51 @@ async fn session_cancel_handler(
     }
 }
 
+/// Closes the discovery phase, releasing the wizard parked in
+/// `await_discovery_close`. The REST twin of the `close_discovery` frame; the
+/// socket reports a refusal as a protocol-error frame, here it is a 409 with the
+/// same code. The echoed status may still read `awaiting_discovery_close` if the
+/// wizard thread has not yet woken; the `discovery` event and the status body's
+/// `discovery` block are the authority on phase state.
+///
+/// A close arriving while the phase is still open is refused as
+/// `init.discovery_busy` rather than recorded, so a client sends it only after
+/// the `discovery` event reports `awaiting_close` or the status reads
+/// `awaiting_discovery_close`, and retries a busy refusal.
+async fn session_discovery_close_handler(
+    State(state): State<BootstrapState>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    let Some(session) = state.manager.session(&id) else {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "init.session_not_found",
+            "init session not found",
+        );
+    };
+    session.touch();
+    match session.close_discovery() {
+        Ok(()) => ApiSuccess::new(SimpleSessionResponse {
+            session_id: id,
+            status: session.status(),
+        })
+        .into_response(),
+        Err(CloseRejected::NotOpen(message)) => {
+            api_error(StatusCode::CONFLICT, DISCOVERY_NOT_OPEN_CODE, message)
+        }
+        Err(CloseRejected::Busy(message)) => {
+            api_error(StatusCode::CONFLICT, DISCOVERY_BUSY_CODE, message)
+        }
+    }
+}
+
 /// REST twin of the WebSocket `input` client frame: both land in
 /// `submit_answer`, so the wizard thread parses the answer through the same
 /// prompt-driver logic regardless of transport. The socket reports a
-/// rejection as an `init.input_rejected` protocol-error frame; here it is a
-/// 409 with the same code, matching the router's other state conflicts.
+/// rejection as a protocol-error frame; here it is a 409 with the same code,
+/// matching the router's other state conflicts. A `request_id` naming an
+/// accepted discovery prompt of the open phase is a revision, which shares this
+/// route and differs only in the refusal code.
 async fn session_input_handler(
     State(state): State<BootstrapState>,
     AxumPath(id): AxumPath<String>,
@@ -264,7 +308,12 @@ async fn session_input_handler(
             request_id: request.request_id,
         })
         .into_response(),
-        Err(message) => api_error(StatusCode::CONFLICT, "init.input_rejected", message),
+        Err(AnswerRejected::Input(message)) => {
+            api_error(StatusCode::CONFLICT, INPUT_REJECTED_CODE, message)
+        }
+        Err(AnswerRejected::Revision(message)) => {
+            api_error(StatusCode::CONFLICT, REVISION_REJECTED_CODE, message)
+        }
     }
 }
 
@@ -631,9 +680,26 @@ pub(super) fn handle_client_frame(
             };
             match session.submit_answer(&request_id, answer) {
                 Ok(()) => ClientFrameOutcome::None,
-                Err(message) => protocol_error("init.input_rejected", &message),
+                Err(AnswerRejected::Input(message)) => {
+                    protocol_error(INPUT_REJECTED_CODE, &message)
+                }
+                Err(AnswerRejected::Revision(message)) => {
+                    protocol_error(REVISION_REJECTED_CODE, &message)
+                }
             }
         }
+        // Success sends nothing: the seq-bearing `discovery` event already
+        // reaches the socket through the broadcast stream. A close sent while
+        // the phase is still open is refused as `init.discovery_busy` rather
+        // than recorded, so a client sends this after the `discovery` event
+        // reports `awaiting_close` and retries a busy refusal.
+        "close_discovery" => match session.close_discovery() {
+            Ok(()) => ClientFrameOutcome::None,
+            Err(CloseRejected::NotOpen(message)) => {
+                protocol_error(DISCOVERY_NOT_OPEN_CODE, &message)
+            }
+            Err(CloseRejected::Busy(message)) => protocol_error(DISCOVERY_BUSY_CODE, &message),
+        },
         "cancel" => {
             session.cancel(frame.reason.as_deref().unwrap_or("backend_cancel"));
             ClientFrameOutcome::None

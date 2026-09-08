@@ -42,6 +42,65 @@ pub(crate) fn wait_for_pending_input(session: &HostedInitSession) -> PublicInput
     panic!("timed out waiting for hosted init input request");
 }
 
+/// The pending prompt of a given wire `kind`, for waiting on a re-issued lane
+/// rather than racing whichever prompt happens to be pending.
+pub(crate) fn wait_for_pending_kind(session: &HostedInitSession, kind: &str) -> PublicInputRequest {
+    for _ in 0..200 {
+        if let Some(input) = lock_unpoisoned(&session.inner).pending_input.clone()
+            && input.kind == kind
+        {
+            return input;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("timed out waiting for a pending `{kind}` input request");
+}
+
+pub(crate) fn wait_for_status(session: &HostedInitSession, status: &str) {
+    for _ in 0..200 {
+        if session.status() == status {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!(
+        "timed out waiting for status `{status}`; session is `{}`",
+        session.status()
+    );
+}
+
+/// One advertised generic config option, in the shape the wizard streams.
+pub(crate) fn config_option_snapshot(
+    id: &str,
+) -> crate::runtime::agent::config_options::SessionConfigOptionSnapshot {
+    serde_json::from_value(json!({
+        "id": id,
+        "name": id,
+        "type": "select",
+        "current_value": "balanced",
+        "options": [
+            { "value": "balanced", "name": "Balanced" },
+            { "value": "research", "name": "Research" }
+        ]
+    }))
+    .expect("config option snapshot")
+}
+
+pub(crate) fn config_option_test_request(
+    advertised: crate::runtime::agent::config_options::SessionConfigOptionSnapshot,
+) -> HostedPromptRequest {
+    HostedPromptRequest {
+        kind: HostedPromptKind::ConfigOption,
+        style: HostedPromptStyle::SearchableSelect,
+        prompt: advertised.name.clone(),
+        required: false,
+        default: None,
+        items: Vec::new(),
+        inspection: None,
+        config_option: Some(advertised),
+    }
+}
+
 /// Option ids derived from labels, so the wire `value` stays distinct from the
 /// display text exactly as the real call sites build them.
 pub(crate) fn hosted_items(labels: &[&str]) -> Vec<prompt::HostedPromptItem> {
@@ -71,6 +130,87 @@ pub(crate) fn hosted_test_request(
         inspection: None,
         config_option: None,
     }
+}
+
+/// One discovery-lane select, in the searchable style the wizard uses.
+pub(crate) fn revisable_select_request(
+    kind: HostedPromptKind,
+    labels: &[&str],
+) -> HostedPromptRequest {
+    hosted_test_request(kind, HostedPromptStyle::SearchableSelect, "pick", labels)
+}
+
+/// A wizard thread that answers each request as a revisable prompt and then
+/// drains the close wait, handing back every revision it was given in the order
+/// it received them.
+pub(crate) fn spawn_discovery_wizard(
+    session: Arc<HostedInitSession>,
+    requests: Vec<HostedPromptRequest>,
+) -> std::thread::JoinHandle<Result<Vec<DiscoveryRevision>>> {
+    std::thread::spawn(move || {
+        let mut revisions = Vec::new();
+        for request in requests {
+            match session.request_input_revisable(request)? {
+                Some(HostedInput::Revision(revision)) => revisions.push(revision),
+                Some(HostedInput::Answer(_)) | None => {}
+            }
+        }
+        while let DiscoveryWait::Revised(revision) = session.await_discovery_close()? {
+            revisions.push(revision);
+        }
+        Ok(revisions)
+    })
+}
+
+/// Answer whichever prompt of this kind is pending, returning the prompt so a
+/// later revision can address it by its own id.
+pub(crate) fn answer_pending(
+    session: &HostedInitSession,
+    kind: &str,
+    value: Value,
+) -> PublicInputRequest {
+    let pending = wait_for_pending_kind(session, kind);
+    session
+        .submit_input(&pending.request_id, value)
+        .expect("answer the pending prompt");
+    // Wait for the wizard to consume it, so the next `answer_pending` of the
+    // same kind cannot address this prompt a second time.
+    for _ in 0..200 {
+        let still_pending = lock_unpoisoned(&session.inner)
+            .pending_input
+            .as_ref()
+            .is_some_and(|input| input.request_id == pending.request_id);
+        if !still_pending {
+            return pending;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("timed out waiting for the wizard to consume its answer");
+}
+
+/// Close the phase the way a client does: retry while the wizard is still
+/// draining, since the refusal stays `Busy` until it parks with an empty queue.
+pub(crate) fn close_discovery_when_ready(session: &HostedInitSession) {
+    for _ in 0..200 {
+        match session.close_discovery() {
+            Ok(()) => return,
+            Err(CloseRejected::Busy(_)) => std::thread::sleep(Duration::from_millis(10)),
+            Err(CloseRejected::NotOpen(message)) => panic!("close was refused: {message}"),
+        }
+    }
+    panic!("timed out closing the discovery phase");
+}
+
+/// Close the phase and collect the revisions the wizard was handed.
+pub(crate) fn close_and_join(
+    session: &HostedInitSession,
+    handle: std::thread::JoinHandle<Result<Vec<DiscoveryRevision>>>,
+) -> Vec<DiscoveryRevision> {
+    close_discovery_when_ready(session);
+    handle
+        .join()
+        .expect("wizard thread")
+        .expect("wizard result")
 }
 
 /// Drives one select to completion, handing back the raw driver result.

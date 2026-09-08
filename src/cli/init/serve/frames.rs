@@ -8,6 +8,13 @@ use serde_json::value::RawValue;
 pub(super) const FRAME_ENCODE_FAILED_CODE: &str = "init.frame_encode_failed";
 pub(super) const FRAME_ENCODE_FAILED_MESSAGE: &str = "init frame payload could not be encoded";
 
+/// The `input` and `close_discovery` refusal codes, named because each appears
+/// on both transports: a 409 over REST and a protocol-error frame on the socket.
+pub(super) const INPUT_REJECTED_CODE: &str = "init.input_rejected";
+pub(super) const REVISION_REJECTED_CODE: &str = "init.revision_rejected";
+pub(super) const DISCOVERY_NOT_OPEN_CODE: &str = "init.discovery_not_open";
+pub(super) const DISCOVERY_BUSY_CODE: &str = "init.discovery_busy";
+
 #[derive(Debug, thiserror::Error)]
 pub(super) enum FrameError {
     #[error("init frame payload could not be encoded: {source}")]
@@ -27,6 +34,11 @@ pub(super) enum ServerEvent {
     },
     InputAccepted {
         request_id: String,
+    },
+    /// The discovery phase reaching `awaiting_close` or `closed`. Seq-bearing,
+    /// so it lands in the history replay like every other transition.
+    Discovery {
+        state: &'static str,
     },
     ResultReady,
     ResultAcked,
@@ -51,6 +63,7 @@ impl ServerEvent {
             ServerEvent::Progress { .. } => "progress",
             ServerEvent::InputRequired { .. } => "input_required",
             ServerEvent::InputAccepted { .. } => "input_accepted",
+            ServerEvent::Discovery { .. } => "discovery",
             ServerEvent::ResultReady => "result_ready",
             ServerEvent::ResultAcked => "result_acked",
             ServerEvent::Canceled { .. } => "cancelled",
@@ -76,6 +89,9 @@ impl ServerEvent {
             }
             ServerEvent::InputAccepted { request_id } => {
                 payload.insert("request_id".to_owned(), Value::String(request_id));
+            }
+            ServerEvent::Discovery { state } => {
+                payload.insert("state".to_owned(), Value::String(state.to_owned()));
             }
             ServerEvent::ResultReady => {
                 payload.insert(
@@ -149,6 +165,9 @@ pub(super) enum ServerFrame<'a> {
         pending_input: Option<&'a PublicInputRequest>,
         result_available: bool,
         error: Option<&'a PublicError>,
+        /// Present only while the discovery phase is open, so every hello frame
+        /// predating the phase stays byte-identical.
+        discovery: Option<&'a PublicDiscoveryPhase>,
     },
     AckAccepted {
         session_id: &'a str,
@@ -182,6 +201,7 @@ impl ServerFrame<'_> {
                 pending_input,
                 result_available,
                 error,
+                discovery,
             } => encode(&HelloBody {
                 frame_type: "hello",
                 session_id,
@@ -191,6 +211,7 @@ impl ServerFrame<'_> {
                 pending_input: *pending_input,
                 result_available: *result_available,
                 error: *error,
+                discovery: *discovery,
             }),
             ServerFrame::AckAccepted { session_id } => encode(&SessionBody {
                 frame_type: "ack_accepted",
@@ -282,6 +303,8 @@ struct HelloBody<'a> {
     pending_input: Option<&'a PublicInputRequest>,
     result_available: bool,
     error: Option<&'a PublicError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    discovery: Option<&'a PublicDiscoveryPhase>,
 }
 
 #[derive(Serialize)]

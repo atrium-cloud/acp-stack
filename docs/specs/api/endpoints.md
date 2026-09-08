@@ -65,7 +65,7 @@ Session-tier HTTP routes are also mounted on the local socket and serve only whi
         - Each `*_frequency` requires its policy. Omitted policies leave the config schema defaults intact.
         - `agent_update` is honored only for managed registry agents. `agent_update: "on"` against a custom agent fails the session.
     - `defer_provider_credentials` (boolean, default `false`): declares that the caller will push the configured provider's credential through the managed-state extension after init. A missing ref the push can deliver — a custom provider's api-key ref, or a mapped key-based provider's api-key and companion env vars under the names the agent reads — is not prompted and soft-passes. A ref the push cannot deliver stays required and fails the session: a noncanonical api-key alias, a `VAR=template` inner ref, and an agent-native-auth provider's refs. Without the declaration, a missing provider ref fails the session.
-- Response: `{ "session_id": "...", "status": "running" }` in the standard success envelope. `status` is one of `running`, `waiting_for_input`, `completed_awaiting_ack`, `errored`, `cancelled`, or `closed`. The same set backs the status route and the cancel route's `{session_id, status}` body.
+- Response: `{ "session_id": "...", "status": "running" }` in the standard success envelope. `status` is one of `running`, `waiting_for_input`, `awaiting_discovery_close`, `completed_awaiting_ack`, `errored`, `cancelled`, or `closed`. The same set backs the status route and the cancel route's `{session_id, status}` body.
 - Errors:
     - `409 init.session_active` — another session is running or awaiting result acknowledgement. Also returned while a failure is parked (see lifecycle below).
     - `400` — a cross-field rule is violated. The error names the offending field and never echoes its value.
@@ -89,6 +89,7 @@ Session-tier HTTP routes are also mounted on the local socket and serve only whi
     - Option `value` is a stable id that survives display rewording, so answers may address a choice as `{"value": "<id>"}` in addition to the index, label, and `null` forms. An unknown value is rejected as an invalid parameter.
     - A native upload produces `style: "native_config_review"` plus the redacted `inspection`. Its client response value is the revision-bound selection object used by the normal import contract.
     - `last_activity_age_secs` is the idle time leading up to that request, measured before the request itself counts as activity. It supports backend-side reap decisions.
+    - While the discovery phase is open the body carries `discovery`: `{ "state": "open" | "awaiting_close", "revisable": [ { "request_id", "kind", "config_id"? } ] }`. `awaiting_close` means the run is parked on the client's close signal. Each `revisable` entry names one discovery answer that may still be replaced; `config_id` is present on `config_option` entries, which are one lane per advertised option. Option sets are not repeated here: a reconnecting client re-reads them from the init-tier `GET /v1/models` and the recorded `input_required` events. The block is absent before the first discovery answer, after the phase closes, and on a terminal session.
 - Errors: none route-specific.
 - Notes:
     - Status never includes plaintext session/admin keys or secret input values. The server does not replay keys through status or generic events.
@@ -108,20 +109,42 @@ Session-tier HTTP routes are also mounted on the local socket and serve only whi
 - Response: `{ "request_id": "..." }` in the standard success envelope. The `input_accepted` event still reaches subscribed sockets.
 - Errors:
     - `404 init.session_not_found` — no such init session.
-    - `409 init.input_rejected` — no pending input, or a stale `request_id`. The HTTP equivalent of the socket's `init.input_rejected` error frame.
-- Notes: a backend that polls over REST answers prompts here instead of holding a socket open; the two transports are interchangeable.
+    - `409 init.input_rejected` — no pending input, or a stale `request_id`, including the superseded id of a discovery lane that has since been re-issued. The HTTP equivalent of the socket's `init.input_rejected` error frame.
+    - `409 init.revision_rejected` — a revision the discovery phase cannot take: the value is not one the addressed prompt offered, or the phase has already closed. The addressed prompt's previously accepted answer stands. The HTTP equivalent of the socket's `init.revision_rejected` error frame.
+- Notes:
+    - A backend that polls over REST answers prompts here instead of holding a socket open; the two transports are interchangeable.
+    - A `request_id` naming an accepted discovery prompt of the open phase is a revision rather than a stale answer. It is validated against the options that prompt offered, acknowledged with the usual `input_accepted`, and applied by the wizard, which re-issues the lanes below it.
+
+### `POST /v1/init/sessions/{id}/discovery/close`
+
+- Tier: `init`
+- Request: none.
+- Response: the post-close `{session_id, status}`. The echoed status may still read `awaiting_discovery_close` when the wizard thread has not yet woken; the authoritative phase state is the `discovery` event and the status body's `discovery` block.
+- Errors:
+    - `404 init.session_not_found` — no such init session.
+    - `409 init.discovery_not_open` — the phase has not opened, has already closed, or a close is already accepted and awaiting the wizard.
+    - `409 init.discovery_busy` — the phase is open but not yet parked: a discovery prompt is pending, a revision is queued, or the wizard is re-probing. Retry once the session reports `awaiting_discovery_close`.
+- Notes: the REST twin of the `close_discovery` frame, with the same acceptance rule. An accepted close ends the revisable window at once, before the wizard observes it, so a later revision is refused as `init.revision_rejected` and a second close as `init.discovery_not_open`.
 
 ### `GET /v1/init/sessions/{id}/ws`
 
 - Tier: `init`
 - Request: WebSocket upgrade.
 - Response: the hosted init WebSocket stream.
-    - Server frames: `hello`, `progress`, `signal`, `input_required`, `input_accepted`, `result`, `error`.
-    - Client frames: `input`, `cancel`, `replay_result`, `ack_result`, `replay_error`, `ack_error`.
+    - Server frames: `hello`, `progress`, `signal`, `input_required`, `input_accepted`, `discovery`, `result`, `error`.
+    - Client frames: `input`, `close_discovery`, `cancel`, `replay_result`, `ack_result`, `replay_error`, `ack_error`.
 - Errors: none route-specific.
 - Notes:
     - Client `input` frames must include the active `request_id`; stale input is rejected. Unknown fields on a client frame are ignored rather than rejected.
     - For a `config_option` prompt, the input frame's `value` is `{ "config_id": "...", "value": <string|boolean|null> }`. The id and typed value are checked against the advertised option; `null` keeps the agent's current value without writing an override.
+    - The discovery phase opens on the first accepted `model`, `mode`, `effort`, or `config_option` answer and spans every later one. A run that issues no discovery prompt never opens the phase and never waits for its close.
+    - An `input` frame naming an accepted discovery prompt of the open phase revises that answer. The value uses the same grammar as the first answer (index, `{"index"}`, `{"value"}`, label, or `null`; the `{config_id, value}` shape for a `config_option`), and `deferred` is ignored. An accepted revision is acknowledged with `input_accepted`; one the phase cannot take is refused as `init.revision_rejected` and the previously accepted answer stands, including one arriving after a close was accepted but before the wizard observed it.
+    - A revision that arrives while the wizard is busy is queued and picked up at its next blocking call. One revision is kept per lane, the latest replacing the earlier, and lanes are drained in the order they were first revised.
+    - Revising to `null` clears what the lane wrote: the model, mode, or effort field, or a `config_option` override. The model, mode, and effort lanes re-settle with `category_settled` carrying `value: null`.
+    - A revised lane keeps its own `request_id`, so a client holds one stable address per lane. A model revision re-probes the agent and re-issues the mode, effort, and `config_option` prompts with new ids, whose previous ids stop being addressable; it re-probes when the model value changed or the downstream lanes stand withdrawn. Mode, effort, and `config_option` revisions re-issue nothing.
+    - A prompt the wizard abandons to service a revision receives no `input_accepted`. The client learns it is gone from the next `input_required` for the same kind.
+    - `discovery` is a seq-bearing event carrying `state`. `awaiting_close` announces that the forward pass is done and the run is parked; `closed` follows the close signal. `hello` and the status body carry the same phase under `discovery`, in the shape the status route describes.
+    - `close_discovery` carries only its `type`. It ends the revisable window and releases the wizard, and is refused as `init.discovery_not_open` before the phase opens and after it closes, or as `init.discovery_busy` while a prompt is pending, a revision is queued, or the wizard is re-probing. Clients send it once the `discovery` event reports `awaiting_close` or the status reads `awaiting_discovery_close`, and retry a busy refusal. A repeat of an already accepted close is refused as `init.discovery_not_open`.
     - One optional input field is defined: an `input` frame answering the `testflight_confirm` prompt may carry `deferred: true` beside `value: false`. It tells init the answer is a hosting backend that will run the testflight itself after setup rather than an operator declining it.
     - The testflight step then reports `testflight: deferred (runs after setup)` and records the `SkipDeferred` decision instead of `SkipDeclined`. The flag is ignored on every other prompt and on an accepting answer.
     - The final `result` frame carries the platform handoff payload and always includes plaintext `session_key` and `admin_key`. Hosted init generates them on a fresh instance and rotates them over pre-existing state, so every result carries working keys. A successful result's payload also carries the settled agent selection under `selection` (provider, model, mode, and effort, with explicit nulls for lanes that settled without a value).
@@ -164,9 +187,10 @@ The fold produces all ten categories in this order: `agent`, `provider`, `model`
     - `native_config_review` → `native_config`
     - the MCP prompts (`mcp_add`, `mcp_transport`, `mcp_row_action`, the `mcp_stdio_*` and `mcp_http_*` kinds) → `mcp`
     - every other kind — secret-ref, testflight, config-source, custom-agent, skills, dependency, data-source, and update-policy prompts — maps to no category and leaves nothing awaiting
-    - A prompt awaits from its `input_required` until the matching `input_accepted`. At most one category holds `awaiting_input`, since there is one pending input at a time.
+    - A prompt awaits from its `input_required` until the matching `input_accepted`, or until the wizard abandons it to service a discovery revision, which the client observes as a new `input_required` for the same kind. At most one category holds `awaiting_input`, since there is one pending input at a time.
 - `settled` — done, with an optional `value` naming what was written.
     - A settlement (`category_settled`) and a failure are this run's own evidence and are never withdrawn as inapplicable. A settled lane still moves to `failed` if the step behind it breaks afterwards.
+    - A lane may return to `awaiting_input` and settle again while the discovery phase is open: a revised model re-issues the mode, effort, and `config_option` prompts, and each re-settles with a fresh `category_settled`. The latest settlement for a category wins, so the fold needs no special case.
     - A `category_provisionally_settled` value — a value read off configuration that predates the run, what a resumed or fully declared run reports for its provider, model, and mode lanes — is withdrawn, value and all, when a `probe` or `discovery` verdict finds the installed agent no longer has the lane. It is never withdrawn merely because that live check could not be made (`discovery_unavailable`).
 - `blocked` — waiting on the category named in `blocked_on`. `provider` waits on `agent`, `model` on `provider`, `mode` and `effort` on `model`, and both `mcp` and `skills` on `agent`. `workspace`, `native_config`, and `deps` wait on nothing.
 - `ready` — applicable, unblocked, not yet settled.
@@ -184,6 +208,7 @@ The client also folds `current_step` from the `step_started`/`step_finished` str
 
 #### Init Session Lifecycle
 
+- A run that issued a discovery prompt parks in `awaiting_discovery_close` after the forward pass. The session stays active there, revisions are still accepted, and the run continues once the client sends `close_discovery` or posts its REST twin. Reaching `--idle-timeout` in that state cancels with reason `discovery_close_timeout`, regardless of connected WebSockets.
 - After `result`, the session remains `completed_awaiting_ack`. If the WebSocket drops before acknowledgement, the backend reconnects and sends `replay_result`. `ack_result` is terminal: the server clears the in-memory handoff payload, closes the session, and exits successfully.
 - A failure after key handover still delivers a `result` frame (with `"status": "failed"` and any freshly generated keys) through the normal result/ack path.
 - A failure with no result payload to deliver — before key handover completed — parks instead: the session enters `errored` and the server stays up so the backend can learn the typed failure instead of a dead port.

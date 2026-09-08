@@ -108,6 +108,66 @@ fn a_pending_prompt_makes_its_category_await_in_the_fold() {
 }
 
 #[test]
+fn a_revised_lane_settles_again_without_a_fold_special_case() {
+    // A revision walks a lane settled → awaiting_input → settled. The fold is
+    // last-write-wins and `awaiting_input` is derived from `pending_input`, so
+    // the round trip needs no oracle change.
+    let session = test_session("init_state_revision");
+    let (answered, wizard_answered) = std::sync::mpsc::channel();
+    let (release, wizard_release) = std::sync::mpsc::channel::<()>();
+    let wizard = session.clone();
+    // Gated between the two prompts so the settled view can be read while
+    // nothing is pending.
+    let handle = std::thread::spawn(move || {
+        wizard.request_input_revisable(revisable_select_request(
+            HostedPromptKind::Model,
+            &["alpha", "beta"],
+        ))?;
+        answered.send(()).expect("signal the answer landed");
+        wizard_release.recv().expect("release the wizard");
+        wizard.request_input_revisable(revisable_select_request(
+            HostedPromptKind::Model,
+            &["alpha", "beta"],
+        ))?;
+        while let DiscoveryWait::Revised(_) = wizard.await_discovery_close()? {}
+        Ok::<_, StackError>(())
+    });
+
+    let model = answer_pending(&session, "model", json!(0));
+    wizard_answered.recv().expect("wizard answered");
+    session.apply_state_signal(InitStateSignal::CategorySettled {
+        category: InitCategory::Model,
+        value: Some("alpha".to_owned()),
+    });
+    assert_eq!(category(&folded_state(&session), "model")["value"], "alpha");
+    release.send(()).expect("release the wizard");
+
+    let reissued = wait_for_pending_kind(&session, "model");
+    assert_eq!(awaiting_ids(&folded_state(&session)), ["model"]);
+    session
+        .submit_input(&reissued.request_id, json!(1))
+        .expect("re-issued model answer");
+    session.apply_state_signal(InitStateSignal::CategorySettled {
+        category: InitCategory::Model,
+        value: Some("beta".to_owned()),
+    });
+
+    close_discovery_when_ready(&session);
+    handle
+        .join()
+        .expect("wizard thread")
+        .expect("wizard result");
+    let state = folded_state(&session);
+    assert!(awaiting_ids(&state).is_empty());
+    assert_eq!(category(&state, "model")["value"], "beta");
+    assert_eq!(category(&state, "model")["status"], "settled");
+    assert_ne!(
+        model.request_id, reissued.request_id,
+        "a re-issued lane gets a fresh request_id"
+    );
+}
+
+#[test]
 fn at_most_one_category_awaits_input_across_the_whole_surface() {
     let session = test_session("init_state_single_await");
     for (kind, expected) in [

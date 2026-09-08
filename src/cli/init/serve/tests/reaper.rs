@@ -68,6 +68,52 @@ async fn idle_reaper_skips_sessions_with_connected_websocket() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_phase_awaiting_close_expires_even_with_a_connected_socket() {
+    let (manager, session) = reaper_test_manager("init_close_reap");
+    // A held socket is liveness for a pending prompt, but not for a wait only
+    // the client can end.
+    session.ws_connected();
+    let handle = spawn_discovery_wizard(
+        session.clone(),
+        vec![revisable_select_request(
+            HostedPromptKind::Model,
+            &["alpha", "beta"],
+        )],
+    );
+    // The blocking wizard runs on its own thread, so the paused clock needs a
+    // real yield before the park is observable.
+    let session_for_answer = session.clone();
+    tokio::task::spawn_blocking(move || {
+        answer_pending(&session_for_answer, "model", json!(0));
+        wait_for_status(&session_for_answer, "awaiting_discovery_close");
+    })
+    .await
+    .expect("answer task");
+
+    tokio::spawn(reap_idle_session(
+        manager.clone(),
+        Some(std::time::Duration::from_secs(10)),
+    ));
+    tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        manager.wait_for_terminal(),
+    )
+    .await
+    .expect("a phase awaiting close must not pin the process");
+    assert_eq!(session.status(), "cancelled");
+    let events = serde_json::to_string(&session.events_after(0)).expect("events");
+    assert!(events.contains("discovery_close_timeout"));
+    assert!(
+        manager.terminal_result().is_err(),
+        "an expired close wait must exit non-zero"
+    );
+    handle
+        .join()
+        .expect("wizard thread")
+        .expect_err("the expired session releases the close wait as a failure");
+}
+
+#[tokio::test(start_paused = true)]
 async fn idle_reaper_respects_route_lookup_activity() {
     let (manager, session) = reaper_test_manager("init_idle_poll");
     let (app, _store_dir) = app_with_manager(manager.clone());

@@ -42,6 +42,16 @@ pub(super) async fn reap_idle_session(
                     continue;
                 }
                 let Some(timeout) = timeout else { continue };
+                // A phase parked on the client's close signal makes no progress
+                // of its own, so unlike a pending prompt a held-open socket is
+                // not evidence the run is alive. Revisions and the close signal
+                // both touch the session, so an editing client still holds it.
+                if session.status() == AWAITING_DISCOVERY_CLOSE_STATUS
+                    && session.last_activity_age_secs() >= timeout.as_secs()
+                {
+                    session.expire("discovery_close_timeout");
+                    break;
+                }
                 if !session.has_connected_ws()
                     && session.last_activity_age_secs() >= timeout.as_secs()
                 {

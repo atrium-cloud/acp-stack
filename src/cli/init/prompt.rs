@@ -375,8 +375,77 @@ impl ConfirmAnswer {
     }
 }
 
+/// The option id a picker appends for "leave this unset". Answering it is
+/// indistinguishable from answering `null`, so both reach the wizard as `None`.
+pub(super) const SKIP_OPTION_ID: &str = "__skip";
+
+/// A revision's answer, already resolved against the options the revised prompt
+/// offered, so the wizard never re-parses the wire grammar.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum RevisedAnswer {
+    /// Model, mode, effort: the offered option's stable `value` id, or `None`
+    /// for a null answer or the skip sentinel.
+    Select(Option<String>),
+    /// Generic config option: the typed value, or `None` to drop the override.
+    ConfigOption(Option<AgentConfigOptionValue>),
+}
+
+/// One accepted revision of an earlier discovery answer, handed back from the
+/// blocking call the wizard was parked in.
+#[derive(Debug, Clone)]
+pub(super) struct DiscoveryRevision {
+    /// The revised prompt's own id, which stays stable across revisions so a
+    /// client holds one address per lane.
+    pub(super) request_id: String,
+    pub(super) kind: HostedPromptKind,
+    /// Set for `config_option` lanes, which are one lane per advertised option.
+    pub(super) config_id: Option<String>,
+    pub(super) answer: RevisedAnswer,
+}
+
+/// What a revisable prompt resolved to.
+#[derive(Debug, Clone)]
+pub(super) enum RevisableOutcome<T> {
+    Answered(T),
+    Revised(DiscoveryRevision),
+}
+
+/// What ended the wizard's wait for the discovery close signal.
+#[derive(Debug, Clone)]
+pub(super) enum DiscoveryWait {
+    Closed,
+    Revised(DiscoveryRevision),
+}
+
+/// A revision woke a call that cannot service one. Unreachable by construction
+/// (the session only wakes revisable calls with revisions), reported rather than
+/// panicked so a wizard thread settles its durable row.
+fn revision_on_non_revisable_prompt(revision: &DiscoveryRevision) -> StackError {
+    StackError::InvalidParam {
+        field: "init",
+        reason: format!(
+            "a discovery revision of `{}` woke a non-revisable prompt",
+            revision.kind.as_str()
+        ),
+    }
+}
+
 pub(super) trait HostedPromptDriver: Send + Sync {
     fn select(&self, request: HostedPromptRequest) -> Result<HostedPromptOutcome<Option<usize>>>;
+    /// `select` a hosted client may interrupt with a revision of an earlier
+    /// discovery answer. The default never yields `Revised`, which is what keeps
+    /// the terminal and non-interactive paths linear.
+    fn select_revisable(
+        &self,
+        request: HostedPromptRequest,
+    ) -> Result<HostedPromptOutcome<RevisableOutcome<Option<usize>>>> {
+        Ok(match self.select(request)? {
+            HostedPromptOutcome::Handled(value) => {
+                HostedPromptOutcome::Handled(RevisableOutcome::Answered(value))
+            }
+            HostedPromptOutcome::Unhandled => HostedPromptOutcome::Unhandled,
+        })
+    }
     fn confirm(&self, request: HostedPromptRequest) -> Result<HostedPromptOutcome<bool>>;
     /// Confirm answer with the frame's `deferred` sibling preserved.
     fn confirm_with_deferral(
@@ -405,6 +474,26 @@ pub(super) trait HostedPromptDriver: Send + Sync {
     ) -> Result<HostedPromptOutcome<Option<AgentConfigOptionValue>>> {
         Ok(HostedPromptOutcome::Unhandled)
     }
+    /// `config_option` a hosted client may interrupt with a revision.
+    fn config_option_revisable(
+        &self,
+        request: HostedPromptRequest,
+    ) -> Result<HostedPromptOutcome<RevisableOutcome<Option<AgentConfigOptionValue>>>> {
+        Ok(match self.config_option(request)? {
+            HostedPromptOutcome::Handled(value) => {
+                HostedPromptOutcome::Handled(RevisableOutcome::Answered(value))
+            }
+            HostedPromptOutcome::Unhandled => HostedPromptOutcome::Unhandled,
+        })
+    }
+    /// Park until the client closes the discovery phase. The default returns
+    /// `Closed` at once, so a run without a hosted client walks straight through.
+    fn await_discovery_close(&self) -> Result<DiscoveryWait> {
+        Ok(DiscoveryWait::Closed)
+    }
+    /// Drop the named lanes' accepted prompts and any queued revisions of them,
+    /// after an upstream revision invalidated their option sets.
+    fn supersede_discovery_lanes(&self, _kinds: &[HostedPromptKind]) {}
     fn progress(&self, message: String);
     fn result(&self, payload: serde_json::Value);
     /// Machine-readable counterpart to `progress`.
@@ -593,6 +682,26 @@ pub(super) fn config_option(
     option: SessionConfigOptionSnapshot,
     interactive: bool,
 ) -> Result<Option<AgentConfigOptionValue>> {
+    match config_option_inner(option, interactive, false)? {
+        RevisableOutcome::Answered(value) => Ok(value),
+        RevisableOutcome::Revised(revision) => Err(revision_on_non_revisable_prompt(&revision)),
+    }
+}
+
+/// `config_option` a hosted client may interrupt with a revision of an earlier
+/// discovery answer.
+pub(super) fn config_option_revisable(
+    option: SessionConfigOptionSnapshot,
+    interactive: bool,
+) -> Result<RevisableOutcome<Option<AgentConfigOptionValue>>> {
+    config_option_inner(option, interactive, true)
+}
+
+fn config_option_inner(
+    option: SessionConfigOptionSnapshot,
+    interactive: bool,
+    revisable: bool,
+) -> Result<RevisableOutcome<Option<AgentConfigOptionValue>>> {
     if let Some(driver) = HOSTED_DRIVER.with(|slot| slot.borrow().clone()) {
         let style = match option.kind.as_str() {
             SNAPSHOT_KIND_SELECT => HostedPromptStyle::SearchableSelect,
@@ -629,26 +738,37 @@ pub(super) fn config_option(
             inspection: None,
             config_option: Some(option),
         };
-        return match driver.config_option(request)? {
-            HostedPromptOutcome::Handled(value) => Ok(value),
-            HostedPromptOutcome::Unhandled => Ok(None),
+        let outcome = if revisable {
+            driver.config_option_revisable(request)?
+        } else {
+            match driver.config_option(request)? {
+                HostedPromptOutcome::Handled(value) => {
+                    HostedPromptOutcome::Handled(RevisableOutcome::Answered(value))
+                }
+                HostedPromptOutcome::Unhandled => HostedPromptOutcome::Unhandled,
+            }
         };
+        return Ok(match outcome {
+            HostedPromptOutcome::Handled(outcome) => outcome,
+            HostedPromptOutcome::Unhandled => RevisableOutcome::Answered(None),
+        });
     }
     if !interactive {
-        return Ok(None);
+        return Ok(RevisableOutcome::Answered(None));
     }
 
     let items = config_option_items(&option)?;
-    match select(
+    let selection = select(
         HostedPromptKind::ConfigOption,
         interactive,
         &option.name,
         &items,
-    )? {
-        Some(ConfigOptionChoice::Bool(value)) => Ok(Some(AgentConfigOptionValue::Bool(value))),
-        Some(ConfigOptionChoice::Text(value)) => Ok(Some(AgentConfigOptionValue::Text(value))),
-        Some(ConfigOptionChoice::KeepCurrent) | None => Ok(None),
-    }
+    )?;
+    Ok(RevisableOutcome::Answered(match selection {
+        Some(ConfigOptionChoice::Bool(value)) => Some(AgentConfigOptionValue::Bool(value)),
+        Some(ConfigOptionChoice::Text(value)) => Some(AgentConfigOptionValue::Text(value)),
+        Some(ConfigOptionChoice::KeepCurrent) | None => None,
+    }))
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -737,7 +857,10 @@ pub(super) fn select<T: Clone + Eq>(
     prompt: &str,
     items: &[PromptItem<T>],
 ) -> Result<Option<T>> {
-    select_inner(kind, interactive, prompt, items, false)
+    match select_inner(kind, interactive, prompt, items, false, false)? {
+        RevisableOutcome::Answered(value) => Ok(value),
+        RevisableOutcome::Revised(revision) => Err(revision_on_non_revisable_prompt(&revision)),
+    }
 }
 
 pub(super) fn searchable_select<T: Clone + Eq>(
@@ -746,7 +869,22 @@ pub(super) fn searchable_select<T: Clone + Eq>(
     prompt: &str,
     items: &[PromptItem<T>],
 ) -> Result<Option<T>> {
-    select_inner(kind, interactive, prompt, items, true)
+    match select_inner(kind, interactive, prompt, items, true, false)? {
+        RevisableOutcome::Answered(value) => Ok(value),
+        RevisableOutcome::Revised(revision) => Err(revision_on_non_revisable_prompt(&revision)),
+    }
+}
+
+/// `searchable_select` a hosted client may interrupt with a revision of an
+/// earlier discovery answer. Without a hosted driver it behaves exactly like
+/// `searchable_select` and can only answer.
+pub(super) fn searchable_select_revisable<T: Clone + Eq>(
+    kind: HostedPromptKind,
+    interactive: bool,
+    prompt: &str,
+    items: &[PromptItem<T>],
+) -> Result<RevisableOutcome<Option<T>>> {
+    select_inner(kind, interactive, prompt, items, true, true)
 }
 
 fn select_inner<T: Clone + Eq>(
@@ -755,7 +893,8 @@ fn select_inner<T: Clone + Eq>(
     prompt: &str,
     items: &[PromptItem<T>],
     searchable: bool,
-) -> Result<Option<T>> {
+    revisable: bool,
+) -> Result<RevisableOutcome<Option<T>>> {
     // Answers address options by id, so a collision makes one of them
     // unreachable over the wire while the terminal path looks fine.
     debug_assert!(
@@ -780,19 +919,33 @@ fn select_inner<T: Clone + Eq>(
             None,
             items,
         );
-        return match driver.select(request)? {
-            HostedPromptOutcome::Handled(Some(index)) => items
+        let outcome = if revisable {
+            driver.select_revisable(request)?
+        } else {
+            match driver.select(request)? {
+                HostedPromptOutcome::Handled(value) => {
+                    HostedPromptOutcome::Handled(RevisableOutcome::Answered(value))
+                }
+                HostedPromptOutcome::Unhandled => HostedPromptOutcome::Unhandled,
+            }
+        };
+        return match outcome {
+            HostedPromptOutcome::Handled(RevisableOutcome::Answered(Some(index))) => items
                 .get(index)
-                .map(|item| Some(item.value.clone()))
+                .map(|item| RevisableOutcome::Answered(Some(item.value.clone())))
                 .ok_or(StackError::InvalidParam {
                     field: "init",
                     reason: format!("hosted init selected invalid item index {index}"),
                 }),
-            HostedPromptOutcome::Handled(None) | HostedPromptOutcome::Unhandled => Ok(None),
+            HostedPromptOutcome::Handled(RevisableOutcome::Revised(revision)) => {
+                Ok(RevisableOutcome::Revised(revision))
+            }
+            HostedPromptOutcome::Handled(RevisableOutcome::Answered(None))
+            | HostedPromptOutcome::Unhandled => Ok(RevisableOutcome::Answered(None)),
         };
     }
     if !interactive || items.is_empty() {
-        return Ok(None);
+        return Ok(RevisableOutcome::Answered(None));
     }
     let mut builder = cliclack::select::<T>(prompt);
     if searchable {
@@ -802,9 +955,26 @@ fn select_inner<T: Clone + Eq>(
         builder = builder.item(entry.value.clone(), &entry.label, &entry.hint);
     }
     match builder.interact() {
-        Ok(value) => Ok(Some(value)),
+        Ok(value) => Ok(RevisableOutcome::Answered(Some(value))),
         Err(error) if error.kind() == io::ErrorKind::Interrupted => Err(cancelled()),
         Err(error) => Err(map_interact_error(error)),
+    }
+}
+
+/// Park until the client closes the discovery phase, or hands back a revision of
+/// an earlier discovery answer. `Closed` at once without a hosted driver.
+pub(super) fn await_discovery_close() -> Result<DiscoveryWait> {
+    match HOSTED_DRIVER.with(|slot| slot.borrow().clone()) {
+        Some(driver) => driver.await_discovery_close(),
+        None => Ok(DiscoveryWait::Closed),
+    }
+}
+
+/// Drop the named lanes from the revisable set after an upstream revision
+/// invalidated their options. A no-op without a hosted driver.
+pub(super) fn supersede_discovery_lanes(kinds: &[HostedPromptKind]) {
+    if let Some(driver) = HOSTED_DRIVER.with(|slot| slot.borrow().clone()) {
+        driver.supersede_discovery_lanes(kinds);
     }
 }
 

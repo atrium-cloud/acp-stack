@@ -518,3 +518,220 @@ async fn bootstrap_models_not_ready_before_config_is_staged() {
     assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
     assert_eq!(body["error"]["code"], "init.config_not_ready");
 }
+
+#[tokio::test]
+async fn startup_discovery_close_route_releases_the_phase() {
+    let session = test_session("init_close_rest");
+    let handle = spawn_discovery_wizard(
+        session.clone(),
+        vec![revisable_select_request(
+            HostedPromptKind::Model,
+            &["alpha", "beta"],
+        )],
+    );
+    answer_pending(&session, "model", json!(0));
+    wait_for_status(&session, "awaiting_discovery_close");
+
+    let (app, _store_dir) = app_with_session(session.clone());
+    let (status, body) = request_json(
+        app,
+        Method::POST,
+        "/v1/init/sessions/init_close_rest/discovery/close",
+        None,
+        Some(TEST_TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["data"]["session_id"], "init_close_rest");
+    handle
+        .join()
+        .expect("wizard thread")
+        .expect("wizard result");
+    assert!(session.status_snapshot().discovery.is_none());
+}
+
+#[tokio::test]
+async fn startup_discovery_close_rejections_are_mapped() {
+    let session = test_session("init_close_rest_reject");
+    let (app, _store_dir) = app_with_session(session.clone());
+
+    let (status, body) = request_json(
+        app.clone(),
+        Method::POST,
+        "/v1/init/sessions/unknown/discovery/close",
+        None,
+        Some(TEST_TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "init.session_not_found");
+
+    let (status, body) = request_json(
+        app.clone(),
+        Method::POST,
+        "/v1/init/sessions/init_close_rest_reject/discovery/close",
+        None,
+        Some(TEST_TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"]["code"], "init.discovery_not_open");
+
+    // The startup token gates the new route like its siblings.
+    let (status, _) = request_json(
+        app.clone(),
+        Method::POST,
+        "/v1/init/sessions/init_close_rest_reject/discovery/close",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let handle = spawn_discovery_wizard(
+        session.clone(),
+        vec![
+            revisable_select_request(HostedPromptKind::Model, &["alpha", "beta"]),
+            revisable_select_request(HostedPromptKind::Mode, &["fast", "deep"]),
+        ],
+    );
+    let model = answer_pending(&session, "model", json!(0));
+    wait_for_pending_kind(&session, "mode");
+    let (status, body) = request_json(
+        app,
+        Method::POST,
+        "/v1/init/sessions/init_close_rest_reject/discovery/close",
+        None,
+        Some(TEST_TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"]["code"], "init.discovery_busy");
+
+    session
+        .submit_input(&model.request_id, json!(1))
+        .expect("model revision");
+    close_and_join(&session, handle);
+}
+
+#[tokio::test]
+async fn startup_revision_rest_is_accepted_and_maps_its_rejection() {
+    let session = test_session("init_revise_rest");
+    let handle = spawn_discovery_wizard(
+        session.clone(),
+        vec![revisable_select_request(
+            HostedPromptKind::Model,
+            &["alpha", "beta"],
+        )],
+    );
+    let model = answer_pending(&session, "model", json!(0));
+    wait_for_status(&session, "awaiting_discovery_close");
+    let (app, _store_dir) = app_with_session(session.clone());
+
+    let (status, body) = request_json(
+        app.clone(),
+        Method::POST,
+        "/v1/init/sessions/init_revise_rest/input",
+        Some(json!({"request_id": model.request_id, "value": {"value": "id_nope"}})),
+        Some(TEST_TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"]["code"], "init.revision_rejected");
+
+    let (status, body) = request_json(
+        app,
+        Method::POST,
+        "/v1/init/sessions/init_revise_rest/input",
+        Some(json!({"request_id": model.request_id, "value": 1})),
+        Some(TEST_TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["data"]["request_id"], model.request_id);
+
+    let revisions = close_and_join(&session, handle);
+    assert_eq!(revisions.len(), 1);
+    assert_eq!(
+        revisions[0].answer,
+        RevisedAnswer::Select(Some("id_beta".to_owned()))
+    );
+}
+
+#[tokio::test]
+async fn startup_status_carries_the_open_discovery_phase() {
+    let session = test_session("init_status_discovery");
+    let (app, _store_dir) = app_with_session(session.clone());
+    let (status, body) = request_json(
+        app.clone(),
+        Method::GET,
+        "/v1/init/sessions/init_status_discovery",
+        None,
+        Some(TEST_TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body["data"].get("discovery").is_none(),
+        "the block is absent before the phase opens"
+    );
+
+    let handle = spawn_discovery_wizard(
+        session.clone(),
+        vec![
+            revisable_select_request(HostedPromptKind::Model, &["alpha", "beta"]),
+            config_option_test_request(config_option_snapshot("persona")),
+        ],
+    );
+    let model = answer_pending(&session, "model", json!(0));
+    answer_pending(
+        &session,
+        "config_option",
+        json!({"config_id": "persona", "value": "balanced"}),
+    );
+    wait_for_status(&session, "awaiting_discovery_close");
+
+    let (status, body) = request_json(
+        app.clone(),
+        Method::GET,
+        "/v1/init/sessions/init_status_discovery",
+        None,
+        Some(TEST_TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["status"], "awaiting_discovery_close");
+    assert_eq!(body["data"]["discovery"]["state"], "awaiting_close");
+    let revisable = body["data"]["discovery"]["revisable"]
+        .as_array()
+        .expect("revisable entries")
+        .clone();
+    assert_eq!(revisable.len(), 2);
+    assert_eq!(revisable[0]["request_id"], json!(model.request_id));
+    assert_eq!(revisable[0]["kind"], "model");
+    assert!(
+        revisable[0].get("config_id").is_none(),
+        "a typed lane carries no config_id"
+    );
+    assert_eq!(revisable[1]["kind"], "config_option");
+    assert_eq!(revisable[1]["config_id"], "persona");
+    assert!(
+        revisable[1].get("options").is_none(),
+        "revisable entries carry ids only"
+    );
+
+    close_and_join(&session, handle);
+    let (status, body) = request_json(
+        app,
+        Method::GET,
+        "/v1/init/sessions/init_status_discovery",
+        None,
+        Some(TEST_TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body["data"].get("discovery").is_none(),
+        "the block is gone once the phase closes"
+    );
+}
