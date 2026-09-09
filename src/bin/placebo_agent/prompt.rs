@@ -86,9 +86,15 @@ pub(crate) async fn handle_prompt(
         }
     }
     if prompt_contains_testflight_marker(&request) {
-        tokio::fs::write(TESTFLIGHT_MARKER, TESTFLIGHT_CONTENT)
-            .await
-            .map_err(Error::into_internal_error)?;
+        let write_allowed = {
+            let state = state.lock().await;
+            state.testflight_write_allowed(request.session_id.0.as_ref())
+        };
+        if write_allowed {
+            tokio::fs::write(TESTFLIGHT_MARKER, TESTFLIGHT_CONTENT)
+                .await
+                .map_err(Error::into_internal_error)?;
+        }
     }
     if !args.prompt_silent {
         let chunks: &[&str] = if args.prompt_stall_after_update {

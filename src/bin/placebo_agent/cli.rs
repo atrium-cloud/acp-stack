@@ -159,6 +159,11 @@ pub(crate) struct AcpArgs {
     /// first, proving the native mode lane fired (mirrors `--expect-model-config`).
     #[arg(long)]
     pub(crate) expect_mode: Option<String>,
+    /// Write the testflight artifact only when the session's effective native mode
+    /// is one of these ids; otherwise end the turn without writing, mirroring a
+    /// plan-style mode that blocks writes. Empty means always write. Repeatable.
+    #[arg(long)]
+    pub(crate) testflight_write_modes: Vec<String>,
     /// After each `session/set_config_option`, also emit a
     /// `config_option_update` session notification carrying the full list.
     #[arg(long)]

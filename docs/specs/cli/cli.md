@@ -84,7 +84,7 @@ A daemon restart is required for daemon startup-cached settings:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "ok": true,
   "phase": "done",
   "code": "ok",
@@ -102,13 +102,16 @@ A daemon restart is required for daemon startup-cached settings:
     "tool_call_updates": 2
   },
   "fs_check": { "status": "ok", "bytes": 128 },
-  "cleanup": { "session_delete": "deleted", "process": "terminated" }
+  "cleanup": { "session_delete": "deleted", "process": "terminated" },
+  "mode_used": "build",
+  "mode_attempts": 2
 }
 ```
 
 - `phase` is one of `spawn`, `initialize`, `session_new`, `session_config`, `prompt`, `fs_check`, `cleanup`, `done`. It is derived from `code`, so the two can never disagree.
-- `code` is one of `ok`, `agent_spawn_failed`, `agent_initialize_failed`, `session_create_failed`, `session_config_failed`, `prompt_failed`, `prompt_timeout`, `progress_timeout`, `unexpected_stop_reason`, `fs_check_missing`, `fs_check_empty`, `fs_check_not_regular_file`, `fs_check_outside_workspace`, `fs_check_failed`, `cleanup_failed`, `config_invalid`, `agent_unsupported`.
+- `code` is one of `ok`, `agent_spawn_failed`, `agent_initialize_failed`, `session_create_failed`, `session_config_failed`, `session_mode_failed`, `prompt_failed`, `prompt_timeout`, `progress_timeout`, `unexpected_stop_reason`, `fs_check_missing`, `fs_check_empty`, `fs_check_not_regular_file`, `fs_check_outside_workspace`, `fs_check_failed`, `cleanup_failed`, `config_invalid`, `agent_unsupported`.
 - `prompt_source` is `provided`, `registry`, or `default`. `stop_reason` is `null` when the prompt phase was never reached.
+- `mode_used` is the session mode of the passing attempt, or `null` for the agent's own default mode. `mode_attempts` counts the modes tried, including the first. On total failure `mode_used` reports the first attempt while `mode_attempts` still counts every mode tried. See [Testflight mode cycling](#testflight-mode-cycling).
 - `evidence` retains the final 2 KiB of assistant text with the run's injected env credential values scrubbed, marks truncation, and counts message, thought, tool-call, and tool-call-update events on every exit path.
 - `fs_check.status` is `ok`, `skipped`, or `failed`. `skipped` covers both a registry entry that declares no `testflight_expect_fs` and a run that failed before the check. `bytes` is `null` unless the status is `ok`. Artifact paths resolve against the session cwd within the workspace, and missing or empty artifacts are re-polled for two seconds.
 - `cleanup.session_delete` is `deleted`, `cleanup_failed`, `unsupported` (the agent does not advertise `session/delete`), or `skipped` (no session was ever created).
@@ -119,6 +122,14 @@ A daemon restart is required for daemon startup-cached settings:
 - Apart from `evidence.final_assistant_text`, the document carries no reason string, session id, prompt text, file contents, path, credential, or raw provider error. Reasons embed workspace paths and spawn argv; codes are the machine channel.
 - `evidence.final_assistant_text` is agent-authored: injected env credential values are scrubbed from it, but content the model chose to echo — including prompt or workspace-file text — is retained, since telling model non-compliance from a harness defect is the field's purpose.
 - A failure that happens before the harness can run at all — an unreadable config, an unresolvable home directory — emits no document, only the stderr error and exit 1.
+
+## Testflight mode cycling
+
+The testflight verifies that the agent works headless, so it selects its own session mode rather than the operator's configured one. It starts from the registry `default_mode` when the agent declares one, else the agent's own default mode, and applies no model or effort override beyond what config already holds. Permissions stay auto-approved, so a write-capable mode that merely asks permission still passes.
+
+The run respawns under the next advertised mode and tries again, up to six attempts, when an attempt fails in a way a mode causes: it blocked the write (`fs_check_missing`, `fs_check_empty`), refused the turn (`unexpected_stop_reason`), stalled (`progress_timeout`, `prompt_timeout`), or was rejected (`session_mode_failed`). When the seed and the advertised modes fail within the six-attempt budget, a final attempt runs under the agent's own default mode, so a registry `default_mode` the agent no longer advertises cannot fail an otherwise working agent. Failures that repeat identically in every mode (a bad credential, an unreadable config, a spawn or initialize error) abort at once. Each attempt is a fresh process, so a file one mode wrote is never credited to another.
+
+`mode_used` and `mode_attempts` report the outcome. The selected mode is never written back to config: real daemon sessions keep the operator's mode, where the permission service parks on operator decisions. `acps agent test --one-shot` opts out, running a single attempt against the configured mode.
 
 ## Flag Reference
 

@@ -138,6 +138,9 @@ pub struct AgentTestArgs {
     /// Maximum time to wait for either progress or terminal prompt completion.
     #[arg(long = "progress-timeout", default_value = DEFAULT_AGENT_TEST_PROGRESS_TIMEOUT)]
     pub(super) progress_timeout: String,
+    /// Run one attempt against the configured mode instead of cycling modes.
+    #[arg(long = "one-shot")]
+    pub(super) one_shot: bool,
 }
 
 #[derive(Debug, Args)]

@@ -113,6 +113,9 @@ pub(crate) async fn handle_set_mode(
     if state.args.expect_mode.as_deref() == Some(mode_id.as_str()) {
         state.mode_configured = true;
     }
+    state
+        .native_mode_applied
+        .insert(request.session_id.0.to_string(), mode_id);
     responder.respond(SetSessionModeResponse::new())
 }
 

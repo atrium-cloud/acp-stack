@@ -1,5 +1,9 @@
 use super::*;
 
+/// Advertised id of the mode config option, matching ACP's `mode` category id, so
+/// the write-gate can read a mode applied through `session/set_config_option`.
+const MODE_CONFIG_OPTION_ID: &str = "mode";
+
 #[derive(Debug, Clone)]
 pub(crate) struct CreatedSession {
     pub(crate) id: String,
@@ -28,6 +32,9 @@ pub(crate) struct PlaceboState {
     /// Set once a `session/set_mode` applies the `--expect-mode` value, mirroring
     /// `model_configured` so a test can prove the native mode lane actually fired.
     pub(crate) mode_configured: bool,
+    /// The native mode applied via `session/set_mode`, keyed by session id, so the
+    /// testflight-write gate can read each session's effective mode.
+    pub(crate) native_mode_applied: HashMap<String, String>,
 }
 
 impl PlaceboState {
@@ -44,6 +51,35 @@ impl PlaceboState {
             client_capabilities: None,
             config_option_values: BTreeMap::new(),
             mode_configured: false,
+            native_mode_applied: HashMap::new(),
+        }
+    }
+
+    /// A session's effective mode across both wire lanes: a `mode` config option
+    /// applied via `session/set_config_option`, else a native mode applied via
+    /// `session/set_mode`, else the advertised native current. `None` when neither
+    /// a mode config option nor `--session-mode` was configured.
+    pub(crate) fn effective_mode(&self, session_id: &str) -> Option<String> {
+        if let Some(applied) = self.applied_value_id(session_id, MODE_CONFIG_OPTION_ID) {
+            return Some(applied);
+        }
+        if let Some(applied) = self.native_mode_applied.get(session_id) {
+            return Some(applied.clone());
+        }
+        self.session_modes()
+            .map(|modes| modes.current_mode_id.0.to_string())
+    }
+
+    /// Whether the testflight artifact should be written for this session. Without
+    /// `--testflight-write-modes` every mode writes (the default behavior); with it,
+    /// only a listed effective mode does, simulating a write-blocking mode.
+    pub(crate) fn testflight_write_allowed(&self, session_id: &str) -> bool {
+        if self.args.testflight_write_modes.is_empty() {
+            return true;
+        }
+        match self.effective_mode(session_id) {
+            Some(mode) => self.args.testflight_write_modes.contains(&mode),
+            None => false,
         }
     }
 

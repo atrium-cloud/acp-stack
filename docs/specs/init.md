@@ -352,6 +352,8 @@ After config and secrets are present, init can run a testflight. It starts the c
 - Session creation, prompt completion, streamed updates, and a terminal prompt state.
 - At least one filesystem-visible tool action when the agent supports tools.
 
+The testflight selects its own session mode rather than the mode chosen during init: it starts from the registry default mode (or the agent's own default) and cycles to the next advertised mode when a mode-caused failure occurs, so a plan-style mode that blocks writes does not fail an otherwise working agent. The init mode selection is unchanged and applies to real sessions. See [Testflight mode cycling](cli/cli.md#testflight-mode-cycling).
+
 Testflight is opt-in because it may consume provider credits:
 
 - Interactive runs prompt with a credit warning before running.

@@ -609,16 +609,20 @@ Sends a real prompt through the configured agent.
 ### Synopsis
 
 ```sh
-acps agent test [--format json]
+acps agent test [--format json] [--one-shot] [--prompt <text>] [--timeout <duration>] [--progress-timeout <duration>]
 ```
 
 ### Flags
 
 - `--format json`: emit the machine-readable result document.
+- `--one-shot`: run a single attempt against the configured mode instead of selecting a default mode and cycling. Cycling is the default.
+- `--prompt <text>`: send this prompt instead of the registry testflight prompt or the built-in default.
+- `--timeout <duration>`, `--progress-timeout <duration>`: bound each attempt's total prompt time and time between updates.
 
 ### Output
 
 - The run may consume provider credits.
+- The testflight selects its own mode and cycles to the next advertised one when a mode-caused failure occurs; `--one-shot` pins the configured mode. See [Testflight mode cycling](cli.md#testflight-mode-cycling).
 - The testflight is non-interactive. It auto-approves agent permission requests by selecting the first allow-kind option: allow-once is preferred over allow-always so no durable grant is left behind, and a reject option is never selected. A request offering no allow option is cancelled.
 - The run is disposable. Before the agent process is shut down, the session it created is deleted through `session/delete` when the agent advertises that capability. `acps agent test` opens no state store, so it writes no session row.
 - The `--format json` document contract: [cli.md](cli.md#acps-agent-test-json-contract).

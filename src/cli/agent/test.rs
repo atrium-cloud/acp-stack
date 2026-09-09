@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -18,7 +18,8 @@ use crate::runtime::agent::acp_bridge::{
     session_mode_selection_for_value, session_model_selection_for_value,
 };
 use crate::runtime::agent::model_discovery::{
-    effort_value_is_explicit_without_discovery, model_applies_from_disk_only,
+    advertised_values_for_category, effort_value_is_explicit_without_discovery,
+    model_applies_from_disk_only,
 };
 use crate::runtime::install::agent_registry::RegistryCatalog;
 
@@ -32,7 +33,11 @@ use crate::cli::core::{OutputFormat, print_json};
 // CONSTANTS
 
 /// Version of the `agent test --format json` document; any field change bumps it.
-const AGENT_TEST_SCHEMA_VERSION: i64 = 1;
+const AGENT_TEST_SCHEMA_VERSION: i64 = 2;
+
+/// Upper bound on testflight attempts when cycling modes, so an agent advertising
+/// many modes cannot spin unbounded. Mode enums are small; this only caps the tail.
+const MAX_TESTFLIGHT_MODE_ATTEMPTS: usize = 6;
 
 /// Phases, in run order; derived from the outcome code so text and JSON agree.
 const PHASE_SPAWN: &str = "spawn";
@@ -50,6 +55,10 @@ const CODE_AGENT_SPAWN_FAILED: &str = "agent_spawn_failed";
 const CODE_AGENT_INITIALIZE_FAILED: &str = "agent_initialize_failed";
 const CODE_SESSION_CREATE_FAILED: &str = "session_create_failed";
 const CODE_SESSION_CONFIG_FAILED: &str = "session_config_failed";
+/// A `session/set_mode` (or mode config option) rejected the candidate mode. Kept
+/// distinct from `session_config_failed` so the cycle allow-list can retry a bad
+/// mode while a bad model/effort still aborts.
+const CODE_SESSION_MODE_FAILED: &str = "session_mode_failed";
 const CODE_PROMPT_FAILED: &str = "prompt_failed";
 const CODE_PROMPT_TIMEOUT: &str = "prompt_timeout";
 const CODE_PROGRESS_TIMEOUT: &str = "progress_timeout";
@@ -149,7 +158,7 @@ fn phase_for_code(code: &str) -> &'static str {
     match code {
         CODE_AGENT_INITIALIZE_FAILED => PHASE_INITIALIZE,
         CODE_SESSION_CREATE_FAILED => PHASE_SESSION_NEW,
-        CODE_SESSION_CONFIG_FAILED => PHASE_SESSION_CONFIG,
+        CODE_SESSION_CONFIG_FAILED | CODE_SESSION_MODE_FAILED => PHASE_SESSION_CONFIG,
         CODE_PROMPT_FAILED
         | CODE_PROMPT_TIMEOUT
         | CODE_PROGRESS_TIMEOUT
@@ -347,6 +356,11 @@ struct AgentTestOutcome {
     fs_check_bytes: Option<u64>,
     fs_check_path: Option<PathBuf>,
     cleanup: CleanupOutcome,
+    /// The mode the passing (or, on total failure, the first) attempt ran under.
+    /// `None` means the agent's own default mode (no mode applied).
+    mode_used: Option<String>,
+    /// How many mode attempts the run made, including the first.
+    mode_attempts: usize,
 }
 
 impl AgentTestOutcome {
@@ -369,6 +383,8 @@ impl AgentTestOutcome {
             fs_check_bytes: None,
             fs_check_path: None,
             cleanup: CleanupOutcome::nothing_to_clean(),
+            mode_used: None,
+            mode_attempts: 0,
         }
     }
 
@@ -399,6 +415,8 @@ impl AgentTestOutcome {
                 "session_delete": self.cleanup.session_delete,
                 "process": self.cleanup.process,
             },
+            "mode_used": self.mode_used,
+            "mode_attempts": self.mode_attempts,
         })
     }
 }
@@ -419,6 +437,9 @@ pub(in crate::cli) fn run_init_testflight(
         prompt: None,
         timeout: DEFAULT_AGENT_TEST_TIMEOUT.to_owned(),
         progress_timeout: DEFAULT_AGENT_TEST_PROGRESS_TIMEOUT.to_owned(),
+        // Init verifies the agent works headless, so it cycles modes rather than
+        // pinning the operator's configured one.
+        one_shot: false,
     };
     let run = run_agent_test_with(home, config, registry, args);
     if print_summary && run.error.is_none() {
@@ -561,9 +582,6 @@ fn execute_agent_test(
     // The agent resolves relative paths against its session cwd, so the artifact is
     // prepared and verified there; the workspace root stays the containment boundary.
     let artifact_base = cwd.clone();
-    if let Some(rel) = expect_fs.as_deref() {
-        prepare_testflight_expect_fs(&artifact_base, &workspace_root, rel)?;
-    }
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -578,22 +596,141 @@ fn execute_agent_test(
     let sandbox = config.workspace.sandbox.clone();
     let shell = config.workspace.default_shell.clone();
     let network_provider = crate::extensions::resolve_network_provider(config);
-    let report = runtime.block_on(async move {
-        run_agent_test_inner(
+
+    // Testflight mode plan. `--one-shot` verifies the operator's configured mode
+    // exactly once. Otherwise the configured mode is ignored: the run starts from
+    // the registry's unattended-safe `default_mode` (or, absent one, the agent's
+    // own default), then cycles the remaining advertised modes on a
+    // mode-attributable failure until one passes, with the agent's own default as
+    // the final candidate. Real daemon sessions still use the configured mode;
+    // this override never writes back to config.
+    let mut candidates: VecDeque<Option<String>> = VecDeque::new();
+    if args.one_shot {
+        candidates.push_back(config.agent.mode.clone());
+    } else {
+        candidates.push_back(entry.default_mode.clone());
+    }
+
+    let mut tried: Vec<Option<String>> = Vec::new();
+    let mut advertised_appended = false;
+    let mut attempts = 0usize;
+    let mut first_failure: Option<AgentTestFailure> = None;
+    let mut first_failure_is_fs = false;
+    // Evidence/cleanup surfaced to the caller: the passing attempt on success, else
+    // the first (default-mode) attempt, the most representative failure.
+    let mut chosen_report: Option<AgentTestInnerReport> = None;
+    let mut chosen_mode: Option<String> = None;
+    let mut fs_outcome: Option<TestflightFsOutcome> = None;
+    let mut succeeded = false;
+    // A child a cycled-past attempt failed to terminate keeps running on the host,
+    // so a later passing attempt must not report a clean run over it.
+    let mut any_process_leaked = false;
+
+    while let Some(mode_override) = candidates.pop_front() {
+        if tried.contains(&mode_override) {
+            continue;
+        }
+
+        // Clear any stale artifact before each attempt so a file left by a prior
+        // attempt can never be credited to this mode. Runs before the attempt is
+        // counted: a setup failure means this attempt never ran.
+        if let Some(rel) = expect_fs.as_deref()
+            && let Err(failure) = prepare_testflight_expect_fs(&artifact_base, &workspace_root, rel)
+        {
+            if first_failure.is_some() {
+                // An earlier attempt's failure is the representative one; stop
+                // rather than clobber the recorded outcome with a setup error.
+                tracing::warn!(
+                    code = failure.code,
+                    "testflight artifact prepare failed mid-cycle; keeping the first failure"
+                );
+                break;
+            }
+            return Err(failure);
+        }
+
+        tried.push(mode_override.clone());
+        attempts += 1;
+
+        let mut report = runtime.block_on(run_agent_test_inner(
             home,
-            agent,
-            env,
-            cwd,
-            prompt,
+            agent.clone(),
+            env.clone(),
+            cwd.clone(),
+            prompt.clone(),
             timeout,
             progress_timeout,
-            sandbox,
-            shell,
-            network_provider,
-        )
-        .await
-    });
+            sandbox.clone(),
+            shell.clone(),
+            network_provider.clone(),
+            mode_override.as_deref(),
+        ));
+        let advertised_modes = std::mem::take(&mut report.advertised_modes);
+        if report.cleanup.process == PROCESS_TERMINATE_FAILED {
+            any_process_leaked = true;
+        }
 
+        // Effective failure: the ACP failure, or an expect-fs verification miss.
+        let attempt_failure = match report.failure.take() {
+            Some(failure) => Some(failure),
+            None => match expect_fs.as_deref() {
+                Some(rel) => {
+                    match verify_testflight_expect_fs_settled(&artifact_base, &workspace_root, rel)
+                    {
+                        Ok(verified) => {
+                            fs_outcome = Some(verified);
+                            None
+                        }
+                        Err(failure) => Some(failure),
+                    }
+                }
+                None => None,
+            },
+        };
+
+        match attempt_failure {
+            None => {
+                succeeded = true;
+                chosen_mode = mode_override;
+                chosen_report = Some(report);
+                break;
+            }
+            Some(failure) => {
+                let code = failure.code;
+                if first_failure.is_none() {
+                    first_failure_is_fs = phase_for_code(code) == PHASE_FS_CHECK;
+                    first_failure = Some(failure);
+                    chosen_report = Some(report);
+                    chosen_mode = mode_override;
+                }
+                if args.one_shot
+                    || !failure_triggers_mode_cycle(code)
+                    || attempts >= MAX_TESTFLIGHT_MODE_ATTEMPTS
+                {
+                    break;
+                }
+                // Enumerate the agent's other advertised modes once, after the seed
+                // attempt has reported them.
+                if !advertised_appended {
+                    advertised_appended = true;
+                    for mode in advertised_modes {
+                        let candidate = Some(mode);
+                        if !tried.contains(&candidate) {
+                            candidates.push_back(candidate);
+                        }
+                    }
+                    // Last resort: the agent's own default mode. Covers registry
+                    // drift where the declared default_mode is no longer advertised
+                    // and no other mode is.
+                    if !tried.contains(&None) {
+                        candidates.push_back(None);
+                    }
+                }
+            }
+        }
+    }
+
+    let report = chosen_report.expect("at least one testflight attempt ran");
     // Cleanup is observed on every exit path, so record it before propagating failure.
     outcome.cleanup = report.cleanup;
     outcome.session_id = report.session_id;
@@ -605,24 +742,52 @@ fn execute_agent_test(
         &secret_values,
         outcome.evidence.text_truncated,
     );
-    if let Some(failure) = report.failure {
-        return Err(failure);
+    outcome.mode_used = chosen_mode;
+    outcome.mode_attempts = attempts;
+    // The surfaced report is one attempt's; a leak in any attempt outlives it.
+    if any_process_leaked {
+        outcome.cleanup.process = PROCESS_TERMINATE_FAILED;
     }
 
-    if let Some(rel) = expect_fs.as_deref() {
-        match verify_testflight_expect_fs_settled(&artifact_base, &workspace_root, rel) {
-            Ok(fs_outcome) => {
-                outcome.fs_check_status = FS_CHECK_OK;
-                outcome.fs_check_bytes = Some(fs_outcome.bytes);
-                outcome.fs_check_path = Some(fs_outcome.path);
-            }
-            Err(failure) => {
-                outcome.fs_check_status = FS_CHECK_FAILED;
-                return Err(failure);
-            }
+    if succeeded {
+        if let Some(verified) = fs_outcome {
+            outcome.fs_check_status = FS_CHECK_OK;
+            outcome.fs_check_bytes = Some(verified.bytes);
+            outcome.fs_check_path = Some(verified.path);
         }
+        if any_process_leaked {
+            // A prior attempt's child never terminated, so the run is not clean
+            // even though a later mode passed.
+            return Err(AgentTestFailure::new(
+                "shutdown",
+                CODE_CLEANUP_FAILED,
+                "an agent process from an earlier testflight attempt did not terminate".to_owned(),
+            ));
+        }
+        return Ok(());
     }
-    Ok(())
+
+    if first_failure_is_fs {
+        outcome.fs_check_status = FS_CHECK_FAILED;
+    }
+    Err(first_failure.expect("a failed testflight has a failure"))
+}
+
+/// Whether a failed testflight attempt is worth retrying under a different mode.
+/// Allow-list, not deny-list: these are the outcomes a mode causes (it blocked the
+/// write, refused the turn, stalled on a permission the auto-allow could not clear,
+/// or was rejected outright). Everything else fails identically in every mode, so
+/// cycling would only burn real prompts.
+fn failure_triggers_mode_cycle(code: &str) -> bool {
+    matches!(
+        code,
+        CODE_FS_CHECK_MISSING
+            | CODE_FS_CHECK_EMPTY
+            | CODE_UNEXPECTED_STOP_REASON
+            | CODE_PROGRESS_TIMEOUT
+            | CODE_PROMPT_TIMEOUT
+            | CODE_SESSION_MODE_FAILED
+    )
 }
 
 /// [`verify_testflight_expect_fs`] behind the [`FS_CHECK_SETTLE_TIMEOUT`] re-poll window.
@@ -874,6 +1039,9 @@ struct AgentTestInnerReport {
     evidence: AgentTestEvidence,
     cleanup: CleanupOutcome,
     failure: Option<AgentTestFailure>,
+    /// Mode values `session/new` advertised, so the caller can cycle to the next
+    /// one. Empty when the spawn failed before a session opened.
+    advertised_modes: Vec<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -888,6 +1056,7 @@ async fn run_agent_test_inner(
     sandbox: crate::config::SandboxConfig,
     shell: String,
     network_provider: Option<crate::extensions::NetworkProviderExtension>,
+    mode_override: Option<&str>,
 ) -> AgentTestInnerReport {
     let sink = Arc::new(AgentTestSessionEventSink::new());
     let bridge = match AcpBridge::spawn(
@@ -914,21 +1083,34 @@ async fn run_agent_test_inner(
                 evidence: AgentTestEvidence::default(),
                 cleanup: CleanupOutcome::nothing_to_clean(),
                 failure: Some(agent_test_spawn_error(error)),
+                advertised_modes: Vec::new(),
             };
         }
     };
 
     let mut created_session: Option<SessionId> = None;
     let mut stop_reason = None;
+    let mut advertised_modes: Vec<String> = Vec::new();
     let result = {
         let created_session: &mut Option<SessionId> = &mut created_session;
         let stop_reason = &mut stop_reason;
+        let advertised_modes = &mut advertised_modes;
         async {
             let session = bridge.new_session(cwd, Vec::new()).await.map_err(|err| {
                 agent_test_error("session creation", CODE_SESSION_CREATE_FAILED, err)
             })?;
             *created_session = Some(session.session_id.clone());
-            apply_agent_test_session_config(&bridge, &agent, &session)
+            // Captured before any apply can fail, so the caller can cycle modes
+            // even when applying this attempt's mode is what failed.
+            *advertised_modes =
+                advertised_values_for_category(&session, AgentSessionConfigCategory::Mode)
+                    .unwrap_or_default();
+            // Mode is per-attempt (cycle-eligible on failure); model and effort are
+            // constant across attempts, so their failure aborts rather than cycles.
+            apply_agent_test_mode(&bridge, mode_override, &session)
+                .await
+                .map_err(|err| agent_test_error("session mode", CODE_SESSION_MODE_FAILED, err))?;
+            apply_agent_test_model_and_effort(&bridge, &agent, &session)
                 .await
                 .map_err(|err| {
                     agent_test_error("session creation", CODE_SESSION_CONFIG_FAILED, err)
@@ -1023,6 +1205,7 @@ async fn run_agent_test_inner(
         evidence: sink.evidence(),
         cleanup,
         failure,
+        advertised_modes,
     }
 }
 
@@ -1077,25 +1260,41 @@ async fn run_agent_test_prompt(
         })?
 }
 
-async fn apply_agent_test_session_config(
+/// Apply the testflight's chosen mode to the disposable session. `None` leaves the
+/// adapter in its own default mode (the native-default candidate). The value is
+/// applied verbatim, so a mode the agent does not advertise surfaces as an error
+/// the caller treats as mode-attributable and cycles past.
+async fn apply_agent_test_mode(
+    bridge: &AcpBridge,
+    mode_override: Option<&str>,
+    response: &agent_client_protocol::schema::v1::NewSessionResponse,
+) -> Result<()> {
+    let Some(mode) = mode_override else {
+        return Ok(());
+    };
+    match session_mode_selection_for_value(response, mode)? {
+        AgentSessionModeSelection::ConfigOption { config_id } => {
+            bridge
+                .set_session_config_option(response.session_id.clone(), &config_id, mode)
+                .await?;
+        }
+        AgentSessionModeSelection::NativeMode { mode_id } => {
+            bridge
+                .set_session_mode(response.session_id.clone(), &mode_id)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+/// Apply the configured model and reasoning effort. These do not vary across mode
+/// attempts, so a failure here is not mode-attributable and aborts the testflight
+/// rather than cycling.
+async fn apply_agent_test_model_and_effort(
     bridge: &AcpBridge,
     agent: &crate::config::AgentConfig,
     response: &agent_client_protocol::schema::v1::NewSessionResponse,
 ) -> Result<()> {
-    if let Some(mode) = agent.mode.as_deref() {
-        match session_mode_selection_for_value(response, mode)? {
-            AgentSessionModeSelection::ConfigOption { config_id } => {
-                bridge
-                    .set_session_config_option(response.session_id.clone(), &config_id, mode)
-                    .await?;
-            }
-            AgentSessionModeSelection::NativeMode { mode_id } => {
-                bridge
-                    .set_session_mode(response.session_id.clone(), &mode_id)
-                    .await?;
-            }
-        }
-    }
     if let Some(model) = agent.model.as_deref().or_else(|| {
         agent
             .provider
@@ -1174,6 +1373,42 @@ fn human_duration(duration: Duration) -> String {
         format!("{}ms", duration.as_millis())
     } else {
         format!("{}s", duration.as_secs())
+    }
+}
+
+#[cfg(test)]
+mod cycle_tests {
+    use super::*;
+
+    #[test]
+    fn only_mode_attributable_codes_trigger_a_mode_cycle() {
+        // A mode blocks the write, refuses the turn, stalls, or is rejected.
+        for code in [
+            CODE_FS_CHECK_MISSING,
+            CODE_FS_CHECK_EMPTY,
+            CODE_UNEXPECTED_STOP_REASON,
+            CODE_PROGRESS_TIMEOUT,
+            CODE_PROMPT_TIMEOUT,
+            CODE_SESSION_MODE_FAILED,
+        ] {
+            assert!(failure_triggers_mode_cycle(code), "{code} should cycle");
+        }
+        // These fail identically in every mode, so cycling would only burn prompts.
+        for code in [
+            CODE_AGENT_SPAWN_FAILED,
+            CODE_AGENT_INITIALIZE_FAILED,
+            CODE_SESSION_CREATE_FAILED,
+            CODE_SESSION_CONFIG_FAILED,
+            CODE_CONFIG_INVALID,
+            CODE_AGENT_UNSUPPORTED,
+            CODE_CLEANUP_FAILED,
+            CODE_PROMPT_FAILED,
+            CODE_FS_CHECK_OUTSIDE_WORKSPACE,
+            CODE_FS_CHECK_NOT_REGULAR_FILE,
+            CODE_FS_CHECK_FAILED,
+        ] {
+            assert!(!failure_triggers_mode_cycle(code), "{code} must not cycle");
+        }
     }
 }
 

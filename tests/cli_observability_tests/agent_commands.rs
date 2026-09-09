@@ -396,6 +396,8 @@ fn agent_test_json_success_document_has_the_full_schema() {
             "elapsed_ms",
             "evidence",
             "fs_check",
+            "mode_attempts",
+            "mode_used",
             "ok",
             "phase",
             "prompt_source",
@@ -404,7 +406,7 @@ fn agent_test_json_success_document_has_the_full_schema() {
             "updates",
         ]
     );
-    assert_eq!(document["schema_version"], 1);
+    assert_eq!(document["schema_version"], 2);
     assert_eq!(document["ok"], true);
     assert_eq!(document["phase"], "done");
     assert_eq!(document["code"], "ok");
@@ -412,6 +414,10 @@ fn agent_test_json_success_document_has_the_full_schema() {
     assert_eq!(document["prompt_source"], "provided");
     assert_eq!(document["stop_reason"], "end_turn");
     assert_eq!(document["updates"], 2);
+    // No modes advertised and the prompt succeeds first try, so the run stays on
+    // the agent's native default (null) after a single attempt.
+    assert_eq!(document["mode_used"], Value::Null);
+    assert_eq!(document["mode_attempts"], 1);
     assert!(document["elapsed_ms"].is_u64());
     assert_eq!(
         json_keys(&document["evidence"]),
@@ -567,6 +573,184 @@ fn agent_test_writes_no_session_row() {
         "agent test must not open the state store: {}",
         state_path.display()
     );
+}
+
+/// Layer an operator registry override giving the placebo a testflight prompt +
+/// expect-fs artifact and mode support, so `agent test` runs the registry-prompt fs
+/// path and can cycle modes. `default_mode` seeds the first candidate; `None` starts
+/// the run from the agent's own default mode.
+fn write_placebo_testflight_override(home: &std::path::Path, default_mode: Option<&str>) {
+    let config_dir = home.join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let default_mode_line = match default_mode {
+        Some(mode) => format!("default_mode = \"{mode}\"\n"),
+        None => String::new(),
+    };
+    // The prompt embeds the exact artifact name the placebo watches for.
+    let override_toml = format!(
+        r#"[[agents]]
+id = "placebo"
+name = "Placebo Agent"
+kind = "native"
+headless_compatible = true
+set_mode = true
+support_doc = "src/bin/placebo_agent/main.rs"
+testflight_prompt = "Use your file tool to create .acp-stack-testflight.txt in your cwd. Actually write it."
+testflight_expect_fs = ".acp-stack-testflight.txt"
+{default_mode_line}
+[agents.harness]
+id = "placebo-agent"
+
+[agents.harness.install.shell]
+script = "true"
+creates = "placebo-agent"
+"#
+    );
+    fs::write(config_dir.join("agents.toml"), override_toml).expect("override should be written");
+}
+
+/// Native-mode placebo args: advertise `plan`/`build` with `plan` current, and let
+/// only the listed modes write the testflight artifact.
+fn native_mode_write_args(write_mode: &str) -> Vec<String> {
+    vec![
+        "--session-mode".to_owned(),
+        "plan".to_owned(),
+        "--session-mode".to_owned(),
+        "build".to_owned(),
+        "--session-mode-current".to_owned(),
+        "plan".to_owned(),
+        "--testflight-write-modes".to_owned(),
+        write_mode.to_owned(),
+    ]
+}
+
+#[test]
+fn agent_test_cycles_past_a_write_blocking_mode() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let args = native_mode_write_args("build");
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    write_fake_agent_home(tempdir.path(), &args);
+    // No registry default_mode: the run starts from the native default (`plan`,
+    // which blocks the write) and must cycle to `build`.
+    write_placebo_testflight_override(tempdir.path(), None);
+
+    let document = agent_test_json(tempdir.path(), &[], true);
+
+    assert_eq!(document["ok"], true);
+    assert_eq!(document["code"], "ok");
+    assert_eq!(document["prompt_source"], "registry");
+    assert_eq!(document["fs_check"]["status"], "ok");
+    assert_eq!(document["mode_used"], "build");
+    assert_eq!(document["mode_attempts"], 2);
+}
+
+#[test]
+fn agent_test_honors_registry_default_mode_first() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let args = native_mode_write_args("build");
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    write_fake_agent_home(tempdir.path(), &args);
+    // `build` is the unattended-safe default, so it is tried before the native
+    // current (`plan`) and passes on the first attempt.
+    write_placebo_testflight_override(tempdir.path(), Some("build"));
+
+    let document = agent_test_json(tempdir.path(), &[], true);
+
+    assert_eq!(document["ok"], true);
+    assert_eq!(document["fs_check"]["status"], "ok");
+    assert_eq!(document["mode_used"], "build");
+    assert_eq!(document["mode_attempts"], 1);
+}
+
+#[test]
+fn agent_test_one_shot_pins_the_configured_mode_without_cycling() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let args = native_mode_write_args("build");
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    write_fake_agent_home(tempdir.path(), &args);
+    write_placebo_testflight_override(tempdir.path(), Some("build"));
+    // The operator configured `plan`, which blocks the write. `--one-shot` verifies
+    // exactly that mode and does not fall back to a writing one.
+    append_agent_config(tempdir.path(), "mode = \"plan\"\n");
+
+    let document = agent_test_json(tempdir.path(), &["--one-shot"], false);
+
+    assert_eq!(document["ok"], false);
+    assert_eq!(document["code"], "fs_check_missing");
+    assert_eq!(document["fs_check"]["status"], "failed");
+    assert_eq!(document["mode_used"], "plan");
+    assert_eq!(document["mode_attempts"], 1);
+}
+
+#[test]
+fn agent_test_reports_the_first_mode_failure_when_every_mode_fails() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    // Only `plan` is advertised, and no mode is allowed to write, so both the
+    // native-default and the explicit `plan` attempt miss the artifact.
+    write_fake_agent_home(
+        tempdir.path(),
+        &[
+            "--session-mode",
+            "plan",
+            "--session-mode-current",
+            "plan",
+            "--testflight-write-modes",
+            "unreachable",
+        ],
+    );
+    write_placebo_testflight_override(tempdir.path(), None);
+
+    let document = agent_test_json(tempdir.path(), &[], false);
+
+    assert_eq!(document["ok"], false);
+    assert_eq!(document["code"], "fs_check_missing");
+    assert_eq!(document["fs_check"]["status"], "failed");
+    // The reported attempt is the first (native-default) one, so its mode is null.
+    assert_eq!(document["mode_used"], Value::Null);
+    assert_eq!(document["mode_attempts"], 2);
+}
+
+#[test]
+fn agent_test_cycles_the_config_option_mode_lane() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    // OpenCode advertises mode as a config option rather than a native mode, so the
+    // run applies and cycles it through `session/set_config_option`. `plan` (the
+    // registry default) blocks the write and must cycle to `build`.
+    write_fake_agent_home(
+        tempdir.path(),
+        &[
+            "--config-option-select",
+            "mode@mode=plan:plan,build",
+            "--testflight-write-modes",
+            "build",
+        ],
+    );
+    write_placebo_testflight_override(tempdir.path(), Some("plan"));
+
+    let document = agent_test_json(tempdir.path(), &[], true);
+
+    assert_eq!(document["ok"], true);
+    assert_eq!(document["fs_check"]["status"], "ok");
+    assert_eq!(document["mode_used"], "build");
+    assert_eq!(document["mode_attempts"], 2);
+}
+
+#[test]
+fn agent_test_falls_back_to_agent_default_when_registry_default_is_unadvertised() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    // No --session-mode args: the placebo advertises no modes, so the registry
+    // default_mode cannot be applied (registry/agent version drift). The run must
+    // fall back to the agent's own default mode rather than fail outright.
+    write_fake_agent_home(tempdir.path(), &[]);
+    write_placebo_testflight_override(tempdir.path(), Some("yolo"));
+
+    let document = agent_test_json(tempdir.path(), &[], true);
+
+    assert_eq!(document["ok"], true);
+    assert_eq!(document["code"], "ok");
+    assert_eq!(document["fs_check"]["status"], "ok");
+    assert_eq!(document["mode_used"], Value::Null);
+    assert_eq!(document["mode_attempts"], 2);
 }
 
 #[test]
