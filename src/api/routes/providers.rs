@@ -14,8 +14,7 @@ use crate::runtime::agent::model_discovery::{
     harness_accepted_efforts, model_value_is_explicit_without_discovery,
 };
 use crate::runtime::agent::provider_keys::{
-    AgentProviderSummary, HERMES_AGENT_ID, agent_provider_id_for_provider_id,
-    models_url_for_provider_id, providers_for_agent,
+    AgentProviderSummary, HERMES_AGENT_ID, models_url_for_provider_id, providers_for_agent,
 };
 use crate::runtime::agent::provider_model_catalog::{cached_models, refresh_provider_models};
 
@@ -310,58 +309,29 @@ pub(crate) async fn models_response_for_config(
     Ok(ModelsResponse {
         agent_id,
         source: MODELS_SOURCE_ACP_ADVERTISED,
-        models: advertised_models(model_choices, model_routing_prefix(config).as_deref()),
+        models: advertised_models(model_choices),
         modes,
         efforts,
         catalog_error,
     })
 }
 
-/// The `provider/` prefix the harness prepends to composite model ids, so the
-/// advertised lane can strip it for display. Resolves the agent-native provider
-/// id (which the value is actually prefixed with) and falls back to the canonical
-/// id, matching `canonical_provider_id_for_agent_native_id`'s convention.
-fn model_routing_prefix(config: &Config) -> Option<String> {
-    config.agent.provider.as_ref().map(|provider| {
-        let native = agent_provider_id_for_provider_id(&config.agent.id, &provider.id)
-            .unwrap_or(provider.id.as_str());
-        format!("{native}/")
-    })
-}
-
-/// Map advertised `(value, name)` choices to wire models. `display_name` prefers
-/// the agent's ACP name; when the agent only echoes the value as the name it
-/// falls back to the value with its routing prefix stripped
-/// (`openrouter/aion-labs/aion-2.0` -> `aion-labs/aion-2.0`) so a client need not
-/// know the prefix. `value` always stays the full composite id a session runs on.
-fn advertised_models(
-    choices: Vec<(String, String)>,
-    routing_prefix: Option<&str>,
-) -> Vec<ModelJson> {
+/// Map advertised `(value, name)` choices to wire models. `display_name` is the
+/// agent's ACP option name, or `None` when the agent only echoes the value as the
+/// name. `value` always stays the full composite id a session runs on.
+fn advertised_models(choices: Vec<(String, String)>) -> Vec<ModelJson> {
     choices
         .into_iter()
         .map(|(value, name)| ModelJson {
-            display_name: advertised_display_name(&value, &name, routing_prefix),
+            display_name: advertised_display_name(&value, &name),
             value,
             efforts: Vec::new(),
         })
         .collect()
 }
 
-fn advertised_display_name(
-    value: &str,
-    name: &str,
-    routing_prefix: Option<&str>,
-) -> Option<String> {
-    // An echoed-id name falls through to prefix stripping instead of being
-    // dropped, so composite ids still get a readable label.
-    if !name.trim().is_empty() && name != value {
-        return Some(name.to_owned());
-    }
-    routing_prefix
-        .and_then(|prefix| value.strip_prefix(prefix))
-        .filter(|stripped| !stripped.is_empty())
-        .map(str::to_owned)
+fn advertised_display_name(value: &str, name: &str) -> Option<String> {
+    (!name.trim().is_empty() && name != value).then(|| name.to_owned())
 }
 
 #[cfg(test)]
@@ -369,70 +339,39 @@ mod tests {
     use super::*;
     use crate::config::ArrayTargetConfig;
 
-    // A friendly ACP name is used verbatim, even over a strippable prefix.
+    // A distinct ACP name is used verbatim.
     #[test]
     fn advertised_display_name_prefers_friendly_name() {
         assert_eq!(
-            advertised_display_name(
-                "openrouter/aion-labs/aion-2.0",
-                "Aion Labs: Aion 2.0",
-                Some("openrouter/")
-            ),
+            advertised_display_name("openrouter/aion-labs/aion-2.0", "Aion Labs: Aion 2.0"),
             Some("Aion Labs: Aion 2.0".to_owned())
         );
     }
 
-    // Name echoing the value falls through to routing-prefix stripping.
+    // A name echoing the value carries no distinct label.
     #[test]
-    fn advertised_display_name_strips_prefix_when_name_echoes_value() {
+    fn advertised_display_name_none_when_name_echoes_value() {
         let value = "openrouter/aion-labs/aion-2.0";
-        assert_eq!(
-            advertised_display_name(value, value, Some("openrouter/")),
-            Some("aion-labs/aion-2.0".to_owned())
-        );
+        assert_eq!(advertised_display_name(value, value), None);
     }
 
     // Whitespace-only names are treated as absent, same as the empty case.
     #[test]
     fn advertised_display_name_treats_whitespace_name_as_absent() {
-        assert_eq!(
-            advertised_display_name("openrouter/glm", "   ", Some("openrouter/")),
-            Some("glm".to_owned())
-        );
-    }
-
-    // No prefix match (echoed name, unprefixed value) yields no display name.
-    #[test]
-    fn advertised_display_name_none_without_prefix_match() {
-        assert_eq!(
-            advertised_display_name("sonnet", "sonnet", Some("openrouter/")),
-            None
-        );
-    }
-
-    // No provider configured means no prefix to strip.
-    #[test]
-    fn advertised_display_name_none_without_prefix() {
-        assert_eq!(advertised_display_name("sonnet", "sonnet", None), None);
+        assert_eq!(advertised_display_name("openrouter/glm", "   "), None);
     }
 
     #[test]
     fn advertised_models_maps_value_verbatim() {
-        let models = advertised_models(
-            vec![
-                (
-                    "openrouter/aion-labs/aion-2.0".to_owned(),
-                    "openrouter/aion-labs/aion-2.0".to_owned(),
-                ),
-                ("openrouter/glm".to_owned(), "GLM 5.3".to_owned()),
-            ],
-            Some("openrouter/"),
-        );
+        let models = advertised_models(vec![
+            (
+                "openrouter/aion-labs/aion-2.0".to_owned(),
+                "openrouter/aion-labs/aion-2.0".to_owned(),
+            ),
+            ("openrouter/glm".to_owned(), "GLM 5.3".to_owned()),
+        ]);
         assert_eq!(models[0].value, "openrouter/aion-labs/aion-2.0");
-        assert_eq!(
-            models[0].display_name.as_deref(),
-            Some("aion-labs/aion-2.0")
-        );
+        assert_eq!(models[0].display_name, None);
         assert_eq!(models[1].value, "openrouter/glm");
         assert_eq!(models[1].display_name.as_deref(), Some("GLM 5.3"));
     }
