@@ -483,7 +483,10 @@ fn print_agent_test_summary(outcome: &AgentTestOutcome) {
         outcome.evidence.tool_calls, outcome.evidence.tool_call_updates
     );
     if let (Some(bytes), Some(path)) = (outcome.fs_check_bytes, outcome.fs_check_path.as_ref()) {
-        println!("fs_check: ok ({bytes} bytes at {})", path.display());
+        println!(
+            "fs_check: ok ({bytes} bytes at {}; removed after the run)",
+            path.display()
+        );
     }
 }
 
@@ -749,6 +752,24 @@ fn execute_agent_test(
         outcome.cleanup.process = PROCESS_TERMINATE_FAILED;
     }
 
+    // The artifact lives in the agent's real cwd, which real sessions reuse, so the
+    // file the run caused must not linger for a later session to see. `prepare` wipes
+    // the artifact before each attempt, so at most one file survives the loop; removing
+    // its resolved path clears it whichever attempt wrote it. An attempt whose child
+    // failed termination can still be running here, so a surviving writer may rewrite
+    // the artifact after removal; that is accepted as part of the leaked-process case
+    // already reported by the verdict. Best-effort: a failed removal is logged, never
+    // flipping the verdict.
+    if let Some(rel) = expect_fs.as_deref()
+        && let Err(failure) = remove_testflight_expect_fs(&artifact_base, &workspace_root, rel)
+    {
+        tracing::warn!(
+            code = failure.code,
+            reason = %failure.reason,
+            "could not remove testflight artifact after the run"
+        );
+    }
+
     if succeeded {
         if let Some(verified) = fs_outcome {
             outcome.fs_check_status = FS_CHECK_OK;
@@ -877,6 +898,56 @@ pub(super) fn prepare_testflight_expect_fs(
             CODE_FS_CHECK_FAILED,
             format!(
                 "stat pre-existing testflight artifact `{}` failed: {source}",
+                path.display()
+            ),
+        )),
+    }
+}
+
+/// Remove the testflight artifact after the run so it never lingers in the agent's
+/// session cwd, the same directory real sessions reuse. Only a regular file is
+/// unlinked; a symlink or other node is left in place rather than followed. A missing
+/// file is already clean. Mirrors the path resolution and containment guard of
+/// [`prepare_testflight_expect_fs`].
+pub(super) fn remove_testflight_expect_fs(
+    artifact_base: &Path,
+    workspace_root: &Path,
+    relative: &str,
+) -> TestResult<()> {
+    let path = testflight_expect_fs_path(artifact_base, relative)?;
+    ensure_testflight_parent_within_workspace(workspace_root, &path)?;
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            std::fs::remove_file(&path).map_err(|source| {
+                AgentTestFailure::new(
+                    STAGE_FS_CHECK,
+                    CODE_FS_CHECK_FAILED,
+                    format!(
+                        "remove testflight artifact `{}` failed: {source}",
+                        path.display()
+                    ),
+                )
+            })
+        }
+        Ok(metadata) => Err(AgentTestFailure::new(
+            STAGE_FS_CHECK,
+            CODE_FS_CHECK_NOT_REGULAR_FILE,
+            format!(
+                "testflight artifact `{}` is {}; leaving it in place",
+                path.display(),
+                if metadata.file_type().is_symlink() {
+                    "a symlink"
+                } else {
+                    "not a regular file"
+                }
+            ),
+        )),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(AgentTestFailure::new(
+            STAGE_FS_CHECK,
+            CODE_FS_CHECK_FAILED,
+            format!(
+                "stat testflight artifact `{}` before removal failed: {source}",
                 path.display()
             ),
         )),
@@ -1409,6 +1480,51 @@ mod cycle_tests {
         ] {
             assert!(!failure_triggers_mode_cycle(code), "{code} must not cycle");
         }
+    }
+}
+
+#[cfg(test)]
+mod fs_cleanup_tests {
+    use super::*;
+
+    const ARTIFACT: &str = ".acp-stack-testflight.txt";
+
+    #[test]
+    fn removes_an_existing_regular_file() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let path = workspace.path().join(ARTIFACT);
+        std::fs::write(&path, b"proof").expect("write artifact");
+
+        remove_testflight_expect_fs(workspace.path(), workspace.path(), ARTIFACT)
+            .expect("removal succeeds");
+        assert!(!path.exists(), "artifact should be gone after removal");
+    }
+
+    #[test]
+    fn missing_file_is_already_clean() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        remove_testflight_expect_fs(workspace.path(), workspace.path(), ARTIFACT)
+            .expect("removing a missing artifact is a no-op");
+    }
+
+    #[test]
+    fn refuses_to_remove_a_symlink() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let target = workspace.path().join("elsewhere.txt");
+        std::fs::write(&target, b"real").expect("write target");
+        let link = workspace.path().join(ARTIFACT);
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+
+        let failure = remove_testflight_expect_fs(workspace.path(), workspace.path(), ARTIFACT)
+            .expect_err("a symlink is refused");
+        assert_eq!(failure.code, CODE_FS_CHECK_NOT_REGULAR_FILE);
+        assert!(
+            link.symlink_metadata()
+                .expect("symlink still present")
+                .file_type()
+                .is_symlink(),
+            "the symlink must be left in place, not followed or removed"
+        );
     }
 }
 

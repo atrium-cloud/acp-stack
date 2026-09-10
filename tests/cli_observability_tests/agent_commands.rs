@@ -642,6 +642,16 @@ fn agent_test_cycles_past_a_write_blocking_mode() {
     assert_eq!(document["fs_check"]["status"], "ok");
     assert_eq!(document["mode_used"], "build");
     assert_eq!(document["mode_attempts"], 2);
+
+    // The verified artifact must not linger in the agent's cwd for a later session.
+    let artifact = tempdir
+        .path()
+        .join("workspace")
+        .join(".acp-stack-testflight.txt");
+    assert!(
+        !artifact.exists(),
+        "testflight artifact must be removed after the run"
+    );
 }
 
 #[test]
