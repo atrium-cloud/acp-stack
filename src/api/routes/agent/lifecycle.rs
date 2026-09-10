@@ -80,7 +80,7 @@ pub(crate) async fn ensure_agent_started(state: &AppState, target_id: &str) -> R
 
 /// Inner half of `start_agent_target`, for callers already holding the
 /// agent-config mutation lock.
-async fn start_agent_target_locked(
+pub(crate) async fn start_agent_target_locked(
     state: &AppState,
     target_id: &str,
 ) -> std::result::Result<ApiSuccess<AgentStartResponse>, StackError> {

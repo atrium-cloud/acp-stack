@@ -48,7 +48,7 @@ pub(crate) use self::config_options::agent_config_options_handler;
 pub(crate) use self::lifecycle::{
     agent_restart_blockers_handler, agent_restart_handler, agent_start_handler, agent_stop_handler,
     array_agent_restart_handler, array_agent_start_handler, array_agent_stop_handler,
-    cancel_pending_acp_permissions_for_target, ensure_agent_started,
+    cancel_pending_acp_permissions_for_target, ensure_agent_started, start_agent_target_locked,
 };
 pub(crate) use self::switch::agent_switch_handler;
 pub(crate) use self::update::{agent_update_handler, agent_update_status_handler};

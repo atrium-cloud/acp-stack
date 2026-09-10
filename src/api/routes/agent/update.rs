@@ -34,22 +34,30 @@ pub(crate) async fn agent_update_handler(
     let home = state.runtime_paths.home.clone();
     let state_path = state.runtime_paths.state_path.clone();
 
+    // A running agent is stopped for the update and started again after it,
+    // but only under the restart route's safety rule: a turn or permission in
+    // flight keeps the agent up and the update skips. Config and env resolve
+    // BEFORE the stop so a malformed config or missing secret fails the
+    // request with the agent still up, mirroring the restart route.
+    let restart_after = target.supervisor.is_running().await;
+    if restart_after {
+        ensure_array_process_start_allowed(&config, &target_id)?;
+        open_agent_environment(&state.runtime_paths.home, &config)?;
+        let _mutation = state.lock_agent_config_mutation().await?;
+        let stopped = target
+            .supervisor
+            .stop_when_restart_safe(&target.target_id, &state.state, &state.event_hub)
+            .await?;
+        if stopped.is_err() {
+            return Ok(busy_skip(&state, agent_id).await);
+        }
+        // A permission that landed between the blocker query and the teardown
+        // would otherwise stay pending and block every later stop.
+        cancel_pending_acp_permissions_for_target(&state, &target_id, "agent-updated").await;
+    }
+
     if !target.supervisor.try_begin_update().await {
-        append_update_lifecycle(
-            &state,
-            "agent.update.skipped",
-            "agent update skipped",
-            serde_json::json!({
-                "agent_id": agent_id,
-                "reason": "agent is running",
-                "trigger": UPDATE_TRIGGER_API,
-            }),
-        )
-        .await;
-        return Ok(ApiSuccess::new(AgentUpdateReport::skipped(
-            agent_id,
-            "agent is running",
-        )));
+        return Ok(busy_skip(&state, agent_id).await);
     }
     // Must stay a detached task with no await between `try_begin_update` and
     // `spawn`: a client disconnect cancels only this handler future, so an
@@ -61,6 +69,8 @@ pub(crate) async fn agent_update_handler(
         state_path,
         config,
         request.force,
+        restart_after,
+        target_id,
     ));
     match update_task.await {
         Ok(result) => result.map(ApiSuccess::new),
@@ -70,9 +80,31 @@ pub(crate) async fn agent_update_handler(
     }
 }
 
+/// The busy skip: the agent stayed up because a turn or permission blocked the
+/// stop, or the supervisor was mid-transition (start, stop, another update).
+async fn busy_skip(state: &AppState, agent_id: String) -> ApiSuccess<AgentUpdateReport> {
+    append_update_lifecycle(
+        state,
+        "agent.update.skipped",
+        "agent update skipped",
+        serde_json::json!({
+            "agent_id": agent_id,
+            "reason": "agent is running",
+            "trigger": UPDATE_TRIGGER_API,
+        }),
+    )
+    .await;
+    ApiSuccess::new(AgentUpdateReport::skipped(agent_id, "agent is running"))
+}
+
 /// The post-lock update sequence: started event, blocking update, lock
 /// release, terminal event. Runs detached from the request handler so it
-/// always completes even when the HTTP caller disconnects.
+/// always completes even when the HTTP caller disconnects. When the update
+/// stopped a running agent (`restart_after`), the agent is started again
+/// inside this task so a disconnect cannot strand it stopped.
+// A detached task takes its context by value; bundling the args would only
+// rename the same move.
+#[allow(clippy::too_many_arguments)]
 async fn run_update_and_release(
     state: AppState,
     supervisor: std::sync::Arc<crate::runtime::agent::supervisor::AgentSupervisor>,
@@ -80,6 +112,8 @@ async fn run_update_and_release(
     state_path: std::path::PathBuf,
     config: Config,
     force: bool,
+    restart_after: bool,
+    target_id: String,
 ) -> std::result::Result<AgentUpdateReport, StackError> {
     let agent_id = config.agent.id.clone();
     append_update_lifecycle(
@@ -102,7 +136,7 @@ async fn run_update_and_release(
     })
     .await;
     supervisor.finish_update().await;
-    match result {
+    let outcome = match result {
         Ok(Ok(report)) => {
             let (event_kind, event_message) = if report.skipped {
                 ("agent.update.skipped", "agent update skipped")
@@ -145,6 +179,36 @@ async fn run_update_and_release(
             Err(StackError::AgentInitializeFailed {
                 reason: format!("agent update task join failed: {err}"),
             })
+        }
+    };
+    if restart_after {
+        restart_agent_after_update(&state, &target_id).await;
+    }
+    outcome
+}
+
+/// Start the agent again after an update that stopped it. A failure is logged
+/// rather than propagated: the update has already settled, and the next
+/// session request starts the agent through `ensure_agent_started`.
+async fn restart_agent_after_update(state: &AppState, target_id: &str) {
+    let _mutation = match state.lock_agent_config_mutation().await {
+        Ok(mutation) => mutation,
+        Err(error) => {
+            tracing::warn!(error = %error, target_id, "agent update: post-update restart could not take the config lock");
+            return;
+        }
+    };
+    match start_agent_target_locked(state, target_id).await {
+        Ok(_) => {}
+        // A concurrent lazy start already brought the agent up.
+        Err(StackError::AgentAlreadyRunning) => {
+            tracing::debug!(
+                target_id,
+                "agent update: post-update restart joined an in-flight start"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, target_id, "agent update: post-update restart failed; the next session request starts the agent");
         }
     }
 }

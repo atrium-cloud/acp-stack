@@ -14,6 +14,7 @@ use common::agent::{
 };
 
 use acp_stack::runtime::install::agent_updater::NON_REGISTRY_SKIP_REASON;
+use acp_stack::state::{NewPromptRecord, NewSessionRecord};
 
 const GITHUB_API_BASE_ENV: &str = "ACP_STACK_GITHUB_API_BASE";
 const PINNED_TAG: &str = "v1.2.3";
@@ -251,7 +252,7 @@ async fn update_reports_up_to_date_at_pinned_version() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn update_skips_while_agent_running_and_releases_lock_on_stop() {
+async fn update_stops_an_idle_running_agent_and_starts_it_again() {
     let tempdir = TempDir::new().expect("tempdir");
 
     let harness = AgentHarness::spawn_with_config_and_home(
@@ -267,7 +268,10 @@ async fn update_skips_while_agent_running_and_releases_lock_on_stop() {
         .await
         .expect("start");
     assert_eq!(start.status(), StatusCode::OK);
+    let first_pid = start.json::<Value>().await.expect("start json")["data"]["pid"].clone();
 
+    // No turn or permission is in flight, so the update stops the agent, runs,
+    // and starts it again rather than skipping as busy.
     let response = client
         .post(format!("{}/v1/agent/update", harness.base_url))
         .header("Authorization", admin_bearer())
@@ -278,24 +282,34 @@ async fn update_skips_while_agent_running_and_releases_lock_on_stop() {
     let body: Value = response.json().await.expect("json");
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(body["data"]["skipped"], true);
-    assert_eq!(body["data"]["reason"], "agent is running");
+    assert_eq!(body["data"]["reason"], NON_REGISTRY_SKIP_REASON);
 
-    let stop = client
-        .post(format!("{}/v1/agent/stop", harness.base_url))
-        .header("Authorization", admin_bearer())
+    let status_body: Value = client
+        .get(format!("{}/v1/agent/status", harness.base_url))
+        .header("Authorization", session_bearer())
         .send()
         .await
-        .expect("stop");
-    assert_eq!(stop.status(), StatusCode::OK);
+        .expect("status")
+        .json()
+        .await
+        .expect("status json");
+    assert_eq!(
+        status_body["data"]["process_state"], "running",
+        "the update must start the agent it stopped: {status_body}"
+    );
+    assert_ne!(
+        status_body["data"]["pid"], first_pid,
+        "the update must have recycled the agent process: {status_body}"
+    );
 
-    // The skip reason flipping from busy to non-registry proves `finish_update`
-    // released the supervisor's update lock.
+    // A second run answers the settled outcome rather than busy, proving
+    // `finish_update` released the supervisor's update lock.
     let response = client
         .post(format!("{}/v1/agent/update", harness.base_url))
         .header("Authorization", admin_bearer())
         .send()
         .await
-        .expect("send update after stop");
+        .expect("send second update");
     let status = response.status();
     let body: Value = response.json().await.expect("json");
     assert_eq!(status, StatusCode::OK, "body: {body}");
@@ -330,6 +344,77 @@ async fn update_skips_while_agent_running_and_releases_lock_on_stop() {
             .iter()
             .any(|event| event["event_kind"] == "agent.update.skipped"),
         "expected an api-triggered agent.update.skipped event, got: {events:?}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn update_skips_when_a_turn_blocks_the_stop() {
+    let tempdir = TempDir::new().expect("tempdir");
+
+    let harness =
+        AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
+    let client = http().await;
+    let start = client
+        .post(format!("{}/v1/agent/start", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .send()
+        .await
+        .expect("start");
+    assert_eq!(start.status(), StatusCode::OK);
+    let first_pid = start.json::<Value>().await.expect("start json")["data"]["pid"].clone();
+
+    // A session with a prompt in flight blocks the restart-safe stop, so the
+    // agent stays up and the update skips as busy. `insert_session` keys the
+    // row's target off `agent_id`, matching the harness's primary target.
+    {
+        let store = harness.state.lock().await;
+        store
+            .insert_session(NewSessionRecord {
+                id: "sess_blocked".to_owned(),
+                agent_id: "opencode".to_owned(),
+                cwd: "/tmp/sess_blocked".to_owned(),
+                title: None,
+                metadata_json: "{}".to_owned(),
+            })
+            .expect("session inserted");
+        store
+            .insert_prompt(NewPromptRecord {
+                id: "prm_blocked".to_owned(),
+                session_id: "sess_blocked".to_owned(),
+                prompt_json: "[]".to_owned(),
+            })
+            .expect("prompt inserted");
+    }
+
+    let response = client
+        .post(format!("{}/v1/agent/update", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .send()
+        .await
+        .expect("send update");
+    let status = response.status();
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["data"]["skipped"], true);
+    assert_eq!(body["data"]["reason"], "agent is running");
+
+    let status_body: Value = client
+        .get(format!("{}/v1/agent/status", harness.base_url))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("status")
+        .json()
+        .await
+        .expect("status json");
+    assert_eq!(
+        status_body["data"]["process_state"], "running",
+        "a blocked stop must leave the agent up: {status_body}"
+    );
+    assert_eq!(
+        status_body["data"]["pid"], first_pid,
+        "a blocked stop must leave the same process up: {status_body}"
     );
 }
 
