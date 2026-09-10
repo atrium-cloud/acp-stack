@@ -619,11 +619,13 @@ fn deferred_mapped_credential_writes_explicit_model_without_discovery() {
 
 /// Picks `openrouter/model-b` at the model prompt and, at that moment, rewrites the discovery
 /// fixture so only the post-model advertisement carries efforts; then takes the first effort.
+#[cfg(feature = "test-fixtures")]
 struct ModelDependentEffortDriver {
     fixture_path: PathBuf,
     offered: std::sync::Mutex<Vec<(prompt::HostedPromptKind, Vec<String>)>>,
 }
 
+#[cfg(feature = "test-fixtures")]
 fn write_discovery_fixture(path: &Path, efforts: &[&str]) {
     let mut options = vec![serde_json::json!({
         "id": "model",
@@ -652,6 +654,7 @@ fn write_discovery_fixture(path: &Path, efforts: &[&str]) {
     std::fs::write(path, serde_json::Value::Array(options).to_string()).expect("write fixture");
 }
 
+#[cfg(feature = "test-fixtures")]
 impl prompt::HostedPromptDriver for ModelDependentEffortDriver {
     fn select(
         &self,

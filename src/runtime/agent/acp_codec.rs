@@ -133,18 +133,16 @@ pub fn session_config_id_for_value(
     })
 }
 
-pub fn session_config_values(
+/// Locate the advertised select option for `category`: select-only, matched by
+/// the ACP category verbatim or by the option id. The id-only match is the
+/// legacy behavior `advertised_values_for_category` relies on, so both the value
+/// and choice projections share one matcher and cannot drift.
+fn find_config_option(
     config_options: Option<&[SessionConfigOption]>,
     category: AgentSessionConfigCategory,
-) -> Result<Vec<String>> {
+) -> Result<&SessionConfigOption> {
     let Some(config_options) = config_options else {
-        return Err(StackError::AgentConfigProvision {
-            path: PathBuf::from("ACP session config options"),
-            reason: format!(
-                "agent did not advertise a `{}` session config option",
-                category.id()
-            ),
-        });
+        return Err(missing_config_option(category));
     };
     for option in config_options {
         // Same select-only guard as `session_config_id_for_value`.
@@ -157,19 +155,30 @@ pub fn session_config_values(
             .is_some_and(|option_category| category.matches(option_category));
         let id_matches = category.matches_id(option.id.0.as_ref());
         if category_matches || id_matches {
-            let mut values = session_config_option_values(option);
-            values.sort();
-            values.dedup();
-            return Ok(values);
+            return Ok(option);
         }
     }
-    Err(StackError::AgentConfigProvision {
+    Err(missing_config_option(category))
+}
+
+fn missing_config_option(category: AgentSessionConfigCategory) -> StackError {
+    StackError::AgentConfigProvision {
         path: PathBuf::from("ACP session config options"),
         reason: format!(
             "agent did not advertise a `{}` session config option",
             category.id()
         ),
-    })
+    }
+}
+
+pub fn session_config_values(
+    config_options: Option<&[SessionConfigOption]>,
+    category: AgentSessionConfigCategory,
+) -> Result<Vec<String>> {
+    let mut values = session_config_option_values(find_config_option(config_options, category)?);
+    values.sort();
+    values.dedup();
+    Ok(values)
 }
 
 pub fn session_model_selection_for_value(
@@ -196,6 +205,22 @@ pub fn session_model_values(response: &NewSessionResponse) -> Result<Vec<String>
         response.config_options.as_deref(),
         AgentSessionConfigCategory::Model,
     )
+}
+
+/// Advertised `(value, name)` model choices in the agent's presentation order,
+/// deduped by value keeping the first occurrence. Unlike [`session_model_values`]
+/// the order is preserved and the ACP select `name` is carried, so a client can
+/// present models as the agent offered them with the agent's own labels.
+pub fn session_model_choices(response: &NewSessionResponse) -> Result<Vec<(String, String)>> {
+    let option = find_config_option(
+        response.config_options.as_deref(),
+        AgentSessionConfigCategory::Model,
+    )?;
+    let mut seen = std::collections::HashSet::new();
+    Ok(session_config_option_choices(option)
+        .into_iter()
+        .filter(|(value, _name)| seen.insert(value.clone()))
+        .collect())
 }
 
 /// Resolve a mode `value` to how it must be applied. `config_options` is
@@ -276,16 +301,26 @@ pub(crate) fn session_config_option_contains_value(
 }
 
 fn session_config_option_values(option: &SessionConfigOption) -> Vec<String> {
+    session_config_option_choices(option)
+        .into_iter()
+        .map(|(value, _name)| value)
+        .collect()
+}
+
+/// Select `(value, name)` pairs in advertised order, flattening groups and
+/// dropping group headers, mirroring `project_config_options` so the two lanes
+/// never disagree on the choice set.
+fn session_config_option_choices(option: &SessionConfigOption) -> Vec<(String, String)> {
     match &option.kind {
         SessionConfigKind::Select(select) => match &select.options {
             SessionConfigSelectOptions::Ungrouped(options) => options
                 .iter()
-                .map(|option| option.value.0.to_string())
+                .map(|option| (option.value.0.to_string(), option.name.clone()))
                 .collect(),
             SessionConfigSelectOptions::Grouped(groups) => groups
                 .iter()
                 .flat_map(|group| group.options.iter())
-                .map(|option| option.value.0.to_string())
+                .map(|option| (option.value.0.to_string(), option.name.clone()))
                 .collect(),
             _ => Vec::new(),
         },

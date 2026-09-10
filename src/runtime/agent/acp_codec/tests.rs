@@ -142,6 +142,116 @@ fn session_mode_values_prefers_config_option_over_native() {
     );
 }
 
+fn response_with_model_option(
+    option: agent_client_protocol::schema::v1::SessionConfigOption,
+) -> agent_client_protocol::schema::v1::NewSessionResponse {
+    agent_client_protocol::schema::v1::NewSessionResponse::new("session")
+        .config_options(vec![option])
+}
+
+// Advertised order is preserved (not sorted), duplicate values collapse to the
+// first occurrence, and each ACP select `name` rides along with its value.
+#[test]
+fn session_model_choices_preserves_order_and_dedups_by_value() {
+    use agent_client_protocol::schema::v1::{
+        SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
+    };
+    let response = response_with_model_option(
+        SessionConfigOption::select(
+            "model",
+            "Model",
+            "z",
+            vec![
+                SessionConfigSelectOption::new("z", "Z.ai: GLM 5.3 Flash"),
+                SessionConfigSelectOption::new(
+                    "openrouter/aion-labs/aion-2.0",
+                    "openrouter/aion-labs/aion-2.0",
+                ),
+                SessionConfigSelectOption::new("z", "later duplicate"),
+            ],
+        )
+        .category(SessionConfigOptionCategory::Model),
+    );
+    assert_eq!(
+        session_model_choices(&response).expect("choices"),
+        vec![
+            ("z".to_owned(), "Z.ai: GLM 5.3 Flash".to_owned()),
+            (
+                "openrouter/aion-labs/aion-2.0".to_owned(),
+                "openrouter/aion-labs/aion-2.0".to_owned()
+            ),
+        ]
+    );
+    // The value lane still sorts+dedups, unchanged by the shared finder refactor.
+    assert_eq!(
+        session_model_values(&response).expect("values"),
+        vec!["openrouter/aion-labs/aion-2.0".to_owned(), "z".to_owned()]
+    );
+}
+
+// Grouped options flatten in group order with headers dropped, matching the
+// per-session `project_config_options` lane.
+#[test]
+fn session_model_choices_flattens_groups_in_order() {
+    use agent_client_protocol::schema::v1::{
+        SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectGroup,
+        SessionConfigSelectOption,
+    };
+    let response = response_with_model_option(
+        SessionConfigOption::select(
+            "model",
+            "Model",
+            "two",
+            vec![
+                SessionConfigSelectGroup::new(
+                    "g2",
+                    "Group Two",
+                    vec![SessionConfigSelectOption::new("two", "Two")],
+                ),
+                SessionConfigSelectGroup::new(
+                    "g1",
+                    "Group One",
+                    vec![SessionConfigSelectOption::new("one", "One")],
+                ),
+            ],
+        )
+        .category(SessionConfigOptionCategory::Model),
+    );
+    assert_eq!(
+        session_model_choices(&response).expect("choices"),
+        vec![
+            ("two".to_owned(), "Two".to_owned()),
+            ("one".to_owned(), "One".to_owned()),
+        ]
+    );
+}
+
+// An agent advertising a bare `model`-id option with no category still resolves
+// through the id-only match the shared finder preserves.
+#[test]
+fn session_model_choices_matches_by_id_without_category() {
+    use agent_client_protocol::schema::v1::{SessionConfigOption, SessionConfigSelectOption};
+    let response = response_with_model_option(SessionConfigOption::select(
+        "model",
+        "Model",
+        "one",
+        vec![SessionConfigSelectOption::new("one", "One")],
+    ));
+    assert_eq!(
+        session_model_choices(&response).expect("choices"),
+        vec![("one".to_owned(), "One".to_owned())]
+    );
+}
+
+#[test]
+fn session_model_choices_errors_without_model_option() {
+    let response = agent_client_protocol::schema::v1::NewSessionResponse::new("session");
+    assert!(matches!(
+        session_model_choices(&response),
+        Err(crate::error::StackError::AgentConfigProvision { .. })
+    ));
+}
+
 #[derive(Default)]
 struct RecordingSink {
     events: Mutex<Vec<(String, String, String)>>,
