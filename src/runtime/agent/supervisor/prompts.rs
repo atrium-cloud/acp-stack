@@ -28,12 +28,15 @@ impl AgentSupervisor {
                     id: session_id.to_owned(),
                 });
             }
-            if session.status != SESSION_STATUS_ACTIVE {
-                return Err(StackError::SessionNotActive {
-                    id: session_id.to_owned(),
-                    status: session.status,
-                });
-            }
+            // Prompting re-promotes an `available` session: the idle sweep and
+            // agent teardown demote rows, and the next prompt is the signal the
+            // session is attached again. If the adapter does not actually know
+            // the session, ACP `session/prompt` fails and the prompt settles
+            // `errored`; the idle sweep then re-demotes the row. The write is
+            // unconditional so `updated_at` records this submission and an
+            // aged-but-active session cannot be swept between this gate and
+            // the prompt insert below.
+            guard.update_session_status(session_id, SESSION_STATUS_ACTIVE)?;
             session.agent_session_id
         };
         // One ACP session drives one turn at a time: a second prompt would

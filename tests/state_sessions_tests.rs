@@ -1017,3 +1017,255 @@ fn delete_session_removes_row_prompts_and_events_and_repeats_silently() {
             .is_none()
     );
 }
+
+#[test]
+fn reconcile_orphaned_sessions_demotes_only_active_rows() {
+    let (_tempdir, store) = fresh_state("state.sqlite");
+    for id in [
+        "sess_orphan_a",
+        "sess_orphan_b",
+        "sess_closed",
+        "sess_avail",
+    ] {
+        store
+            .insert_session(NewSessionRecord {
+                id: id.to_owned(),
+                agent_id: "fake".to_owned(),
+                cwd: "/tmp".to_owned(),
+                title: None,
+                metadata_json: "{}".to_owned(),
+            })
+            .expect("session inserted");
+    }
+    store
+        .update_session_status("sess_closed", SESSION_STATUS_CLOSED)
+        .expect("closed");
+    store
+        .update_session_status("sess_avail", SESSION_STATUS_AVAILABLE)
+        .expect("available");
+
+    let updated_at_before = store
+        .get_session("sess_orphan_a")
+        .expect("lookup")
+        .expect("session exists")
+        .updated_at;
+    let mut demoted = store
+        .reconcile_orphaned_sessions(None)
+        .expect("reconcile succeeds");
+    demoted.sort();
+    assert_eq!(demoted, vec!["sess_orphan_a", "sess_orphan_b"]);
+    // Demotion is not activity: the last-activity timestamp must survive.
+    assert_eq!(
+        store
+            .get_session("sess_orphan_a")
+            .expect("lookup")
+            .expect("session exists")
+            .updated_at,
+        updated_at_before
+    );
+    for (id, expected) in [
+        ("sess_orphan_a", SESSION_STATUS_AVAILABLE),
+        ("sess_orphan_b", SESSION_STATUS_AVAILABLE),
+        ("sess_closed", SESSION_STATUS_CLOSED),
+        ("sess_avail", SESSION_STATUS_AVAILABLE),
+    ] {
+        let record = store
+            .get_session(id)
+            .expect("lookup")
+            .expect("session exists");
+        assert_eq!(record.status, expected, "unexpected status for {id}");
+    }
+
+    assert!(
+        store
+            .reconcile_orphaned_sessions(None)
+            .expect("repeat reconcile")
+            .is_empty()
+    );
+}
+
+#[test]
+fn reconcile_orphaned_sessions_scopes_to_target() {
+    let (_tempdir, store) = fresh_state("state.sqlite");
+    for (target, session) in [("target_a", "sess_a"), ("target_b", "sess_b")] {
+        store
+            .insert_session_for_target(
+                target,
+                session.to_owned(),
+                NewSessionRecord {
+                    id: session.to_owned(),
+                    agent_id: target.to_owned(),
+                    cwd: "/tmp".to_owned(),
+                    title: None,
+                    metadata_json: "{}".to_owned(),
+                },
+            )
+            .expect("session inserted");
+    }
+
+    let demoted = store
+        .reconcile_orphaned_sessions(Some("target_a"))
+        .expect("scoped reconcile succeeds");
+    assert_eq!(demoted, vec!["sess_a"]);
+    assert_eq!(
+        store
+            .get_session("sess_b")
+            .expect("lookup")
+            .expect("session exists")
+            .status,
+        SESSION_STATUS_ACTIVE
+    );
+}
+
+#[test]
+fn mark_idle_sessions_skips_inflight_and_fresh_rows() {
+    let (_tempdir, store) = fresh_state("state.sqlite");
+    const OLD: &str = "2020-01-01T00:00:00.000000000Z";
+    let threshold = std::time::Duration::from_secs(30);
+
+    // In-flight prompt keeps the session active regardless of age.
+    common::state::seed_running_prompt_at(&store, "sess_busy", "prm_busy", OLD);
+
+    // A still-pending prompt shields the same way a running one does.
+    store
+        .insert_session(NewSessionRecord {
+            id: "sess_pending".to_owned(),
+            agent_id: "fake".to_owned(),
+            cwd: "/tmp".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("session inserted");
+    store
+        .insert_prompt(NewPromptRecord {
+            id: "prm_pending".to_owned(),
+            session_id: "sess_pending".to_owned(),
+            prompt_json: "[]".to_owned(),
+        })
+        .expect("prompt inserted");
+
+    // A pending ACP permission request shields even with no in-flight prompt.
+    store
+        .insert_session(NewSessionRecord {
+            id: "sess_permission".to_owned(),
+            agent_id: "fake".to_owned(),
+            cwd: "/tmp".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("session inserted");
+    store
+        .append_permission_request(NewPermissionRequest {
+            source: "acp",
+            requester: Some("agent"),
+            subject_id: Some("sess_permission"),
+            detail_json: "{}",
+            expires_at: None,
+        })
+        .expect("permission inserted");
+
+    // Idle past the threshold with no prompts at all.
+    store
+        .insert_session(NewSessionRecord {
+            id: "sess_idle".to_owned(),
+            agent_id: "fake".to_owned(),
+            cwd: "/tmp".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("session inserted");
+
+    // Fresh row stays untouched.
+    store
+        .insert_session(NewSessionRecord {
+            id: "sess_fresh".to_owned(),
+            agent_id: "fake".to_owned(),
+            cwd: "/tmp".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("session inserted");
+
+    let connection = rusqlite::Connection::open(store.path()).expect("open sqlite directly");
+    connection
+        .execute(
+            "UPDATE sessions SET updated_at = ?1 WHERE id IN (?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                OLD,
+                "sess_idle",
+                "sess_busy",
+                "sess_pending",
+                "sess_permission"
+            ],
+        )
+        .expect("force-set session updated_at");
+    connection
+        .execute(
+            "UPDATE prompts SET updated_at = ?1 WHERE id = ?2",
+            rusqlite::params![OLD, "prm_pending"],
+        )
+        .expect("force-set pending prompt updated_at");
+
+    let demoted = store.mark_idle_sessions(threshold).expect("sweep succeeds");
+    assert_eq!(demoted, vec!["sess_idle"]);
+    assert_eq!(
+        store
+            .get_session("sess_idle")
+            .expect("lookup")
+            .expect("session exists")
+            .updated_at,
+        OLD
+    );
+
+    // The demotion event must not register as activity in the status window.
+    store
+        .append_session_event_with_source(
+            "sess_idle",
+            "info",
+            "session.available",
+            EVENT_SOURCE_SYSTEM,
+            "session available",
+            r#"{"reason":"idle"}"#,
+        )
+        .expect("demotion event appended");
+    let window = store
+        .query_session_status_window("1970-01-01T00:00:00.000000000Z", None, 10)
+        .expect("status window");
+    let idle_row = window
+        .iter()
+        .find(|row| row.id == "sess_idle")
+        .expect("demoted session in window");
+    assert_eq!(idle_row.last_activity_at, OLD);
+    for (id, expected) in [
+        ("sess_busy", SESSION_STATUS_ACTIVE),
+        ("sess_pending", SESSION_STATUS_ACTIVE),
+        ("sess_permission", SESSION_STATUS_ACTIVE),
+        ("sess_idle", SESSION_STATUS_AVAILABLE),
+        ("sess_fresh", SESSION_STATUS_ACTIVE),
+    ] {
+        let record = store
+            .get_session(id)
+            .expect("lookup")
+            .expect("session exists");
+        assert_eq!(record.status, expected, "unexpected status for {id}");
+    }
+
+    // A settled prompt with fresh activity still shields its session.
+    store
+        .update_prompt_status(
+            "prm_busy",
+            PromptStatus::Completed,
+            Some("end_turn"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("prompt settles");
+    assert!(
+        store
+            .mark_idle_sessions(threshold)
+            .expect("repeat sweep")
+            .is_empty()
+    );
+}

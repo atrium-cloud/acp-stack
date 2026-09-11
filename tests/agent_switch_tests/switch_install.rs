@@ -125,6 +125,91 @@ async fn agent_switch_preserves_mcp_runtime_config() {
 }
 
 #[tokio::test]
+async fn agent_switch_demotes_renamed_sessions_of_running_agent() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    // The switched-to agent must actually start (the old one is running), so
+    // the registry override needs a real ACP command, not the default `true`.
+    let shim_path = tempdir.path().join("kimi-shim");
+    crate::common::agent::write_placebo_shim(&shim_path);
+    crate::common::agent::write_kimi_registry_override_with_command(
+        &config_dir,
+        &shim_path.to_string_lossy(),
+    );
+    let mut config = test_config();
+    let workspace = tempdir.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    config.workspace.root = workspace.to_string_lossy().into_owned();
+    config.workspace.uploads = workspace.join("uploads").to_string_lossy().into_owned();
+    config.agent.cwd = Some(config.workspace.root.clone());
+    let mut secrets =
+        acp_stack::secrets::SecretStore::open_or_create(tempdir.path()).expect("secret store");
+    secrets
+        .set_many([("KIMI_API_KEY", "kimi-secret")])
+        .expect("kimi secret");
+    let fixture_path = write_config_options_fixture(tempdir.path(), &["kimi/kimi-k3"]);
+    let _fixture_guard = EnvVarGuard::set("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &fixture_path);
+
+    let harness =
+        AgentHarness::spawn_with_config_and_home(config, tempdir.path().to_path_buf()).await;
+    let client = http().await;
+    let start = client
+        .post(format!("{}/v1/agent/start", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .send()
+        .await
+        .expect("send start");
+    assert_eq!(start.status(), StatusCode::OK);
+    let create = client
+        .post(format!("{}/v1/sessions", harness.base_url))
+        .header("Authorization", session_bearer())
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("create session");
+    let create_status = create.status();
+    let create_body: Value = create.json().await.expect("create json");
+    assert_eq!(create_status, StatusCode::OK, "body: {create_body}");
+    let session_id = create_body["data"]["id"]
+        .as_str()
+        .expect("session id")
+        .to_owned();
+    assert_eq!(create_body["data"]["status"], "active");
+
+    let response = client
+        .post(format!("{}/v1/agent/switch", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .json(&serde_json::json!({ "agent_id": "kimi" }))
+        .send()
+        .await
+        .expect("send switch");
+    let status = response.status();
+    let body_text = response.text().await.unwrap_or_default();
+    assert_eq!(status, StatusCode::OK, "body: {body_text}");
+
+    let store = harness.state.lock().await;
+    let record = store
+        .get_session(&session_id)
+        .expect("session lookup")
+        .expect("session exists");
+    let events = store
+        .latest_session_events(&session_id, 20)
+        .expect("session events");
+    drop(store);
+    // The rename moved the row to the new target before the old agent
+    // stopped; the switch path must still demote it.
+    assert_eq!(record.target_id, "kimi");
+    assert_eq!(record.status, "available");
+    assert!(
+        events.iter().any(|event| {
+            event.kind == "session.available" && event.payload_json.contains("agent_stopped")
+        }),
+        "expected a session.available event with reason agent_stopped"
+    );
+}
+
+#[tokio::test]
 async fn agent_switch_preserves_adapter_metadata_and_skips_model_follow_up() {
     let tempdir = TempDir::new().expect("tempdir");
     let config_dir = tempdir.path().join(".config/acp-stack");

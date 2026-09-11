@@ -90,6 +90,7 @@ headers = [{ name = "Authorization", value_ref = "LINEAR_API_KEY" }]
 | `[permissions]`       | command and ACP permission policy                                                                       |
 | `[commands]`          | mediated shell command limits and env allowlist                                                         |
 | `[prompts]`           | stale-prompt sweeper thresholds (see [runtime.md](runtime.md))                                          |
+| `[sessions]`          | idle threshold for demoting `active` session rows to `available` (see [runtime.md](runtime.md))        |
 | `[dependencies]`      | expected external programs, runtimes, packages, and MCP declarations                                    |
 | `[[mcp.servers]]`     | MCP servers attached to ACP sessions                                                                    |
 | `[[skills.sources]]`  | user-declared Agent Skills sources, alongside the embedded catalog                                      |

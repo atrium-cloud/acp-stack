@@ -191,6 +191,15 @@ async fn monitor_bridge_exit(
             None
         }
     };
+    // Even when `on-crash` respawns below, the fresh adapter process has no
+    // sessions loaded, so `available` is the truthful status until re-attach.
+    demote_sessions_on_agent_teardown(
+        &restart_context.state_store,
+        &restart_context.target_id,
+        "agent_exited",
+    )
+    .await;
+
     let restart_policy = restart_context.agent.restart.as_str();
     append_and_publish_agent_lifecycle(
         &restart_context.state_store,

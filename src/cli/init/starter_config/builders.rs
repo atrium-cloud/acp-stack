@@ -256,6 +256,7 @@ pub(crate) fn starter_config(args: &InitArgs) -> Result<String> {
         permissions: permissions_from_args(args),
         commands: Default::default(),
         prompts: Default::default(),
+        sessions: Default::default(),
         dependencies: Default::default(),
         mcp: mcp_from_args(args)?,
         skills: Default::default(),

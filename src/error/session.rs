@@ -9,7 +9,6 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
     Some(match err {
         SessionNotFound { .. } => "session.not_found",
         SessionClosed { .. } => "session.closed",
-        SessionNotActive { .. } => "session.not_active",
         PromptInFlight { .. } => "session.prompt_in_flight",
         PromptNotFound { .. } => "prompt.not_found",
         PromptSessionMismatch { .. } => "prompt.session_mismatch",
@@ -26,9 +25,6 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
     Some(match err {
         SessionNotFound { id } => format!("session `{id}` was not found"),
         SessionClosed { id } => format!("session `{id}` is closed"),
-        SessionNotActive { id, status } => {
-            format!("session `{id}` is {status}; load or resume it before prompting")
-        }
         PromptInFlight { session_id } => {
             format!("session `{session_id}` already has a prompt in flight")
         }
@@ -57,10 +53,9 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
     use StackError::*;
     Some(match err {
         SessionNotFound { .. } | PromptNotFound { .. } => StatusCode::NOT_FOUND,
-        SessionClosed { .. }
-        | SessionNotActive { .. }
-        | PromptInFlight { .. }
-        | PromptSessionMismatch { .. } => StatusCode::CONFLICT,
+        SessionClosed { .. } | PromptInFlight { .. } | PromptSessionMismatch { .. } => {
+            StatusCode::CONFLICT
+        }
         SessionTargetRenameConflict { .. } => StatusCode::CONFLICT,
         PromptBodyEmpty | PromptBodyInvalid(_) | PromptUnsupportedModality { .. } => {
             StatusCode::BAD_REQUEST

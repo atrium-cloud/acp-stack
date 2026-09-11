@@ -202,6 +202,46 @@ impl PromptsConfig {
     }
 }
 
+// SESSIONS
+
+/// Default idle window before an `active` session row demotes to `available`.
+/// A session between turns re-promotes on the next `session/load`,
+/// `session/resume`, or `session/prompt`, so a short window keeps the
+/// DB-derived busy signal truthful without costing callers anything.
+pub const DEFAULT_SESSIONS_IDLE_THRESHOLD: &str = "30s";
+
+/// Configuration for session row lifecycle. When an `active` session has no
+/// `pending`/`running` prompt and no prompt activity for `idle_threshold`,
+/// the background sweeper demotes it to `available`. The sweep shares the
+/// `[prompts].sweep_interval` cadence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SessionsConfig {
+    pub idle_threshold: String,
+}
+
+impl Default for SessionsConfig {
+    fn default() -> Self {
+        Self {
+            idle_threshold: DEFAULT_SESSIONS_IDLE_THRESHOLD.to_owned(),
+        }
+    }
+}
+
+impl SessionsConfig {
+    /// Parsed `idle_threshold`. See `PromptsConfig::effective_stale_threshold`
+    /// for the parse-or-default fallback contract.
+    pub fn effective_idle_threshold(&self) -> std::time::Duration {
+        crate::config::validate::primitives::parse_duration_string(&self.idle_threshold)
+            .unwrap_or_else(|| {
+                crate::config::validate::primitives::parse_duration_string(
+                    DEFAULT_SESSIONS_IDLE_THRESHOLD,
+                )
+                .unwrap_or(std::time::Duration::from_secs(30))
+            })
+    }
+}
+
 // LOCAL DAEMON SOCKET
 
 #[derive(

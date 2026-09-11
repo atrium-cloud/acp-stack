@@ -306,6 +306,38 @@ fn metrics_summary_exposes_prompt_failure_counters() {
 }
 
 #[test]
+fn metrics_summary_counts_available_sessions_as_neither_active_nor_closed() {
+    use acp_stack::state::{MetricsWindow, SESSION_STATUS_AVAILABLE, SESSION_STATUS_CLOSED};
+    let (_dir, store) = fresh_state("metrics_sessions.sqlite");
+    for id in ["sess_active", "sess_available", "sess_closed"] {
+        store
+            .insert_session(NewSessionRecord {
+                id: id.to_owned(),
+                agent_id: "fake".to_owned(),
+                cwd: "/tmp".to_owned(),
+                title: None,
+                metadata_json: "{}".to_owned(),
+            })
+            .unwrap();
+    }
+    store
+        .update_session_status("sess_available", SESSION_STATUS_AVAILABLE)
+        .unwrap();
+    store
+        .update_session_status("sess_closed", SESSION_STATUS_CLOSED)
+        .unwrap();
+
+    let summary = store
+        .metrics_summary(MetricsWindow {
+            since: "2000-01-01T00:00:00.000000000Z".to_owned(),
+            until: "2100-01-01T00:00:00.000000000Z".to_owned(),
+        })
+        .unwrap();
+    assert_eq!(summary.sessions.active, 1);
+    assert_eq!(summary.sessions.closed, 1);
+}
+
+#[test]
 fn metrics_summary_returns_zero_when_window_misses_all_rows() {
     use acp_stack::state::MetricsWindow;
     let (_dir, store) = fresh_state("metrics_empty.sqlite");

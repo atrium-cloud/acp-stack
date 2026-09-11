@@ -89,10 +89,10 @@ use crate::runtime::mediation::permissions::PermissionService;
 use crate::secrets::SecretStore;
 use crate::state::{
     EVENT_KIND_MCP_SESSION_SKIPPED, EVENT_KIND_PROMPT_ERRORED, EVENT_KIND_PROMPT_INFERENCE_FAILED,
-    EVENT_KIND_SESSION_CAPABILITY_IGNORED, EVENT_SOURCE_SYSTEM, FailureClass, ListedSessionRecord,
-    NewPromptRecord, NewSessionRecord, PromptRecord, PromptStatus, SESSION_STATUS_ACTIVE,
-    SESSION_STATUS_CLOSED, SessionRecord, StateStore, next_prompt_id, next_prompt_message_id,
-    next_session_id,
+    EVENT_KIND_SESSION_AVAILABLE, EVENT_KIND_SESSION_CAPABILITY_IGNORED, EVENT_SOURCE_SYSTEM,
+    FailureClass, ListedSessionRecord, NewPromptRecord, NewSessionRecord, PromptRecord,
+    PromptStatus, SESSION_STATUS_ACTIVE, SESSION_STATUS_CLOSED, SessionRecord, StateStore,
+    next_prompt_id, next_prompt_message_id, next_session_id,
 };
 
 use self::bridge::*;
@@ -621,6 +621,10 @@ impl AgentSupervisor {
         *self.last_pid.write().await = None;
         *self.loaded_providers.write().await = None;
 
+        // The adapter is gone, so no session can still be attached; demote
+        // BEFORE `shutdown_result?` so a messy shutdown cannot skip it.
+        demote_sessions_on_agent_teardown(state, target_id, "agent_stopped").await;
+
         let exit = shutdown_result?;
         let data = json!({
             "target_id": target_id,
@@ -716,6 +720,44 @@ impl AgentSupervisor {
         let mut guard = self.state.lock().await;
         if matches!(*guard, AgentState::Updating) {
             *guard = AgentState::Stopped;
+        }
+    }
+}
+
+/// Demote every `active` session to `available` after the agent process is
+/// gone: nothing can still be attached, so `active` would be a lie the DB's
+/// busy predicates act on. Best-effort — teardown must not fail on it.
+pub(crate) async fn demote_sessions_on_agent_teardown(
+    state: &Arc<TokioMutex<StateStore>>,
+    target_id: &str,
+    reason: &str,
+) {
+    let guard = state.lock().await;
+    let ids = match guard.reconcile_orphaned_sessions(Some(target_id)) {
+        Ok(ids) => ids,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to demote active sessions on agent teardown");
+            return;
+        }
+    };
+    if ids.is_empty() {
+        return;
+    }
+    let payload = json!({ "reason": reason }).to_string();
+    for session_id in &ids {
+        if let Err(err) = guard.append_session_event_with_source(
+            session_id,
+            "info",
+            EVENT_KIND_SESSION_AVAILABLE,
+            EVENT_SOURCE_SYSTEM,
+            "session available",
+            &payload,
+        ) {
+            tracing::warn!(
+                error = %err,
+                session_id = %session_id,
+                "failed to append session.available event on agent teardown"
+            );
         }
     }
 }

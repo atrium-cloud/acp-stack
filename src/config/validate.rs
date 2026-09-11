@@ -10,6 +10,7 @@ pub mod mcp;
 pub mod permissions;
 pub mod primitives;
 pub mod prompts;
+pub mod sessions;
 pub mod skills;
 pub mod sources;
 
@@ -40,6 +41,7 @@ use self::primitives::{
     validate_secret_ref_name_value, validate_socket_address,
 };
 use self::prompts::validate_prompts;
+use self::sessions::validate_sessions;
 use self::sources::{validate_code_sources, validate_data_sources};
 
 pub(crate) fn validate_config(config: &Config) -> Result<()> {
@@ -127,6 +129,7 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
     validate_permissions(&config.permissions)?;
     validate_commands(&config.commands)?;
     validate_prompts(&config.prompts)?;
+    validate_sessions(&config.sessions)?;
     validate_trusted_proxies(&config.security.http)?;
     validate_edge(&config.edge)?;
     validate_dependencies(&config.dependencies)?;

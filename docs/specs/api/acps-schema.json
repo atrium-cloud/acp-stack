@@ -6451,7 +6451,6 @@
             "description": "Derived per request from the durable row plus in-flight prompt and\npermission state; a wider set than the durable `status`.",
             "enum": [
               "closed",
-              "available",
               "permission_required",
               "idle",
               "working",
@@ -7769,6 +7768,12 @@
               "sweep_interval": "30s"
             }
           },
+          "sessions": {
+            "$ref": "#/$defs/config/SessionsConfig",
+            "default": {
+              "idle_threshold": "30s"
+            }
+          },
           "dependencies": {
             "$ref": "#/$defs/config/DependenciesConfig",
             "default": {}
@@ -8960,6 +8965,19 @@
         "required": [
           "stale_threshold",
           "sweep_interval"
+        ],
+        "additionalProperties": false
+      },
+      "SessionsConfig": {
+        "type": "object",
+        "description": "Configuration for session row lifecycle. When an `active` session has no\n`pending`/`running` prompt and no prompt activity for `idle_threshold`,\nthe background sweeper demotes it to `available`. The sweep shares the\n`[prompts].sweep_interval` cadence.",
+        "properties": {
+          "idle_threshold": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "idle_threshold"
         ],
         "additionalProperties": false
       },

@@ -704,8 +704,9 @@ Session creation proceeds when a configured `agent.mode`, model, `agent.effort`,
 
 - Tier: `session`
 - Request: `window=<duration>` from `1m` through `999h`. Defaults to a rolling `8h` activity window.
-- Response: compact windowed session turn status. Each row includes a derived `state`: `idle`, `prompt_sent`, `working`, `permission_required`, `done`, `stopped`, `error`, `cancelled`, `available`, or `closed`.
+- Response: compact windowed session turn status. Each row includes a derived `state`: `idle`, `prompt_sent`, `working`, `permission_required`, `done`, `stopped`, `error`, `cancelled`, or `closed`.
     - `done` means the latest prompt completed with `stop_reason = "end_turn"`.
+    - `available` rows derive their `state` from activity like `active` rows do; the durable `status` field on the same row tells them apart.
 - Notes: also exposed on the local Unix socket without bearer auth.
 
 ### `GET /v1/sessions/{id}`
@@ -749,6 +750,7 @@ Session creation proceeds when a configured `agent.mode`, model, `agent.effort`,
 - Notes:
     - Clients can poll the prompt status endpoint or subscribe to `sessions.{id}` over WebSocket.
     - One session carries one turn at a time. A submission that arrives while the previous prompt is live is refused without creating a row, and never dispatched to the agent.
+    - Prompting an `available` session promotes it back to `active` before dispatch; only `closed` sessions refuse prompts.
     - Before a prompt row is created, media-bearing prompts are checked against the selected target model's known input modalities from `models.dev`. Unknown models, unavailable catalog data, PDFs, and generic files are allowed through.
 
 #### Prompt-Path Error Codes

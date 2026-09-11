@@ -697,6 +697,45 @@ fn rejects_prompts_with_unparsable_duration() {
 }
 
 #[test]
+fn parses_sessions_block_with_overrides() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [sessions]\n\
+         idle_threshold = \"2m\"\n"
+    );
+    let config = load_config_from_str(&config_text).expect("config with [sessions] should parse");
+    assert_eq!(config.sessions.idle_threshold, "2m");
+    assert_eq!(
+        config.sessions.effective_idle_threshold(),
+        std::time::Duration::from_secs(120)
+    );
+}
+
+#[test]
+fn omitted_sessions_block_falls_back_to_defaults() {
+    let config = load_config_from_str(VALID_CONFIG).expect("default config should parse");
+    assert_eq!(config.sessions.idle_threshold, "30s");
+    assert_eq!(
+        config.sessions.effective_idle_threshold(),
+        std::time::Duration::from_secs(30)
+    );
+}
+
+#[test]
+fn rejects_sessions_with_zero_duration() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [sessions]\n\
+         idle_threshold = \"0s\"\n"
+    );
+    let err = load_config_from_str(&config_text).expect_err("zero idle_threshold must be rejected");
+    assert!(
+        err.to_string().contains("sessions.idle_threshold"),
+        "got: {err}"
+    );
+}
+
+#[test]
 fn rejects_duration_field_exceeding_epoch_floor() {
     // The 1970 hardstop is shared by every duration field, not just the stack one.
     let config_text = format!(

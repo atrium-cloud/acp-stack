@@ -274,15 +274,18 @@ impl StateStore {
             params![window.since, window.until],
             |row| row.get(0),
         )?;
+        // `available` rows are neither active nor closed: idle demotion parks
+        // sessions there, so counting them as closed would skew both the count
+        // and the duration samples.
         let closed: i64 = self.connection().query_row(
             "SELECT COUNT(*) FROM sessions \
-             WHERE status != 'active' AND created_at >= ?1 AND created_at < ?2",
+             WHERE status = 'closed' AND created_at >= ?1 AND created_at < ?2",
             params![window.since, window.until],
             |row| row.get(0),
         )?;
         let mut statement = self.connection().prepare(
             "SELECT created_at, updated_at FROM sessions \
-             WHERE status != 'active' AND created_at >= ?1 AND created_at < ?2",
+             WHERE status = 'closed' AND created_at >= ?1 AND created_at < ?2",
         )?;
         let durations: Vec<i64> = statement
             .query_map(params![window.since, window.until], |row| {

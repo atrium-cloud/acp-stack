@@ -121,6 +121,14 @@ Session-scoped events that mirror terminal prompt transitions:
 | `prompt.stalled`          | warn  | `system` | `{ "prompt_id", "threshold_secs": <u64> }`                            | Stale-prompt sweeper, after flipping the row        |
 | `prompt.errored`          | error | `system` | `{ "prompt_id", "error_code": "<code>" }`                             | Supervisor, on any other terminal error             |
 
+### Session Lifecycle Event Kinds
+
+| Kind                | Level | Source   | Payload                                                       | Emit site                                                    |
+| ------------------- | ----- | -------- | -------------------------------------------------------------- | ------------------------------------------------------------ |
+| `session.available` | info  | `system` | `{ "reason": "<label>", "threshold_secs"?: <u64> }`            | Startup reconcile, agent teardown, and the idle session sweep |
+
+`reason` is one of `daemon_restart`, `agent_stopped`, `agent_exited`, or `idle`; `threshold_secs` appears only on idle-sweep demotions.
+
 The `prompt.inference_failed` payload is intentionally sanitized:
 
 - Only `status_code` and a `reason_category` from a fixed static enum reach SQLite: `rate_limit`, `internal_server_error`, `bad_gateway`, `service_unavailable`, `gateway_timeout`, `server_overloaded`, `client_error`, `unknown`.
@@ -165,7 +173,7 @@ When any sweep settled rows, the daemon records one aggregate event after startu
 
 | Kind                | Level | Source   | Payload                                                                                                                                                        |
 | ------------------- | ----- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `server.reconciled` | info  | `system` | `{ "prompts", "commands", "permissions_cancelled", "permissions_expired", "command_ids": [...], "command_ids_truncated": <bool>, "reason": "daemon-restart" }` |
+| `server.reconciled` | info  | `system` | `{ "prompts", "sessions", "commands", "permissions_cancelled", "permissions_expired", "command_ids": [...], "command_ids_truncated": <bool>, "reason": "daemon-restart" }` |
 
 `command_ids` is capped at 50 entries; `command_ids_truncated` is `true` when the sweep settled more. `permissions_cancelled` includes permissions cancelled by the command sweep's in-transaction settle alongside the permission sweep's own cancellations.
 
@@ -192,7 +200,7 @@ The `security_category` filter clusters the flat `security.*` kinds into operato
 
 - `window` — the resolved `{ since, until }` bounds (RFC 3339)
 - `counts` — row totals for `events`, `sessions`, `commands`, `auth_failures`, `agent_lifecycle`, `installer_runs`, `agent_capabilities`, `prompts`, `permission_requests`, and `permission_decisions`
-- `sessions.active`, `sessions.closed`, plus closed-session duration p50/p95
+- `sessions.active` (rows with `status = 'active'`, meaning attached with activity inside `[sessions].idle_threshold`), `sessions.closed` (rows with `status = 'closed'`; `available` rows count in neither), plus closed-session duration p50/p95
 - `turns.total`, `turns.by_status`, `turns.average_per_session`
 - `commands.total`, `commands.by_status`, command duration p50/p95, `commands.truncated_count`
 - `permissions.total`, `permissions.by_outcome`, permission response_ms p50/p95

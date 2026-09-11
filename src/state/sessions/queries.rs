@@ -423,6 +423,10 @@ impl StateStore {
                 JOIN scoped_sessions ss ON ss.id = e.session_id
                 WHERE e.session_id IS NOT NULL
                   AND e.created_at >= ?1
+                  -- A demotion is bookkeeping, not activity: without this
+                  -- exclusion a bulk startup reconcile would stamp every
+                  -- historical session into the window as user activity.
+                  AND e.kind <> ?7
                 UNION ALL
                 SELECT pr.subject_id AS session_id,
                        pr.created_at AS activity_at,
@@ -538,6 +542,7 @@ impl StateStore {
                 EVENT_SOURCE_ACP,
                 target_id,
                 i64::from(limit),
+                EVENT_KIND_SESSION_AVAILABLE,
             ],
             |row| {
                 let prompt_id: Option<String> = row.get(11)?;
@@ -922,6 +927,92 @@ impl StateStore {
                 return Err(StackError::SessionNotFound { id: id.to_owned() });
             }
             Ok(())
+        })
+    }
+
+    /// Demote every `active` session (of one target, or all) to `available`,
+    /// returning the demoted ids. Runs at serve startup (all targets) and on
+    /// agent teardown (that target only), where no session can still be
+    /// attached to a live adapter.
+    ///
+    /// `updated_at` is deliberately left untouched: it doubles as the
+    /// last-activity timestamp for list ranges, `since` pagination, and the
+    /// status window, and a demotion is not activity.
+    pub fn reconcile_orphaned_sessions(&self, target_id: Option<&str>) -> Result<Vec<String>> {
+        const SQL: &str = r#"
+            UPDATE sessions
+            SET status = ?1
+            WHERE status = ?2
+              AND (?3 IS NULL OR target_id = ?3)
+            RETURNING id
+        "#;
+        let now = current_timestamp();
+        self.persist_many_with_outbox("sessions", &now, |conn| {
+            let mut statement = conn.prepare(SQL)?;
+            let rows = statement.query_map(
+                params![SESSION_STATUS_AVAILABLE, SESSION_STATUS_ACTIVE, target_id],
+                |row| row.get::<_, String>(0),
+            )?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    /// Demote `active` sessions with no in-flight prompt, no pending ACP
+    /// permission request, and no prompt/session activity within `threshold`
+    /// to `available`, returning the demoted ids. Like the orphan reconcile,
+    /// the sweep never touches `updated_at`.
+    pub fn mark_idle_sessions(&self, threshold: std::time::Duration) -> Result<Vec<String>> {
+        const SQL: &str = r#"
+            UPDATE sessions
+            SET status = ?1
+            WHERE status = ?2
+              AND NOT EXISTS (
+                  SELECT 1 FROM prompts p
+                  WHERE p.session_id = sessions.id
+                    AND p.status IN ('pending', 'running')
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM permission_requests pr
+                  WHERE pr.subject_id = sessions.id
+                    AND pr.source = 'acp'
+                    AND pr.status = 'pending'
+              )
+              AND max(
+                  COALESCE(
+                      (SELECT MAX(p.updated_at) FROM prompts p WHERE p.session_id = sessions.id),
+                      updated_at
+                  ),
+                  updated_at
+              ) < ?3
+            RETURNING id
+        "#;
+        let now = Utc::now();
+        let now_string = now.to_rfc3339_opts(SecondsFormat::Nanos, true);
+        // The cutoff MUST use the same SecondsFormat::Nanos formatting as
+        // `current_timestamp`, or the string-level `<` comparison is wrong.
+        let threshold_chrono =
+            chrono::Duration::from_std(threshold).map_err(|err| StackError::InvalidParam {
+                field: "sessions.idle_threshold",
+                reason: format!("threshold out of range: {err}"),
+            })?;
+        let cutoff = now
+            .checked_sub_signed(threshold_chrono)
+            .ok_or(StackError::InvalidParam {
+                field: "sessions.idle_threshold",
+                reason: "threshold subtraction underflowed the chrono range".to_owned(),
+            })?;
+        let cutoff_string = cutoff.to_rfc3339_opts(SecondsFormat::Nanos, true);
+        self.persist_many_with_outbox("sessions", &now_string, |conn| {
+            let mut statement = conn.prepare(SQL)?;
+            let rows = statement.query_map(
+                params![
+                    SESSION_STATUS_AVAILABLE,
+                    SESSION_STATUS_ACTIVE,
+                    cutoff_string
+                ],
+                |row| row.get::<_, String>(0),
+            )?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
     }
 }

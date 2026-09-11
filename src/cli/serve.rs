@@ -6,8 +6,8 @@ use crate::fs_util::{
     create_dir_owner_only, home_dir, parent_dir, pre_create_owner_only, set_owner_only_dir,
     set_owner_only_file,
 };
-use crate::runtime::agent::stale_prompt_sweeper::StalePromptSweeper;
 use crate::runtime::agent::supervisor::ServerLifecycle;
+use crate::runtime::agent::sweeper::StateSweeper;
 use crate::runtime::install::agent_auto_update::AgentAutoUpdater;
 use crate::runtime::logging::supabase_mirror::SUPABASE_DEFAULT_DB_URL_REF;
 use crate::runtime::logging::supabase_sink::{SupabaseSink, SupabaseSinkCredential};
@@ -234,6 +234,24 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
         }
     };
 
+    // Session rows cannot be attached to a live adapter at daemon startup, so every `active`
+    // row is a leftover from the previous process and demotes to `available`.
+    let reconciled_session_ids = match store.reconcile_orphaned_sessions(None) {
+        Ok(ids) => {
+            if !ids.is_empty() {
+                tracing::info!(
+                    reconciled = ids.len(),
+                    "demoted orphaned active sessions to available on startup"
+                );
+            }
+            ids
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "startup session reconcile failed; rows will settle on the next restart");
+            Vec::new()
+        }
+    };
+
     let bind = args.bind.unwrap_or_else(|| config.api.bind.clone());
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -280,10 +298,27 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
         lifecycle.started(&state_handle, &event_hub, &local).await?;
 
         // Emitted after the hub is attached to the store so the sweep trace also fans out live.
+        if !reconciled_session_ids.is_empty() {
+            let payload = serde_json::json!({ "reason": "daemon_restart" }).to_string();
+            let store = state_handle.lock().await;
+            for session_id in &reconciled_session_ids {
+                if let Err(error) = store.append_session_event_with_source(
+                    session_id,
+                    "info",
+                    crate::state::EVENT_KIND_SESSION_AVAILABLE,
+                    crate::state::EVENT_SOURCE_SYSTEM,
+                    "session available",
+                    &payload,
+                ) {
+                    tracing::warn!(error = %error, session_id = %session_id, "failed to record session.available event");
+                }
+            }
+        }
         if reconciled_prompts > 0
             || perm_canceled > 0
             || perm_expired > 0
             || !reconciled_command_ids.is_empty()
+            || !reconciled_session_ids.is_empty()
         {
             let command_ids_truncated = reconciled_command_ids.len() > RECONCILED_COMMAND_IDS_CAP;
             let command_ids: Vec<&String> = reconciled_command_ids
@@ -292,6 +327,7 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
                 .collect();
             let payload = serde_json::json!({
                 "prompts": reconciled_prompts,
+                "sessions": reconciled_session_ids.len(),
                 "commands": reconciled_command_ids.len(),
                 "permissions_cancelled": perm_canceled + command_permissions_canceled,
                 "permissions_expired": perm_expired,
@@ -329,10 +365,11 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
         };
 
         // Held in scope so the sweeper shuts down before `acps serve` returns.
-        let stale_prompt_sweeper = StalePromptSweeper::spawn(
+        let state_sweeper = StateSweeper::spawn(
             state_handle.clone(),
             app_state.config.prompts.effective_stale_threshold(),
             app_state.config.prompts.effective_sweep_interval(),
+            app_state.config.sessions.effective_idle_threshold(),
         );
         let agent_auto_updater = AgentAutoUpdater::spawn(
             home.clone(),
@@ -368,7 +405,7 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
         }
         // Stop the sweeper before `server.stopped`, or a racing sweep appends `prompt.stalled`
         // after the lifecycle row.
-        stale_prompt_sweeper.shutdown().await;
+        state_sweeper.shutdown().await;
         agent_auto_updater.shutdown().await;
         let reason = match &serve_result {
             Ok(()) => "signal",

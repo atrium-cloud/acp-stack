@@ -14,7 +14,7 @@ pub mod provider_keys;
 pub mod provider_model_catalog;
 pub(crate) mod session_changes;
 pub mod session_sink;
-pub(crate) mod stale_prompt_sweeper;
 pub mod supervisor;
+pub(crate) mod sweeper;
 pub mod switch;
 pub mod switch_journal;

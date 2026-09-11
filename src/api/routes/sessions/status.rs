@@ -42,7 +42,7 @@ pub(crate) struct SessionStatusSessionResponse {
     id: String,
     /// Derived per request from the durable row plus in-flight prompt and
     /// permission state; a wider set than the durable `status`.
-    #[schemars(extend("enum" = ["closed", "available", "permission_required", "idle", "working", "prompt_sent", "done", "stopped", "error", "cancelled"]))]
+    #[schemars(extend("enum" = ["closed", "permission_required", "idle", "working", "prompt_sent", "done", "stopped", "error", "cancelled"]))]
     state: &'static str,
     /// Durable session status as stored.
     #[schemars(extend("enum" = ["active", "available", "closed"]))]
@@ -130,10 +130,12 @@ impl SessionStatusSessionResponse {
 }
 
 fn derived_session_state(record: &SessionStatusRecord) -> &'static str {
-    match record.status.as_str() {
-        SESSION_STATUS_CLOSED => return "closed",
-        SESSION_STATUS_AVAILABLE => return "available",
-        _ => {}
+    // `available` falls through to the activity-derived state: idle demotion
+    // parks recently worked sessions there, and collapsing them to a bare
+    // "available" would hide `done`/`error` detail the durable `status`
+    // field already conveys.
+    if record.status.as_str() == SESSION_STATUS_CLOSED {
+        return "closed";
     }
     if record.pending_permission.is_some() {
         return "permission_required";

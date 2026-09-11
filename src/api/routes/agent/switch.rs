@@ -959,6 +959,16 @@ async fn apply_switch_runtime(
             Err(err) => return Err(err),
         }
     }
+    // The stop's own demotion scopes to the old target id, but the session
+    // rename already moved the rows to the new id, so it matches nothing.
+    // Demote here under the new id, before the new agent starts, so a fast
+    // load/resume cannot race the sweep.
+    crate::runtime::agent::supervisor::demote_sessions_on_agent_teardown(
+        &state.state,
+        new_target_id,
+        "agent_stopped",
+    )
+    .await;
     let target_state = target.supervisor.snapshot().await.state;
     if target_state.as_wire_str() != "stopped" {
         return Ok(false);

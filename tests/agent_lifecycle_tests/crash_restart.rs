@@ -120,6 +120,16 @@ async fn on_crash_policy_restarts_agent_and_allows_session_resume() {
     let restarted_pid = status["pid"].as_u64().expect("restarted pid");
     assert_ne!(restarted_pid, u64::from(first_pid));
 
+    // The crash demoted the session: the restarted adapter has nothing loaded.
+    {
+        let store = harness.state.lock().await;
+        let record = store
+            .get_session(&session_id)
+            .expect("session lookup")
+            .expect("session exists");
+        assert_eq!(record.status, "available");
+    }
+
     let response = client
         .post(format!(
             "{}/v1/sessions/{}/resume",
@@ -133,6 +143,7 @@ async fn on_crash_policy_restarts_agent_and_allows_session_resume() {
     let resume_status = response.status();
     let resume_body: Value = response.json().await.expect("resume json");
     assert_eq!(resume_status, StatusCode::OK, "body: {resume_body}");
+    assert_eq!(resume_body["data"]["status"], "active");
 
     let store = harness.state.lock().await;
     let lifecycle = store.query_agent_lifecycle(50).expect("lifecycle");

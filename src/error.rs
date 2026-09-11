@@ -700,9 +700,6 @@ pub enum StackError {
     #[error("session `{id}` is closed")]
     SessionClosed { id: String },
 
-    #[error("session `{id}` is {status} and must be loaded or resumed before prompting")]
-    SessionNotActive { id: String, status: String },
-
     #[error("session `{session_id}` already has a prompt in flight")]
     PromptInFlight { session_id: String },
 

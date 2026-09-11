@@ -21,14 +21,15 @@ pub use self::schema::{
     DEFAULT_CUSTOM_MODEL_CONTEXT, DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
     DEFAULT_NETWORK_PROVIDER_TIMEOUT, DEFAULT_PERMISSION_REQUEST_TIMEOUT,
     DEFAULT_PERMISSION_TIMEOUT_ACTION, DEFAULT_PROMPTS_STALE_THRESHOLD,
-    DEFAULT_PROMPTS_SWEEP_INTERVAL, DEFAULT_SKILL_SOURCE_BRANCH, DEFAULT_STACK_UPDATE_FREQUENCY,
-    DEFAULT_STACK_UPDATE_POLICY, DataSourceConfig, DependenciesConfig, DependencyEntry,
-    DependencyInstallAction, DependencyInstallScope, EdgeConfig, ExtensionConfig, ExtensionType,
-    HeaderValueSource, HttpHeaderRef, LocalConfig, LocalSessionAuth, LoggingConfig, McpConfig,
-    McpHttpServer, McpServerConfig, McpStdioServer, PermissionTimeoutAction, PermissionsConfig,
-    PromptsConfig, SandboxConfig, SandboxMode, SandboxProviderStderr, SecurityConfig,
-    SecurityHttpConfig, SkillsConfig, StackUpdateConfig, StackUpdatePolicy, SupabaseLoggingBackend,
-    SupabaseLoggingConfig, UpdatesConfig, UserSkillSource, WorkspaceConfig,
+    DEFAULT_PROMPTS_SWEEP_INTERVAL, DEFAULT_SESSIONS_IDLE_THRESHOLD, DEFAULT_SKILL_SOURCE_BRANCH,
+    DEFAULT_STACK_UPDATE_FREQUENCY, DEFAULT_STACK_UPDATE_POLICY, DataSourceConfig,
+    DependenciesConfig, DependencyEntry, DependencyInstallAction, DependencyInstallScope,
+    EdgeConfig, ExtensionConfig, ExtensionType, HeaderValueSource, HttpHeaderRef, LocalConfig,
+    LocalSessionAuth, LoggingConfig, McpConfig, McpHttpServer, McpServerConfig, McpStdioServer,
+    PermissionTimeoutAction, PermissionsConfig, PromptsConfig, SandboxConfig, SandboxMode,
+    SandboxProviderStderr, SecurityConfig, SecurityHttpConfig, SessionsConfig, SkillsConfig,
+    StackUpdateConfig, StackUpdatePolicy, SupabaseLoggingBackend, SupabaseLoggingConfig,
+    UpdatesConfig, UserSkillSource, WorkspaceConfig,
 };
 pub use self::secret_template::{
     EnvEntry, SecretTemplate, TemplateSegment, agent_env_declares, env_entry_ref_names_lossy,
@@ -74,6 +75,8 @@ pub struct Config {
     pub commands: CommandsConfig,
     #[serde(default)]
     pub prompts: PromptsConfig,
+    #[serde(default)]
+    pub sessions: SessionsConfig,
     #[serde(default)]
     pub dependencies: DependenciesConfig,
     #[serde(default)]
@@ -173,6 +176,8 @@ struct RawConfig {
     commands: Option<CommandsConfig>,
     #[serde(default)]
     prompts: Option<PromptsConfig>,
+    #[serde(default)]
+    sessions: Option<SessionsConfig>,
     #[serde(default)]
     dependencies: Option<DependenciesConfig>,
     #[serde(default)]
@@ -472,6 +477,7 @@ fn parse_config_from_str_with_legacy(input: &str) -> Result<LoadedConfig> {
         permissions: raw.permissions.unwrap_or_default(),
         commands: raw.commands.unwrap_or_default(),
         prompts: raw.prompts.unwrap_or_default(),
+        sessions: raw.sessions.unwrap_or_default(),
         dependencies: raw.dependencies.unwrap_or_default(),
         mcp: raw.mcp.unwrap_or_default(),
         skills: raw.skills.unwrap_or_default(),

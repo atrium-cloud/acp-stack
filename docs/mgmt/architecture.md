@@ -39,6 +39,7 @@ flowchart LR
 - ACP bridge — ACP initialization, sessions, prompts, updates, and permissions.
 - ACP terminals — client-side `terminal/*` handlers with per-terminal owning tasks, capped output buffers, and command-log recording (`src/runtime/agent/acp_terminal.rs`).
 - Session changes — bounded process-local reduction of explicit ACP diff tool content.
+- State sweeper — background flips of stalled prompts to terminal `stalled` and idle `active` sessions to `available` (`src/runtime/agent/sweeper.rs`).
 - Config options — generic ACP session config-option projection and per-session snapshot (`src/runtime/agent/config_options.rs`).
 - Permissions — durable approval, denial, cancellation, and expiry.
 

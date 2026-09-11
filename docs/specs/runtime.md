@@ -300,6 +300,26 @@ The `reason_category` catalog is:
 - 400-range codes map to `FailureClass::Inference4xx` and HTTP 424.
 - Anything else falls back to `FailureClass::AgentRequest` with `reason_category = "unknown"`.
 
+## Sessions
+
+### Session Status Lifecycle
+
+A session row's durable `status` is `active` (attached to the running agent with recent work), `available` (known to the agent and promotable), or `closed` (terminal). `active` rows demote to `available` on agent stop, unplanned agent exit, daemon startup reconcile, and the idle sweep below. A demoted session re-promotes to `active` through `session/load`, `session/resume`, or a new `session/prompt`. Each demotion appends a `session.available` event whose payload names the reason (`agent_stopped`, `agent_exited`, `daemon_restart`, or `idle`).
+
+### Idle Session Sweep
+
+The same background task as the stale-prompt sweeper demotes `active` sessions with no `pending`/`running` prompt, no pending ACP permission request, and no prompt or session activity within the configured threshold, so DB-derived busy predicates (such as `EXISTS(sessions WHERE status = 'active')`) stay truthful between turns and across crash-shaped agent exits. Demotion changes only `status`: `updated_at` keeps recording last activity for list ranges and the status window.
+
+Config under `[sessions]`:
+
+```toml
+[sessions]
+idle_threshold = "30s"
+```
+
+- The default is `30s`. The sweep shares the `[prompts].sweep_interval` cadence, so worst-case demotion latency is `idle_threshold` plus one interval.
+- The sweep compares stored wall-clock timestamps at scan time, so it fires correctly after a host suspend/resume.
+
 ## Dependencies And MCP
 
 ### Dependency Declarations

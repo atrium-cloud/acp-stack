@@ -40,6 +40,8 @@ pub const EVENT_KIND_PROMPT_ERRORED: &str = "prompt.errored";
 pub const EVENT_KIND_MCP_SESSION_SKIPPED: &str = "mcp.session_skipped";
 /// A configured mode or model was ignored because the agent lacks the capability.
 pub const EVENT_KIND_SESSION_CAPABILITY_IGNORED: &str = "session.capability_ignored";
+/// The session was demoted from `active` to `available`; payload names the reason.
+pub const EVENT_KIND_SESSION_AVAILABLE: &str = "session.available";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRecord {

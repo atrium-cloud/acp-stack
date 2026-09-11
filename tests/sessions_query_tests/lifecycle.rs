@@ -3,7 +3,7 @@ use reqwest::StatusCode;
 use serde_json::{Value, json};
 
 #[tokio::test]
-async fn available_session_must_be_loaded_before_prompting() {
+async fn prompting_available_session_promotes_it_to_active() {
     let harness = Harness::spawn().await;
     let client = http();
     let list: Value = client
@@ -21,7 +21,8 @@ async fn available_session_must_be_loaded_before_prompting() {
         .iter()
         .find(|session| session["agent_session_id"] == "sess_listed_0")
         .and_then(|session| session["id"].as_str())
-        .expect("listed session local id");
+        .expect("listed session local id")
+        .to_owned();
 
     let response = client
         .post(format!(
@@ -33,9 +34,18 @@ async fn available_session_must_be_loaded_before_prompting() {
         .send()
         .await
         .expect("prompt");
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let body: Value = response.json().await.expect("prompt json");
-    assert_eq!(body["error"]["code"], "session.not_active");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let record: Value = client
+        .get(format!("{}/v1/sessions/{}", harness.base_url, session_id))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("get session")
+        .json()
+        .await
+        .expect("session json");
+    assert_eq!(record["data"]["status"], "active");
 }
 
 #[tokio::test]

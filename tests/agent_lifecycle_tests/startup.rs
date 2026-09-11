@@ -221,6 +221,66 @@ creates = "opencode"
 }
 
 #[tokio::test]
+async fn agent_stop_demotes_active_sessions_to_available() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let mut config = test_config();
+    let workspace = tempdir.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    config.workspace.root = workspace.to_string_lossy().into_owned();
+    config.workspace.uploads = workspace.join("uploads").to_string_lossy().into_owned();
+    config.agent.cwd = Some(config.workspace.root.clone());
+    let harness = AgentHarness::spawn_with_config(config).await;
+    let client = http().await;
+
+    let start = client
+        .post(format!("{}/v1/agent/start", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .send()
+        .await
+        .expect("send start");
+    assert_eq!(start.status(), StatusCode::OK);
+
+    let create = client
+        .post(format!("{}/v1/sessions", harness.base_url))
+        .header("Authorization", session_bearer())
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("create session");
+    let create_status = create.status();
+    let create_body: Value = create.json().await.expect("create json");
+    assert_eq!(create_status, StatusCode::OK, "body: {create_body}");
+    let session_id = create_body["data"]["id"]
+        .as_str()
+        .expect("session id")
+        .to_owned();
+    assert_eq!(create_body["data"]["status"], "active");
+
+    let stop = client
+        .post(format!("{}/v1/agent/stop", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .send()
+        .await
+        .expect("send stop");
+    assert_eq!(stop.status(), StatusCode::OK);
+
+    let store = harness.state.lock().await;
+    let record = store
+        .get_session(&session_id)
+        .expect("session lookup")
+        .expect("session exists");
+    let events = store
+        .latest_session_events(&session_id, 20)
+        .expect("session events");
+    drop(store);
+    assert_eq!(record.status, "available");
+    assert!(
+        events.iter().any(|event| event.kind == "session.available"),
+        "expected a session.available event"
+    );
+}
+
+#[tokio::test]
 async fn websocket_streams_agent_lifecycle_topic() {
     let harness = AgentHarness::spawn().await;
     let (mut ws, response) = tokio_tungstenite::connect_async(websocket_request(&harness))
