@@ -147,3 +147,9 @@ id = 25
 name = "deps_apply_runs"
 sqlite_file = "025_deps_apply_runs.sqlite.sql"
 postgres_file = "025_deps_apply_runs.postgres.sql"
+
+[[migration]]
+id = 26
+name = "commands_terminal_id"
+sqlite_file = "026_commands_terminal_id.sqlite.sql"
+postgres_file = "026_commands_terminal_id.postgres.sql"

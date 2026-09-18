@@ -870,6 +870,64 @@ mod tests {
     }
 
     #[test]
+    fn inference_failed_event_carries_the_cause() {
+        let terminal = build_terminal_outcome_with_prompt_id(
+            Outcome::Settled(Err(StackError::InferenceRequestFailed {
+                status_code: 429,
+                reason_category: "rate_limit",
+            })),
+            Some("prm_rate_limit"),
+        );
+
+        let event = terminal.session_event.expect("inference failure event");
+        assert_eq!(event.kind, EVENT_KIND_PROMPT_INFERENCE_FAILED);
+        let payload: serde_json::Value =
+            serde_json::from_str(&event.payload_json).expect("payload is json");
+        assert_eq!(
+            payload["cause"],
+            "inference endpoint returned 429 (rate_limit)"
+        );
+        assert_eq!(payload["status_code"], 429);
+        assert_eq!(payload["reason_category"], "rate_limit");
+    }
+
+    #[test]
+    fn errored_event_carries_the_cause() {
+        let terminal = build_terminal_outcome_with_prompt_id(
+            Outcome::Settled(Err(StackError::AgentNotRunning)),
+            Some("prm_not_running"),
+        );
+
+        let event = terminal.session_event.expect("errored event");
+        assert_eq!(event.kind, EVENT_KIND_PROMPT_ERRORED);
+        let payload: serde_json::Value =
+            serde_json::from_str(&event.payload_json).expect("payload is json");
+        assert_eq!(payload["cause"], "agent is not running");
+        assert_eq!(payload["error_code"], "agent.not_running");
+    }
+
+    #[test]
+    fn errored_cause_is_scrubbed_of_local_paths() {
+        const LOCAL_PATH: &str = "/home/operator/.local/share/acp-stack/agents/claude-code";
+        let terminal = build_terminal_outcome_with_prompt_id(
+            Outcome::Settled(Err(StackError::AgentInitializeFailed {
+                reason: format!("spawn {LOCAL_PATH} failed: No such file or directory"),
+            })),
+            Some("prm_scrubbed"),
+        );
+
+        let event = terminal.session_event.expect("errored event");
+        assert!(
+            !event.payload_json.contains(LOCAL_PATH),
+            "local path leaked into the event payload: {}",
+            event.payload_json
+        );
+        let payload: serde_json::Value =
+            serde_json::from_str(&event.payload_json).expect("payload is json");
+        assert_eq!(payload["cause"], "agent failed to initialize");
+    }
+
+    #[test]
     fn terminal_outcome_classifies_sqlite_failures() {
         let terminal = build_terminal_outcome_with_prompt_id(
             Outcome::Settled(Err(StackError::State(rusqlite::Error::InvalidQuery))),

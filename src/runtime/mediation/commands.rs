@@ -163,6 +163,7 @@ impl CommandGateway {
                 env_json: env_json.as_deref(),
                 origin: crate::state::CommandOrigin::Operator,
                 session_id: None,
+                terminal_id: None,
             })?
         };
 
@@ -247,10 +248,11 @@ impl CommandGateway {
             .ok_or_else(|| StackError::CommandNotFound { id: id.to_owned() })
     }
 
-    pub async fn list(&self, limit: u32) -> Result<Vec<CommandRecord>> {
+    pub async fn list(&self, limit: u32, terminal_id: Option<&str>) -> Result<Vec<CommandRecord>> {
         let store = self.state.lock().await;
         store.query_commands(crate::state::CommandFilter {
             limit,
+            terminal_id,
             ..Default::default()
         })
     }

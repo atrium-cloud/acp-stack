@@ -228,6 +228,7 @@ async fn happy_path_uploads_grouped_batches_and_marks_sent() {
                 env_json: Some(r#"{"TOKEN":"sk-command"}"#),
                 origin: acp_stack::state::CommandOrigin::Acp,
                 session_id: Some("sess_1"),
+                terminal_id: Some("term_0"),
             })
             .expect("append command");
     }

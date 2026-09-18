@@ -70,10 +70,15 @@ pub(super) fn build_terminal_outcome_with_prompt_id(
                         "reason_category": reason_category,
                     })
                     .to_string();
+                    // `public` is the scrubbed message already stored on the
+                    // prompt row, so a transcript reads the cause off the event
+                    // without a second read and local paths, I/O text, and
+                    // subprocess output stay out of it.
                     let payload = json!({
                         "prompt_id": prompt_id_for_event,
                         "status_code": status_code,
                         "reason_category": reason_category,
+                        "cause": &public,
                     })
                     .to_string();
                     TerminalOutcome {
@@ -98,6 +103,7 @@ pub(super) fn build_terminal_outcome_with_prompt_id(
                         let payload = json!({
                             "prompt_id": prompt_id_for_event,
                             "error_code": code,
+                            "cause": &public,
                         })
                         .to_string();
                         return TerminalOutcome {
@@ -118,6 +124,7 @@ pub(super) fn build_terminal_outcome_with_prompt_id(
                     let payload = json!({
                         "prompt_id": prompt_id_for_event,
                         "error_code": code,
+                        "cause": &public,
                     })
                     .to_string();
                     TerminalOutcome {

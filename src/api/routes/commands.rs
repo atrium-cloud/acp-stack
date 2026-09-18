@@ -3,7 +3,7 @@ use axum::extract::{Path, Query, State};
 use serde::{Deserialize, Serialize};
 
 use super::super::core::AppState;
-use super::logs::{LogsLimitParams, MAX_LOGS_LIMIT, default_logs_limit, parse_order};
+use super::logs::{MAX_LOGS_LIMIT, default_logs_limit, parse_order};
 use crate::envelope::ApiSuccess;
 use crate::error::StackError;
 use crate::runtime::mediation::commands::SubmitRequest;
@@ -41,6 +41,9 @@ pub(crate) struct CommandResponse {
     #[schemars(extend("enum" = ["operator", "acp"]))]
     origin: String,
     session_id: Option<String>,
+    /// ACP client terminal this row ran; the join key from a tool call's
+    /// `terminalId` to the command log.
+    terminal_id: Option<String>,
 }
 
 impl From<crate::state::CommandRecord> for CommandResponse {
@@ -64,6 +67,7 @@ impl From<crate::state::CommandRecord> for CommandResponse {
             last_progress_at: record.last_progress_at,
             origin: record.origin,
             session_id: record.session_id,
+            terminal_id: record.terminal_id,
         }
     }
 }
@@ -182,12 +186,25 @@ pub(crate) async fn commands_output_handler(
     }))
 }
 
+#[derive(Debug, Deserialize, Default, schemars::JsonSchema)]
+#[serde(default)]
+pub(crate) struct CommandsListParams {
+    /// Values above 1000 are silently clamped to 1000, not rejected.
+    #[serde(default = "default_logs_limit")]
+    limit: u32,
+    /// Restrict to the row that ran this ACP client terminal.
+    terminal_id: Option<String>,
+}
+
 pub(crate) async fn commands_list_handler(
-    Query(params): Query<LogsLimitParams>,
+    Query(params): Query<CommandsListParams>,
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<CommandsListResponse>, StackError> {
     let limit = params.limit.min(MAX_LOGS_LIMIT);
-    let records = state.commands.list(limit).await?;
+    let records = state
+        .commands
+        .list(limit, params.terminal_id.as_deref())
+        .await?;
     Ok(ApiSuccess::new(CommandsListResponse {
         items: records.into_iter().map(CommandResponse::from).collect(),
     }))

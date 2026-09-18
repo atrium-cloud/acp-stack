@@ -34,9 +34,14 @@ The initialize request advertises the client capabilities `acp-stack` implements
 
 `terminal/create` executes directly — there is no permission-service gate on terminal spawns. The VM is the security boundary; agents send `session/request_permission` separately when their own policy requires review. Every created terminal is recorded in the durable command log as an `acp`-origin `commands` row tied to the local session:
 
+- The row carries the terminal id from its insert, so the id the agent holds resolves to exactly one command.
 - Output streams into `command.stdout`/`command.stderr` events, which also fan out live on the `commands.{id}` WebSocket topic (same payload shape as gateway commands).
 - The row is finalized with the exit status.
 - Agent shell activity is therefore visible in `acps logs`, command history, and live subscriptions alongside operator-submitted commands.
+
+### Session Stream
+
+Finalizing a terminal appends one `terminal.finished` event scoped to the local session, carrying the terminal id, the command id, the cwd, the terminal status, the exit status or signal, the duration, and the newest 8 KiB of output. A transcript replayed from `GET /v1/sessions/{id}/events` fills a tool call's `{ "type": "terminal", "terminalId": ... }` item from that one row, and follows either id into the command log routes for the untrimmed stream, the terminal id through the `terminal_id` list filter. Terminals that fail to spawn or fail to start record the event too, so a tool call the agent already announced always resolves. The raw output chunk events stay unscoped on the command log. `docs/specs/state-logging.md` holds the payload table.
 
 The argv decides how the request is executed. A `terminal/create` that carries `args` execs `command` as the program with that argv exactly. A `terminal/create` with an empty `args` runs the whole `command` string through `[workspace].default_shell -c`, the same interpreter the command gateway runs operator commands under. That is how agents which send a full shell line (pipes, operators, quoting) in `command` execute as they intend. Both forms pass through the same sandbox wrapper, and the command log records the agent-requested command line either way.
 

@@ -182,6 +182,26 @@
           }
         }
       },
+      "CommandsListParams": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "description": "Values above 1000 are silently clamped to 1000, not rejected.",
+            "default": 100
+          },
+          "terminal_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Restrict to the row that ran this ACP client terminal.",
+            "default": null
+          }
+        }
+      },
       "CommandSubmitRequest": {
         "type": "object",
         "properties": {
@@ -396,6 +416,13 @@
             "default": null
           },
           "status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "terminal_id": {
             "type": [
               "string",
               "null"
@@ -3413,6 +3440,13 @@
               "string",
               "null"
             ]
+          },
+          "terminal_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "ACP client terminal this row ran; the join key from a tool call's\n`terminalId` to the command log."
           }
         },
         "required": [
@@ -3433,7 +3467,8 @@
           "output_bytes",
           "last_progress_at",
           "origin",
-          "session_id"
+          "session_id",
+          "terminal_id"
         ]
       },
       "CommandsListResponse": {

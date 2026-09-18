@@ -28,7 +28,8 @@ use crate::runtime::mediation::commands::output::{
 use crate::runtime::mediation::commands::policy::resolve_cwd_under_workspace;
 use crate::runtime::mediation::commands::process::kill_process_group_pid;
 use crate::state::{
-    CommandOrigin, CommandStatus, EVENT_SOURCE_COMMAND, NewCommandRecord, StateStore,
+    CommandOrigin, CommandStatus, EVENT_KIND_TERMINAL_FINISHED, EVENT_SOURCE_ACP,
+    EVENT_SOURCE_COMMAND, NewCommandRecord, StateStore,
 };
 
 use super::acp_bridge::agent_process_path;
@@ -51,6 +52,15 @@ pub(crate) const TERMINAL_KILL_GRACE: Duration = Duration::from_secs(2);
 const OUTPUT_CHANNEL_CAPACITY: usize = 64;
 
 const TERMINAL_ID_PREFIX: &str = "term_";
+
+/// Output tail carried on the session-scoped finalize event. A transcript
+/// renders this inline under the tool call; the untrimmed stream stays
+/// reachable through the command log routes.
+pub(crate) const TERMINAL_FINISHED_OUTPUT_TAIL_BYTES: u64 = 8 * 1024;
+
+/// `message` column of the session-scoped finalize event; the payload's
+/// `status` carries the verdict.
+const TERMINAL_FINISHED_MESSAGE: &str = "terminal finished";
 
 /// Rolling output buffer for one terminal; `truncated` latches once any byte
 /// has been dropped.
@@ -135,33 +145,59 @@ pub struct TerminalCommandLog {
 pub(crate) struct TerminalPersistence {
     pub(crate) command_log: TerminalCommandLog,
     pub(crate) command_id: String,
+    /// Local session that owns the terminal; scopes the finalize event to the
+    /// per-session event log a transcript replays from.
+    pub(crate) session_id: String,
+    pub(crate) terminal_id: String,
+    pub(crate) cwd: String,
+}
+
+/// Fields the session-scoped finalize event names, so a transcript can fill a
+/// tool call's `{ "type": "terminal", "terminalId": ... }` item from the log.
+struct TerminalFinished<'a> {
+    terminal_id: &'a str,
+    command_id: &'a str,
+    cwd: &'a str,
+    status: CommandStatus,
+    exit_status: Option<i32>,
+    signal: Option<&'a str>,
+    duration_ms: Option<i64>,
+    output_tail: &'a str,
+    output_tail_truncated: bool,
 }
 
 impl TerminalRegistry {
-    /// Take ownership of a freshly spawned child and return the minted
-    /// terminal id, or `None` (after killing the child) once `drain_all` has
-    /// closed the registry. The entries lock MUST stay held from the closed
-    /// check through the insert, so a concurrent `drain_all` either sees the
-    /// new terminal or the register sees `closed` — otherwise shutdown leaks
-    /// an orphan process.
+    /// Mint the next terminal id. Minted before the child spawns so the
+    /// durable `commands` row carries the id from its INSERT, which is what
+    /// lets a fast-exiting terminal's finalize name the terminal it ran.
+    pub(crate) fn mint_terminal_id(&self) -> String {
+        format!(
+            "{TERMINAL_ID_PREFIX}{}",
+            self.next_terminal.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    /// Take ownership of a freshly spawned child under `terminal_id`, or
+    /// report `false` (after killing the child) once `drain_all` has closed
+    /// the registry. The entries lock MUST stay held from the closed check
+    /// through the insert, so a concurrent `drain_all` either sees the new
+    /// terminal or the register sees `closed` — otherwise shutdown leaks an
+    /// orphan process.
     pub(crate) async fn register(
         self: &Arc<Self>,
         session_id: &str,
+        terminal_id: &str,
         mut child: Child,
         output_byte_limit: u64,
         persistence: Option<TerminalPersistence>,
-    ) -> Option<String> {
+    ) -> bool {
         let mut entries = self.entries.lock().await;
         if entries.closed {
             drop(entries);
             kill_with_grace(&mut child, Duration::ZERO).await;
-            return None;
+            return false;
         }
 
-        let terminal_id = format!(
-            "{TERMINAL_ID_PREFIX}{}",
-            self.next_terminal.fetch_add(1, Ordering::Relaxed)
-        );
         let buffer = Arc::new(TokioMutex::new(TerminalBuffer::default()));
         let (exit_tx, exit_rx) = watch::channel(None);
         let (kill_tx, kill_rx) = mpsc::channel::<Duration>(1);
@@ -197,8 +233,8 @@ impl TerminalRegistry {
         });
         entries
             .terminals
-            .insert((session_id.to_owned(), terminal_id.clone()), handle);
-        Some(terminal_id)
+            .insert((session_id.to_owned(), terminal_id.to_owned()), handle);
+        true
     }
 
     pub(crate) async fn get(
@@ -392,6 +428,28 @@ async fn own_terminal(
                     }),
                 )
                 .await;
+                let (output_tail, output_tail_truncated) = {
+                    let buffer = buffer.lock().await;
+                    let (tail, cut_now) =
+                        keep_newest(&buffer.data, TERMINAL_FINISHED_OUTPUT_TAIL_BYTES);
+                    (tail.to_owned(), buffer.truncated || cut_now)
+                };
+                publish_terminal_finished_event(
+                    &persistence.command_log,
+                    &persistence.session_id,
+                    TerminalFinished {
+                        terminal_id: &persistence.terminal_id,
+                        command_id: &persistence.command_id,
+                        cwd: &persistence.cwd,
+                        status: command_status,
+                        exit_status: exit_code,
+                        signal: status.signal.as_deref(),
+                        duration_ms,
+                        output_tail: &output_tail,
+                        output_tail_truncated,
+                    },
+                )
+                .await;
             }
             Err(error) => {
                 tracing::warn!(
@@ -450,6 +508,49 @@ async fn append_chunk(
             }
         }
         *seq += 1;
+    }
+}
+
+/// Append the session-scoped finalize event. This is the only place a client
+/// terminal's cwd, verdict, and output reach the per-session event stream; the
+/// raw stdout/stderr chunks stay unscoped on the command log.
+async fn publish_terminal_finished_event(
+    command_log: &TerminalCommandLog,
+    session_id: &str,
+    finished: TerminalFinished<'_>,
+) {
+    let payload = serde_json::json!({
+        "terminal_id": finished.terminal_id,
+        "command_id": finished.command_id,
+        "cwd": finished.cwd,
+        "status": finished.status.as_str(),
+        "exit_status": finished.exit_status,
+        "signal": finished.signal,
+        "duration_ms": finished.duration_ms,
+        "output_tail": finished.output_tail,
+        "output_tail_truncated": finished.output_tail_truncated,
+    })
+    .to_string();
+    let level = match finished.status {
+        CommandStatus::Exited => "info",
+        _ => "warn",
+    };
+    let store = command_log.state.lock().await;
+    if let Err(error) = store.append_session_event_with_source(
+        session_id,
+        level,
+        EVENT_KIND_TERMINAL_FINISHED,
+        EVENT_SOURCE_ACP,
+        TERMINAL_FINISHED_MESSAGE,
+        &payload,
+    ) {
+        tracing::warn!(
+            error = %error,
+            command_id = %finished.command_id,
+            terminal_id = %finished.terminal_id,
+            session_id = %session_id,
+            "failed to append the session-scoped terminal finalize event",
+        );
     }
 }
 
@@ -556,6 +657,12 @@ pub(crate) async fn handle_create_terminal(
     )
     .map_err(AcpError::into_internal_error)?;
 
+    // Minted before the row is inserted so the command carries its terminal id
+    // from the start, and a terminal that exits before `register` returns can
+    // still name itself on the finalize event.
+    let terminal_id = context.registry.mint_terminal_id();
+    let cwd_display = resolved_cwd.display_path();
+
     // Insert the durable row before spawning so even a failed spawn leaves an
     // audit trail.
     let command_id = match &context.command_log {
@@ -566,10 +673,11 @@ pub(crate) async fn handle_create_terminal(
             let record = store
                 .append_command(NewCommandRecord {
                     command: &rendered,
-                    cwd: Some(&resolved_cwd.display_path()),
+                    cwd: Some(&cwd_display),
                     env_json: env_names_json.as_deref(),
                     origin: CommandOrigin::Acp,
                     session_id: Some(&local_session_id),
+                    terminal_id: Some(&terminal_id),
                 })
                 .map_err(AcpError::into_internal_error)?;
             Some(record.id)
@@ -579,16 +687,36 @@ pub(crate) async fn handle_create_terminal(
 
     let mark_failed = async |reason: &str| {
         if let (Some(command_log), Some(command_id)) = (&context.command_log, &command_id) {
-            let store = command_log.state.lock().await;
-            if let Err(finish_error) =
+            let finish_result = {
+                let store = command_log.state.lock().await;
                 store.finish_command(command_id, CommandStatus::Failed, None, None)
-            {
+            };
+            if let Err(finish_error) = finish_result {
                 tracing::warn!(
                     error = %finish_error,
                     command_id = %command_id,
                     "failed to record terminal {reason}",
                 );
+                return;
             }
+            // A terminal that never ran still belongs on the transcript, or the
+            // tool call the agent already announced never resolves there.
+            publish_terminal_finished_event(
+                command_log,
+                &local_session_id,
+                TerminalFinished {
+                    terminal_id: &terminal_id,
+                    command_id,
+                    cwd: &cwd_display,
+                    status: CommandStatus::Failed,
+                    exit_status: None,
+                    signal: None,
+                    duration_ms: None,
+                    output_tail: "",
+                    output_tail_truncated: false,
+                },
+            )
+            .await;
         }
     };
 
@@ -623,25 +751,31 @@ pub(crate) async fn handle_create_terminal(
             Some(TerminalPersistence {
                 command_log: command_log.clone(),
                 command_id,
+                session_id: local_session_id.clone(),
+                terminal_id: terminal_id.clone(),
+                cwd: cwd_display.clone(),
             })
         }
         _ => None,
     };
 
     let output_byte_limit = effective_output_byte_limit(request.output_byte_limit);
-    let terminal_id = match context
+    let registered = context
         .registry
-        .register(&agent_session_id, child, output_byte_limit, persistence)
-        .await
-    {
-        Some(terminal_id) => terminal_id,
-        None => {
-            mark_failed("create during bridge shutdown").await;
-            return Err(AcpError::internal_error().data(serde_json::json!({
-                "reason": "agent bridge is shutting down; terminal registry closed",
-            })));
-        }
-    };
+        .register(
+            &agent_session_id,
+            &terminal_id,
+            child,
+            output_byte_limit,
+            persistence,
+        )
+        .await;
+    if !registered {
+        mark_failed("create during bridge shutdown").await;
+        return Err(AcpError::internal_error().data(serde_json::json!({
+            "reason": "agent bridge is shutting down; terminal registry closed",
+        })));
+    }
     Ok(CreateTerminalResponse::new(TerminalId::new(terminal_id)))
 }
 

@@ -656,6 +656,7 @@ async fn mark_stalled_prompts_appends_stalled_event_when_invoked_directly() {
         let payload = serde_json::json!({
             "prompt_id": pairs[0].0,
             "threshold_secs": 60u64,
+            "cause": "test stall",
         })
         .to_string();
         guard

@@ -42,6 +42,9 @@ pub const EVENT_KIND_MCP_SESSION_SKIPPED: &str = "mcp.session_skipped";
 pub const EVENT_KIND_SESSION_CAPABILITY_IGNORED: &str = "session.capability_ignored";
 /// The session was demoted from `active` to `available`; payload names the reason.
 pub const EVENT_KIND_SESSION_AVAILABLE: &str = "session.available";
+/// An ACP client terminal reached a terminal state; payload joins the tool
+/// call's `terminalId` to its `commands` row and carries the run's verdict.
+pub const EVENT_KIND_TERMINAL_FINISHED: &str = "terminal.finished";
 /// Verbatim ACP `session/update` notification. Agent-streamed rows carry source
 /// `acp`; the accepted user prompt is recorded under the same kind with source
 /// `system`, since it originates on this side of the protocol.

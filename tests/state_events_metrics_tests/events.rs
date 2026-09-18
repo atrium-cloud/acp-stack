@@ -55,6 +55,7 @@ fn command_output_query_filters_by_command_and_pages_forward() {
             env_json: None,
             origin: acp_stack::state::CommandOrigin::Operator,
             session_id: None,
+            terminal_id: None,
         })
         .expect("first command");
     let second = store
@@ -64,6 +65,7 @@ fn command_output_query_filters_by_command_and_pages_forward() {
             env_json: None,
             origin: acp_stack::state::CommandOrigin::Operator,
             session_id: None,
+            terminal_id: None,
         })
         .expect("second command");
 
@@ -90,6 +92,64 @@ fn command_output_query_filters_by_command_and_pages_forward() {
 }
 
 #[test]
+fn command_query_filters_by_terminal_id() {
+    use acp_stack::state::{CommandFilter, CommandOrigin, NewCommandRecord};
+
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state should open");
+    store.migrate().expect("migration should pass");
+    let operator = store
+        .append_command(NewCommandRecord {
+            command: "printf operator",
+            cwd: None,
+            env_json: None,
+            origin: CommandOrigin::Operator,
+            session_id: None,
+            terminal_id: None,
+        })
+        .expect("operator command");
+    let terminal = store
+        .append_command(NewCommandRecord {
+            command: "printf terminal",
+            cwd: None,
+            env_json: None,
+            origin: CommandOrigin::Acp,
+            session_id: Some("sess_1"),
+            terminal_id: Some("term_1"),
+        })
+        .expect("terminal command");
+
+    let matched = store
+        .query_commands(CommandFilter {
+            limit: 10,
+            terminal_id: Some("term_1"),
+            ..Default::default()
+        })
+        .expect("filtered query");
+    assert_eq!(matched.len(), 1);
+    assert_eq!(matched[0].id, terminal.id);
+    assert_eq!(matched[0].terminal_id.as_deref(), Some("term_1"));
+
+    let unmatched = store
+        .query_commands(CommandFilter {
+            limit: 10,
+            terminal_id: Some("term_missing"),
+            ..Default::default()
+        })
+        .expect("unmatched query");
+    assert!(unmatched.is_empty());
+
+    let all = store
+        .query_commands(CommandFilter {
+            limit: 10,
+            ..Default::default()
+        })
+        .expect("unfiltered query");
+    assert_eq!(all.len(), 2);
+    assert!(all.iter().any(|row| row.id == operator.id));
+}
+
+#[test]
 fn command_output_and_progress_update_reconnect_fields() {
     use acp_stack::state::NewCommandRecord;
 
@@ -104,6 +164,7 @@ fn command_output_and_progress_update_reconnect_fields() {
             env_json: None,
             origin: acp_stack::state::CommandOrigin::Operator,
             session_id: None,
+            terminal_id: None,
         })
         .expect("command");
     let output = store

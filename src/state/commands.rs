@@ -36,6 +36,9 @@ pub struct CommandRecord {
     pub origin: String,
     /// Local session the command belongs to; set only for `acp`-origin rows.
     pub session_id: Option<String>,
+    /// ACP client terminal this row ran; the join key from a tool call's
+    /// `terminalId` to the command log. Set only for client-terminal rows.
+    pub terminal_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +48,7 @@ pub struct NewCommandRecord<'a> {
     pub env_json: Option<&'a str>,
     pub origin: CommandOrigin,
     pub session_id: Option<&'a str>,
+    pub terminal_id: Option<&'a str>,
 }
 
 /// Origin of a `commands` row. String form goes to SQLite and the API.
@@ -107,6 +111,7 @@ pub(super) fn row_to_command(row: &rusqlite::Row<'_>) -> rusqlite::Result<Comman
         last_progress_at: row.get(16)?,
         origin: row.get(17)?,
         session_id: row.get(18)?,
+        terminal_id: row.get(19)?,
     })
 }
 
@@ -116,7 +121,7 @@ impl StateStore {
             "SELECT id, created_at, updated_at, status, command, exit_status, \
                     started_at, finished_at, cwd, env_json, duration_ms, truncated, \
                     last_output_event_id, last_output_at, last_output_seq, output_bytes, \
-                    last_progress_at, origin, session_id \
+                    last_progress_at, origin, session_id, terminal_id \
              FROM commands WHERE 1=1",
         );
         let mut bindings: Vec<rusqlite::types::Value> = Vec::new();
@@ -131,6 +136,10 @@ impl StateStore {
         if let Some(status) = filter.status {
             sql.push_str(" AND status = ?");
             bindings.push(rusqlite::types::Value::Text(status.to_owned()));
+        }
+        if let Some(terminal_id) = filter.terminal_id {
+            sql.push_str(" AND terminal_id = ?");
+            bindings.push(rusqlite::types::Value::Text(terminal_id.to_owned()));
         }
         if let Some(after) = filter.after_id {
             match filter.order {
@@ -162,7 +171,7 @@ impl StateStore {
                 SELECT id, created_at, updated_at, status, command, exit_status,
                        started_at, finished_at, cwd, env_json, duration_ms, truncated,
                        last_output_event_id, last_output_at, last_output_seq,
-                       output_bytes, last_progress_at, origin, session_id
+                       output_bytes, last_progress_at, origin, session_id, terminal_id
                 FROM commands
                 WHERE id = ?1
                 "#,
@@ -199,6 +208,7 @@ impl StateStore {
             last_progress_at: None,
             origin: input.origin.as_str().to_owned(),
             session_id: input.session_id.map(str::to_owned),
+            terminal_id: input.terminal_id.map(str::to_owned),
         };
 
         self.persist_with_outbox("commands", &record.id, &record.created_at, |conn| {
@@ -208,9 +218,9 @@ impl StateStore {
                     (id, created_at, updated_at, status, command, exit_status,
                      started_at, finished_at, cwd, env_json, duration_ms, truncated,
                      last_output_event_id, last_output_at, last_output_seq,
-                     output_bytes, last_progress_at, origin, session_id)
+                     output_bytes, last_progress_at, origin, session_id, terminal_id)
                 VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL, ?6, ?7, NULL, 0,
-                        NULL, NULL, NULL, 0, NULL, ?8, ?9)
+                        NULL, NULL, NULL, 0, NULL, ?8, ?9, ?10)
                 "#,
                 params![
                     record.id,
@@ -222,6 +232,7 @@ impl StateStore {
                     record.env_json,
                     record.origin,
                     record.session_id,
+                    record.terminal_id,
                 ],
             )?;
             Ok(())

@@ -280,6 +280,7 @@ impl PermissionService {
                 "subject_id": record.subject_id,
                 "expires_at": record.expires_at,
             }),
+            None,
         )
         .await;
     }
@@ -464,9 +465,15 @@ impl PermissionService {
             "deciding_principal": decision.deciding_principal,
             "reason": decision.reason,
         });
-        link_request_subject(&self.state, id, &mut payload).await;
-        self.publish_event(id, &decision.created_at, kind, payload)
-            .await;
+        let session_id = link_request_subject(&self.state, id, &mut payload).await;
+        self.publish_event(
+            id,
+            &decision.created_at,
+            kind,
+            payload,
+            session_id.as_deref(),
+        )
+        .await;
     }
 
     fn spawn_timer(&self, id: String) {
@@ -534,14 +541,38 @@ impl PermissionService {
                 "deciding_principal": "system",
                 "reason": "timeout",
             });
-            link_request_subject(&state, &id, &mut payload).await;
-            persist_and_publish_permission_event(&state, &events, &id, &now, kind, payload).await;
+            let session_id = link_request_subject(&state, &id, &mut payload).await;
+            persist_and_publish_permission_event(
+                &state,
+                &events,
+                &id,
+                &now,
+                kind,
+                payload,
+                session_id.as_deref(),
+            )
+            .await;
         });
     }
 
-    async fn publish_event(&self, id: &str, created_at: &str, kind: &str, data: Value) {
-        persist_and_publish_permission_event(&self.state, &self.events, id, created_at, kind, data)
-            .await;
+    async fn publish_event(
+        &self,
+        id: &str,
+        created_at: &str,
+        kind: &str,
+        data: Value,
+        session_id: Option<&str>,
+    ) {
+        persist_and_publish_permission_event(
+            &self.state,
+            &self.events,
+            id,
+            created_at,
+            kind,
+            data,
+            session_id,
+        )
+        .await;
     }
 }
 
@@ -575,7 +606,15 @@ fn decision_view(decision: PermissionDecisionRecord) -> PermissionDecisionView {
 /// permission settled. ACP-source `subject_id` is a session id and must not
 /// be presented as a command id. Best-effort: a failed read keeps the base
 /// payload and logs.
-async fn link_request_subject(state: &Arc<TokioMutex<StateStore>>, id: &str, payload: &mut Value) {
+///
+/// Returns the local session id for ACP-source requests, which the caller
+/// stamps on the durable event so the decision replays from the per-session
+/// event log.
+async fn link_request_subject(
+    state: &Arc<TokioMutex<StateStore>>,
+    id: &str,
+    payload: &mut Value,
+) -> Option<String> {
     let record = {
         let store = state.lock().await;
         store.get_permission_request(id)
@@ -584,20 +623,23 @@ async fn link_request_subject(state: &Arc<TokioMutex<StateStore>>, id: &str, pay
         Ok(Some(record)) => {
             payload["source"] = json!(record.source);
             payload["subject_id"] = json!(record.subject_id);
-            if record.source == PermissionSource::Command.as_str()
-                && let Some(subject_id) = record.subject_id
-            {
+            let subject_id = record.subject_id?;
+            if record.source == PermissionSource::Command.as_str() {
                 payload["command_id"] = json!(subject_id);
+                return None;
             }
+            (record.source == PermissionSource::Acp.as_str()).then_some(subject_id)
         }
         Ok(None) => {
             tracing::warn!(
                 perm_id = id,
                 "permission row missing while enriching decision event"
             );
+            None
         }
         Err(error) => {
             tracing::warn!(error = %error, perm_id = id, "failed to read permission row while enriching decision event");
+            None
         }
     }
 }
@@ -609,6 +651,10 @@ async fn link_request_subject(state: &Arc<TokioMutex<StateStore>>, id: &str, pay
 /// fanned out live (so subscribers see it immediately). The append_event
 /// helper already fans out to the `logs` topic, so each lifecycle event
 /// reaches `logs` AND `permissions` subscribers.
+///
+/// `session_id` scopes the durable row to the session that raised the request,
+/// which is what puts an ACP-source decision in the per-session event log a
+/// transcript replays from.
 async fn persist_and_publish_permission_event(
     state: &Arc<TokioMutex<StateStore>>,
     events: &EventHub,
@@ -616,6 +662,7 @@ async fn persist_and_publish_permission_event(
     created_at: &str,
     kind: &str,
     data: Value,
+    session_id: Option<&str>,
 ) {
     let payload_text = match serde_json::to_string(&data) {
         Ok(text) => text,
@@ -639,13 +686,24 @@ async fn persist_and_publish_permission_event(
     };
     {
         let store = state.lock().await;
-        if let Err(err) = store.append_event_with_source(
-            "info",
-            kind,
-            crate::state::EVENT_SOURCE_PERMISSION,
-            message,
-            &payload_text,
-        ) {
+        let appended = match session_id {
+            Some(session_id) => store.append_session_event_with_source(
+                session_id,
+                "info",
+                kind,
+                crate::state::EVENT_SOURCE_PERMISSION,
+                message,
+                &payload_text,
+            ),
+            None => store.append_event_with_source(
+                "info",
+                kind,
+                crate::state::EVENT_SOURCE_PERMISSION,
+                message,
+                &payload_text,
+            ),
+        };
+        if let Err(err) = appended {
             tracing::warn!(
                 error = %err,
                 perm_id = id,
@@ -723,6 +781,61 @@ mod tests {
             outcome,
             PermissionOutcome::Approved { option_id: Some(opt), .. } if opt == "ok"
         ));
+    }
+
+    /// An ACP-source decision is the session's own turn content, so it must
+    /// replay from the per-session event log. A command-source decision has no
+    /// session and stays unscoped.
+    #[tokio::test]
+    async fn only_acp_source_decisions_reach_the_per_session_event_log() {
+        let (_dir, service) = fresh_service(PermissionTimeoutAction::Deny);
+        let (acp_record, _acp_rx) = service
+            .request(NewPermission {
+                source: PermissionSource::Acp,
+                requester: Some("session:sess_scope".to_owned()),
+                subject_id: Some("sess_scope".to_owned()),
+                detail: json!({}),
+            })
+            .await
+            .expect("acp request");
+        let (command_record, _command_rx) = service
+            .request(NewPermission {
+                source: PermissionSource::Command,
+                requester: Some("cmd_scope".to_owned()),
+                subject_id: Some("cmd_scope".to_owned()),
+                detail: json!({ "command": "echo hi" }),
+            })
+            .await
+            .expect("command request");
+
+        service
+            .approve(&acp_record.id, None, None, "session-key")
+            .await
+            .expect("approve acp");
+        service
+            .deny(&command_record.id, None, "session-key")
+            .await
+            .expect("deny command");
+
+        let session_events = {
+            let state = service.state.lock().await;
+            state
+                .query_session_events("sess_scope", None, 50)
+                .expect("query session events")
+        };
+        let decisions: Vec<&crate::state::Event> = session_events
+            .iter()
+            .filter(|event| event.kind.starts_with("permission."))
+            .collect();
+        assert_eq!(decisions.len(), 1, "{session_events:?}");
+        assert_eq!(decisions[0].kind, "permission.approved");
+        assert!(decisions[0].payload_json.contains(&acp_record.id));
+        assert!(
+            !session_events
+                .iter()
+                .any(|event| event.payload_json.contains("cmd_scope")),
+            "a command-source decision must stay unscoped: {session_events:?}"
+        );
     }
 
     /// The durable row exists before its waiter is registered, so a decider

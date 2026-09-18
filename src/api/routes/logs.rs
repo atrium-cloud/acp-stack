@@ -270,6 +270,7 @@ pub(crate) struct LogsCommandsParams {
     since: Option<String>,
     until: Option<String>,
     status: Option<String>,
+    terminal_id: Option<String>,
     after: Option<String>,
     #[schemars(extend("enum" = ["asc", "desc", null]))]
     order: Option<String>,
@@ -304,6 +305,7 @@ pub(crate) async fn logs_commands_handler(
         since: params.since.as_deref(),
         until: params.until.as_deref(),
         status: params.status.as_deref(),
+        terminal_id: params.terminal_id.as_deref(),
         after_id: params.after.as_deref(),
         order,
     })?;

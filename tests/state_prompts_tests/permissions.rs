@@ -106,6 +106,7 @@ fn reconcile_orphaned_commands_settles_dependent_permissions() {
             env_json: None,
             origin: CommandOrigin::Operator,
             session_id: None,
+            terminal_id: None,
         })
         .expect("command row");
     let requester = format!("command:{}", command.id);

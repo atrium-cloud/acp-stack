@@ -250,6 +250,14 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         sqlite: include_str!("../../migrations/025_deps_apply_runs.sqlite.sql"),
         postgres: include_str!("../../migrations/025_deps_apply_runs.postgres.sql"),
     },
+    Migration {
+        id: 26,
+        name: "commands_terminal_id",
+        sqlite_file: "026_commands_terminal_id.sqlite.sql",
+        postgres_file: "026_commands_terminal_id.postgres.sql",
+        sqlite: include_str!("../../migrations/026_commands_terminal_id.sqlite.sql"),
+        postgres: include_str!("../../migrations/026_commands_terminal_id.postgres.sql"),
+    },
 ];
 
 /// Read-only accessor for the migration registry, including Postgres SQL.

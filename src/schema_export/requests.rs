@@ -14,6 +14,7 @@ pub(super) enum AcpsRequestTypes {
     AgentUpdateRequest(crate::api::routes::agent::update::AgentUpdateRequest),
     ApplyRequest(crate::extensions::managed_state::ApplyRequest),
     CommandOutputParams(crate::api::routes::commands::CommandOutputParams),
+    CommandsListParams(crate::api::routes::commands::CommandsListParams),
     CommandSubmitRequest(crate::api::routes::commands::CommandSubmitRequest),
     ConfigImportQuery(crate::api::routes::config::ConfigImportQuery),
     DepsApplyBody(crate::api::routes::deps::DepsApplyBody),

@@ -185,15 +185,17 @@ CREATE TABLE IF NOT EXISTS {commands} (
     output_bytes bigint NOT NULL DEFAULT 0,
     last_progress_at timestamptz,
     origin text NOT NULL DEFAULT 'operator',
-    session_id text
+    session_id text,
+    terminal_id text
 );
 
 -- Additive drift guard for mirrors created before these columns existed:
 -- CREATE TABLE IF NOT EXISTS is a no-op on an existing table, but the ingest
 -- function below is regenerated with the full column list and would fail
--- against the old shape. Mirrors local migration 023.
+-- against the old shape. Mirrors local migrations 023 and 026.
 ALTER TABLE {commands} ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'operator';
 ALTER TABLE {commands} ADD COLUMN IF NOT EXISTS session_id text;
+ALTER TABLE {commands} ADD COLUMN IF NOT EXISTS terminal_id text;
 
 CREATE TABLE IF NOT EXISTS {permission_requests} (
     id text PRIMARY KEY,
@@ -472,6 +474,7 @@ fn columns_for(source_table: &str) -> Result<&'static [&'static str]> {
             "last_progress_at",
             "origin",
             "session_id",
+            "terminal_id",
         ]),
         "permission_requests" => Ok(&[
             "id",

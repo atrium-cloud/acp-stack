@@ -959,12 +959,12 @@ Commands are session-tier and mediated by policy.
 - Response: the command record.
 - Notes:
     - Command status values are `pending`, `running`, `exited`, `failed`, and `cancelled`.
-    - Command records include `last_output_event_id`, `last_output_at`, `last_output_seq`, `output_bytes`, and `last_progress_at` for reconnect and liveness checks, plus `origin` (`operator` for gateway submissions, `acp` for agent-created client terminals) and `session_id` (set on `acp`-origin rows).
+    - Command records include `last_output_event_id`, `last_output_at`, `last_output_seq`, `output_bytes`, and `last_progress_at` for reconnect and liveness checks, plus `origin` (`operator` for gateway submissions, `acp` for agent-created client terminals), `session_id` (set on `acp`-origin rows), and `terminal_id` (the ACP terminal id the row ran, set on client-terminal rows).
 
 ### `GET /v1/commands`
 
 - Tier: `session`
-- Request: none.
+- Request: optional `limit` and `terminal_id` query parameters. `terminal_id` narrows the list to the row that ran that ACP client terminal.
 - Response: command records.
 
 ### `GET /v1/commands/{id}`
@@ -1176,7 +1176,7 @@ A `running` row is reconciled to `failed` with `error.code = "deps.apply_abandon
 ### `GET /v1/logs/commands`
 
 - Tier: `session`
-- Request: the shared log filters plus `status`.
+- Request: the shared log filters plus `status` and `terminal_id`.
 - Response: command history.
 
 ### `GET /v1/logs/permissions`

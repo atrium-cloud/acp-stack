@@ -115,11 +115,13 @@ Common sources are `system`, `api`, `acp`, `command`, `permission`, `cli`, and `
 
 Session-scoped events that mirror terminal prompt transitions:
 
-| Kind                      | Level | Source   | Payload                                                               | Emit site                                           |
-| ------------------------- | ----- | -------- | --------------------------------------------------------------------- | --------------------------------------------------- |
-| `prompt.inference_failed` | warn  | `system` | `{ "prompt_id", "status_code": <u16>, "reason_category": "<label>" }` | Supervisor, on `StackError::InferenceRequestFailed` |
-| `prompt.stalled`          | warn  | `system` | `{ "prompt_id", "threshold_secs": <u64> }`                            | Stale-prompt sweeper, after flipping the row        |
-| `prompt.errored`          | error | `system` | `{ "prompt_id", "error_code": "<code>" }`                             | Supervisor, on any other terminal error             |
+| Kind                      | Level | Source   | Payload                                                                                | Emit site                                           |
+| ------------------------- | ----- | -------- | --------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| `prompt.inference_failed` | warn  | `system` | `{ "prompt_id", "status_code": <u16>, "reason_category": "<label>", "cause": "<text>" }` | Supervisor, on `StackError::InferenceRequestFailed` |
+| `prompt.stalled`          | warn  | `system` | `{ "prompt_id", "threshold_secs": <u64>, "cause": "<text>" }`                            | Stale-prompt sweeper, after flipping the row        |
+| `prompt.errored`          | error | `system` | `{ "prompt_id", "error_code": "<code>", "cause": "<text>" }`                             | Supervisor, on any other terminal error             |
+
+`cause` carries the same text the prompt row's `error_message` holds, so a transcript distinguishes a rate limit from a crashed subprocess without a second read. It is the error's public message, which the scrub keeps free of local paths, I/O text, and subprocess output. On a stall it is the sweeper's stall reason.
 
 ### Session Lifecycle Event Kinds
 
@@ -128,6 +130,16 @@ Session-scoped events that mirror terminal prompt transitions:
 | `session.available` | info  | `system` | `{ "reason": "<label>", "threshold_secs"?: <u64> }`            | Startup reconcile, agent teardown, and the idle session sweep |
 
 `reason` is one of `daemon_restart`, `agent_stopped`, `agent_exited`, or `idle`; `threshold_secs` appears only on idle-sweep demotions.
+
+### Client Terminal Events
+
+| Kind                | Level                          | Source | Payload                                                                                                                                            | Emit site                                  |
+| ------------------- | ------------------------------ | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| `terminal.finished` | info on `exited`, warn on rest | `acp`  | `{ "terminal_id", "command_id", "cwd", "status", "exit_status": <i32 or null>, "signal": "<name> or null", "duration_ms": <i64 or null>, "output_tail", "output_tail_truncated" }` | Terminal owner task, and `terminal/create` on a spawn or start failure |
+
+This is the session-scoped view of a client terminal, and the only one a transcript needs to fill a tool call's `{ "type": "terminal", "terminalId": ... }` item. `command_id` addresses the full run on the command log routes. `terminal_id` matches the id the agent received from `terminal/create` and the `commands.terminal_id` column, so `GET /v1/commands?terminal_id=` and `GET /v1/logs/commands?terminal_id=` reach the same row from a tool call's `terminalId`. `status` is the `commands` row's terminal status: `exited`, `failed`, or `cancelled`. `exit_status` is set when the process reported a code, `signal` when it died on one; a kill-intent exit reports the signal with no code. A spawn or start failure carries `status: "failed"` with `exit_status`, `signal`, and `duration_ms` null and an empty `output_tail`.
+
+`output_tail` is the newest 8 KiB of the run's combined output, cut at a UTF-8 character boundary, with `output_tail_truncated` marking that bytes were dropped. The untrimmed stream stays on the unscoped `command.stdout` and `command.stderr` events, which the command log routes serve in write order.
 
 ### Session Update Events
 
@@ -171,6 +183,8 @@ The `prompt.inference_failed` payload is intentionally sanitized:
 Every permission decision event (`permission.approved`, `permission.denied`, `permission.cancelled`, `permission.expired`) carries the request's `source` and `subject_id` in its payload, plus a `command_id` field when the request is command-source. For command-source requests `subject_id` is the command id; ACP-source `subject_id` is a session id and appears only as a session id.
 
 This makes a decision visible through `GET /v1/logs/events?command_id=` alongside the command's own events.
+
+An ACP-source decision event is also scoped to the session that raised it, so an approval or denial replays from the per-session event log alongside the turn that asked for it. A command-source decision belongs to a command rather than a session and stays unscoped.
 
 The `reason` field in a decision payload (and in `permission_decisions.reason`) is a machine-readable kebab-case string naming the cause:
 

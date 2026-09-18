@@ -87,10 +87,18 @@ async fn registered_terminal_captures_output_and_exit_code() {
     .expect("spawn");
 
     let registry = Arc::new(TerminalRegistry::default());
-    let terminal_id = registry
-        .register("sess_test", child, DEFAULT_TERMINAL_OUTPUT_BYTE_LIMIT, None)
-        .await
-        .expect("register on open registry");
+    let terminal_id = registry.mint_terminal_id();
+    assert!(
+        registry
+            .register(
+                "sess_test",
+                &terminal_id,
+                child,
+                DEFAULT_TERMINAL_OUTPUT_BYTE_LIMIT,
+                None
+            )
+            .await
+    );
     let handle = registry
         .get("sess_test", &terminal_id)
         .await
@@ -129,10 +137,18 @@ async fn kill_terminates_long_running_child_and_publishes_signal() {
     .expect("spawn");
 
     let registry = Arc::new(TerminalRegistry::default());
-    let terminal_id = registry
-        .register("sess_test", child, DEFAULT_TERMINAL_OUTPUT_BYTE_LIMIT, None)
-        .await
-        .expect("register on open registry");
+    let terminal_id = registry.mint_terminal_id();
+    assert!(
+        registry
+            .register(
+                "sess_test",
+                &terminal_id,
+                child,
+                DEFAULT_TERMINAL_OUTPUT_BYTE_LIMIT,
+                None
+            )
+            .await
+    );
     let handle = registry
         .get("sess_test", &terminal_id)
         .await
@@ -327,6 +343,169 @@ async fn kill_finalizes_command_row_as_canceled() {
         })
         .expect("query events");
     assert_eq!(events.len(), 1, "expected one command.cancelled event");
+
+    // The transcript's view: one session-scoped finalize event naming the
+    // terminal, with no exit status and the signal that ended it.
+    let finished = terminal_finished_payload(&guard, "sess_agent");
+    assert_eq!(finished["terminal_id"], response.terminal_id.0.as_ref());
+    assert_eq!(finished["command_id"], commands[0].id);
+    assert_eq!(finished["status"], "cancelled");
+    assert_eq!(finished["exit_status"], serde_json::Value::Null);
+    assert_eq!(finished["signal"], "SIGTERM");
+}
+
+/// The single session-scoped finalize event for `session_id`, as parsed JSON.
+fn terminal_finished_payload(store: &StateStore, session_id: &str) -> serde_json::Value {
+    let events = store
+        .query_session_events(session_id, None, 50)
+        .expect("query session events");
+    let finished: Vec<&crate::state::Event> = events
+        .iter()
+        .filter(|event| event.kind == EVENT_KIND_TERMINAL_FINISHED)
+        .collect();
+    assert_eq!(finished.len(), 1, "{events:?}");
+    assert_eq!(finished[0].source, EVENT_SOURCE_ACP);
+    serde_json::from_str(&finished[0].payload_json).expect("payload is json")
+}
+
+/// A context whose command log writes to `state`, with the workspace rooted at
+/// the system temp dir.
+fn logging_context(state: Arc<TokioMutex<StateStore>>) -> TerminalHandlerContext {
+    TerminalHandlerContext {
+        registry: Arc::new(TerminalRegistry::default()),
+        workspace_root: std::env::temp_dir(),
+        home: std::env::temp_dir(),
+        sandbox: crate::config::SandboxConfig::default(),
+        shell: TEST_SHELL.to_owned(),
+        network_provider: None,
+        command_log: Some(TerminalCommandLog {
+            state,
+            event_hub: EventHub::new(),
+        }),
+        sink: Arc::new(NoopStubSink),
+    }
+}
+
+fn logging_state() -> (tempfile::TempDir, Arc<TokioMutex<StateStore>>) {
+    let state_dir = tempfile::tempdir().expect("tempdir");
+    let store = StateStore::open(state_dir.path().join("state.sqlite")).expect("state open");
+    store.migrate().expect("migrate");
+    (state_dir, Arc::new(TokioMutex::new(store)))
+}
+
+#[tokio::test]
+async fn natural_exit_links_the_terminal_to_its_command_on_the_session_stream() {
+    use agent_client_protocol::schema::v1::SessionId;
+
+    let (_state_dir, state) = logging_state();
+    let context = logging_context(state.clone());
+    let request = CreateTerminalRequest::new(SessionId::new("sess_agent"), "/bin/sh").args(vec![
+        "-c".to_owned(),
+        "printf hi-from-terminal; exit 3".to_owned(),
+    ]);
+    let response = handle_create_terminal(&context, request)
+        .await
+        .expect("terminal created");
+    let handle = context
+        .registry
+        .get("sess_agent", &response.terminal_id.0)
+        .await
+        .expect("handle");
+    handle.wait_for_exit().await;
+
+    let guard = state.lock().await;
+    let commands = guard
+        .query_commands(crate::state::CommandFilter {
+            limit: 10,
+            ..Default::default()
+        })
+        .expect("query commands");
+    assert_eq!(commands.len(), 1);
+    // The join key a transcript follows from a tool call's `terminalId`.
+    assert_eq!(
+        commands[0].terminal_id.as_deref(),
+        Some(response.terminal_id.0.as_ref())
+    );
+
+    let finished = terminal_finished_payload(&guard, "sess_agent");
+    assert_eq!(finished["terminal_id"], response.terminal_id.0.as_ref());
+    assert_eq!(finished["command_id"], commands[0].id);
+    assert_eq!(finished["status"], "failed");
+    assert_eq!(finished["exit_status"], 3);
+    assert_eq!(finished["signal"], serde_json::Value::Null);
+    assert_eq!(finished["output_tail"], "hi-from-terminal");
+    assert_eq!(finished["output_tail_truncated"], false);
+    assert!(finished["cwd"].as_str().is_some_and(|cwd| !cwd.is_empty()));
+    assert!(finished["duration_ms"].as_i64().is_some());
+}
+
+#[tokio::test]
+async fn the_output_tail_respects_the_cap_and_cuts_at_a_utf8_boundary() {
+    use agent_client_protocol::schema::v1::SessionId;
+
+    let (_state_dir, state) = logging_state();
+    let context = logging_context(state.clone());
+    // Four-byte characters well past the cap, so the cut lands mid-character
+    // unless it is pushed to a boundary.
+    let rockets = TERMINAL_FINISHED_OUTPUT_TAIL_BYTES;
+    let request = CreateTerminalRequest::new(SessionId::new("sess_agent"), "/bin/sh").args(vec![
+        "-c".to_owned(),
+        format!("printf '\u{1F680}%.0s' $(seq 1 {rockets})"),
+    ]);
+    let response = handle_create_terminal(&context, request)
+        .await
+        .expect("terminal created");
+    let handle = context
+        .registry
+        .get("sess_agent", &response.terminal_id.0)
+        .await
+        .expect("handle");
+    handle.wait_for_exit().await;
+
+    let guard = state.lock().await;
+    let finished = terminal_finished_payload(&guard, "sess_agent");
+    let tail = finished["output_tail"].as_str().expect("tail is a string");
+    assert!(
+        tail.len() as u64 <= TERMINAL_FINISHED_OUTPUT_TAIL_BYTES,
+        "tail of {} bytes exceeds the cap",
+        tail.len()
+    );
+    assert!(tail.chars().all(|character| character == '\u{1F680}'));
+    assert_eq!(finished["output_tail_truncated"], true);
+}
+
+#[tokio::test]
+async fn spawn_failure_still_records_the_session_event() {
+    use agent_client_protocol::schema::v1::SessionId;
+
+    let (_state_dir, state) = logging_state();
+    let context = logging_context(state.clone());
+    // A non-empty argv execs `command` verbatim, so a missing program fails at
+    // spawn rather than inside a shell.
+    let request = CreateTerminalRequest::new(
+        SessionId::new("sess_agent"),
+        "/nonexistent/program-for-test",
+    )
+    .args(vec!["--version".to_owned()]);
+    handle_create_terminal(&context, request)
+        .await
+        .expect_err("spawn failure must surface as an error");
+
+    let guard = state.lock().await;
+    let commands = guard
+        .query_commands(crate::state::CommandFilter {
+            limit: 10,
+            ..Default::default()
+        })
+        .expect("query commands");
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0].status, "failed");
+
+    let finished = terminal_finished_payload(&guard, "sess_agent");
+    assert_eq!(finished["command_id"], commands[0].id);
+    assert_eq!(finished["status"], "failed");
+    assert_eq!(finished["exit_status"], serde_json::Value::Null);
+    assert_eq!(finished["output_tail"], "");
 }
 
 #[tokio::test]
@@ -572,14 +751,18 @@ async fn closed_registry_rejects_registration_and_kills_child() {
     let registry = Arc::new(TerminalRegistry::default());
     registry.drain_all().await;
 
+    let terminal_id = registry.mint_terminal_id();
     let registered = registry
-        .register("sess_test", child, DEFAULT_TERMINAL_OUTPUT_BYTE_LIMIT, None)
+        .register(
+            "sess_test",
+            &terminal_id,
+            child,
+            DEFAULT_TERMINAL_OUTPUT_BYTE_LIMIT,
+            None,
+        )
         .await;
-    assert!(
-        registered.is_none(),
-        "closed registry must refuse registration"
-    );
-    // register() reaps the child before returning None, so a live process
+    assert!(!registered, "closed registry must refuse registration");
+    // register() reaps the child before refusing, so a live process
     // here is the shutdown orphan this path exists to prevent.
     let alive = unsafe { libc::kill(pid, 0) } == 0;
     assert!(!alive, "child survived closed-registry registration");

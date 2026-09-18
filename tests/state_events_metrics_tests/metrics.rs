@@ -34,6 +34,7 @@ fn metrics_summary_aggregates_within_window() {
             env_json: None,
             origin: acp_stack::state::CommandOrigin::Operator,
             session_id: None,
+            terminal_id: None,
         })
         .unwrap();
     store
@@ -267,6 +268,7 @@ fn metrics_summary_exposes_prompt_failure_counters() {
             env_json: None,
             origin: acp_stack::state::CommandOrigin::Operator,
             session_id: None,
+            terminal_id: None,
         })
         .expect("command inserted");
 

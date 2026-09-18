@@ -651,6 +651,7 @@ mod tests {
                 env_json: None,
                 origin: CommandOrigin::Operator,
                 session_id: None,
+                terminal_id: None,
             })
             .expect("append command")
             .id

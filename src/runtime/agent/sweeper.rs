@@ -82,11 +82,7 @@ async fn sweep_stalled_prompts(state: &Arc<TokioMutex<StateStore>>, threshold: D
     let threshold_secs = threshold.as_secs();
     let guard = state.lock().await;
     for (prompt_id, session_id) in pairs {
-        let payload = serde_json::json!({
-            "prompt_id": prompt_id,
-            "threshold_secs": threshold_secs,
-        })
-        .to_string();
+        let payload = stalled_event_payload(&prompt_id, threshold_secs);
         if let Err(err) = guard.append_session_event_with_source(
             &session_id,
             "warn",
@@ -103,6 +99,17 @@ async fn sweep_stalled_prompts(state: &Arc<TokioMutex<StateStore>>, threshold: D
             );
         }
     }
+}
+
+/// `cause` mirrors the `error_message` the sweep wrote onto the prompt row, so
+/// a transcript reads the stall reason off the event alone.
+fn stalled_event_payload(prompt_id: &str, threshold_secs: u64) -> String {
+    serde_json::json!({
+        "prompt_id": prompt_id,
+        "threshold_secs": threshold_secs,
+        "cause": SWEEPER_STALL_REASON,
+    })
+    .to_string()
 }
 
 async fn sweep_idle_sessions(state: &Arc<TokioMutex<StateStore>>, idle_threshold: Duration) {
@@ -154,5 +161,20 @@ impl Drop for StateSweeper {
         if let Some(handle) = self.handle.take() {
             handle.abort();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stalled_event_payload_names_the_stall_cause() {
+        let payload: serde_json::Value =
+            serde_json::from_str(&stalled_event_payload("prm_1", 900)).expect("payload is json");
+
+        assert_eq!(payload["prompt_id"], "prm_1");
+        assert_eq!(payload["threshold_secs"], 900);
+        assert_eq!(payload["cause"], SWEEPER_STALL_REASON);
     }
 }
