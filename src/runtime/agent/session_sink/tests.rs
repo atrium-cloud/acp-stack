@@ -712,6 +712,66 @@ async fn writer_keeps_raw_session_info_when_projection_fails() {
 }
 
 #[tokio::test]
+async fn drain_makes_every_earlier_append_durable_and_keeps_the_sink_open() {
+    use crate::runtime::agent::session_sink::{SessionEventSink, StateStoreSessionSink};
+    use std::sync::Arc;
+    use tokio::sync::Mutex as TokioMutex;
+
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state open");
+    store.migrate().expect("migrate");
+    store
+        .insert_session_for_target(
+            "target_a",
+            "agent_sess_1".to_owned(),
+            NewSessionRecord {
+                id: "sess_local".to_owned(),
+                agent_id: "target_a".to_owned(),
+                cwd: "/tmp".to_owned(),
+                title: None,
+                metadata_json: "{}".to_owned(),
+            },
+        )
+        .expect("session inserted");
+    let state = Arc::new(TokioMutex::new(store));
+    let sink = StateStoreSessionSink::new("target_a".to_owned(), state.clone());
+    let payload = r#"{"sessionId":"agent_sess_1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"tail"}}}"#;
+
+    sink.append("agent_sess_1", "session.update", payload).await;
+    sink.append("agent_sess_1", "session.update", payload).await;
+    sink.drain().await;
+
+    let count_rows = |guard: &StateStore| {
+        guard
+            .query_events(crate::state::LogFilter {
+                limit: 10,
+                kind: Some("session.update"),
+                source: Some("acp"),
+                ..Default::default()
+            })
+            .expect("query raw events")
+            .len()
+    };
+    assert_eq!(count_rows(&*state.lock().await), 2, "rows durable at drain");
+
+    sink.append("agent_sess_1", "session.update", payload).await;
+    sink.drain().await;
+    assert_eq!(
+        count_rows(&*state.lock().await),
+        3,
+        "sink accepts appends after drain"
+    );
+
+    sink.flush().await;
+    sink.drain().await;
+    assert_eq!(
+        count_rows(&*state.lock().await),
+        3,
+        "drain on a flushed sink returns"
+    );
+}
+
+#[tokio::test]
 async fn session_cwd_resolves_local_session_record() {
     use crate::runtime::agent::session_sink::{SessionEventSink, StateStoreSessionSink};
     use std::sync::Arc;

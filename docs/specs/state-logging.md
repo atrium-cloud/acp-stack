@@ -129,6 +129,37 @@ Session-scoped events that mirror terminal prompt transitions:
 
 `reason` is one of `daemon_restart`, `agent_stopped`, `agent_exited`, or `idle`; `threshold_secs` appears only on idle-sweep demotions.
 
+### Session Update Events
+
+Conversation content lands under the single kind `session.update`, whose payload is a verbatim ACP `session/update` notification. The `source` column names the side that produced it.
+
+| Source   | Contents                                                                    | Emit site                       |
+| -------- | --------------------------------------------------------------------------- | ------------------------------- |
+| `acp`    | Every notification the agent sends, forwarded byte-for-byte                 | Session event sink              |
+| `system` | The accepted user prompt, as a `user_message_chunk`                         | Supervisor, on prompt admission |
+
+Prompt admission covers both `POST /v1/sessions/{id}/prompt` and `POST /v1/sessions/{id}/commands/run`, so a slash command is logged as the `/name args` text it was sent as.
+
+The user-prompt row is written under the same state guard as the `prompts` insert and before the ACP request is dispatched. Admission first waits for the previous turn's remaining `session/update` rows to become durable, so a transcript replayed in `(created_at, id)` order opens on the user's turn, continues into that turn's agent output, and holds the next user's turn after it. One event is written per prompt content block, all sharing the prompt's message id. The insert and the appends are separate writes: a failed append is logged and the submission proceeds, and a crash between them leaves a durable prompt row with zero or partial chunks.
+
+The payload is an ACP `session/update` notification whose `sessionId` is the agent's session id:
+
+```json
+{
+    "sessionId": "acp_sess_1",
+    "update": {
+        "sessionUpdate": "user_message_chunk",
+        "content": { "type": "text", "text": "hello agent" },
+        "messageId": "msg_user_1",
+        "_meta": { "acpStack": { "promptId": "prompt_1" } }
+    }
+}
+```
+
+`messageId` is the prompt's message id, the same value `POST /v1/sessions/{id}/prompt` returns as `message_id` and the agent echoes on its own chunks. `_meta.acpStack.promptId` names the `prompts` row, so a client that rendered the prompt optimistically can match its local entry against the durable event.
+
+Consumers that treat `session.update` as evidence the agent started streaming must scope themselves to `source = 'acp'`. The multi-session status view already does this for `prompt_stream_started_at`. WebSocket frames on `sessions.{id}` carry the same value as `payload.source`.
+
 The `prompt.inference_failed` payload is intentionally sanitized:
 
 - Only `status_code` and a `reason_category` from a fixed static enum reach SQLite: `rate_limit`, `internal_server_error`, `bad_gateway`, `service_unavailable`, `gateway_timeout`, `server_overloaded`, `client_error`, `unknown`.

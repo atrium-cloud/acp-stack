@@ -265,6 +265,235 @@ async fn full_lifecycle_create_list_get_prompt_poll_close() {
     assert_eq!(close_body["data"]["status"], "closed");
 }
 
+/// Budget for the placebo to settle a turn; generous enough to absorb a loaded
+/// CI box, short enough that a missing event fails rather than hangs.
+const PROMPT_SETTLE_BUDGET: Duration = Duration::from_secs(10);
+const PROMPT_SETTLE_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+#[tokio::test]
+async fn the_accepted_prompt_is_logged_as_a_user_chunk_before_the_agent_output() {
+    let harness = Harness::spawn().await;
+    let client = http();
+    let session_id = create_session(&harness).await;
+    let session: Value = client
+        .get(format!("{}/v1/sessions/{}", harness.base_url, session_id))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("get session")
+        .json()
+        .await
+        .expect("get session json");
+    let agent_session_id = session["data"]["agent_session_id"]
+        .as_str()
+        .expect("agent session id")
+        .to_owned();
+
+    let prompt_text = "log me as a user chunk";
+    let submit: Value = client
+        .post(format!(
+            "{}/v1/sessions/{}/prompt",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .json(&json!({ "prompt": prompt_text }))
+        .send()
+        .await
+        .expect("submit")
+        .json()
+        .await
+        .expect("submit json");
+    let prompt_id = submit["data"]["prompt_id"]
+        .as_str()
+        .expect("prompt id")
+        .to_owned();
+    let message_id = submit["data"]["message_id"]
+        .as_str()
+        .expect("prompt message id")
+        .to_owned();
+    await_prompt_settled(&harness, &session_id, &prompt_id).await;
+
+    let events = session_events(&harness, &session_id).await;
+    let user_chunks: Vec<&Value> = events
+        .iter()
+        .filter(|event| {
+            event["kind"] == "session.update"
+                && event["source"] == "system"
+                && chunk_kind(event) == Some("user_message_chunk".to_owned())
+        })
+        .collect();
+    assert_eq!(
+        user_chunks.len(),
+        1,
+        "expected exactly one user chunk, saw {events:#?}"
+    );
+    let user_chunk = user_chunks[0];
+    assert_eq!(user_chunk["level"], "info", "event = {user_chunk}");
+    let payload: Value = serde_json::from_str(
+        user_chunk["payload_json"]
+            .as_str()
+            .expect("payload_json string"),
+    )
+    .expect("payload json");
+    assert_eq!(
+        payload["sessionId"], agent_session_id,
+        "payload = {payload}"
+    );
+    assert_eq!(payload["update"]["content"]["type"], "text");
+    assert_eq!(payload["update"]["content"]["text"], prompt_text);
+    assert_eq!(payload["update"]["messageId"], message_id);
+    assert_eq!(
+        payload["update"]["_meta"]["acpStack"]["promptId"], prompt_id,
+        "payload = {payload}"
+    );
+
+    // Ordering is the point of the durable row: a transcript replayed from the
+    // log must open on the user's turn, not on the agent's first chunk.
+    let user_index = events
+        .iter()
+        .position(|event| event["id"] == user_chunk["id"])
+        .expect("user chunk position");
+    let first_agent_index = events
+        .iter()
+        .position(|event| event["kind"] == "session.update" && event["source"] == "acp")
+        .expect("the placebo streamed at least one agent chunk");
+    assert!(
+        user_index < first_agent_index,
+        "user chunk must precede agent output, events = {events:#?}"
+    );
+
+    // Replaying the log in order yields both sides of the conversation.
+    let replay: Vec<(String, String)> = events
+        .iter()
+        .filter_map(|event| {
+            let kind = chunk_kind(event)?;
+            let payload: Value =
+                serde_json::from_str(event["payload_json"].as_str()?).unwrap_or(Value::Null);
+            let text = payload["update"]["content"]["text"].as_str()?.to_owned();
+            Some((kind, text))
+        })
+        .collect();
+    assert_eq!(
+        replay.first(),
+        Some(&("user_message_chunk".to_owned(), prompt_text.to_owned())),
+        "replay = {replay:?}"
+    );
+    assert!(
+        replay.iter().any(|(kind, _)| kind == "agent_message_chunk"),
+        "replay = {replay:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_next_user_chunk_lands_after_every_agent_chunk_of_the_previous_turn() {
+    let harness = Harness::spawn().await;
+    let client = http();
+    let session_id = create_session(&harness).await;
+
+    // Back-to-back turns: the second is submitted the moment the first settles,
+    // which is when the first turn's trailing chunks are most likely still in
+    // the sink's writer queue.
+    for prompt_text in ["first turn", "second turn"] {
+        let submit: Value = client
+            .post(format!(
+                "{}/v1/sessions/{}/prompt",
+                harness.base_url, session_id
+            ))
+            .header("Authorization", session_bearer())
+            .json(&json!({ "prompt": prompt_text }))
+            .send()
+            .await
+            .expect("submit")
+            .json()
+            .await
+            .expect("submit json");
+        let prompt_id = submit["data"]["prompt_id"]
+            .as_str()
+            .expect("prompt id")
+            .to_owned();
+        await_prompt_settled(&harness, &session_id, &prompt_id).await;
+    }
+
+    // The placebo streams two agent chunks per turn, so the log reads as two
+    // complete exchanges with the second user turn after the first turn's tail.
+    let expected = vec![
+        "user_message_chunk",
+        "agent_message_chunk",
+        "agent_message_chunk",
+        "user_message_chunk",
+        "agent_message_chunk",
+        "agent_message_chunk",
+    ];
+    // The second turn's tail may still be in the writer queue when its prompt
+    // row settles, so wait for the full count before checking the order.
+    let deadline = tokio::time::Instant::now() + PROMPT_SETTLE_BUDGET;
+    loop {
+        let events = session_events(&harness, &session_id).await;
+        let replay: Vec<String> = events
+            .iter()
+            .filter(|event| event["kind"] == "session.update")
+            .filter_map(chunk_kind)
+            .collect();
+        if replay.len() >= expected.len() || tokio::time::Instant::now() >= deadline {
+            assert_eq!(replay, expected, "events = {events:#?}");
+            return;
+        }
+        tokio::time::sleep(PROMPT_SETTLE_POLL_INTERVAL).await;
+    }
+}
+
+/// The `sessionUpdate` discriminator of an event whose payload is a verbatim
+/// ACP `session/update` notification.
+fn chunk_kind(event: &Value) -> Option<String> {
+    let payload: Value = serde_json::from_str(event["payload_json"].as_str()?).ok()?;
+    Some(payload["update"]["sessionUpdate"].as_str()?.to_owned())
+}
+
+async fn session_events(harness: &Harness, session_id: &str) -> Vec<Value> {
+    let body: Value = http()
+        .get(format!(
+            "{}/v1/sessions/{}/events",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("session events")
+        .json()
+        .await
+        .expect("session events json");
+    body["data"]["events"]
+        .as_array()
+        .expect("events array")
+        .clone()
+}
+
+async fn await_prompt_settled(harness: &Harness, session_id: &str, prompt_id: &str) {
+    let deadline = tokio::time::Instant::now() + PROMPT_SETTLE_BUDGET;
+    loop {
+        let poll: Value = http()
+            .get(format!(
+                "{}/v1/sessions/{}/prompts/{}",
+                harness.base_url, session_id, prompt_id
+            ))
+            .header("Authorization", session_bearer())
+            .send()
+            .await
+            .expect("poll")
+            .json()
+            .await
+            .expect("poll json");
+        if poll["data"]["status"] == "completed" {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "prompt never completed: {poll}"
+        );
+        tokio::time::sleep(PROMPT_SETTLE_POLL_INTERVAL).await;
+    }
+}
+
 #[tokio::test]
 async fn delete_session_removes_the_row_and_repeats_silently() {
     let harness = Harness::spawn().await;

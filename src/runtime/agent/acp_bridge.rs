@@ -64,7 +64,7 @@ pub(crate) use self::spawn::resolve_command_path;
 pub use crate::runtime::agent::acp_codec::{
     meta_message_id, prompt_message_id_meta, session_config_id_for_value, session_config_values,
     session_mode_selection_for_value, session_mode_values, session_model_selection_for_value,
-    session_model_values,
+    session_model_values, user_prompt_chunk_payload,
 };
 pub use crate::runtime::agent::acp_terminal::TerminalCommandLog;
 pub use crate::runtime::agent::session_changes::SessionChangesHandle;
@@ -385,6 +385,14 @@ impl AcpBridge {
         // Only safe to close the sink once every accepted notification append
         // task has finished enqueueing its row.
         self.sink.flush().await;
+    }
+
+    /// Wait until every `session/update` the agent has sent so far is durable.
+    /// The sink stays open; this is the ordering barrier a new prompt takes
+    /// before writing its own row.
+    pub async fn drain_session_events(&self) {
+        self.notification_drain.wait_idle().await;
+        self.sink.drain().await;
     }
 }
 

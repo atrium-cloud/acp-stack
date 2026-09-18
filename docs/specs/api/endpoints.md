@@ -1246,7 +1246,7 @@ Log query filters are per-route, not one shared set. All log routes accept:
 - Tier: `session`
 - Request: WebSocket upgrade. Clients authenticate with the session key and send a `{ "type": "subscribe", "topics": [...] }` frame to subscribe. Frames of any other `type` are ignored.
 - Response: the WebSocket event stream.
-- Notes: topics are `logs`, `workspace`, `permissions`, `status`, `commands.{id}`, `sessions.{id}`, and `agent.lifecycle`.
+- Notes: topics are `logs`, `workspace`, `permissions`, `status`, `commands.{id}`, `sessions.{id}`, and `agent.lifecycle`. Frames on `sessions.{id}` carry `payload.kind`, `payload.source`, and `payload.data`, where `source` is the durable event's source column.
 
 ### `GET /v1/ws/connections`
 

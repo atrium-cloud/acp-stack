@@ -385,9 +385,12 @@ async fn receive_session_update(
             continue;
         };
         let event: Value = serde_json::from_str(text.as_str()).expect("ws event JSON");
+        // The accepted user prompt streams on this topic under the same kind,
+        // so the agent's own chunk is selected by its update discriminator.
         if event["type"] == "event"
             && event["topic"] == topic
             && event["payload"]["kind"] == "session.update"
+            && event["payload"]["data"]["update"]["sessionUpdate"] == "agent_message_chunk"
         {
             return event;
         }

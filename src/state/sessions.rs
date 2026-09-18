@@ -42,6 +42,10 @@ pub const EVENT_KIND_MCP_SESSION_SKIPPED: &str = "mcp.session_skipped";
 pub const EVENT_KIND_SESSION_CAPABILITY_IGNORED: &str = "session.capability_ignored";
 /// The session was demoted from `active` to `available`; payload names the reason.
 pub const EVENT_KIND_SESSION_AVAILABLE: &str = "session.available";
+/// Verbatim ACP `session/update` notification. Agent-streamed rows carry source
+/// `acp`; the accepted user prompt is recorded under the same kind with source
+/// `system`, since it originates on this side of the protocol.
+pub const EVENT_KIND_SESSION_UPDATE: &str = "session.update";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRecord {

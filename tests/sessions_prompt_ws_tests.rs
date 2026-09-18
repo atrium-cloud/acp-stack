@@ -353,15 +353,19 @@ async fn websocket_streams_live_session_update_events() {
             continue;
         };
         let event: Value = serde_json::from_str(&text).expect("event json");
+        // The accepted user prompt streams on this topic under the same kind,
+        // so the agent's own chunk is selected by its update discriminator.
         if event["type"] == "event"
             && event["topic"] == format!("sessions.{session_id}")
             && event["payload"]["kind"] == "session.update"
+            && event["payload"]["data"]["update"]["sessionUpdate"] == "agent_message_chunk"
         {
             received = Some(event);
             break;
         }
     }
     let event = received.expect("session.update websocket event");
+    assert_eq!(event["payload"]["source"], "acp", "event = {event}");
     assert!(event["id"].as_str().unwrap_or("").starts_with("evt_"));
     assert!(
         event["createdAt"].as_str().unwrap_or("").contains('T'),

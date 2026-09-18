@@ -34,6 +34,43 @@ fn mode_lookup_only_constructs_agent_config_provision() {
 }
 
 #[test]
+fn the_user_prompt_chunk_carries_the_message_id_and_prompt_id() {
+    let payload = user_prompt_chunk_payload(
+        "acp_sess_1",
+        "msg_user_1",
+        "prompt_1",
+        ContentBlock::from("hello agent"),
+    )
+    .expect("payload");
+    let value: serde_json::Value = serde_json::from_str(&payload).expect("payload json");
+    assert_eq!(value["sessionId"], "acp_sess_1");
+    assert_eq!(value["update"]["sessionUpdate"], "user_message_chunk");
+    assert_eq!(value["update"]["content"]["type"], "text");
+    assert_eq!(value["update"]["content"]["text"], "hello agent");
+    assert_eq!(value["update"]["messageId"], "msg_user_1");
+    assert_eq!(value["update"]["_meta"]["acpStack"]["promptId"], "prompt_1");
+}
+
+#[test]
+fn the_user_prompt_chunk_round_trips_as_an_acp_session_update() {
+    let payload = user_prompt_chunk_payload(
+        "acp_sess_1",
+        "msg_user_1",
+        "prompt_1",
+        ContentBlock::from("round trip"),
+    )
+    .expect("payload");
+    let notification: SessionNotification = serde_json::from_str(&payload).expect("notification");
+    let SessionUpdate::UserMessageChunk(chunk) = notification.update else {
+        panic!("expected a user message chunk");
+    };
+    assert_eq!(
+        chunk.message_id.map(|id| id.0.to_string()),
+        Some("msg_user_1".to_owned())
+    );
+}
+
+#[test]
 fn model_lookup_only_constructs_agent_config_provision() {
     let response = agent_client_protocol::schema::v1::NewSessionResponse::new("session");
     assert!(matches!(

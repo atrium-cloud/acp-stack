@@ -6,9 +6,10 @@ use std::sync::Arc;
 
 use agent_client_protocol::RequestCancellation;
 use agent_client_protocol::schema::v1::{
-    Meta, NewSessionResponse, PermissionOption, PermissionOptionId, PermissionOptionKind,
-    ReadTextFileRequest, ReadTextFileResponse, RequestPermissionOutcome, RequestPermissionRequest,
-    SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigSelectOptions,
+    ContentBlock, ContentChunk, MessageId, Meta, NewSessionResponse, PermissionOption,
+    PermissionOptionId, PermissionOptionKind, ReadTextFileRequest, ReadTextFileResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, SelectedPermissionOutcome,
+    SessionConfigKind, SessionConfigOption, SessionConfigSelectOptions, SessionId as AcpSessionId,
     SessionNotification, SessionUpdate, WriteTextFileRequest, WriteTextFileResponse,
 };
 use tokio::sync::{Mutex as TokioMutex, mpsc};
@@ -26,7 +27,7 @@ use crate::runtime::mediation::permissions::{
 /// Stable audit reason shared by the durable permission decision and its
 /// published cancellation event when ACP `$/cancel_request` wins the race.
 const ACP_REQUEST_CANCELLED_REASON: &str = "acp-request-cancelled";
-use crate::state::StateStore;
+use crate::state::{EVENT_KIND_SESSION_UPDATE, StateStore};
 
 use super::acp_bridge::{NotificationDrain, NotificationGuard};
 
@@ -34,6 +35,10 @@ use super::acp_bridge::{NotificationDrain, NotificationGuard};
 /// `AgentCapabilitiesDto::supports_fork_message_id`).
 const ACP_STACK_META_KEY: &str = "acpStack";
 const MESSAGE_ID_META_KEY: &str = "messageId";
+/// `_meta.acpStack` key naming the `prompts` row a durable user-prompt chunk
+/// records, so a client can match the event against the id it got back from
+/// `POST /v1/sessions/{id}/prompt`.
+const PROMPT_ID_META_KEY: &str = "promptId";
 
 /// At most one notification may wait behind the worker: each owns both parsed
 /// ACP content and its raw JSON payload, so a deeper queue multiplies memory
@@ -61,7 +66,7 @@ pub(super) fn spawn_session_notification_queue(
             {
                 sink.append(
                     &notification.agent_session_id,
-                    "session.update",
+                    EVENT_KIND_SESSION_UPDATE,
                     &notification.payload,
                 )
                 .await;
@@ -85,6 +90,43 @@ pub fn prompt_message_id_meta(message_id: &str) -> Meta {
         serde_json::Value::Object(stack),
     );
     meta
+}
+
+/// Serialize one accepted prompt content block as an ACP `session/update`
+/// notification carrying a `user_message_chunk`. This is the shape the daemon
+/// persists for the user's own turn, so a transcript rebuilt from the event log
+/// holds both sides of the conversation rather than agent output alone.
+///
+/// The chunk's `messageId` is the prompt's message id, matching the id the
+/// agent echoes on its own chunks, and `_meta.acpStack.promptId` names the
+/// prompt row.
+pub fn user_prompt_chunk_payload(
+    agent_session_id: &str,
+    message_id: &str,
+    prompt_id: &str,
+    content: ContentBlock,
+) -> Result<String> {
+    let mut stack = serde_json::Map::new();
+    stack.insert(
+        PROMPT_ID_META_KEY.to_owned(),
+        serde_json::Value::String(prompt_id.to_owned()),
+    );
+    let mut meta = Meta::new();
+    meta.insert(
+        ACP_STACK_META_KEY.to_owned(),
+        serde_json::Value::Object(stack),
+    );
+    let chunk = ContentChunk::new(content)
+        .message_id(MessageId::new(message_id))
+        .meta(meta);
+    let notification = SessionNotification::new(
+        AcpSessionId::new(agent_session_id),
+        SessionUpdate::UserMessageChunk(chunk),
+    );
+    serde_json::to_string(&notification).map_err(|err| StackError::StateInvalidJson {
+        field: "session.update",
+        reason: err.to_string(),
+    })
 }
 
 pub fn meta_message_id(meta: Option<&Meta>) -> Option<&str> {

@@ -147,6 +147,8 @@ ACP session lifecycle calls pass CWDs as paths because ACP has no directory-hand
 
 ACP `session/update` notifications are persisted as durable events and published to WebSocket subscribers. Explicit `type: "diff"` tool-call content is also reduced into the bounded process-local snapshot returned by `GET /v1/sessions/{id}/changes`; no diff is inferred from tool kind, locations, filesystem calls, or Git. Prompt submission returns quickly with a prompt id; clients can follow live updates or poll durable prompt state.
 
+An accepted prompt, including a slash command submitted through the commands route, is recorded on the same stream as a `user_message_chunk`, one event per content block. It is written after the previous turn's notifications have drained and before the ACP request is dispatched, so each user turn sits between the agent output of the turn before it and its own. See the user-prompt entry under Session Update Events in `docs/specs/state-logging.md` for the row shape.
+
 Two derived events are lifted out of the verbatim `session.update` stream when the payload shape is recognized:
 
 - `usage.reported`: standard ACP context-window/cost snapshots plus recognized legacy token usage.

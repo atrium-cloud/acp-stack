@@ -461,7 +461,7 @@ async fn await_pending_permission_for_subject(harness: &Harness, subject_id: &st
     }
 }
 
-async fn session_event_kinds(harness: &Harness, session_id: &str) -> Vec<String> {
+async fn session_events(harness: &Harness, session_id: &str) -> Vec<Value> {
     let body: Value = http()
         .get(format!(
             "{}/v1/sessions/{}/events",
@@ -477,6 +477,12 @@ async fn session_event_kinds(harness: &Harness, session_id: &str) -> Vec<String>
     body["data"]["events"]
         .as_array()
         .expect("events array")
+        .clone()
+}
+
+async fn session_event_kinds(harness: &Harness, session_id: &str) -> Vec<String> {
+    session_events(harness, session_id)
+        .await
         .iter()
         .filter_map(|event| event["kind"].as_str().map(str::to_owned))
         .collect()
@@ -499,14 +505,15 @@ async fn await_prompt_status(harness: &Harness, session_id: &str, prompt_id: &st
 
 /// Block until the placebo has persisted its first `session/update` chunk. That
 /// proves the agent read the prompt request, which fixes the ordering between
-/// the turn and the `session/cancel` notification the test sends next.
+/// the turn and the `session/cancel` notification the test sends next. The
+/// accepted user prompt shares the kind, so only ACP-source rows count.
 async fn await_agent_entered_the_turn(harness: &Harness, session_id: &str) {
     let deadline = tokio::time::Instant::now() + POLL_BUDGET;
     loop {
-        if session_event_kinds(harness, session_id)
+        if session_events(harness, session_id)
             .await
             .iter()
-            .any(|kind| kind == "session.update")
+            .any(|event| event["kind"] == "session.update" && event["source"] == "acp")
         {
             return;
         }

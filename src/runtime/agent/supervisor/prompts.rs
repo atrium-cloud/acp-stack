@@ -53,18 +53,33 @@ impl AgentSupervisor {
                 session_id: session_id.to_owned(),
             });
         }
+        // The previous turn's trailing chunks may still sit in the sink's
+        // writer queue after its prompt task settled. Wait them out so the
+        // user row below lands after every row of the turn before it.
+        bridge.drain_session_events().await;
         let prompt_id = next_prompt_id();
         let message_id = next_prompt_message_id();
         let record = {
             let guard = state.lock().await;
-            guard.insert_prompt_with_message_id(
+            let record = guard.insert_prompt_with_message_id(
                 NewPromptRecord {
                     id: prompt_id.clone(),
                     session_id: session_id.to_owned(),
                     prompt_json,
                 },
                 Some(message_id.clone()),
-            )?
+            )?;
+            // Written before the ACP request is dispatched, so the user's turn
+            // always precedes that turn's agent output in the event log.
+            append_user_prompt_events(
+                &guard,
+                session_id,
+                &agent_session_id,
+                &message_id,
+                &prompt_id,
+                &prompt_blocks,
+            );
+            record
         };
 
         let cancel = CancellationToken::new();
@@ -406,6 +421,56 @@ impl AgentSupervisor {
     async fn reap_finished(&self) {
         let mut prompts = self.prompts.lock().await;
         prompts.retain(|_, handle| !handle.join.is_finished());
+    }
+}
+
+/// Event message on a durable user-prompt row. The prompt text lives in the
+/// payload only, so the message stays a fixed label across every prompt.
+const USER_PROMPT_EVENT_MESSAGE: &str = "user prompt accepted";
+
+/// Record the accepted prompt as `session.update` rows in ACP's own
+/// `user_message_chunk` shape, one per content block, all sharing the prompt's
+/// message id. A failed append is logged rather than propagated: the prompt row
+/// is already durable and the turn is about to be dispatched, so refusing the
+/// submission here would cost the user a turn to buy back one log row.
+fn append_user_prompt_events(
+    store: &StateStore,
+    session_id: &str,
+    agent_session_id: &str,
+    message_id: &str,
+    prompt_id: &str,
+    prompt_blocks: &[ContentBlock],
+) {
+    for block in prompt_blocks {
+        let payload =
+            match user_prompt_chunk_payload(agent_session_id, message_id, prompt_id, block.clone())
+            {
+                Ok(payload) => payload,
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        prompt_id,
+                        session_id,
+                        "failed to encode the user prompt chunk event"
+                    );
+                    continue;
+                }
+            };
+        if let Err(err) = store.append_session_event_with_source(
+            session_id,
+            "info",
+            EVENT_KIND_SESSION_UPDATE,
+            EVENT_SOURCE_SYSTEM,
+            USER_PROMPT_EVENT_MESSAGE,
+            &payload,
+        ) {
+            tracing::warn!(
+                error = %err,
+                prompt_id,
+                session_id,
+                "failed to record the user prompt session event"
+            );
+        }
     }
 }
 

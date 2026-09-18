@@ -3,12 +3,13 @@
 
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use agent_client_protocol::schema::{
     MaybeUndefined,
     v1::{AvailableCommandInput, SessionUpdate},
 };
-use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::{Mutex as TokioMutex, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::runtime::agent::session_changes::SessionChangesHandle;
@@ -17,8 +18,9 @@ use crate::state::{
 };
 
 /// Sink for ACP `session/update` notifications. `append` must persist the
-/// event before its future resolves, and `flush` must drain any background
-/// writer, or a fast shutdown drops in-flight writes.
+/// event before its future resolves, `drain` must resolve once every earlier
+/// `append` is durable, and `flush` must drain any background writer, or a
+/// fast shutdown drops in-flight writes.
 pub trait SessionEventSink: Send + Sync + 'static {
     fn capture_session_update<'a>(
         &'a self,
@@ -56,6 +58,12 @@ pub trait SessionEventSink: Send + Sync + 'static {
         payload_json: &'a str,
     ) -> futures::future::BoxFuture<'a, ()>;
 
+    /// Wait until every `append` accepted before this call has been written.
+    /// The sink stays open afterwards.
+    fn drain<'a>(&'a self) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
+
     fn flush<'a>(&'a self) -> futures::future::BoxFuture<'a, ()> {
         Box::pin(async {})
     }
@@ -68,8 +76,20 @@ pub struct StateStoreSessionSink {
     target_id: String,
     state: Arc<TokioMutex<StateStore>>,
     session_changes: SessionChangesHandle,
-    tx: TokioMutex<Option<tokio::sync::mpsc::Sender<SessionEventRow>>>,
+    tx: TokioMutex<Option<tokio::sync::mpsc::Sender<SessionWrite>>>,
     writer: TokioMutex<Option<JoinHandle<()>>>,
+}
+
+/// Maximum wall time `drain` waits for the writer to reach its barrier. A
+/// prompt submission awaits this, so a wedged writer costs the caller a bounded
+/// delay and an out-of-order log row rather than a hung request.
+const SESSION_EVENT_DRAIN_BUDGET: Duration = Duration::from_secs(5);
+
+enum SessionWrite {
+    Row(SessionEventRow),
+    /// Ordering barrier: acknowledged once every row queued before it is
+    /// durable, since the writer handles the channel strictly in order.
+    Barrier(oneshot::Sender<()>),
 }
 
 struct SessionEventRow {
@@ -428,10 +448,21 @@ impl StateStoreSessionSink {
         state: Arc<TokioMutex<StateStore>>,
         session_changes: SessionChangesHandle,
     ) -> Self {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<SessionEventRow>(SESSION_EVENT_BUFFER);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<SessionWrite>(SESSION_EVENT_BUFFER);
         let writer_state = state.clone();
         let writer = tokio::spawn(async move {
-            while let Some(row) = rx.recv().await {
+            while let Some(write) = rx.recv().await {
+                let row = match write {
+                    SessionWrite::Row(row) => row,
+                    SessionWrite::Barrier(ack) => {
+                        if ack.send(()).is_err() {
+                            tracing::debug!(
+                                "session event drain waiter gave up before the barrier"
+                            );
+                        }
+                        continue;
+                    }
+                };
                 let guard = writer_state.lock().await;
                 match guard.append_session_event_with_source(
                     &row.session_id,
@@ -635,11 +666,11 @@ impl SessionEventSink for StateStoreSessionSink {
                 }
             };
             if let Err(err) = sender
-                .send(SessionEventRow {
+                .send(SessionWrite::Row(SessionEventRow {
                     session_id,
                     kind: kind.to_owned(),
                     payload_json: payload_json.to_owned(),
-                })
+                }))
                 .await
             {
                 tracing::warn!(
@@ -647,6 +678,42 @@ impl SessionEventSink for StateStoreSessionSink {
                     agent_session_id,
                     "session event writer task ended; dropping update"
                 );
+            }
+        })
+    }
+
+    fn drain<'a>(&'a self) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            let sender = {
+                let guard = self.tx.lock().await;
+                match guard.as_ref() {
+                    Some(tx) => tx.clone(),
+                    // A closed sink has already been flushed, so nothing is
+                    // left to wait for.
+                    None => return,
+                }
+            };
+            let (ack_tx, ack_rx) = oneshot::channel();
+            // The budget covers queueing the barrier too: a full channel
+            // behind a stalled writer must not park the caller indefinitely.
+            let barrier = async move {
+                sender
+                    .send(SessionWrite::Barrier(ack_tx))
+                    .await
+                    .map_err(|_| ())?;
+                ack_rx.await.map_err(|_| ())
+            };
+            match tokio::time::timeout(SESSION_EVENT_DRAIN_BUDGET, barrier).await {
+                Ok(Ok(())) => {}
+                Ok(Err(())) => {
+                    tracing::warn!("session event writer task ended before the drain barrier");
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        budget_secs = SESSION_EVENT_DRAIN_BUDGET.as_secs(),
+                        "session event writer did not reach the drain barrier in time"
+                    );
+                }
             }
         })
     }

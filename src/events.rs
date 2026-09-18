@@ -54,6 +54,8 @@ impl EventHub {
                 Value::Null
             }
         };
+        // `source` rides along so a subscriber can tell the daemon's own
+        // `session.update` rows (the user prompt) from the agent's.
         self.publish(LiveEvent {
             event_type: "event",
             id: event.id.clone(),
@@ -61,6 +63,7 @@ impl EventHub {
             created_at: event.created_at.clone(),
             payload: json!({
                 "kind": event.kind,
+                "source": event.source,
                 "data": data,
             }),
         });
@@ -223,6 +226,7 @@ mod tests {
         let live = rx.recv().await.expect("event");
         assert_eq!(live.topic, "sessions.sess_abc");
         assert_eq!(live.payload["kind"], "session.update");
+        assert_eq!(live.payload["source"], "system");
         assert_eq!(live.payload["data"]["foo"], 1);
     }
 

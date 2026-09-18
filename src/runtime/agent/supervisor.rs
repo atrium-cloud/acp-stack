@@ -78,7 +78,7 @@ use crate::runtime::agent::acp_bridge::{
     IGNORED_FEATURE_AGENT_EFFORT, IGNORED_FEATURE_AGENT_MODE, IGNORED_FEATURE_AGENT_MODEL,
     IgnoredFeature, PartitionedMcpServers, SessionEventSink, SkippedMcpServer,
     StateStoreSessionSink, meta_message_id, prompt_message_id_meta, resolve_command_path,
-    session_config_id_for_value, session_mode_selection_for_value,
+    session_config_id_for_value, session_mode_selection_for_value, user_prompt_chunk_payload,
 };
 use crate::runtime::agent::model_discovery::{
     effort_value_is_explicit_without_discovery, model_applies_from_disk_only,
@@ -89,10 +89,10 @@ use crate::runtime::mediation::permissions::PermissionService;
 use crate::secrets::SecretStore;
 use crate::state::{
     EVENT_KIND_MCP_SESSION_SKIPPED, EVENT_KIND_PROMPT_ERRORED, EVENT_KIND_PROMPT_INFERENCE_FAILED,
-    EVENT_KIND_SESSION_AVAILABLE, EVENT_KIND_SESSION_CAPABILITY_IGNORED, EVENT_SOURCE_SYSTEM,
-    FailureClass, ListedSessionRecord, NewPromptRecord, NewSessionRecord, PromptRecord,
-    PromptStatus, SESSION_STATUS_ACTIVE, SESSION_STATUS_CLOSED, SessionRecord, StateStore,
-    next_prompt_id, next_prompt_message_id, next_session_id,
+    EVENT_KIND_SESSION_AVAILABLE, EVENT_KIND_SESSION_CAPABILITY_IGNORED, EVENT_KIND_SESSION_UPDATE,
+    EVENT_SOURCE_SYSTEM, FailureClass, ListedSessionRecord, NewPromptRecord, NewSessionRecord,
+    PromptRecord, PromptStatus, SESSION_STATUS_ACTIVE, SESSION_STATUS_CLOSED, SessionRecord,
+    StateStore, next_prompt_id, next_prompt_message_id, next_session_id,
 };
 
 use self::bridge::*;
