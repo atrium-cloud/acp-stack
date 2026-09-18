@@ -103,7 +103,7 @@ pub(super) async fn authenticate(
                     "auth.missing",
                     "missing Authorization header",
                 ),
-                Err(state_err) => state_err,
+                Err(state_err) => *state_err,
             };
         }
         (Some(_), Some(_)) => {
@@ -127,7 +127,7 @@ pub(super) async fn authenticate(
                     "auth.malformed_header",
                     "duplicate Authorization headers are not allowed",
                 ),
-                Err(state_err) => state_err,
+                Err(state_err) => *state_err,
             };
         }
         (Some(only), None) => only,
@@ -156,7 +156,7 @@ pub(super) async fn authenticate(
                     "auth.malformed_header",
                     "Authorization header must be `Bearer <token>` with a single ASCII token",
                 ),
-                Err(state_err) => state_err,
+                Err(state_err) => *state_err,
             };
         }
     };
@@ -213,7 +213,7 @@ pub(super) async fn authenticate(
                     "auth.invalid",
                     "invalid credential",
                 ),
-                Err(state_err) => state_err,
+                Err(state_err) => *state_err,
             }
         }
     }
@@ -425,7 +425,7 @@ async fn enforce_tier(
                     "auth.wrong_kind",
                     "presented key is not valid for this route",
                 ),
-                Err(state_err) => state_err,
+                Err(state_err) => *state_err,
             }
         }
         None => {
@@ -592,7 +592,7 @@ async fn log_failure(
     client_ip: Option<&str>,
     origin: &crate::http_hardening::RequestOrigin,
     route: &str,
-) -> std::result::Result<(), Response> {
+) -> std::result::Result<(), Box<Response>> {
     // Every rejected auth attempt MUST leave a durable `auth_failures` row, so
     // an unwritable state DB fails closed with 500 rather than returning a
     // silent 401 an attacker could brute-force against unrecorded.
@@ -601,11 +601,11 @@ async fn log_failure(
         record_auth_failure_with_origin(&store, kind, reason, client_ip, Some(route), Some(origin))
     {
         tracing::error!(error = %err, "failed to record auth failure");
-        return Err(reject(
+        return Err(Box::new(reject(
             StatusCode::INTERNAL_SERVER_ERROR,
             "state.error",
             "internal state error while recording auth failure",
-        ));
+        )));
     }
     drop(store);
     // Tick the in-memory blocker; tripping the threshold emits a durable event.

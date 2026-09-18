@@ -177,7 +177,7 @@ fn provider_lookup_works_for_every_collapsed_provider_id() {
 
 #[test]
 fn models_dev_only_providers_are_opencode_scoped_without_default_env_refs() {
-    for provider_id in ["helicone", "deepinfra", "github-models", "venice"] {
+    for provider_id in ["helicone", "deepinfra", "gitlab", "venice"] {
         assert!(provider_id_is_known(provider_id));
         assert!(provider_id_supports_agent(provider_id, "opencode"));
         assert!(!provider_id_supports_agent(provider_id, "pi"));

@@ -11,7 +11,7 @@ This document is for maintainers and (future) contributors.
 
 ## Verification Commands
 
-Use Rust `1.95.0`, matching `rust-toolchain.toml`. Default Cargo commands build the production-shaped target set. Development commands and fixtures require explicit features:
+Use Rust `1.98.1`, matching `rust-toolchain.toml`. Default Cargo commands build the production-shaped target set. Development commands and fixtures require explicit features:
 
 ```sh
 cargo test

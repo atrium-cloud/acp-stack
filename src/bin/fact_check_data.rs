@@ -22,7 +22,10 @@ const ACP_REGISTRY_REPO: &str = "agentclientprotocol/registry";
 const ACP_REGISTRY_ASSET: &str = "registry.json";
 const MODELS_DEV_API_URL: &str = "https://models.dev/api.json";
 const PI_PROVIDER_DOC_URL: &str = "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/docs/providers.md";
-const AMP_MANUAL_URL: &str = "https://ampcode.com/manual";
+// The Amp manual dropped its env-var appendix; the amp-acp adapter README is the
+// document that names the headless credential acp-stack actually injects.
+const AMP_ACP_README_URL: &str =
+    "https://raw.githubusercontent.com/tao12345666333/amp-acp/main/README.md";
 const OPENCODE_PROVIDER_DOC_URL: &str = "https://opencode.ai/docs/providers/";
 const GITHUB_API_BASE: &str = "https://api.github.com";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -255,16 +258,16 @@ fn check_provider_sources(
     let models_dev: Value = http.get_json(MODELS_DEV_API_URL)?;
     let models_dev_providers = models_dev_provider_names(&models_dev);
     let pi_doc = http.get_text(PI_PROVIDER_DOC_URL)?;
-    let amp_manual = http.get_text(AMP_MANUAL_URL)?;
+    let amp_acp_readme = http.get_text(AMP_ACP_README_URL)?;
     let opencode_doc = http.get_text(OPENCODE_PROVIDER_DOC_URL)?;
 
     let mut primary_doc = BTreeSet::new();
     check_pi_provider_doc(mapping, &pi_doc, &mut primary_doc, report);
     check_agent_env_doc(
         "amp-code",
-        "Amp",
+        "amp-acp README",
         "AMP_API_KEY",
-        &amp_manual,
+        &amp_acp_readme,
         &mut primary_doc,
         report,
     );
@@ -403,6 +406,7 @@ fn embedded_sync_ids(catalog: &RegistryCatalog) -> BTreeSet<String> {
     catalog
         .entries()
         .iter()
+        .filter(|entry| !entry.sync_exempt)
         .map(|entry| {
             entry
                 .adapter
@@ -831,6 +835,8 @@ mod tests {
         assert!(ids.contains("claude-acp"));
         assert!(!ids.contains("amp"));
         assert!(!ids.contains("claude-agent-acp"));
+        assert!(!ids.contains("pi-acp"));
+        assert!(!ids.contains("hermes-agent-acp"));
     }
 
     #[test]
@@ -843,7 +849,7 @@ mod tests {
             .collect();
 
         assert!(providers.contains("deepinfra"));
-        assert!(providers.contains("github-models"));
+        assert!(providers.contains("gitlab"));
         assert!(!providers.contains("openai"));
         assert!(!providers.contains("opencode"));
     }

@@ -314,9 +314,9 @@ fn env_assertion_title(args: &AcpArgs) -> String {
             failures.push(format!("env missing: {name}"));
         }
     }
-    for pair in args.assert_env_not_equals.chunks_exact(2) {
-        if std::env::var_os(&pair[0]).as_deref() == Some(std::ffi::OsStr::new(&pair[1])) {
-            failures.push(format!("env override: {}", pair[0]));
+    for [name, value] in args.assert_env_not_equals.as_chunks::<2>().0 {
+        if std::env::var_os(name).as_deref() == Some(std::ffi::OsStr::new(value)) {
+            failures.push(format!("env override: {name}"));
         }
     }
     if args.assert_env_absent.is_empty()

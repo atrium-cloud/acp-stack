@@ -829,11 +829,6 @@ agents = ["opencode"]
 base_url = "https://go.fastrouter.ai/api/v1"
 
 [[providers]]
-id = ["firepass"]
-name = "Fireworks (Firepass)"
-agents = ["opencode"]
-
-[[providers]]
 id = ["friendli"]
 name = "Friendli"
 agents = ["opencode"]
@@ -850,11 +845,6 @@ id = ["github-copilot"]
 name = "GitHub Copilot"
 agents = ["opencode"]
 base_url = "https://api.githubcopilot.com"
-
-[[providers]]
-id = ["github-models"]
-name = "GitHub Models"
-agents = ["opencode"]
 
 [[providers]]
 id = ["gitlab"]
@@ -953,7 +943,7 @@ base_url = "https://api.llama.com/compat/v1"
 
 [[providers]]
 id = ["llmgateway"]
-name = "LLM Gateway"
+name = "DevPass (LLM Gateway)"
 agents = ["opencode"]
 base_url = "https://api.llmgateway.io/v1"
 
@@ -970,7 +960,7 @@ base_url = "https://api.longcat.chat/openai"
 
 [[providers]]
 id = ["lucidquery"]
-name = "LucidQuery AI"
+name = "LucidQuery"
 agents = ["opencode"]
 base_url = "https://api.lucidquery.com/v1"
 
@@ -1284,7 +1274,7 @@ api_mode = "chat_completions"
 
 [[providers]]
 id = ["stepfun-ai"]
-name = "StepFun AI"
+name = "StepFun (Global)"
 agents = ["opencode"]
 base_url = "https://api.stepfun.ai/v1"
 
@@ -1390,7 +1380,7 @@ base_url = "https://pass.wafer.ai/v1"
 
 [[providers]]
 id = ["wandb"]
-name = "Weights & Biases"
+name = "CoreWeave"
 agents = ["opencode"]
 base_url = "https://api.inference.wandb.ai/v1"
 
