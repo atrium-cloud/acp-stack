@@ -149,11 +149,13 @@ By default the agent harness and mediated shells run in the same process tree an
 
 The masked set is always derived from the runtime's own path helpers — the config directory (`~/.config/acp-stack`, holding config and the age key) and the state directory (`~/.local/share/acp-stack`, holding the secret store, state database, and local socket) — so an operator cannot misconfigure the protection away. `[workspace.sandbox].mask_paths` only adds to that set.
 
+Masking comes in two keys, matched to the filesystem object being hidden. `mask_paths` takes directories and covers each with an empty `tmpfs`. `mask_files` takes non-directory paths, a unix socket or a plain file, and binds an empty read-only regular file over each. `mask_files` is an `unshare` feature: config validation rejects a non-empty `mask_files` under `bwrap` or `custom`, and `off` skips every mask. Both take absolute paths. A symlink entry masks the path it resolves to, so access through the link still lands on the mask.
+
 Backends are selected by `[workspace.sandbox].mode`:
 
 - `off` — no wrapping.
-- `unshare` — runs the workload in fresh mount, pid, ipc, and uts namespaces with a private `/proc`, the sensitive paths masked with `tmpfs`, then all capabilities and `no_new_privs` dropped before exec. Requires the daemon to hold `CAP_SYS_ADMIN`, as in a privileged container.
-- `bwrap` — the same masking through `bubblewrap`, for hosts with unprivileged user namespaces.
+- `unshare` — runs the workload in fresh mount, pid, ipc, and uts namespaces with a private `/proc`, the sensitive directories masked with `tmpfs` and every declared `mask_files` entry masked with an empty read-only file, then all capabilities and `no_new_privs` dropped before exec. Requires the daemon to hold `CAP_SYS_ADMIN`, as in a privileged container.
+- `bwrap` — the same directory masking through `bubblewrap`, for hosts with unprivileged user namespaces.
 - `custom` — an operator-supplied wrapper argv in `[workspace.sandbox].wrapper`, for any other mechanism such as `systemd-run` or `firejail`.
 
 Secrets referenced in `[agent].env` are still delivered to the harness through its environment under every backend; only on-disk secrets and the control socket are masked. The same wrapping applies to mediated shell commands, so a shell command the agent runs cannot read the daemon's secrets either.
@@ -198,7 +200,7 @@ The cleared environment carries exactly these variables:
 
 Provider stdout is always discarded so it cannot corrupt the ACP transport. Provider stderr goes to the daemon's diagnostic channel (`provider_stderr = "daemon"`, the default) or is discarded (`"null"`). It is never attached to a mediated command's captured output. A provider killed by supervisor SIGKILL must reconcile any host resources not tied to namespace destruction on its next run.
 
-A network namespace isolates the IPv4/IPv6 stacks and abstract-namespace Unix sockets. It does not block pathname Unix sockets — those are filesystem objects. The daemon's control socket stays protected by the tmpfs path masking above, not by the network namespace.
+A network namespace isolates the IPv4/IPv6 stacks and abstract-namespace Unix sockets. A pathname Unix socket is a filesystem object, so path masking is what hides it: the daemon's own control socket sits inside the tmpfs-masked state directory, and a socket outside the masked directories is declared in `mask_files`.
 
 ```mermaid
 flowchart TB

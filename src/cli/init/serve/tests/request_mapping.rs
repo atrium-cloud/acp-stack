@@ -876,3 +876,46 @@ fn start_init_request_sandbox_mask_paths_stage_into_the_starter_config() {
         "starter config must carry the mask path: {toml}"
     );
 }
+
+#[test]
+fn start_init_request_maps_sandbox_mask_files_into_args() {
+    let args = request_from_json(
+        r#"{
+                "agent": "placebo",
+                "sandbox_mask_files": ["/run/host-control.sock", "/run/host.sock"]
+            }"#,
+    )
+    .into_init_args()
+    .expect("valid request");
+    assert_eq!(
+        args.prompt_sandbox_mask_files,
+        [
+            "/run/host-control.sock".to_owned(),
+            "/run/host.sock".to_owned()
+        ]
+    );
+    // Absent declarations default to an empty list.
+    let args = request_from_json(r#"{"agent":"placebo"}"#)
+        .into_init_args()
+        .expect("valid request");
+    assert!(args.prompt_sandbox_mask_files.is_empty());
+}
+
+#[test]
+fn start_init_request_sandbox_mask_files_stage_into_the_starter_config() {
+    let args = request_from_json(
+        r#"{
+                "agent": "placebo",
+                "sandbox": "unshare",
+                "sandbox_mask_files": ["/run/host-control.sock"]
+            }"#,
+    )
+    .into_init_args()
+    .expect("valid request");
+    let toml = super::super::super::starter_config::starter_config(&args)
+        .expect("a valid declaration must assemble into a starter config");
+    assert!(
+        toml.contains("mask_files") && toml.contains("/run/host-control.sock"),
+        "starter config must carry the mask file: {toml}"
+    );
+}

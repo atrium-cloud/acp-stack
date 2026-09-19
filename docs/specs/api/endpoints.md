@@ -59,6 +59,7 @@ Session-tier HTTP routes are also mounted on the local socket and serve only whi
         - Applies only when creating a starter config; a request carrying `extensions` against an existing config is rejected. The exception is `resume`: a resumed run keeps the recorded run's original staging, and re-declared `extensions` are ignored, matching `data_sources` and `deps`.
         - Semantic validation (name shape, per-type field discipline, the network-provider/unshare pairing) runs in-session with the rest of config validation, matching the deferred-validation note below.
         - `sandbox_mask_paths`: array of absolute paths unioned into the starter config's `[workspace.sandbox].mask_paths`. A network-provider declared here needs its egress config and state dirs masked from the first sandboxed spawn, so the caller declares them alongside. Entries must be non-blank absolute paths, validated in-session like the extension declarations; duplicates collapse. Applies only when creating a starter config, with the same rejection discipline as `extensions`.
+        - `sandbox_mask_files`: array of absolute non-directory paths unioned into the starter config's `[workspace.sandbox].mask_files`, masked with an empty read-only file rather than a tmpfs, for a host control socket or a plain file the sandboxed agent must not reach. Same entry rules, duplicate collapse, and starter-config-only discipline as `sandbox_mask_paths`.
     - Update policies (mirror the `--stack-update`/`--agent-update` flags; declared up-front, never streamed):
         - `stack_update` (`on` | `security` | `off`) with optional `stack_update_frequency` (day/week units, e.g. `1d`, `3w`).
         - `agent_update` (`on` | `off`) with optional `agent_update_frequency` (hour/day/week units, e.g. `12h`, `1d`).
@@ -1097,7 +1098,7 @@ A `running` row is reconciled to `failed` with `error.code = "deps.apply_abandon
 ```json
 {
   "version": "0.1.9",
-  "features": ["network-provider-workload-env", "agent-test-json", "managed-credential-base-url"]
+  "features": ["network-provider-workload-env", "agent-test-json", "managed-credential-base-url", "sandbox-mask-files"]
 }
 ```
 
@@ -1107,6 +1108,7 @@ A `running` row is reconciled to `failed` with `error.code = "deps.apply_abandon
     - `network-provider-workload-env` — `[extensions.<name>.workload_env]`
     - `agent-test-json` — `acps agent test --format json`
     - `managed-credential-base-url` — `base_url` on a managed-state credential selection
+    - `sandbox-mask-files` — `sandbox_mask_files` on the init create body and `[workspace.sandbox].mask_files` masking
 
 ### `GET /v1/status/agent`
 

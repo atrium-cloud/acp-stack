@@ -19,6 +19,12 @@ pub struct SandboxConfig {
     /// Extra absolute paths to mask (read-deny) on top of the daemon's own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mask_paths: Vec<String>,
+    /// Extra absolute non-directory paths to mask (read-deny) by binding an
+    /// empty read-only regular file over them. `unshare` only: a tmpfs mask
+    /// fails with ENOTDIR on a file, so a unix socket or a plain file needs
+    /// this key rather than `mask_paths`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mask_files: Vec<String>,
     /// Extra absolute paths the workload may read+write (e.g. bwrap binds)
     /// beyond the workspace root.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

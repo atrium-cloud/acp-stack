@@ -1081,6 +1081,75 @@ fn hosted_sandbox_mask_paths_reject_blank_and_relative_entries() {
 }
 
 #[test]
+fn hosted_sandbox_mask_files_stage_into_the_starter_config() {
+    let mut args = parse_init_args(&["--agent", "placebo", "--sandbox", "unshare"]);
+    args.prompt_sandbox_mask_files = vec![
+        "/run/host-control.sock".to_owned(),
+        "/run/host.sock".to_owned(),
+        "/run/host-control.sock".to_owned(),
+    ];
+    let config = starter_config_from_args(&args);
+    assert_eq!(
+        config.workspace.sandbox.mask_files,
+        [
+            "/run/host-control.sock".to_owned(),
+            "/run/host.sock".to_owned()
+        ],
+        "declared files stage in declaration order, duplicates collapse"
+    );
+    assert!(
+        config.workspace.sandbox.mask_paths.is_empty(),
+        "file masks stay out of the directory mask set"
+    );
+}
+
+#[test]
+fn hosted_sandbox_mask_files_reject_blank_and_relative_entries() {
+    for (declared, reason) in [
+        (vec!["   ".to_owned()], "non-blank"),
+        (vec!["run/host-control.sock".to_owned()], "must be absolute"),
+    ] {
+        let mut args = parse_init_args(&["--agent", "placebo"]);
+        args.prompt_sandbox_mask_files = declared;
+        let error = starter_config(&args).expect_err("an invalid mask file must fail");
+        assert!(
+            error.to_string().contains(reason),
+            "error must explain the rejection ({reason}): {error}"
+        );
+    }
+}
+
+#[test]
+fn hosted_sandbox_mask_files_are_rejected_against_an_existing_config() {
+    let mut args = parse_init_args(&["--agent", "placebo"]);
+    args.prompt_sandbox_mask_files = vec!["/run/host-control.sock".to_owned()];
+    let error = reject_sandbox_mask_files_args_for_existing_config(&args)
+        .expect_err("declarations against an existing config must be rejected");
+    assert!(
+        error.to_string().contains("starter config"),
+        "error must explain the starter-only scope: {error}"
+    );
+    reject_sandbox_mask_files_args_for_existing_config(&parse_init_args(&["--agent", "placebo"]))
+        .expect("no declarations, no rejection");
+}
+
+#[test]
+fn resume_ignores_redeclared_sandbox_masks_against_an_existing_config() {
+    let mut args = parse_init_args(&["--agent", "placebo", "--resume"]);
+    args.prompt_sandbox_mask_paths = vec!["/var/lib/network-egress".to_owned()];
+    args.prompt_sandbox_mask_files = vec!["/run/host-control.sock".to_owned()];
+    reject_starter_only_args_for_existing_config(&args, false)
+        .expect("a resumed run keeps its recorded staging and ignores re-declarations");
+
+    args.resume = false;
+    let error = reject_starter_only_args_for_existing_config(&args, false)
+        .expect_err("the same declarations against an existing config are rejected");
+    assert!(error.to_string().contains("starter config"), "got: {error}");
+    reject_starter_only_args_for_existing_config(&args, true)
+        .expect("a starter config accepts the declarations");
+}
+
+#[test]
 fn hosted_sandbox_mask_paths_are_rejected_against_an_existing_config() {
     let mut args = parse_init_args(&["--agent", "placebo"]);
     args.prompt_sandbox_mask_paths = vec!["/var/lib/network-egress".to_owned()];

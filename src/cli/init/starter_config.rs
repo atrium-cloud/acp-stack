@@ -42,16 +42,12 @@ mod prompts;
 // them `pub(crate)` and they are re-exported here.
 pub(super) use self::builders::{
     mcp_servers_from_prompted, merge_prompted_mcp_servers,
-    reject_data_source_args_for_existing_config, reject_extensions_args_for_existing_config,
-    reject_sandbox_mask_paths_args_for_existing_config,
-    reject_starter_only_mcp_args_for_existing_config, starter_config,
-    validate_deployment_overrides_match_existing,
+    reject_starter_only_args_for_existing_config, reject_starter_only_mcp_args_for_existing_config,
+    starter_config, validate_deployment_overrides_match_existing,
 };
 pub(super) use self::deps::{
     AgentEnvCollection, append_agent_env_refs, apply_agent_env_collection,
-    collect_agent_env_refs_for_init, push_args_deps_to_config,
-    reject_agent_env_refs_for_existing_config, reject_deps_args_for_existing_config,
-    should_apply_deps_for_init,
+    collect_agent_env_refs_for_init, push_args_deps_to_config, should_apply_deps_for_init,
 };
 pub(super) use self::prompts::{
     configure_agent_update_for_init, configure_stack_update_for_init,

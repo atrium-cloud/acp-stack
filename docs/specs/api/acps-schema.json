@@ -1601,6 +1601,14 @@
             "description": "Absolute paths unioned into the starter config's\n`[workspace.sandbox].mask_paths`, so a network-provider declared through\n`extensions` has its egress config/state dirs masked from the first\nsandboxed spawn. Applies only when creating a starter config.",
             "default": []
           },
+          "sandbox_mask_files": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Absolute non-directory paths unioned into the starter config's\n`[workspace.sandbox].mask_files`, so a host control socket or plain file\nis masked from the first sandboxed spawn. Applies only when creating a\nstarter config.",
+            "default": []
+          },
           "data_sources": {
             "type": "array",
             "items": {
@@ -4242,7 +4250,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Advertised capability names, currently `network-provider-workload-env`,\n`agent-test-json`, and `managed-credential-base-url`. The list grows\nover time; an absent or empty list means none are present."
+            "description": "Advertised capability names, currently `network-provider-workload-env`,\n`agent-test-json`, `managed-credential-base-url`, and\n`sandbox-mask-files`. The list grows over time; an absent or empty list\nmeans none are present."
           }
         },
         "required": [
@@ -8103,6 +8111,13 @@
               "type": "string"
             },
             "description": "Extra absolute paths to mask (read-deny) on top of the daemon's own."
+          },
+          "mask_files": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Extra absolute non-directory paths to mask (read-deny) by binding an\nempty read-only regular file over them. `unshare` only: a tmpfs mask\nfails with ENOTDIR on a file, so a unix socket or a plain file needs\nthis key rather than `mask_paths`."
           },
           "allow_paths": {
             "type": "array",

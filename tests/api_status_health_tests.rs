@@ -34,6 +34,7 @@ async fn status_returns_200_with_session_key() {
         "network-provider-workload-env",
         "agent-test-json",
         "managed-credential-base-url",
+        "sandbox-mask-files",
     ] {
         assert!(
             features.iter().any(|entry| entry == feature),

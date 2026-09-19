@@ -359,6 +359,18 @@ fn apply_sandbox_set(config: &mut Config, args: &SandboxSetArgs) -> Result<()> {
             ),
         });
     }
+    if !config.workspace.sandbox.mask_files.is_empty()
+        && matches!(args.mode, SandboxModeArg::Bwrap | SandboxModeArg::Custom)
+    {
+        return Err(StackError::InvalidParam {
+            field: "workspace.sandbox.mask_files",
+            reason: format!(
+                "cannot set sandbox mode `{}` while [workspace.sandbox].mask_files is non-empty; \
+                 clear mask_files in the config TOML first",
+                sandbox_mode_label(args.mode.to_config())
+            ),
+        });
+    }
     let mut sandbox_config = config.workspace.sandbox.clone();
     sandbox_config.mode = args.mode.to_config();
     sandbox_config.wrapper = if args.mode == SandboxModeArg::Custom {
@@ -907,6 +919,39 @@ mod tests {
             assert!(error.to_string().contains("extensions.egress"));
             assert_eq!(config, before, "config must be untouched on failure");
         }
+    }
+
+    #[test]
+    fn sandbox_set_rejects_bwrap_and_custom_while_mask_files_are_declared() {
+        let mut config = fixture_config();
+        config.workspace.sandbox.mode = SandboxMode::Unshare;
+        config.workspace.sandbox.mask_files = vec!["/run/host-control.sock".to_owned()];
+        let before = config.clone();
+
+        for (mode, wrapper_args) in [
+            (SandboxModeArg::Bwrap, Vec::new()),
+            (SandboxModeArg::Custom, vec!["systemd-run".to_owned()]),
+        ] {
+            let error = apply_sandbox_set(&mut config, &SandboxSetArgs { mode, wrapper_args })
+                .expect_err(
+                    "declared mask_files must block a switch to a backend that ignores them",
+                );
+            assert!(error.to_string().contains("mask_files"), "got: {error}");
+            assert_eq!(config, before, "config must be untouched on failure");
+        }
+
+        apply_sandbox_set(
+            &mut config,
+            &SandboxSetArgs {
+                mode: SandboxModeArg::Off,
+                wrapper_args: Vec::new(),
+            },
+        )
+        .expect("off opts out of every mask and keeps the declaration");
+        assert_eq!(
+            config.workspace.sandbox.mask_files,
+            vec!["/run/host-control.sock"]
+        );
     }
 
     #[test]

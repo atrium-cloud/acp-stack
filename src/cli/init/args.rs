@@ -443,6 +443,12 @@ pub struct InitArgs {
     /// staged network-provider's egress dirs are masked from the first spawn.
     #[arg(skip)]
     pub(super) prompt_sandbox_mask_paths: Vec<String>,
+    /// Sandbox mask files from the hosted start request (`sandbox_mask_files`),
+    /// unioned into the starter config's `[workspace.sandbox].mask_files` so a
+    /// non-directory path such as a host control socket is masked from the
+    /// first spawn.
+    #[arg(skip)]
+    pub(super) prompt_sandbox_mask_files: Vec<String>,
     /// Resume the most recent non-terminal init run. With `--run-id`, resume
     /// the specified run. Conflicts with `--fresh`.
     #[arg(long, conflicts_with = "fresh")]
@@ -542,6 +548,7 @@ impl Default for InitArgs {
             defer_provider_credentials: false,
             prompt_extensions: std::collections::BTreeMap::new(),
             prompt_sandbox_mask_paths: Vec::new(),
+            prompt_sandbox_mask_files: Vec::new(),
             skip_testflight: false,
             standard_agent_work_deps: false,
             browser_use_profile: false,

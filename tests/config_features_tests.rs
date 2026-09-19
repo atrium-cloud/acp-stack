@@ -771,6 +771,61 @@ fn removed_sandbox_network_block_gets_migration_error() {
 }
 
 #[test]
+fn accepts_absolute_sandbox_mask_files() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [workspace.sandbox]\n\
+         mode = \"unshare\"\n\
+         mask_files = [\"/run/host-control.sock\"]\n"
+    );
+    let config = load_config_from_str(&config_text).expect("an absolute mask file loads");
+    assert_eq!(
+        config.workspace.sandbox.mask_files,
+        ["/run/host-control.sock"]
+    );
+}
+
+#[test]
+fn rejects_blank_and_relative_sandbox_mask_files() {
+    for entry in ["   ", "run/host-control.sock"] {
+        let config_text = format!(
+            "{VALID_CONFIG}\n\
+             [workspace.sandbox]\n\
+             mode = \"unshare\"\n\
+             mask_files = [\"{entry}\"]\n"
+        );
+        let err = load_config_from_str(&config_text)
+            .expect_err("a blank or relative mask file must be rejected");
+        assert!(err.to_string().contains("must be absolute"), "got: {err}");
+    }
+}
+
+#[test]
+fn rejects_sandbox_mask_files_under_bwrap_and_custom() {
+    for (mode, extra) in [("bwrap", ""), ("custom", "wrapper = [\"systemd-run\"]\n")] {
+        let config_text = format!(
+            "{VALID_CONFIG}\n\
+             [workspace.sandbox]\n\
+             mode = \"{mode}\"\n\
+             mask_files = [\"/run/host-control.sock\"]\n\
+             {extra}"
+        );
+        let err = load_config_from_str(&config_text)
+            .expect_err("mask_files under a backend that cannot enforce them must be rejected");
+        assert!(err.to_string().contains("unshare"), "got: {err}");
+        assert!(err.to_string().contains("mask_files"), "got: {err}");
+    }
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [workspace.sandbox]\n\
+         mode = \"off\"\n\
+         mask_files = [\"/run/host-control.sock\"]\n"
+    );
+    load_config_from_str(&config_text)
+        .expect("off opts out of every mask and keeps the declaration");
+}
+
+#[test]
 fn rejects_network_provider_extension_outside_unshare() {
     for mode in ["off", "bwrap"] {
         let config_text = format!(

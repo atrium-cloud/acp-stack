@@ -61,6 +61,24 @@ pub(crate) fn reject_starter_only_mcp_args_for_existing_config(args: &InitArgs) 
     Ok(())
 }
 
+/// Starter-only declarations against an existing config are rejected, except on
+/// resume: the recorded run's original staging stands and re-declarations are ignored.
+pub(crate) fn reject_starter_only_args_for_existing_config(
+    args: &InitArgs,
+    creating_config: bool,
+) -> Result<()> {
+    if creating_config || args.resume {
+        return Ok(());
+    }
+    super::super::reject_supabase_init_args_for_existing_config(args)?;
+    super::deps::reject_agent_env_refs_for_existing_config(args)?;
+    super::deps::reject_deps_args_for_existing_config(args)?;
+    reject_data_source_args_for_existing_config(args)?;
+    reject_extensions_args_for_existing_config(args)?;
+    reject_sandbox_mask_paths_args_for_existing_config(args)?;
+    reject_sandbox_mask_files_args_for_existing_config(args)
+}
+
 /// Data-source declarations seed a fresh starter config only; reject them when a
 /// config already exists.
 pub(crate) fn reject_data_source_args_for_existing_config(args: &InitArgs) -> Result<()> {
@@ -107,25 +125,66 @@ pub(crate) fn reject_sandbox_mask_paths_args_for_existing_config(args: &InitArgs
     })
 }
 
+/// Sandbox mask file declarations stage into a fresh starter config only, for
+/// the same reason as extension declarations.
+pub(crate) fn reject_sandbox_mask_files_args_for_existing_config(args: &InitArgs) -> Result<()> {
+    if args.prompt_sandbox_mask_files.is_empty() {
+        return Ok(());
+    }
+    Err(StackError::InvalidParam {
+        field: "sandbox_mask_files",
+        reason: "sandbox mask file declarations apply only when creating a starter config"
+            .to_owned(),
+    })
+}
+
 /// Declared mask paths union onto whatever the starter sandbox config already
 /// carries, so a declaration extends the mask set instead of clobbering it.
 /// Blank and relative entries are rejected here, in the style of the config
 /// schema's mask/allow validation, rather than surfacing later at config load.
 pub(super) fn union_sandbox_mask_paths(
+    base: Vec<String>,
+    declared: &[String],
+) -> Result<Vec<String>> {
+    union_sandbox_masks(
+        "workspace.sandbox.mask_paths",
+        "sandbox mask path",
+        base,
+        declared,
+    )
+}
+
+/// Declared mask files union in the same way as mask paths, against the
+/// separate `mask_files` set the file-level mask consumes.
+pub(super) fn union_sandbox_mask_files(
+    base: Vec<String>,
+    declared: &[String],
+) -> Result<Vec<String>> {
+    union_sandbox_masks(
+        "workspace.sandbox.mask_files",
+        "sandbox mask file",
+        base,
+        declared,
+    )
+}
+
+fn union_sandbox_masks(
+    field: &'static str,
+    label: &str,
     mut base: Vec<String>,
     declared: &[String],
 ) -> Result<Vec<String>> {
     for path in declared {
         if path.trim().is_empty() {
             return Err(StackError::InvalidParam {
-                field: "workspace.sandbox.mask_paths",
-                reason: "sandbox mask path must be non-blank".to_owned(),
+                field,
+                reason: format!("{label} must be non-blank"),
             });
         }
         if !Path::new(path).is_absolute() {
             return Err(StackError::InvalidParam {
-                field: "workspace.sandbox.mask_paths",
-                reason: format!("sandbox mask path `{path}` must be absolute"),
+                field,
+                reason: format!("{label} `{path}` must be absolute"),
             });
         }
         if !base.contains(path) {
@@ -168,6 +227,7 @@ fn sandbox_from_args(args: &InitArgs) -> Result<SandboxConfig> {
     Ok(SandboxConfig {
         mode,
         mask_paths: union_sandbox_mask_paths(Vec::new(), &args.prompt_sandbox_mask_paths)?,
+        mask_files: union_sandbox_mask_files(Vec::new(), &args.prompt_sandbox_mask_files)?,
         ..SandboxConfig::default()
     })
 }

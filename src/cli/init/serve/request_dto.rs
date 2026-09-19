@@ -161,6 +161,12 @@ pub(super) struct StartInitRequest {
     /// sandboxed spawn. Applies only when creating a starter config.
     #[serde(default)]
     sandbox_mask_paths: Vec<String>,
+    /// Absolute non-directory paths unioned into the starter config's
+    /// `[workspace.sandbox].mask_files`, so a host control socket or plain file
+    /// is masked from the first sandboxed spawn. Applies only when creating a
+    /// starter config.
+    #[serde(default)]
+    sandbox_mask_files: Vec<String>,
     #[serde(default)]
     data_sources: Vec<DataSourceRequest>,
     /// Continue the most recent unfinished or failed run instead of starting a
@@ -689,6 +695,7 @@ impl StartInitRequest {
         args.defer_provider_credentials = self.defer_provider_credentials.unwrap_or(false);
         args.prompt_extensions = self.extensions;
         args.prompt_sandbox_mask_paths = self.sandbox_mask_paths;
+        args.prompt_sandbox_mask_files = self.sandbox_mask_files;
         args.prompt_data_sources = self
             .data_sources
             .into_iter()

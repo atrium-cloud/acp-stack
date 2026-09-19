@@ -29,6 +29,13 @@ pub const SANDBOX_PROVIDER_SUPERVISE_SUBCOMMAND: &str = "__sandbox-provider-supe
 /// Fixed child fd the spawn sites dup the daemon's stderr onto, so supervisor diagnostics reach the operator even when the workload's stderr is a captured pipe.
 pub const SANDBOX_DIAG_FD: i32 = 3;
 
+/// `mkdtemp` template for the directory where the `__sandbox-exec` helper stages the empty file it binds
+/// over a masked non-directory path. Each spawn gets its own directory, torn down before the workload execs.
+#[cfg(target_os = "linux")]
+const MASK_FILE_STAGING_TEMPLATE: &str = ".acps-sandbox-mask-XXXXXX";
+#[cfg(target_os = "linux")]
+const MASK_FILE_STAGING_NAME: &str = "empty";
+
 const UNSHARE_FLAGS: &[&str] = &[
     "--mount",
     "--uts",
@@ -171,6 +178,10 @@ fn unshare_chain_args(
     for path in sensitive_mask_paths(home, sandbox) {
         out.push("--mask".to_owned());
         out.push(path.to_string_lossy().into_owned());
+    }
+    for path in &sandbox.mask_files {
+        out.push("--mask-file".to_owned());
+        out.push(path.clone());
     }
     out.push("--".to_owned());
     out.push(resolve_bin("setpriv").to_string_lossy().into_owned());
@@ -382,9 +393,10 @@ fn host_has_cap_sys_admin() -> bool {
     false
 }
 
-/// `acps __sandbox-exec --mask <dir>… -- <cmd> <args…>`: masks each directory with a fresh `tmpfs` inside the `unshare` namespaces, then execs the privilege-drop chain. Never returns on success.
+/// `acps __sandbox-exec --mask <dir>… --mask-file <path>… -- <cmd> <args…>`: masks each directory with a fresh `tmpfs` and each non-directory path with an empty read-only file inside the `unshare` namespaces, then execs the privilege-drop chain. Never returns on success.
 pub fn run_exec(raw_args: Vec<String>) -> Result<()> {
     let mut masks: Vec<String> = Vec::new();
+    let mut mask_files: Vec<String> = Vec::new();
     let mut sync_fd: Option<i32> = None;
     let mut command: Vec<String> = Vec::new();
     let mut iter = raw_args.into_iter();
@@ -395,6 +407,12 @@ pub fn run_exec(raw_args: Vec<String>) -> Result<()> {
                     reason: "--mask requires a path argument".to_owned(),
                 })?;
                 masks.push(value);
+            }
+            "--mask-file" => {
+                let value = iter.next().ok_or_else(|| StackError::SandboxFailed {
+                    reason: "--mask-file requires a path argument".to_owned(),
+                })?;
+                mask_files.push(value);
             }
             "--sync-fd" => {
                 let value = iter.next().ok_or_else(|| StackError::SandboxFailed {
@@ -425,6 +443,9 @@ pub fn run_exec(raw_args: Vec<String>) -> Result<()> {
     }
     for path in &masks {
         mask_with_tmpfs(Path::new(path))?;
+    }
+    for path in &mask_files {
+        mask_with_empty_file(Path::new(path))?;
     }
     // Fail-closed gate: block until the supervisor confirms provider setup, so the workload never runs
     // with a half-configured namespace. A dead supervisor means EOF here and no exec at all.
@@ -475,6 +496,194 @@ fn mask_with_tmpfs(path: &Path) -> Result<()> {
 fn mask_with_tmpfs(_path: &Path) -> Result<()> {
     Err(StackError::SandboxFailed {
         reason: "tmpfs masking is only supported on Linux".to_owned(),
+    })
+}
+
+/// Bind an empty read-only regular file over `path`. A missing path is skipped; any other failure is fatal rather than run the workload unmasked.
+/// The empty file is staged on a private tmpfs that is detached again once the bind holds it, so the helper leaves no file behind for the workload to find.
+#[cfg(target_os = "linux")]
+fn mask_with_empty_file(path: &Path) -> Result<()> {
+    if !path.exists() {
+        eprintln!(
+            "acps sandbox: mask file {} does not exist; skipping",
+            path.display()
+        );
+        return Ok(());
+    }
+    if path.is_dir() {
+        return Err(StackError::SandboxFailed {
+            reason: format!(
+                "mask file {} is a directory; declare it under [workspace.sandbox].mask_paths",
+                path.display()
+            ),
+        });
+    }
+    let staging = stage_mask_file_dir()?;
+    let staging_target = match mount_mask_file_staging(&staging) {
+        Ok(target) => target,
+        Err(error) => {
+            // Nothing is mounted yet, so the empty mkdtemp directory is all there is to undo.
+            if let Err(remove_error) = std::fs::remove_dir(&staging) {
+                eprintln!(
+                    "acps sandbox: remove mask-file staging dir {} failed: {remove_error}",
+                    staging.display()
+                );
+            }
+            return Err(error);
+        }
+    };
+    let bound = bind_empty_file_over(&staging, path);
+    // The bind keeps the tmpfs alive, so detaching the staging mount and removing its
+    // now-empty host directory cannot take the mask away. A bind failure outranks a
+    // cleanup failure, so the operator sees the reason the mask did not hold.
+    match (bound, unstage_empty_file(&staging, &staging_target)) {
+        (Ok(()), unstaged) => unstaged,
+        (Err(bind_error), Ok(())) => Err(bind_error),
+        (Err(bind_error), Err(unstage_error)) => {
+            eprintln!("acps sandbox: {unstage_error}");
+            Err(bind_error)
+        }
+    }
+}
+
+/// Mount the private staging tmpfs and hand back the C path the teardown needs.
+#[cfg(target_os = "linux")]
+fn mount_mask_file_staging(staging: &Path) -> Result<CString> {
+    let staging_target = c_path(staging)?;
+    let fstype = CString::new("tmpfs").expect("static string has no NUL");
+    // SAFETY: all pointers are valid C strings for the duration of the call; a null `data` is valid for tmpfs.
+    let rc = unsafe {
+        libc::mount(
+            fstype.as_ptr(),
+            staging_target.as_ptr(),
+            fstype.as_ptr(),
+            0,
+            std::ptr::null(),
+        )
+    };
+    if rc != 0 {
+        let errno = std::io::Error::last_os_error();
+        return Err(StackError::SandboxFailed {
+            reason: format!(
+                "mount mask-file staging tmpfs at {} failed: {errno}",
+                staging.display()
+            ),
+        });
+    }
+    Ok(staging_target)
+}
+
+/// A staging directory this spawn alone owns. The mount namespace is private but the
+/// directory entry is not, so a fixed path would let concurrent sandboxed spawns tear
+/// down each other's in-flight staging.
+#[cfg(target_os = "linux")]
+fn stage_mask_file_dir() -> Result<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let template = std::env::temp_dir().join(MASK_FILE_STAGING_TEMPLATE);
+    let mut raw = template.into_os_string().into_vec();
+    if raw.contains(&0) {
+        return Err(StackError::SandboxFailed {
+            reason: "mask-file staging template contains a NUL byte".to_owned(),
+        });
+    }
+    raw.push(0);
+    // SAFETY: `raw` is a writable, NUL-terminated buffer ending in the six template
+    // characters mkdtemp replaces in place; it outlives the call.
+    let created = unsafe { libc::mkdtemp(raw.as_mut_ptr().cast::<libc::c_char>()) };
+    if created.is_null() {
+        let errno = std::io::Error::last_os_error();
+        return Err(StackError::SandboxFailed {
+            reason: format!("create mask-file staging dir failed: {errno}"),
+        });
+    }
+    raw.pop();
+    Ok(PathBuf::from(OsString::from_vec(raw)))
+}
+
+#[cfg(target_os = "linux")]
+fn unstage_empty_file(staging: &Path, staging_target: &CString) -> Result<()> {
+    // SAFETY: the pointer is a valid C string for the duration of the call.
+    let rc = unsafe { libc::umount2(staging_target.as_ptr(), libc::MNT_DETACH) };
+    if rc != 0 {
+        let errno = std::io::Error::last_os_error();
+        return Err(StackError::SandboxFailed {
+            reason: format!(
+                "detach mask-file staging tmpfs at {} failed: {errno}",
+                staging.display()
+            ),
+        });
+    }
+    std::fs::remove_dir(staging).map_err(|source| StackError::SandboxFailed {
+        reason: format!(
+            "remove mask-file staging dir {} failed: {source}",
+            staging.display()
+        ),
+    })
+}
+
+/// Create the empty file on the staged tmpfs and bind it read-only over `target`.
+#[cfg(target_os = "linux")]
+fn bind_empty_file_over(staging: &Path, target: &Path) -> Result<()> {
+    let source = staging.join(MASK_FILE_STAGING_NAME);
+    std::fs::File::create(&source).map_err(|error| StackError::SandboxFailed {
+        reason: format!("create mask file {} failed: {error}", source.display()),
+    })?;
+    let source_c = c_path(&source)?;
+    let target_c = c_path(target)?;
+    // SAFETY: both pointers are valid C strings for the duration of the call; MS_BIND ignores `fstype` and `data`.
+    let rc = unsafe {
+        libc::mount(
+            source_c.as_ptr(),
+            target_c.as_ptr(),
+            std::ptr::null(),
+            libc::MS_BIND,
+            std::ptr::null(),
+        )
+    };
+    if rc != 0 {
+        let errno = std::io::Error::last_os_error();
+        return Err(StackError::SandboxFailed {
+            reason: format!(
+                "mask {} with an empty file failed: {errno}",
+                target.display()
+            ),
+        });
+    }
+    // SAFETY: the target pointer stays valid; a bind remount takes its flags from `flags` alone.
+    let rc = unsafe {
+        libc::mount(
+            std::ptr::null(),
+            target_c.as_ptr(),
+            std::ptr::null(),
+            libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY,
+            std::ptr::null(),
+        )
+    };
+    if rc != 0 {
+        let errno = std::io::Error::last_os_error();
+        return Err(StackError::SandboxFailed {
+            reason: format!(
+                "remount mask of {} read-only failed: {errno}",
+                target.display()
+            ),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn c_path(path: &Path) -> Result<CString> {
+    CString::new(path.as_os_str().as_bytes()).map_err(|_| StackError::SandboxFailed {
+        reason: format!("sandbox path {} contains a NUL byte", path.display()),
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn mask_with_empty_file(_path: &Path) -> Result<()> {
+    Err(StackError::SandboxFailed {
+        reason: "empty-file masking is only supported on Linux".to_owned(),
     })
 }
 
@@ -547,6 +756,81 @@ mod tests {
         assert!(line.contains("--reuid=1001"));
         assert!(line.contains("--no-new-privs"));
         assert!(line.trim_end().ends_with("/home/u/.local/bin/claude acp"));
+    }
+
+    #[test]
+    fn unshare_masks_declared_files_after_the_directory_masks() {
+        let mut sandbox = cfg(SandboxMode::Unshare);
+        sandbox.mask_paths = vec!["/var/lib/network-egress".to_owned()];
+        sandbox.mask_files = vec!["/run/host-control.sock".to_owned()];
+        let w = wrap(
+            &sandbox,
+            None,
+            Path::new("/home/u/.local/bin/claude"),
+            &["acp".to_owned()],
+            Path::new("/home/u"),
+            Path::new("/home/u/ws"),
+            1001,
+            1001,
+        )
+        .unwrap();
+        let line = run(&w);
+        assert!(
+            line.contains("--mask /var/lib/network-egress --mask-file /run/host-control.sock --")
+        );
+        let mask_file_index = w
+            .args
+            .iter()
+            .position(|arg| arg == "--mask-file")
+            .expect("the file mask reaches the helper argv");
+        let setpriv_index = w
+            .args
+            .iter()
+            .position(|arg| arg == "--reuid=1001")
+            .expect("the privilege drop follows");
+        assert!(
+            mask_file_index < setpriv_index,
+            "masking must run while caps are still held"
+        );
+    }
+
+    /// Config validation rejects `mask_files` under bwrap and custom, so a declaration
+    /// that reaches `off` is the only non-unshare case the wrapper sees.
+    #[test]
+    fn off_mode_skips_mask_files() {
+        let mut off = cfg(SandboxMode::Off);
+        off.mask_files = vec!["/run/host-control.sock".to_owned()];
+        let w = wrap(
+            &off,
+            None,
+            Path::new("/home/u/.local/bin/claude"),
+            &["acp".to_owned()],
+            Path::new("/home/u"),
+            Path::new("/home/u/ws"),
+            1001,
+            1001,
+        )
+        .unwrap();
+        assert!(!run(&w).contains("/run/host-control.sock"));
+    }
+
+    /// Two sandboxed spawns can stage a file mask at the same time, so a shared
+    /// directory entry would let one spawn's teardown hit the other's staging.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn mask_file_staging_dirs_are_unique_per_spawn() {
+        let first = stage_mask_file_dir().expect("staging dir");
+        let second = stage_mask_file_dir().expect("staging dir");
+        assert_ne!(first, second);
+        assert!(first.is_dir() && second.is_dir());
+        std::fs::remove_dir(&first).expect("cleanup");
+        std::fs::remove_dir(&second).expect("cleanup");
+    }
+
+    #[test]
+    fn sandbox_exec_rejects_a_mask_file_without_a_path() {
+        let err = run_exec(vec!["--mask-file".to_owned()]);
+        assert!(err.is_err());
     }
 
     #[test]

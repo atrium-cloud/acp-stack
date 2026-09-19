@@ -273,7 +273,8 @@ The session-create request may carry an `extensions` map, staged into a freshly-
 
 - A managed-state declaration names the namespace the platform later pushes credentials into. A network-provider declaration routes every sandboxed init phase through the egress provider from the start, since the declaration lands before install, probe, and discovery run.
 - A network-provider declaration pairs with `sandbox_mask_paths`: absolute paths (the provider's config and state dirs) unioned into the starter config's `[workspace.sandbox].mask_paths`, so the sandboxed agent cannot read them from the first spawn. Blank and relative entries are rejected.
-- Declarations apply only to a starter config; a request carrying `extensions` or `sandbox_mask_paths` against an existing config is rejected. The exception is `resume`: the recorded run's original staging stands and re-declarations are ignored, matching `data_sources` and `deps`.
+- `sandbox_mask_files` unions absolute non-directory paths, a host control socket for instance, into `[workspace.sandbox].mask_files`, masked with an empty read-only file from the first spawn. Blank and relative entries are rejected.
+- Declarations apply only to a starter config; a request carrying `extensions`, `sandbox_mask_paths`, or `sandbox_mask_files` against an existing config is rejected. The exception is `resume`: the recorded run's original staging stands and re-declarations are ignored, matching `data_sources` and `deps`.
 
 While the session runs, the platform pushes the sealed provider credential through `POST /v1/init/credential`:
 

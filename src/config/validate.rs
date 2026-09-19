@@ -110,7 +110,26 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
             reason: "mode = \"custom\" requires a non-empty wrapper argv".to_owned(),
         });
     }
-    for path in sandbox.mask_paths.iter().chain(sandbox.allow_paths.iter()) {
+    // Only the unshare helper binds file masks; accepting them under another
+    // backend would imply an unenforced guarantee. `off` opts out of every mask.
+    if !sandbox.mask_files.is_empty()
+        && matches!(
+            sandbox.mode,
+            crate::config::SandboxMode::Bwrap | crate::config::SandboxMode::Custom
+        )
+    {
+        return Err(StackError::InvalidParam {
+            field: "workspace.sandbox.mask_files",
+            reason: "mask_files requires mode = \"unshare\"; clear mask_files or change the sandbox mode first"
+                .to_owned(),
+        });
+    }
+    for path in sandbox
+        .mask_paths
+        .iter()
+        .chain(sandbox.mask_files.iter())
+        .chain(sandbox.allow_paths.iter())
+    {
         if !Path::new(path).is_absolute() {
             return Err(StackError::InvalidParam {
                 field: "workspace.sandbox",

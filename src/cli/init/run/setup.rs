@@ -63,14 +63,8 @@ pub(super) fn prepare_init_base(
     let creating_config = !config_path.exists();
     if creating_config && !args.resume {
         apply_supabase_env_defaults(args)?;
-    } else if !creating_config && !args.resume {
-        reject_supabase_init_args_for_existing_config(args)?;
-        reject_agent_env_refs_for_existing_config(args)?;
-        reject_deps_args_for_existing_config(args)?;
-        reject_data_source_args_for_existing_config(args)?;
-        reject_extensions_args_for_existing_config(args)?;
-        reject_sandbox_mask_paths_args_for_existing_config(args)?;
     }
+    reject_starter_only_args_for_existing_config(args, creating_config)?;
     // A `--custom-agent-*` spec satisfies the real-agent requirement without an `--agent` registry id.
     let mut custom_agent_spec: Option<CustomAgentSpec> = resolve_custom_agent_spec(args)?;
     if let Some(spec) = &custom_agent_spec {
