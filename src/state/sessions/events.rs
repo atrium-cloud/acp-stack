@@ -74,6 +74,12 @@ impl StateStore {
         Ok(event)
     }
 
+    /// Forward page of session events.
+    ///
+    /// A cursor that does not resolve to an event of this session is an error
+    /// rather than an empty page: after a checkpoint restore rolls the database
+    /// back, an empty page would read as "you are at the head" and a client
+    /// would treat a stale prefix as complete.
     pub fn query_session_events(
         &self,
         session_id: &str,
@@ -83,6 +89,12 @@ impl StateStore {
         let limit = i64::from(limit);
         match after {
             Some(after_id) => {
+                if !self.session_event_exists(session_id, after_id)? {
+                    return Err(StackError::SessionEventCursorUnknown {
+                        session_id: session_id.to_owned(),
+                        cursor_id: after_id.to_owned(),
+                    });
+                }
                 // Compare the `(created_at, id)` tuple, not just id, so a slow
                 // inserter cannot reorder pagination across a clock tick.
                 let mut statement = self.connection().prepare(
@@ -114,6 +126,18 @@ impl StateStore {
                 Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
             }
         }
+    }
+
+    fn session_event_exists(&self, session_id: &str, event_id: &str) -> Result<bool> {
+        let found = self
+            .connection()
+            .query_row(
+                "SELECT 1 FROM events WHERE id = ?1 AND session_id = ?2",
+                params![event_id, session_id],
+                |_| Ok(()),
+            )
+            .optional()?;
+        Ok(found.is_some())
     }
 
     /// Newest-first window of session-scoped events, so a reconnecting client

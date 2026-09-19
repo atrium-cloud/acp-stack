@@ -700,6 +700,15 @@ pub enum StackError {
     #[error("session `{id}` is closed")]
     SessionClosed { id: String },
 
+    /// Distinguishes a cursor that no longer resolves (for example after a
+    /// checkpoint restore rolled the state database back) from a cursor
+    /// sitting at the head, which legitimately pages to an empty result.
+    #[error("session `{session_id}` has no event `{cursor_id}` to page after")]
+    SessionEventCursorUnknown {
+        session_id: String,
+        cursor_id: String,
+    },
+
     #[error("session `{session_id}` already has a prompt in flight")]
     PromptInFlight { session_id: String },
 

@@ -310,6 +310,125 @@ async fn sessions_changes_returns_404_for_unknown_session() {
 }
 
 #[tokio::test]
+async fn sessions_events_separates_a_head_cursor_from_an_unknown_one() {
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.push("--no-cap-list-session".into());
+    })
+    .await;
+    let session_id = "sess_events_cursor".to_owned();
+    {
+        let store = harness.state.lock().await;
+        store
+            .insert_session(NewSessionRecord {
+                id: session_id.clone(),
+                agent_id: "placebo".to_owned(),
+                cwd: "/tmp/cursor".to_owned(),
+                title: None,
+                metadata_json: "{}".to_owned(),
+            })
+            .expect("session inserted");
+        for index in 0..3 {
+            store
+                .append_session_event_with_source(
+                    &session_id,
+                    "info",
+                    "session.update",
+                    acp_stack::state::EVENT_SOURCE_ACP,
+                    "ACP session update",
+                    &format!(r#"{{"seq":{index}}}"#),
+                )
+                .expect("event inserted");
+        }
+    }
+    let other_session_id = "sess_events_cursor_other".to_owned();
+    let foreign_cursor = {
+        let store = harness.state.lock().await;
+        store
+            .insert_session(NewSessionRecord {
+                id: other_session_id.clone(),
+                agent_id: "placebo".to_owned(),
+                cwd: "/tmp/cursor-other".to_owned(),
+                title: None,
+                metadata_json: "{}".to_owned(),
+            })
+            .expect("other session inserted");
+        store
+            .append_session_event_with_source(
+                &other_session_id,
+                "info",
+                "session.update",
+                acp_stack::state::EVENT_SOURCE_ACP,
+                "ACP session update",
+                r#"{"seq":0}"#,
+            )
+            .expect("foreign event inserted")
+            .id
+    };
+
+    let snapshot: Value = http()
+        .get(format!(
+            "{}/v1/sessions/{}/snapshot",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("snapshot")
+        .json()
+        .await
+        .expect("snapshot json");
+    let head_cursor = snapshot["data"]["last_event_id"]
+        .as_str()
+        .expect("last_event_id present")
+        .to_owned();
+
+    let head = http()
+        .get(format!(
+            "{}/v1/sessions/{}/events?after={}",
+            harness.base_url, session_id, head_cursor
+        ))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("head cursor request");
+    assert_eq!(head.status(), StatusCode::OK);
+    let head_body: Value = head.json().await.expect("head cursor json");
+    assert_eq!(head_body["data"]["events"], json!([]));
+
+    let unknown = http()
+        .get(format!(
+            "{}/v1/sessions/{}/events?after=evt_does_not_exist",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("unknown cursor request");
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    let unknown_body: Value = unknown.json().await.expect("unknown cursor json");
+    assert_eq!(
+        unknown_body["error"]["code"],
+        "session.event_cursor_unknown"
+    );
+
+    let foreign = http()
+        .get(format!(
+            "{}/v1/sessions/{}/events?after={}",
+            harness.base_url, session_id, foreign_cursor
+        ))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("foreign cursor request");
+    assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+    let foreign_body: Value = foreign.json().await.expect("foreign cursor json");
+    assert_eq!(
+        foreign_body["error"]["code"],
+        "session.event_cursor_unknown"
+    );
+}
+
+#[tokio::test]
 async fn sessions_snapshot_caps_recent_events_at_50() {
     let harness = Harness::spawn_with(|config| {
         config.agent.args.push("--no-cap-list-session".into());

@@ -856,7 +856,11 @@ The `agent.inference_*` codes carry a sanitized public message of the form `"inf
 - Tier: `session`
 - Request: `after=<event_id>` paginates forward on `(created_at, id)` ascending.
 - Response: durable session events.
-- Notes: used for forward catch-up after a snapshot read (`after=last_event_id`).
+- Errors:
+    - `404 session.event_cursor_unknown` — `after` names an event this session does not have. A cursor stops resolving when the state database is rolled back to a checkpoint that predates the event, so the client re-reads `GET /v1/sessions/{id}/snapshot` for a fresh cursor.
+- Notes:
+    - Used for forward catch-up after a snapshot read (`after=last_event_id`).
+    - A cursor at the head returns an empty list, which means the client holds every event.
 
 ### `GET /v1/sessions/{id}/changes`
 
@@ -879,7 +883,7 @@ The `agent.inference_*` codes carry a sanitized public message of the form `"inf
     - `session` — full session row (id, status, agent id, cwd, title, metadata). The durable `status` is `active`, `available`, or `closed`, distinct from the derived `state` of the status route.
     - `in_flight_prompts` — prompts currently in `pending` or `running`, capped at 25 (`SNAPSHOT_IN_FLIGHT_PROMPTS_CAP`). Empty when the session is idle. Each entry is the same shape returned by `GET /v1/sessions/{id}/prompts/{prompt_id}`.
     - `last_event_id` — the id of the newest persisted session event, or `null` when the session has no events. Acts as a tail cursor for forward catch-up via `GET /v1/sessions/{id}/events?after=last_event_id`.
-    - `recent_events` — the latest session events, newest-first, capped at 50. The cap is enforced by `SNAPSHOT_RECENT_EVENTS_LIMIT` in `src/api/routes/sessions.rs` and is sized to cover one prompt-turn's worth of updates without bloating the response.
+    - `recent_events` — the latest session events, newest-first, capped at 50. The cap is enforced by `SNAPSHOT_RECENT_EVENTS_LIMIT` in `src/api/routes/sessions/events.rs` and is sized to cover one prompt-turn's worth of updates without bloating the response.
     - `available_commands` — the agent's last advertised slash-command list, same entry shape as `GET /v1/sessions/{id}/commands`. Empty when nothing has been advertised; may be stale until the agent re-advertises.
 - Notes:
     - Reconnect flow: `GET snapshot` once to recover state, subscribe to `sessions.{id}` over WebSocket, then `GET events?after=last_event_id` to catch up on events that landed between the snapshot read and the WebSocket subscribe.

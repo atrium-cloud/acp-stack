@@ -9,6 +9,7 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
     Some(match err {
         SessionNotFound { .. } => "session.not_found",
         SessionClosed { .. } => "session.closed",
+        SessionEventCursorUnknown { .. } => "session.event_cursor_unknown",
         PromptInFlight { .. } => "session.prompt_in_flight",
         PromptNotFound { .. } => "prompt.not_found",
         PromptSessionMismatch { .. } => "prompt.session_mismatch",
@@ -25,6 +26,10 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
     Some(match err {
         SessionNotFound { id } => format!("session `{id}` was not found"),
         SessionClosed { id } => format!("session `{id}` is closed"),
+        SessionEventCursorUnknown {
+            session_id,
+            cursor_id,
+        } => format!("session `{session_id}` has no event `{cursor_id}` to page after"),
         PromptInFlight { session_id } => {
             format!("session `{session_id}` already has a prompt in flight")
         }
@@ -52,7 +57,9 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
 pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
     use StackError::*;
     Some(match err {
-        SessionNotFound { .. } | PromptNotFound { .. } => StatusCode::NOT_FOUND,
+        SessionNotFound { .. } | PromptNotFound { .. } | SessionEventCursorUnknown { .. } => {
+            StatusCode::NOT_FOUND
+        }
         SessionClosed { .. } | PromptInFlight { .. } | PromptSessionMismatch { .. } => {
             StatusCode::CONFLICT
         }
