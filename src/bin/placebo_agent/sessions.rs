@@ -86,6 +86,7 @@ pub(crate) async fn handle_new_session(
         id: session_id.clone(),
         cwd: request.cwd,
     });
+    state.opened_sessions.insert(session_id.clone());
     let mut response = NewSessionResponse::new(session_id.clone())
         .config_options(state.config_options(&session_id));
     if let Some(modes) = state.session_modes() {
@@ -225,11 +226,16 @@ pub(crate) async fn handle_set_config_option(
 }
 
 pub(crate) async fn handle_load_session(
-    _state: SharedState,
-    _request: LoadSessionRequest,
+    state: SharedState,
+    request: LoadSessionRequest,
     responder: Responder<LoadSessionResponse>,
     _connection: ConnectionTo<Client>,
 ) -> agent_client_protocol::Result<()> {
+    state
+        .lock()
+        .await
+        .opened_sessions
+        .insert(request.session_id.0.to_string());
     responder.respond(LoadSessionResponse::new())
 }
 
@@ -239,7 +245,10 @@ pub(crate) async fn handle_resume_session(
     responder: Responder<ResumeSessionResponse>,
     _connection: ConnectionTo<Client>,
 ) -> agent_client_protocol::Result<()> {
-    let state = state.lock().await;
+    let mut state = state.lock().await;
+    state
+        .opened_sessions
+        .insert(request.session_id.0.to_string());
     responder.respond(
         ResumeSessionResponse::new()
             .config_options(state.config_options(request.session_id.0.as_ref())),
@@ -304,6 +313,7 @@ pub(crate) async fn handle_fork_session(
         id: session_id.clone(),
         cwd,
     });
+    state.opened_sessions.insert(session_id.clone());
     responder.respond(ForkSessionResponse::new(session_id))
 }
 

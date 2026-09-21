@@ -362,8 +362,10 @@ impl AgentSupervisor {
         .await
     }
 
-    /// Shared body of [`Self::load_session`] and [`Self::resume_session`].
-    async fn attach_session(
+    /// Shared body of [`Self::load_session`] and [`Self::resume_session`], also
+    /// used by the prompt path to re-attach a session the running adapter has
+    /// not opened.
+    pub(super) async fn attach_session(
         &self,
         session_id: &str,
         cwd: Option<String>,
@@ -649,9 +651,18 @@ impl AgentSupervisor {
 
 /// Which ACP method [`AgentSupervisor::attach_session`] sends for an existing session.
 #[derive(Clone, Copy)]
-enum SessionAttachKind {
+pub(super) enum SessionAttachKind {
     Load,
     Resume,
+}
+
+impl SessionAttachKind {
+    pub(super) fn acp_method(self) -> &'static str {
+        match self {
+            Self::Load => "session/load",
+            Self::Resume => "session/resume",
+        }
+    }
 }
 
 /// Fetch a session row and refuse closed ones, before any bridge call is made.

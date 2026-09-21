@@ -28,6 +28,8 @@ impl AcpBridge {
                 method: "session/new",
                 message: err.to_string(),
             })?;
+        self.mark_session_attached(response.session_id.0.as_ref())
+            .await;
         Ok(response)
     }
 
@@ -55,14 +57,17 @@ impl AcpBridge {
         if let Some(message_id) = message_id {
             request = request.meta(prompt_message_id_meta(&message_id));
         }
-        connection
+        let response: ForkSessionResponse = connection
             .send_request(request)
             .block_task()
             .await
             .map_err(|err| StackError::AgentRequestFailed {
                 method: "session/fork",
                 message: err.to_string(),
-            })
+            })?;
+        self.mark_session_attached(response.session_id.0.as_ref())
+            .await;
+        Ok(response)
     }
 
     /// `session/list`. Requires the `sessionCapabilities.list` capability.
@@ -170,6 +175,7 @@ impl AcpBridge {
         self.capabilities
             .reject_unmodeled_mcp_servers(&mcp_servers)?;
         let connection = self.connection().await?;
+        let attached_id = session_id.0.to_string();
         let request = LoadSessionRequest::new(session_id, cwd).mcp_servers(mcp_servers);
         connection
             .send_request(request)
@@ -179,6 +185,7 @@ impl AcpBridge {
                 method: "session/load",
                 message: err.to_string(),
             })?;
+        self.mark_session_attached(&attached_id).await;
         Ok(())
     }
 
@@ -197,6 +204,7 @@ impl AcpBridge {
         self.capabilities
             .reject_unmodeled_mcp_servers(&mcp_servers)?;
         let connection = self.connection().await?;
+        let attached_id = session_id.0.to_string();
         let request = ResumeSessionRequest::new(session_id, cwd).mcp_servers(mcp_servers);
         connection
             .send_request(request)
@@ -206,6 +214,7 @@ impl AcpBridge {
                 method: "session/resume",
                 message: err.to_string(),
             })?;
+        self.mark_session_attached(&attached_id).await;
         Ok(())
     }
 
@@ -217,6 +226,7 @@ impl AcpBridge {
             });
         }
         let connection = self.connection().await?;
+        let attached_id = session_id.0.to_string();
         let request = CloseSessionRequest::new(session_id);
         connection
             .send_request(request)
@@ -226,6 +236,7 @@ impl AcpBridge {
                 method: "session/close",
                 message: err.to_string(),
             })?;
+        self.forget_attached_session(&attached_id).await;
         Ok(())
     }
 
@@ -238,6 +249,7 @@ impl AcpBridge {
             });
         }
         let connection = self.connection().await?;
+        let attached_id = session_id.0.to_string();
         let request = DeleteSessionRequest::new(session_id);
         connection
             .send_request(request)
@@ -247,6 +259,7 @@ impl AcpBridge {
                 method: "session/delete",
                 message: err.to_string(),
             })?;
+        self.forget_attached_session(&attached_id).await;
         Ok(())
     }
 
@@ -256,9 +269,20 @@ impl AcpBridge {
     pub async fn prompt_session(&self, request: PromptRequest) -> Result<PromptResponse> {
         self.capabilities.validate_prompt(&request.prompt)?;
         let connection = self.connection().await?;
+        let agent_session_id = request.session_id.0.to_string();
         match connection.send_request(request).block_task().await {
             Ok(response) => Ok(response),
             Err(err) => {
+                // The persisted message stays static, so the local process log
+                // is the only place the adapter's own words survive. Without
+                // this an adapter rejecting the session id reads exactly like
+                // an adapter rejecting the prompt content.
+                tracing::warn!(
+                    method = "session/prompt",
+                    agent_session_id = %agent_session_id,
+                    error = %err,
+                    "agent rejected the prompt request"
+                );
                 let classified = inference_failure::classify(&err);
                 Err(map_prompt_error(classified))
             }

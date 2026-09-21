@@ -1,16 +1,26 @@
 //! Prompt submission, cancellation, and the in-flight prompt registry.
 
+use super::sessions::SessionAttachKind;
 use super::*;
 
 impl AgentSupervisor {
     /// `POST /v1/sessions/{id}/prompt`. Fire-and-forget: inserts a `pending`
     /// row, spawns the task that drives ACP `session/prompt`, and returns the
     /// prompt id immediately for clients to poll.
+    ///
+    /// `open_mcp_servers` and `workspace_root` are the re-attach inputs: a
+    /// session the running adapter has not opened is re-attached through
+    /// `session/resume` or `session/load` before the prompt is dispatched, and
+    /// that call carries the same admin-configured MCP servers the resume route
+    /// sends. The servers are resolved only on that path, so a warm prompt
+    /// never depends on the secret store or on MCP command paths.
     pub async fn submit_prompt(
         &self,
         session_id: &str,
         prompt_blocks: Vec<ContentBlock>,
         prompt_json: String,
+        open_mcp_servers: impl FnOnce() -> Result<Vec<McpServer>>,
+        workspace_root: &str,
         state: &Arc<TokioMutex<StateStore>>,
     ) -> Result<PromptRecord> {
         let _dispatch_guard = self.dispatch_gate.lock().await;
@@ -28,21 +38,13 @@ impl AgentSupervisor {
                     id: session_id.to_owned(),
                 });
             }
-            // Prompting re-promotes an `available` session: the idle sweep and
-            // agent teardown demote rows, and the next prompt is the signal the
-            // session is attached again. If the adapter does not actually know
-            // the session, ACP `session/prompt` fails and the prompt settles
-            // `errored`; the idle sweep then re-demotes the row. The write is
-            // unconditional so `updated_at` records this submission and an
-            // aged-but-active session cannot be swept between this gate and
-            // the prompt insert below.
-            guard.update_session_status(session_id, SESSION_STATUS_ACTIVE)?;
             session.agent_session_id
         };
         // One ACP session drives one turn at a time: a second prompt would
         // race the live one on the same agent session, and its `session/cancel`
         // would be ambiguous. Reap first so a finished-but-unreaped task does
-        // not read as live.
+        // not read as live. This check is local, so it runs before any
+        // re-attach: a refused submission never reaches the agent.
         self.reap_finished().await;
         if !self
             .live_prompts_for_session(session_id, state)
@@ -52,6 +54,20 @@ impl AgentSupervisor {
             return Err(StackError::PromptInFlight {
                 session_id: session_id.to_owned(),
             });
+        }
+        // An adapter only holds the sessions its own process opened, so a row
+        // this bridge has never attached must be re-attached before the prompt
+        // goes out; `attach_session` is what promotes it to `active` and writes
+        // the `session.resumed`/`session.loaded` event.
+        if bridge.has_attached_session(&agent_session_id).await {
+            // Written unconditionally so `updated_at` records this submission
+            // and an aged-but-active session cannot be swept between this gate
+            // and the prompt insert below.
+            let guard = state.lock().await;
+            guard.update_session_status(session_id, SESSION_STATUS_ACTIVE)?;
+        } else {
+            self.reattach_for_prompt(session_id, &bridge, open_mcp_servers, workspace_root, state)
+                .await?;
         }
         // The previous turn's trailing chunks may still sit in the sink's
         // writer queue after its prompt task settled. Wait them out so the
@@ -192,6 +208,42 @@ impl AgentSupervisor {
         );
         self.reap_finished().await;
         Ok(record)
+    }
+
+    /// Re-open a session on the running adapter so the prompt about to be
+    /// dispatched lands on a session the agent holds. `session/resume` is
+    /// preferred because it restores the turn history the session already has;
+    /// `session/load` is the fallback for adapters that advertise only it. The
+    /// cwd is the stored session cwd, so a re-attach never relocates a session.
+    async fn reattach_for_prompt(
+        &self,
+        session_id: &str,
+        bridge: &AcpBridge,
+        open_mcp_servers: impl FnOnce() -> Result<Vec<McpServer>>,
+        workspace_root: &str,
+        state: &Arc<TokioMutex<StateStore>>,
+    ) -> Result<()> {
+        let kind = if bridge.capabilities().supports_resume_session() {
+            SessionAttachKind::Resume
+        } else if bridge.capabilities().supports_load_session() {
+            SessionAttachKind::Load
+        } else {
+            // Dispatching anyway would send `session/prompt` for a session id
+            // the adapter has never heard of, which it rejects with a message
+            // the prompt row is not allowed to carry.
+            return Err(StackError::SessionReattachUnsupported {
+                id: session_id.to_owned(),
+            });
+        };
+        tracing::info!(
+            session_id,
+            method = kind.acp_method(),
+            "re-attaching a session the running agent has not opened before prompting it"
+        );
+        let mcp_servers = open_mcp_servers()?;
+        self.attach_session(session_id, None, mcp_servers, workspace_root, state, kind)
+            .await?;
+        Ok(())
     }
 
     /// `POST /v1/sessions/{id}/cancel`. ACP `session/cancel` goes out, the

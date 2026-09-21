@@ -16,6 +16,10 @@ pub(crate) struct PlaceboState {
     pub(crate) title: String,
     pub(crate) next_session: u64,
     pub(crate) created_sessions: Vec<CreatedSession>,
+    /// Session ids this process holds open. A real adapter keeps session state
+    /// in memory, so a restarted one knows only what the client re-attached;
+    /// `--reject-unopened-session-prompt` makes the placebo behave that way.
+    pub(crate) opened_sessions: HashSet<String>,
     /// Two cancel signals for two fixture modes that never run in one process. The set
     /// is a consumable pending-cancel for the inline finish path: a cancel with no live
     /// turn is claimed by the next turn to complete. The count is epoch state for the
@@ -45,6 +49,7 @@ impl PlaceboState {
             title,
             next_session: 0,
             created_sessions: Vec::new(),
+            opened_sessions: HashSet::new(),
             cancelled_sessions: HashSet::new(),
             session_cancels: HashMap::new(),
             model_configured: false,

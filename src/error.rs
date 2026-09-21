@@ -700,6 +700,14 @@ pub enum StackError {
     #[error("session `{id}` is closed")]
     SessionClosed { id: String },
 
+    /// The running adapter never opened this session and advertises neither
+    /// `session/resume` nor `session/load`, so there is no way to re-attach it
+    /// before dispatching a session-scoped request.
+    #[error(
+        "session `{id}` cannot be re-attached: the agent advertises neither `session/resume` nor `session/load`"
+    )]
+    SessionReattachUnsupported { id: String },
+
     /// Distinguishes a cursor that no longer resolves (for example after a
     /// checkpoint restore rolled the state database back) from a cursor
     /// sitting at the head, which legitimately pages to an empty result.

@@ -102,6 +102,7 @@ impl AcpBridge {
             sink,
             notification_drain,
             terminals,
+            attached_sessions: TokioMutex::new(HashSet::new()),
         })
     }
 }

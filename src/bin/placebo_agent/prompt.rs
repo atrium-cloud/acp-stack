@@ -9,13 +9,21 @@ pub(crate) async fn handle_prompt(
     // Captured before any await that could observe a cancel: a `session/cancel` counts
     // against this turn only if it arrives after this point, which is what lets a later
     // turn on the same session shrug off a cancel aimed at an earlier one.
-    let (args, start_cancels) = {
+    let (args, start_cancels, session_opened) = {
         let state = state.lock().await;
         (
             state.args.clone(),
             state.cancel_count(request.session_id.0.as_ref()),
+            state
+                .opened_sessions
+                .contains(request.session_id.0.as_ref()),
         )
     };
+    if args.reject_unopened_session_prompt && !session_opened {
+        return responder.respond_with_error(
+            Error::invalid_params().data(format!("unknown session \"{}\"", request.session_id.0)),
+        );
+    }
     if args.prompt_error {
         return responder.respond_with_error(Error::new(-32000, "fake prompt failure"));
     }

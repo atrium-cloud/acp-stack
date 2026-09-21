@@ -80,6 +80,12 @@ pub(crate) struct AcpArgs {
     pub(crate) cap_mcp_http: bool,
     #[arg(long)]
     pub(crate) expect_fork_message_id: Option<String>,
+    /// Reject `session/prompt` with `invalidParams` for any session this process
+    /// has not opened through `session/new`, `session/load`, `session/resume`, or
+    /// `session/fork`, the way a restarted adapter rejects a session id it has
+    /// never heard of.
+    #[arg(long)]
+    pub(crate) reject_unopened_session_prompt: bool,
     #[arg(long)]
     pub(crate) prompt_silent: bool,
     #[arg(long)]

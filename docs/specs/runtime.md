@@ -61,7 +61,9 @@ The supervisor:
 - Readiness scans recent `agent.started` lifecycle rows for live Unix process groups whose PID is not the currently supervised process.
 - A match is reported as an orphaned agent or adapter process group and degrades `/v1/health/ready`.
 
-Session recovery remains explicit. After an automatic relaunch, clients use `GET /v1/sessions/{id}/snapshot` to recover local state. They call `POST /v1/sessions/{id}/resume` only when the agent advertises `sessionCapabilities.resume` (see [acp-bridge.md](acp/acp-bridge.md)).
+An adapter holds only the sessions its own process opened, so the runtime tracks which agent session ids the live bridge has attached through `session/new`, `session/load`, `session/resume`, or `session/fork`. A prompt for a session outside that set re-attaches it first: `session/resume` when the agent advertises `sessionCapabilities.resume`, `session/load` when it advertises `loadSession`, and `501 session.reattach_unsupported` when it advertises neither. The re-attach uses the stored session cwd and the admin-configured MCP servers, and writes the same `session.resumed` or `session.loaded` event and `active` status the explicit routes write.
+
+After an automatic relaunch, clients use `GET /v1/sessions/{id}/snapshot` to recover local state, and call `POST /v1/sessions/{id}/resume` when they want the attach to happen before their next prompt (see [acp-bridge.md](acp/acp-bridge.md)).
 
 ## Agent Installation
 
@@ -304,7 +306,7 @@ The `reason_category` catalog is:
 
 ### Session Status Lifecycle
 
-A session row's durable `status` is `active` (attached to the running agent with recent work), `available` (known to the agent and promotable), or `closed` (terminal). `active` rows demote to `available` on agent stop, unplanned agent exit, daemon startup reconcile, and the idle sweep below. A demoted session re-promotes to `active` through `session/load`, `session/resume`, or a new `session/prompt`. Each demotion appends a `session.available` event whose payload names the reason (`agent_stopped`, `agent_exited`, `daemon_restart`, or `idle`).
+A session row's durable `status` is `active` (attached to the running agent with recent work), `available` (known to the agent and promotable), or `closed` (terminal). `active` rows demote to `available` on agent stop, unplanned agent exit, daemon startup reconcile, and the idle sweep below. A demoted session re-promotes to `active` through `session/load`, `session/resume`, or a new `session/prompt`; when the running adapter has not opened that session, the prompt re-attaches it through `session/resume` or `session/load` first. Each demotion appends a `session.available` event whose payload names the reason (`agent_stopped`, `agent_exited`, `daemon_restart`, or `idle`).
 
 ### Idle Session Sweep
 

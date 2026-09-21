@@ -748,9 +748,12 @@ Session creation proceeds when a configured `agent.mode`, model, `agent.effort`,
 - Errors:
     - `400 prompt.unsupported_modality` — media-bearing prompt with confidently unsupported image, audio, or video input for the selected target model.
     - `409 session.prompt_in_flight` — the session already has a prompt the runtime is still driving. Retryable once that turn settles or is cancelled.
+    - `501 session.reattach_unsupported` — the running agent has not opened this session and advertises neither `session/resume` nor `session/load`.
+    - `502 agent.request_failed` — the agent rejected the `session/resume` or `session/load` the re-attach sent. No prompt row is created.
 - Notes:
     - Clients can poll the prompt status endpoint or subscribe to `sessions.{id}` over WebSocket.
     - One session carries one turn at a time. A submission that arrives while the previous prompt is live is refused without creating a row, and never dispatched to the agent.
+    - A prompt for a session the running agent has not opened re-attaches it first, through `session/resume` when the agent advertises `sessionCapabilities.resume` and `session/load` when it advertises `loadSession`. The re-attach uses the stored session cwd and the admin-configured MCP servers, appends the matching `session.resumed` or `session.loaded` event, and promotes the row to `active` before the turn is dispatched.
     - Prompting an `available` session promotes it back to `active` before dispatch; only `closed` sessions refuse prompts.
     - Before a prompt row is created, media-bearing prompts are checked against the selected target model's known input modalities from `models.dev`. Unknown models, unavailable catalog data, PDFs, and generic files are allowed through.
 

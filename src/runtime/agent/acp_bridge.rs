@@ -173,6 +173,12 @@ pub struct AcpBridge {
     /// so shutdown MUST drain this registry explicitly; the agent-pgroup kill
     /// never reaches them.
     terminals: Arc<TerminalRegistry>,
+    /// Agent session ids this bridge instance has opened, through `session/new`,
+    /// `session/load`, `session/resume`, or `session/fork`. An adapter only
+    /// knows the sessions its own process opened, so a durable `sessions` row
+    /// says nothing about whether the currently running adapter can be prompted
+    /// for it; this set does.
+    attached_sessions: TokioMutex<HashSet<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -257,6 +263,30 @@ impl AcpBridge {
     /// Best-effort pid of the spawned child, captured at spawn time.
     pub fn pid(&self) -> Option<u32> {
         self.spawn_pid
+    }
+
+    /// Whether this bridge instance has opened `agent_session_id` since it
+    /// started. Callers that dispatch a session-scoped request use it to decide
+    /// whether the session must be re-attached first.
+    pub async fn has_attached_session(&self, agent_session_id: &str) -> bool {
+        self.attached_sessions
+            .lock()
+            .await
+            .contains(agent_session_id)
+    }
+
+    /// Record a session the agent has just confirmed it holds open.
+    async fn mark_session_attached(&self, agent_session_id: &str) {
+        self.attached_sessions
+            .lock()
+            .await
+            .insert(agent_session_id.to_owned());
+    }
+
+    /// Forget a session the agent no longer holds open, so a later prompt for
+    /// it re-attaches rather than dispatching into a session the adapter closed.
+    async fn forget_attached_session(&self, agent_session_id: &str) {
+        self.attached_sessions.lock().await.remove(agent_session_id);
     }
 
     pub fn subscribe_exit(&self) -> watch::Receiver<Option<AcpBridgeExit>> {

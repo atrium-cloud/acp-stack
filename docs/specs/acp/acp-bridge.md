@@ -131,6 +131,14 @@ ACP v1 assigns message ids on agent-emitted update chunks but has no client-prop
 
 Before ACP 1.0 this extension used the SDK's unstable top-level `messageId`/`userMessageId` prompt fields. Agents still speaking that pre-1.0 shape receive no acknowledgment, so only current-head fork remains available to them.
 
+### Session Attachment
+
+The bridge records every agent session id it opens, through `session/new`, `session/load`, `session/resume`, and `session/fork`, and drops the ones `session/close` and `session/delete` retire. The set lives with the bridge instance, so a restarted agent starts with none of them.
+
+`session/prompt` is dispatched for an attached session. A prompt for any other session re-attaches it first, preferring `session/resume` over `session/load` and failing with `StackError::SessionReattachUnsupported` (HTTP 501, `error_code = "session.reattach_unsupported"`) when the agent advertises neither.
+
+An adapter that rejects a `session/prompt` gets its own error text logged locally at `warn` with the method and agent session id. The persisted prompt row keeps its static sanitized message.
+
 Sessions learned from `session/list` are persisted only when their CWD is an existing directory under `[workspace].root`. Load, resume, and fork recheck the stored CWD before passing it back to the agent. Explicit load/resume CWDs update local session state after the agent accepts the call.
 
 ACP session lifecycle calls pass CWDs as paths because ACP has no directory-handle transport; the runtime revalidates those paths immediately before each call.

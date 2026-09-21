@@ -40,9 +40,18 @@ pub(crate) async fn sessions_prompt_handler(
     let prompt_json = serde_json::to_string(&blocks).map_err(|err| {
         StackError::PromptBodyInvalid(format!("failed to canonicalize prompt: {err}"))
     })?;
+    // Same admin-config source the resume route uses: a prompt that has to
+    // re-attach the session must send the servers the session would have had.
     let record = target
         .supervisor
-        .submit_prompt(&id, blocks, prompt_json, &state.state)
+        .submit_prompt(
+            &id,
+            blocks,
+            prompt_json,
+            || open_mcp_servers(&state.runtime_paths.home, &state.config),
+            &state.config.workspace.root,
+            &state.state,
+        )
         .await?;
     Ok(ApiSuccess::new(PromptSubmitResponse {
         prompt_id: record.id,

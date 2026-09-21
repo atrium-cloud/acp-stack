@@ -698,8 +698,8 @@ async fn prompt_lazily_restarts_an_agent_that_went_away() {
     harness.stop_agent().await;
     assert_eq!(harness.agent_process_state().await, "stopped");
 
-    // The prompt itself may fail (the prior session id died with the process);
-    // what matters is that the request brought the agent back.
+    // What matters here is that the request brought the agent back; the
+    // re-attach that makes the prompt itself land is covered below.
     let response = http()
         .post(format!(
             "{}/v1/sessions/{}/prompt",
@@ -712,6 +712,178 @@ async fn prompt_lazily_restarts_an_agent_that_went_away() {
         .expect("prompt");
     assert_ne!(response.status(), StatusCode::CONFLICT);
     assert_eq!(harness.agent_process_state().await, "running");
+}
+
+/// The placebo flag mirrors a restarted adapter: it answers `session/prompt`
+/// with `invalidParams` for any session its own process never opened.
+fn reject_unopened_session_prompt(config: &mut Config) {
+    config
+        .agent
+        .args
+        .push("--reject-unopened-session-prompt".to_owned());
+}
+
+async fn submit_prompt_response(
+    harness: &Harness,
+    session_id: &str,
+    text: &str,
+) -> reqwest::Response {
+    http()
+        .post(format!(
+            "{}/v1/sessions/{}/prompt",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .json(&json!({ "prompt": text }))
+        .send()
+        .await
+        .expect("prompt")
+}
+
+async fn submit_and_settle(harness: &Harness, session_id: &str, text: &str) {
+    let response = submit_prompt_response(harness, session_id, text).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("prompt json");
+    let prompt_id = body["data"]["prompt_id"].as_str().expect("prompt id");
+    await_prompt_settled(harness, session_id, prompt_id).await;
+}
+
+async fn event_kind_count(harness: &Harness, session_id: &str, kind: &str) -> usize {
+    session_events(harness, session_id)
+        .await
+        .iter()
+        .filter(|event| event["kind"] == kind)
+        .count()
+}
+
+#[tokio::test]
+async fn prompting_a_demoted_session_resumes_it_before_dispatch() {
+    let harness = Harness::spawn_with(reject_unopened_session_prompt).await;
+    let session_id = create_session(&harness).await;
+    submit_and_settle(&harness, &session_id, "first turn").await;
+
+    // Stops demote the row to `available`, and the next prompt lazily starts a
+    // fresh adapter that has never held this session.
+    harness.stop_agent().await;
+    submit_and_settle(&harness, &session_id, "second turn after restart").await;
+
+    let events = session_events(&harness, &session_id).await;
+    let resumed = events
+        .iter()
+        .position(|event| event["kind"] == "session.resumed")
+        .unwrap_or_else(|| panic!("expected a session.resumed event, saw {events:#?}"));
+    let demoted = events
+        .iter()
+        .position(|event| event["kind"] == "session.available")
+        .unwrap_or_else(|| panic!("expected a session.available event, saw {events:#?}"));
+    assert!(
+        demoted < resumed,
+        "the re-attach must follow the demotion, events = {events:#?}"
+    );
+
+    let session: Value = http()
+        .get(format!("{}/v1/sessions/{}", harness.base_url, session_id))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("get session")
+        .json()
+        .await
+        .expect("get session json");
+    assert_eq!(session["data"]["status"], "active", "{session}");
+}
+
+#[tokio::test]
+async fn a_warm_session_is_prompted_without_a_second_attach() {
+    let harness = Harness::spawn_with(reject_unopened_session_prompt).await;
+    let session_id = create_session(&harness).await;
+
+    for text in ["first turn", "second turn", "third turn"] {
+        submit_and_settle(&harness, &session_id, text).await;
+    }
+
+    // `session/new` already attached the session on this adapter, so no turn
+    // pays for a re-attach round trip.
+    assert_eq!(
+        event_kind_count(&harness, &session_id, "session.resumed").await,
+        0
+    );
+    assert_eq!(
+        event_kind_count(&harness, &session_id, "session.loaded").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn a_warm_prompt_does_not_resolve_mcp_servers() {
+    let home = tempfile::tempdir().expect("home tempdir");
+    SecretStore::open_or_create(home.path()).expect("secret store initializes");
+    let harness = Harness::spawn_with_and_home(
+        |config| {
+            config.mcp.servers = declared_mcp_servers();
+        },
+        home.path().to_path_buf(),
+    )
+    .await;
+    let session_id = create_session(&harness).await;
+
+    // MCP servers are an input to the re-attach path only. A secret store
+    // that becomes unreadable after the session is open must not fail a
+    // prompt for a session the running adapter already holds.
+    std::fs::remove_file(acp_stack::secrets::secret_store_path(home.path()))
+        .expect("remove secret store");
+    submit_and_settle(&harness, &session_id, "warm turn").await;
+}
+
+#[tokio::test]
+async fn prompting_a_demoted_session_loads_it_when_resume_is_unadvertised() {
+    let harness = Harness::spawn_with(|config| {
+        reject_unopened_session_prompt(config);
+        config.agent.args.push("--no-cap-resume-session".to_owned());
+    })
+    .await;
+    let session_id = create_session(&harness).await;
+    harness.stop_agent().await;
+
+    submit_and_settle(&harness, &session_id, "load me back").await;
+
+    assert_eq!(
+        event_kind_count(&harness, &session_id, "session.loaded").await,
+        1
+    );
+    assert_eq!(
+        event_kind_count(&harness, &session_id, "session.resumed").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn a_prompt_fails_fast_when_the_agent_can_neither_resume_nor_load() {
+    let harness = Harness::spawn_with(|config| {
+        reject_unopened_session_prompt(config);
+        config.agent.args.extend([
+            "--no-cap-resume-session".to_owned(),
+            "--no-cap-load-session".to_owned(),
+        ]);
+    })
+    .await;
+    let session_id = create_session(&harness).await;
+    harness.stop_agent().await;
+
+    let response = submit_prompt_response(&harness, &session_id, "nowhere to attach").await;
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    let body: Value = response.json().await.expect("prompt json");
+    assert_eq!(
+        body["error"]["code"], "session.reattach_unsupported",
+        "{body}"
+    );
+
+    // The refusal happens before any row is written, so no prompt is left for a
+    // client to poll and no turn was dispatched to the agent.
+    assert_eq!(
+        common::sessions::prompt_count_for_session(&harness, &session_id).await,
+        0
+    );
 }
 
 #[tokio::test]

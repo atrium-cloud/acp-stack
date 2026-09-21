@@ -141,7 +141,14 @@ pub(crate) async fn sessions_commands_run_handler(
     })?;
     let record = target
         .supervisor
-        .submit_prompt(&id, blocks, prompt_json, &state.state)
+        .submit_prompt(
+            &id,
+            blocks,
+            prompt_json,
+            || open_mcp_servers(&state.runtime_paths.home, &state.config),
+            &state.config.workspace.root,
+            &state.state,
+        )
         .await?;
     Ok(ApiSuccess::new(SessionCommandRunResponse {
         prompt_id: record.id,
