@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::runtime::install::agent_installer::{STEP_ADAPTER, STEP_HARNESS, STEP_INSTALL};
+use crate::runtime::install::agent_registry::ForkPointDialect;
 use crate::runtime::install::agent_version_check::InstalledComponents;
 use crate::state::InstallerRun;
 
@@ -46,6 +47,12 @@ pub struct AgentCapabilitiesDto {
     /// Installed version of that adapter (the `adapter` installer step).
     #[serde(default)]
     pub adapter_version: Option<String>,
+    /// Catalog-declared `_meta` dialect the launched adapter reads a breakpoint
+    /// fork point from. No ACP capability names the JetBrains AIR extension, so
+    /// this declaration is what makes `session/fork` at a message id reachable
+    /// for the adapters that implement it.
+    #[serde(default)]
+    pub fork_point: ForkPointDialect,
 }
 
 /// A configured MCP server the running agent cannot be given, plus the
@@ -96,6 +103,13 @@ pub const IGNORED_FEATURE_AGENT_MODEL: &str = "agent.model";
 pub const IGNORED_FEATURE_AGENT_EFFORT: &str = "agent.effort";
 pub const IGNORED_FEATURE_AGENT_CONFIG_OPTION: &str = "agent.config_option";
 
+/// Path to the breakpoint-fork sub-capability inside
+/// `capabilities.sessionCapabilities.fork`. A consumer of the reported snapshot
+/// reads the same path to decide whether it may fork at a message id.
+const FORK_META_KEY: &str = "_meta";
+const FORK_ACP_STACK_KEY: &str = "acpStack";
+const FORK_MESSAGE_ID_KEY: &str = "messageId";
+
 impl AgentCapabilitiesDto {
     /// Pair the advertisement with the installed harness/adapter versions from
     /// the latest successful installer rows. The effective registry entry
@@ -120,6 +134,49 @@ impl AgentCapabilitiesDto {
         self.harness_version = version_for(STEP_HARNESS).or_else(|| version_for(STEP_INSTALL));
         self.adapter_version = version_for(STEP_ADAPTER);
         self.adapter_id = components.adapter_id.clone();
+        self.fork_point = components.fork_point;
+        self.apply_effective_fork_capability();
+    }
+
+    /// Raise the catalog's fork-point declaration into the advertised
+    /// capability map, so `capabilities` is the effective set rather than the
+    /// raw handshake.
+    ///
+    /// An adapter on the `jetbrains-air` dialect implements no acp-stack
+    /// extension and so advertises nothing about breakpoint forks, yet
+    /// acp-stack can drive one by translating the fork point. A consumer
+    /// holding only this snapshot has no other way to learn that. The raw
+    /// handshake stays reachable through the bridge's own capability view.
+    fn apply_effective_fork_capability(&mut self) {
+        if self.fork_point != ForkPointDialect::JetbrainsAir {
+            return;
+        }
+        // An agent that does not advertise `session/fork` cannot fork at all,
+        // and claiming a breakpoint on it would be a false advertisement.
+        let Some(fork) = self
+            .capabilities
+            .get_mut("sessionCapabilities")
+            .and_then(Value::as_object_mut)
+            .and_then(|session| session.get_mut("fork"))
+            .and_then(Value::as_object_mut)
+        else {
+            return;
+        };
+        let meta = fork
+            .entry(FORK_META_KEY)
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        let Some(meta) = meta.as_object_mut() else {
+            return;
+        };
+        let stack = meta
+            .entry(FORK_ACP_STACK_KEY)
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        let Some(stack) = stack.as_object_mut() else {
+            return;
+        };
+        stack
+            .entry(FORK_MESSAGE_ID_KEY)
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
     }
 
     pub fn to_json(&self) -> Result<String> {
@@ -157,6 +214,9 @@ impl AgentCapabilitiesDto {
         self.supports_session_capability("fork")
     }
 
+    /// Whether a breakpoint fork is reachable. Read from `capabilities`, which
+    /// is the effective set: a catalog-declared AIR adapter has the sub-capability
+    /// raised into it by `apply_effective_fork_capability`.
     pub fn supports_fork_message_id(&self) -> bool {
         let fork = self
             .capabilities
@@ -164,11 +224,11 @@ impl AgentCapabilitiesDto {
             .and_then(Value::as_object)
             .and_then(|caps| caps.get("fork"))
             .and_then(Value::as_object);
-        fork.and_then(|fork| fork.get("_meta"))
+        fork.and_then(|fork| fork.get(FORK_META_KEY))
             .and_then(Value::as_object)
-            .and_then(|meta| meta.get("acpStack"))
+            .and_then(|meta| meta.get(FORK_ACP_STACK_KEY))
             .and_then(Value::as_object)
-            .and_then(|stack| stack.get("messageId"))
+            .and_then(|stack| stack.get(FORK_MESSAGE_ID_KEY))
             .is_some_and(Value::is_object)
     }
 
@@ -346,6 +406,7 @@ impl AgentCapabilitiesDto {
             harness_version: None,
             adapter_id: None,
             adapter_version: None,
+            fork_point: ForkPointDialect::default(),
         })
     }
 }
@@ -368,6 +429,7 @@ mod tests {
             harness_version: None,
             adapter_id: None,
             adapter_version: None,
+            fork_point: ForkPointDialect::default(),
         }
     }
 
@@ -394,6 +456,15 @@ mod tests {
         InstalledComponents {
             adapter_id: Some(adapter_id.to_owned()),
             steps: steps.to_vec(),
+            fork_point: ForkPointDialect::AcpStack,
+        }
+    }
+
+    fn air_components(adapter_id: &str) -> InstalledComponents {
+        InstalledComponents {
+            adapter_id: Some(adapter_id.to_owned()),
+            steps: vec![STEP_ADAPTER],
+            fork_point: ForkPointDialect::JetbrainsAir,
         }
     }
 
@@ -401,7 +472,73 @@ mod tests {
         InstalledComponents {
             adapter_id: None,
             steps: vec![STEP_INSTALL],
+            fork_point: ForkPointDialect::AcpStack,
         }
+    }
+
+    /// The reported snapshot is what a downstream consumer reads to decide
+    /// whether it may fork at a message id, and a vendor adapter advertises
+    /// nothing about that itself.
+    #[test]
+    fn a_declared_air_adapter_reports_the_breakpoint_sub_capability() {
+        let mut capabilities = capabilities_with(json!({}));
+        capabilities.capabilities = json!({
+            "sessionCapabilities": { "fork": {}, "resume": {} }
+        });
+        assert!(!capabilities.supports_fork_message_id());
+        capabilities.attach_installed_versions(
+            "claude",
+            &air_components("claude-agent-acp"),
+            &[installer_run(STEP_ADAPTER, Some("0.4.0"))],
+        );
+        assert_eq!(capabilities.fork_point, ForkPointDialect::JetbrainsAir);
+        assert!(capabilities.supports_fork_message_id());
+
+        let reported: Value =
+            serde_json::from_str(&capabilities.to_json().expect("snapshot json")).expect("json");
+        assert!(
+            reported["capabilities"]["sessionCapabilities"]["fork"]["_meta"]["acpStack"]
+                ["messageId"]
+                .is_object(),
+            "reported snapshot must carry the sub-capability: {reported}"
+        );
+        // Untouched siblings stay in the reported set.
+        assert!(reported["capabilities"]["sessionCapabilities"]["resume"].is_object());
+    }
+
+    /// Claiming a breakpoint on an agent that cannot fork at all would be a
+    /// false advertisement.
+    #[test]
+    fn an_air_declaration_adds_nothing_when_the_agent_does_not_advertise_fork() {
+        let mut capabilities = capabilities_with(json!({}));
+        capabilities.capabilities = json!({ "sessionCapabilities": { "resume": {} } });
+        capabilities.attach_installed_versions("claude", &air_components("claude-agent-acp"), &[]);
+        assert!(!capabilities.supports_fork_session());
+        assert!(!capabilities.supports_fork_message_id());
+    }
+
+    #[test]
+    fn an_acp_stack_adapter_needs_the_advertised_sub_capability_for_a_breakpoint_fork() {
+        let mut capabilities = capabilities_with(json!({}));
+        capabilities.capabilities = json!({
+            "sessionCapabilities": { "fork": { "_meta": { "acpStack": { "messageId": {} } } } }
+        });
+        capabilities.attach_installed_versions(
+            "pi",
+            &adapter_components("pi-acp", &[STEP_ADAPTER]),
+            &[],
+        );
+        assert_eq!(capabilities.fork_point, ForkPointDialect::AcpStack);
+        assert!(capabilities.supports_fork_message_id());
+
+        // No declaration and no advertisement means no breakpoint fork.
+        capabilities.capabilities = json!({ "sessionCapabilities": { "fork": {} } });
+        capabilities.attach_installed_versions(
+            "pi",
+            &adapter_components("pi-acp", &[STEP_ADAPTER]),
+            &[],
+        );
+        assert!(!capabilities.supports_fork_message_id());
     }
 
     #[test]
@@ -604,6 +741,7 @@ mod tests {
             harness_version: None,
             adapter_id: None,
             adapter_version: None,
+            fork_point: ForkPointDialect::default(),
         };
         assert!(!no_mcp_key.advertises_mcp_support());
     }

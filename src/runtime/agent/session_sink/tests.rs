@@ -898,6 +898,66 @@ async fn change_capture_accepts_non_tool_updates_without_a_session_lookup() {
     );
 }
 
+#[tokio::test]
+async fn the_last_stamped_chunk_id_is_taken_once_per_session() {
+    use crate::runtime::agent::session_sink::{SessionEventSink, StateStoreSessionSink};
+    use agent_client_protocol::schema::v1::{
+        ContentBlock, ContentChunk, MessageId, SessionUpdate, TextContent,
+    };
+    use std::sync::Arc;
+    use tokio::sync::Mutex as TokioMutex;
+
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state open");
+    store.migrate().expect("migrate");
+    let sink = StateStoreSessionSink::new("target".to_owned(), Arc::new(TokioMutex::new(store)));
+    let stamped = |id: &str| {
+        SessionUpdate::AgentMessageChunk(
+            ContentChunk::new(ContentBlock::Text(TextContent::new("hi")))
+                .message_id(MessageId::new(id)),
+        )
+    };
+    let unstamped = SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+        TextContent::new("hi"),
+    )));
+
+    assert!(
+        sink.take_last_agent_message_id("agent_sess_1")
+            .await
+            .is_none()
+    );
+
+    sink.capture_session_update("agent_sess_1", &stamped("msg_a"))
+        .await;
+    sink.capture_session_update("agent_sess_1", &stamped("msg_b"))
+        .await;
+    // A chunk without an id neither replaces nor clears the newest stamped one.
+    sink.capture_session_update("agent_sess_1", &unstamped)
+        .await;
+    sink.capture_session_update("agent_sess_2", &stamped("msg_other"))
+        .await;
+
+    assert_eq!(
+        sink.take_last_agent_message_id("agent_sess_1")
+            .await
+            .as_deref(),
+        Some("msg_b")
+    );
+    assert!(
+        sink.take_last_agent_message_id("agent_sess_1")
+            .await
+            .is_none(),
+        "taking clears the slot"
+    );
+    assert_eq!(
+        sink.take_last_agent_message_id("agent_sess_2")
+            .await
+            .as_deref(),
+        Some("msg_other"),
+        "slots are per agent session"
+    );
+}
+
 #[test]
 fn touch_running_prompt_is_noop_when_no_in_flight_prompt() {
     let tempdir = tempfile::tempdir().expect("tempdir");

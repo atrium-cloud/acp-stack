@@ -186,6 +186,14 @@ pub struct ListedSessionUpsertCounts {
     pub updated: u32,
 }
 
+/// The prompt before a breakpoint, with the adapter-emitted message id that
+/// anchors an AIR fork point at the end of its turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrecedingPromptRecord {
+    pub id: String,
+    pub agent_message_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptRecord {
     pub id: String,

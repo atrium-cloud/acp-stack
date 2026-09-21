@@ -298,6 +298,14 @@ pub(crate) async fn handle_fork_session(
         .and_then(|meta| meta.get("acpStack"))
         .and_then(|stack| stack.get("messageId"))
         .and_then(serde_json::Value::as_str);
+    let air_message_id = meta
+        .as_ref()
+        .and_then(|meta| meta.get("jetbrains"))
+        .and_then(|jetbrains| jetbrains.get("air"))
+        .and_then(|air| air.get("fork"))
+        .filter(|fork| fork.get("version").and_then(serde_json::Value::as_u64) == Some(1))
+        .and_then(|fork| fork.get("messageId"))
+        .and_then(serde_json::Value::as_str);
     let mut state = state.lock().await;
     if let Some(expected) = state.args.expect_fork_message_id.as_deref()
         && message_id != Some(expected)
@@ -305,6 +313,14 @@ pub(crate) async fn handle_fork_session(
         return responder.respond_with_error(Error::new(
             -32000,
             format!("expected fork message id {expected}"),
+        ));
+    }
+    if let Some(expected) = state.args.expect_air_fork_message_id.as_deref()
+        && air_message_id != Some(expected)
+    {
+        return responder.respond_with_error(Error::new(
+            -32000,
+            format!("expected AIR fork message id {expected}"),
         ));
     }
     let session_id = format!("{}{}", FIXTURE_SESSION_PREFIX, state.next_session);

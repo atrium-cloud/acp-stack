@@ -340,7 +340,7 @@ fn hydrate_prompts(conn: &Connection, id: &str) -> Result<Option<Map<String, Val
             SELECT id, session_id, created_at, updated_at, status,
                    stop_reason, error_code, error_message, prompt_json,
                    message_id, message_id_acknowledged,
-                   failure_class, failure_detail_json
+                   failure_class, failure_detail_json, agent_message_id
             FROM prompts WHERE id = ?1
             "#,
             params![id],
@@ -392,6 +392,11 @@ fn hydrate_prompts(conn: &Connection, id: &str) -> Result<Option<Map<String, Val
                     None => Value::Null,
                 };
                 obj.insert("failure_detail_json".into(), detail_value);
+                let agent_message_id: Option<String> = row.get(13)?;
+                obj.insert(
+                    "agent_message_id".into(),
+                    agent_message_id.map(Value::String).unwrap_or(Value::Null),
+                );
                 Ok(obj)
             },
         )

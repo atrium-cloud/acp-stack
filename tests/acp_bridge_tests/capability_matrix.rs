@@ -1,4 +1,4 @@
-use acp_stack::runtime::agent::acp_bridge::{AcpBridge, AcpPermissionPolicy};
+use acp_stack::runtime::agent::acp_bridge::{AcpBridge, AcpPermissionPolicy, ForkPoint};
 
 use crate::support::{fake_agent_config, fake_env, null_sink};
 
@@ -395,10 +395,51 @@ async fn fork_session_sends_message_id_when_capability_is_present() {
             agent_client_protocol::schema::v1::SessionId::new("sess_parent"),
             std::env::temp_dir(),
             vec![],
-            Some("00000000-0000-4000-8000-000000000001".to_owned()),
+            Some(ForkPoint::AcpStackMessageId(
+                "00000000-0000-4000-8000-000000000001".to_owned(),
+            )),
         )
         .await
         .expect("session/fork with message id");
+    assert_eq!(fork.session_id.0.as_ref(), "sess_fake_0");
+    bridge.shutdown().await.expect("shutdown ok");
+}
+
+#[tokio::test]
+async fn fork_session_sends_an_air_fork_point_without_the_acp_stack_capability() {
+    // The vendor adapters advertise no acpStack sub-capability, so the AIR fork
+    // point has to travel on the catalog declaration alone.
+    let mut config = fake_agent_config();
+    config.args.extend([
+        "--no-cap-fork-message-id".into(),
+        "--expect-air-fork-message-id".into(),
+        "msg_previous_turn".into(),
+    ]);
+    let bridge = AcpBridge::spawn(
+        &std::env::temp_dir(),
+        &config,
+        fake_env(),
+        std::env::temp_dir(),
+        null_sink(),
+        AcpPermissionPolicy::Cancel,
+        &Default::default(),
+        "/bin/sh",
+        None,
+        None,
+    )
+    .await
+    .expect("spawn");
+    assert!(!bridge.capabilities().supports_fork_message_id());
+
+    let fork = bridge
+        .fork_session(
+            agent_client_protocol::schema::v1::SessionId::new("sess_parent"),
+            std::env::temp_dir(),
+            vec![],
+            Some(ForkPoint::AirMessageId("msg_previous_turn".to_owned())),
+        )
+        .await
+        .expect("session/fork with an AIR fork point");
     assert_eq!(fork.session_id.0.as_ref(), "sess_fake_0");
     bridge.shutdown().await.expect("shutdown ok");
 }
@@ -429,7 +470,9 @@ async fn fork_session_rejects_message_id_when_capability_is_missing() {
             agent_client_protocol::schema::v1::SessionId::new("sess_parent"),
             std::env::temp_dir(),
             vec![],
-            Some("00000000-0000-4000-8000-000000000001".to_owned()),
+            Some(ForkPoint::AcpStackMessageId(
+                "00000000-0000-4000-8000-000000000001".to_owned(),
+            )),
         )
         .await
         .expect_err("message-id fork requires explicit support");

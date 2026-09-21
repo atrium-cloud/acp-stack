@@ -1,6 +1,7 @@
 //! Sink abstraction for ACP `session/update` notifications and the
 //! `StateStore`-backed implementation used by the daemon.
 
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -41,6 +42,18 @@ pub trait SessionEventSink: Send + Sync + 'static {
         Box::pin(async move { Some(agent_session_id.to_owned()) })
     }
 
+    /// Remove and return the adapter's own `messageId` from the most recent
+    /// `agent_message_chunk` seen on this session. It is kept in memory rather
+    /// than written per chunk because a turn produces thousands of them and
+    /// only the last one anchors a fork point.
+    fn take_last_agent_message_id<'a>(
+        &'a self,
+        agent_session_id: &'a str,
+    ) -> futures::future::BoxFuture<'a, Option<String>> {
+        let _ = agent_session_id;
+        Box::pin(async move { None })
+    }
+
     /// Default working directory for `terminal/create` requests that omit
     /// `cwd`; `None` makes callers fall back to the workspace root.
     fn session_cwd<'a>(
@@ -78,6 +91,10 @@ pub struct StateStoreSessionSink {
     session_changes: SessionChangesHandle,
     tx: TokioMutex<Option<tokio::sync::mpsc::Sender<SessionWrite>>>,
     writer: TokioMutex<Option<JoinHandle<()>>>,
+    /// Newest `agent_message_chunk` `messageId` per agent session id, keyed by
+    /// the adapter's own session id. One entry per open session, replaced on
+    /// every chunk and taken when the turn settles.
+    last_agent_message_ids: TokioMutex<HashMap<String, String>>,
 }
 
 /// Maximum wall time `drain` waits for the writer to reach its barrier. A
@@ -564,6 +581,7 @@ impl StateStoreSessionSink {
             session_changes,
             tx: TokioMutex::new(Some(tx)),
             writer: TokioMutex::new(Some(writer)),
+            last_agent_message_ids: TokioMutex::new(HashMap::new()),
         }
     }
 }
@@ -575,6 +593,16 @@ impl SessionEventSink for StateStoreSessionSink {
         update: &'a SessionUpdate,
     ) -> futures::future::BoxFuture<'a, bool> {
         Box::pin(async move {
+            // An adapter that resolves a fork point against its own transcript
+            // needs one of its own ids; this is the only place they arrive.
+            if let SessionUpdate::AgentMessageChunk(chunk) = update
+                && let Some(message_id) = chunk.message_id.as_ref()
+            {
+                self.last_agent_message_ids
+                    .lock()
+                    .await
+                    .insert(agent_session_id.to_owned(), message_id.0.to_string());
+            }
             // Only tool-call updates carry diff content; skipping the session
             // lookup otherwise keeps chunk-heavy streams off the store lock.
             if !matches!(
@@ -617,6 +645,18 @@ impl SessionEventSink for StateStoreSessionSink {
                     None
                 }
             }
+        })
+    }
+
+    fn take_last_agent_message_id<'a>(
+        &'a self,
+        agent_session_id: &'a str,
+    ) -> futures::future::BoxFuture<'a, Option<String>> {
+        Box::pin(async move {
+            self.last_agent_message_ids
+                .lock()
+                .await
+                .remove(agent_session_id)
         })
     }
 

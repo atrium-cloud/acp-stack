@@ -600,3 +600,24 @@ fn embedded_registry_uses_per_install_arch_maps() {
         "codex-acp is npm-only since the agentclientprotocol move"
     );
 }
+
+/// The vendor adapters read their fork point from the JetBrains AIR key, and no
+/// advertised ACP capability says so, which is why the catalog declares it.
+#[test]
+fn vendor_adapters_declare_the_jetbrains_air_fork_point() {
+    let catalog = RegistryCatalog::load_embedded().expect("embedded registry must parse");
+    for agent_id in ["codex", "claude"] {
+        let entry = catalog.lookup(agent_id).expect("entry exists");
+        let adapter = entry.adapter.as_ref().expect("adapter declared");
+        assert_eq!(
+            adapter.fork_point,
+            ForkPointDialect::JetbrainsAir,
+            "{agent_id} adapter must declare the AIR fork point"
+        );
+    }
+    let opencode = catalog.lookup("opencode").expect("opencode entry exists");
+    assert!(
+        opencode.adapter.is_none(),
+        "opencode is native, so it has no adapter-declared fork point"
+    );
+}

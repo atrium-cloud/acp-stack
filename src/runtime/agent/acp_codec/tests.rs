@@ -835,6 +835,32 @@ fn prompt_message_id_meta_round_trips() {
     assert_eq!(meta_message_id(Some(&Meta::new())), None);
 }
 
+#[test]
+fn air_fork_point_meta_carries_the_versioned_jetbrains_key() {
+    let meta = air_fork_point_meta("msg_previous_turn");
+    assert_eq!(
+        air_fork_point_message_id(Some(&meta)),
+        Some("msg_previous_turn")
+    );
+    // The AIR key is the only one on the wire: an adapter reading the acpStack
+    // key must not see a fork point it would resolve differently.
+    assert_eq!(meta_message_id(Some(&meta)), None);
+    assert_eq!(
+        serde_json::to_value(&meta).expect("meta json")["jetbrains"]["air"]["fork"]["version"],
+        serde_json::json!(1)
+    );
+}
+
+#[test]
+fn air_fork_point_of_another_version_is_not_read_back() {
+    let mut meta = Meta::new();
+    meta.insert(
+        "jetbrains".to_owned(),
+        serde_json::json!({ "air": { "fork": { "version": 2, "messageId": "msg" } } }),
+    );
+    assert_eq!(air_fork_point_message_id(Some(&meta)), None);
+}
+
 #[tokio::test]
 async fn usage_update_notifications_deserialize_and_enqueue() {
     let params = serde_json::json!({

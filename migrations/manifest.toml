@@ -153,3 +153,9 @@ id = 26
 name = "commands_terminal_id"
 sqlite_file = "026_commands_terminal_id.sqlite.sql"
 postgres_file = "026_commands_terminal_id.postgres.sql"
+
+[[migration]]
+id = 27
+name = "prompt_agent_message_ids"
+sqlite_file = "027_prompt_agent_message_ids.sqlite.sql"
+postgres_file = "027_prompt_agent_message_ids.postgres.sql"

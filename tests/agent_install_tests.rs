@@ -207,6 +207,7 @@ fn adapter_kind_entry() -> RegistryEntry {
             id: ADAPTER_BIN.to_owned(),
             sync_id: None,
             github: Some(format!("https://github.com/{ADAPTER_REPO}")),
+            fork_point: Default::default(),
             install: InstallSet {
                 github: Some(GithubInstall {
                     asset_pattern: ADAPTER_ASSET.to_owned(),

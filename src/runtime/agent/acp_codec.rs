@@ -40,6 +40,17 @@ const MESSAGE_ID_META_KEY: &str = "messageId";
 /// `POST /v1/sessions/{id}/prompt`.
 const PROMPT_ID_META_KEY: &str = "promptId";
 
+/// `_meta` namespace of the JetBrains AIR fork extension, the fork-point key the
+/// vendor adapters (`claude-agent-acp`, `codex-acp`) read. `jetbrains` owns the
+/// non-standard contract and `air` names the client that defined it.
+const JETBRAINS_META_KEY: &str = "jetbrains";
+const AIR_META_KEY: &str = "air";
+const AIR_FORK_KEY: &str = "fork";
+const AIR_FORK_VERSION_KEY: &str = "version";
+/// The only version the vendor adapters accept; anything else makes them ignore
+/// the fork point and fork the head instead.
+const AIR_FORK_VERSION: u64 = 1;
+
 /// At most one notification may wait behind the worker: each owns both parsed
 /// ACP content and its raw JSON payload, so a deeper queue multiplies memory
 /// use for large file diffs.
@@ -90,6 +101,45 @@ pub fn prompt_message_id_meta(message_id: &str) -> Meta {
         serde_json::Value::Object(stack),
     );
     meta
+}
+
+/// Fork-point `_meta` for adapters that honor the JetBrains AIR extension. The
+/// id is one the adapter itself emitted as a `session/update` `messageId`, not
+/// an acp-stack prompt message id, because that is what the adapter resolves
+/// against its own transcript.
+pub fn air_fork_point_meta(message_id: &str) -> Meta {
+    let mut fork = serde_json::Map::new();
+    fork.insert(
+        AIR_FORK_VERSION_KEY.to_owned(),
+        serde_json::Value::from(AIR_FORK_VERSION),
+    );
+    fork.insert(
+        MESSAGE_ID_META_KEY.to_owned(),
+        serde_json::Value::String(message_id.to_owned()),
+    );
+    let mut air = serde_json::Map::new();
+    air.insert(AIR_FORK_KEY.to_owned(), serde_json::Value::Object(fork));
+    let mut jetbrains = serde_json::Map::new();
+    jetbrains.insert(AIR_META_KEY.to_owned(), serde_json::Value::Object(air));
+    let mut meta = Meta::new();
+    meta.insert(
+        JETBRAINS_META_KEY.to_owned(),
+        serde_json::Value::Object(jetbrains),
+    );
+    meta
+}
+
+/// Read back an AIR fork point, for tests and for symmetry with
+/// [`meta_message_id`].
+pub fn air_fork_point_message_id(meta: Option<&Meta>) -> Option<&str> {
+    let fork = meta?
+        .get(JETBRAINS_META_KEY)?
+        .get(AIR_META_KEY)?
+        .get(AIR_FORK_KEY)?;
+    if fork.get(AIR_FORK_VERSION_KEY)?.as_u64()? != AIR_FORK_VERSION {
+        return None;
+    }
+    fork.get(MESSAGE_ID_META_KEY)?.as_str()
 }
 
 /// Serialize one accepted prompt content block as an ACP `session/update`

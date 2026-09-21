@@ -6,7 +6,7 @@ mod specs;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "test-fixtures")]
 use crate::dev_gates::{DEV_PLACEBO_REGISTRY_ENV, fixture_path};
@@ -502,6 +502,9 @@ pub fn adapter_spec_from_override(
         id: override_config.command.trim().to_owned(),
         sync_id: None,
         github: override_config.github.clone(),
+        // An operator override names a local binary, not a catalog adapter, so
+        // it speaks the acp-stack key until the catalog says otherwise.
+        fork_point: ForkPointDialect::default(),
         install: InstallSet {
             provided_by: None,
             shell: override_config

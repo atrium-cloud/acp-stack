@@ -111,11 +111,15 @@ pub(crate) async fn handle_prompt(
             &[FIRST_CHUNK, SECOND_CHUNK]
         };
         for text in chunks {
+            let mut chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(*text)));
+            // An adapter that owns its transcript ids stamps them here; it is
+            // the only place acp-stack can learn one.
+            if let Some(agent_message_id) = args.agent_message_id.as_deref() {
+                chunk = chunk.message_id(MessageId::new(agent_message_id));
+            }
             connection.send_notification(SessionNotification::new(
                 request.session_id.clone(),
-                SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
-                    TextContent::new(*text),
-                ))),
+                SessionUpdate::AgentMessageChunk(chunk),
             ))?;
         }
     }
@@ -123,6 +127,7 @@ pub(crate) async fn handle_prompt(
     // client's `session/cancel` is processed while the turn is still open.
     // An inline await (as `--prompt-stall-after-update` does) would park the
     // loop instead and the notification would never be read.
+    let echo_message_id = !args.no_echo_prompt_message_id;
     if args.prompt_await_permission {
         let rounds = args.prompt_await_permission_rounds;
         let permission_connection = connection.clone();
@@ -161,7 +166,7 @@ pub(crate) async fn handle_prompt(
                 RequestPermissionOutcome::Cancelled => StopReason::Cancelled,
                 _ => StopReason::EndTurn,
             };
-            respond_to_prompt(request, responder, stop_reason)
+            respond_to_prompt(request, responder, stop_reason, echo_message_id)
         });
     }
     if args.prompt_never_settle {
@@ -190,7 +195,7 @@ pub(crate) async fn handle_prompt(
                 tokio::time::sleep(CANCEL_WAIT_POLL_INTERVAL).await;
             }
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-            respond_to_prompt(request, responder, StopReason::Cancelled)
+            respond_to_prompt(request, responder, StopReason::Cancelled, echo_message_id)
         });
     }
     if args.prompt_stall_after_update {
@@ -265,28 +270,34 @@ async fn finish_prompt(
     // by the next turn to complete and removed, so it settles this turn as cancelled
     // without leaking onto the one after. The off-loop settle fixture uses the epoch
     // count instead; the two modes never run in the same process.
-    let stop_reason = {
+    let (stop_reason, echo_message_id) = {
         let mut state = state.lock().await;
-        if state
+        let echo_message_id = !state.args.no_echo_prompt_message_id;
+        let stop_reason = if state
             .cancelled_sessions
             .remove(request.session_id.0.as_ref())
         {
             StopReason::Cancelled
         } else {
             StopReason::EndTurn
-        }
+        };
+        (stop_reason, echo_message_id)
     };
-    respond_to_prompt(request, responder, stop_reason)
+    respond_to_prompt(request, responder, stop_reason, echo_message_id)
 }
 
 fn respond_to_prompt(
     request: PromptRequest,
     responder: Responder<PromptResponse>,
     stop_reason: StopReason,
+    echo_message_id: bool,
 ) -> agent_client_protocol::Result<()> {
     // Echo the local message-id extension: acp-stack treats `_meta.acpStack.messageId` on the
     // response as the acknowledgment of the one it stamped on `session/prompt`.
     let mut response = PromptResponse::new(stop_reason);
+    if !echo_message_id {
+        return responder.respond(response);
+    }
     if let Some(message_id) = request
         .meta
         .as_ref()

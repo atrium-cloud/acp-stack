@@ -67,10 +67,11 @@ Schema: `migrations/002_auth_failures_schema.sqlite.sql` (and the `.postgres.sql
 
 ## Prompt Lifecycle Columns
 
-Message identity columns: `migrations/017_prompt_message_ids.sqlite.sql`. Failure classification columns: `migrations/015_prompts_lifecycle_extension.sqlite.sql` (each with a `.postgres.sql` twin). Semantics not visible in the schema:
+Message identity columns: `migrations/017_prompt_message_ids.sqlite.sql` and `migrations/027_prompt_agent_message_ids.sqlite.sql`. Failure classification columns: `migrations/015_prompts_lifecycle_extension.sqlite.sql` (each with a `.postgres.sql` twin). Semantics not visible in the schema:
 
 - `message_id` — ACP user prompt message id sent with `session/prompt`.
-- `message_id_acknowledged` — 1 only after the agent echoes the message id in `PromptResponse.userMessageId`.
+- `message_id_acknowledged` — 1 once the agent has confirmed the message id. On the `acp-stack` fork-point dialect that means echoing it back in `_meta.acpStack.messageId` on the prompt response. On the `jetbrains-air` dialect, where the adapter implements no acp-stack extension, a settled prompt response is the confirmation, since the same settled turn produces the `agent_message_id` anchor its fork point is translated from.
+- `agent_message_id` — the adapter's own `messageId` from the last `agent_message_chunk` of this turn. It is the point a breakpoint fork names for an adapter that resolves fork points against its own transcript. NULL when the adapter stamps no message id on its chunks.
 - `failure_class` — internal taxonomy bucket. NULL for non-terminal rows and for terminal rows the taxonomy does not cover.
 - `failure_detail_json` — class-specific JSON envelope. NULL when no structured detail is captured.
 

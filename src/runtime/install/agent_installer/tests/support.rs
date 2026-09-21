@@ -100,6 +100,7 @@ pub(crate) fn adapter_spec(id: &str, install: InstallSet) -> AdapterSpec {
         id: id.to_owned(),
         sync_id: None,
         github: None,
+        fork_point: Default::default(),
         install,
         update: Default::default(),
     }

@@ -112,6 +112,63 @@ impl StateStore {
         })
     }
 
+    /// Record the adapter's own id for the last agent message of this prompt's
+    /// turn. It is the anchor a breakpoint fork translates into for adapters
+    /// that resolve a fork point against their own transcript.
+    pub fn record_prompt_agent_message_id(
+        &self,
+        prompt_id: &str,
+        agent_message_id: &str,
+    ) -> Result<()> {
+        let now = current_timestamp();
+        self.persist_with_outbox("prompts", prompt_id, &now, |conn| {
+            let affected = conn.execute(
+                r#"
+                UPDATE prompts
+                SET agent_message_id = ?1,
+                    updated_at = ?2
+                WHERE id = ?3
+                "#,
+                params![agent_message_id, now, prompt_id],
+            )?;
+            if affected == 0 {
+                return Err(StackError::PromptNotFound {
+                    id: prompt_id.to_owned(),
+                });
+            }
+            Ok(())
+        })
+    }
+
+    /// The prompt submitted immediately before `prompt_id` in the same session.
+    /// Prompt ids carry a zero-padded nanosecond prefix, so id order is
+    /// submission order.
+    pub fn preceding_prompt(
+        &self,
+        session_id: &str,
+        prompt_id: &str,
+    ) -> Result<Option<PrecedingPromptRecord>> {
+        Ok(self
+            .connection()
+            .query_row(
+                r#"
+                SELECT id, agent_message_id
+                FROM prompts
+                WHERE session_id = ?1 AND id < ?2
+                ORDER BY id DESC
+                LIMIT 1
+                "#,
+                params![session_id, prompt_id],
+                |row| {
+                    Ok(PrecedingPromptRecord {
+                        id: row.get(0)?,
+                        agent_message_id: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
     /// Update a prompt's lifecycle row. `failure_class` and
     /// `failure_detail_json` are three-valued: `None` preserves the existing
     /// column, `Some("")` writes SQL NULL, `Some(value)` overwrites.

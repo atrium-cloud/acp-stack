@@ -337,6 +337,9 @@ testflight_expect_fs = ".acp-stack-testflight.txt"
 [agents.adapter]
 id = "codex-acp"
 github = "agentclientprotocol/codex-acp"
+# Reads the breakpoint fork point from `_meta.jetbrains.air.fork` and resolves it
+# to the turn that contains the named item, keeping that turn in the fork.
+fork_point = "jetbrains-air"
 
 # Upstream moved to the agentclientprotocol org and no longer publishes
 # release binaries (last zed-industries assets are v0.16.0), so install is
@@ -390,6 +393,9 @@ testflight_expect_fs = ".acp-stack-testflight.txt"
 id = "claude-agent-acp"
 sync_id = "claude-acp"
 github = "agentclientprotocol/claude-agent-acp"
+# Reads the breakpoint fork point from `_meta.jetbrains.air.fork` and slices the
+# transcript up to and including the named message.
+fork_point = "jetbrains-air"
 
 [agents.adapter.install.npm]
 package = "@agentclientprotocol/claude-agent-acp"

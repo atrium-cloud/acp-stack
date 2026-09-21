@@ -544,7 +544,9 @@ All skill routes load config leniently, dropping individually invalid `[[skills.
 - Tier: `session`
 - Request: none.
 - Response: `{ "agent_id", "adapter"?, "captured_at", "capabilities", "process_state" }`. The latest handshake snapshot when available.
-    - `capabilities` is the same snapshot object the start/restart responses embed: `{ "protocol_version", "capabilities": {…raw ACP `initialize` advertisement…}, "agent_name", "agent_title", "agent_version", "agent_id", "harness_version", "adapter_id", "adapter_version" }`. Every key is present; the string fields are nullable.
+    - `capabilities` is the same snapshot object the start/restart responses embed: `{ "protocol_version", "capabilities": {…effective ACP capability set…}, "agent_name", "agent_title", "agent_version", "agent_id", "harness_version", "adapter_id", "adapter_version", "fork_point" }`. Every key is present; the string fields are nullable.
+    - The inner `capabilities` map is the agent's `initialize` advertisement with the catalog's fork-point declaration raised into it: for a `jetbrains-air` adapter that advertises `sessionCapabilities.fork`, the map carries `sessionCapabilities.fork._meta.acpStack.messageId` so a consumer reads breakpoint fork support from the same path on every adapter.
+    - `fork_point` is the adapter's declared fork-point dialect from `data/agents.toml`: `acp-stack` (the default) or `jetbrains-air`. See [Fork Point Dialects](../acp/acp-bridge.md#fork-point-dialects).
     - `agent_id` is the configured `[agent].id` the snapshot was captured from. `harness_version` and `adapter_version` are the installed versions from the latest successful installer rows (`harness`/`install` and `adapter` steps), read at the moment of capture; `adapter_id` is the adapter the agent was launched through. Each is null when there is nothing to report: native agents carry no adapter fields, a harness bundled by its adapter has no harness version, and shell-recipe installs record no version.
 - Errors: `404 agent.not_initialized` — occurs only when neither the init capability probe nor agent start has run.
 - Notes: populated by the init capability probe as well as by agent start. Capabilities cannot change between process starts, so the snapshot and its versions describe one launch.
@@ -735,8 +737,13 @@ Session creation proceeds when a configured `agent.mode`, model, `agent.effort`,
 - Tier: `session`
 - Request: optional `cwd`, `target_id` (alias `target`), and `{ "message_id": "<prompt message id>" }`.
 - Response: standard envelope.
-- Errors: `501 agent.unsupported_capability` — unsupported fork capabilities.
-- Notes: forks a session through ACP. `message_id` requires an acknowledged ACP prompt message id from the parent session.
+- Errors: `501 agent.unsupported_capability` — unsupported fork capabilities. `400 request.invalid_param` — the fork point cannot be resolved for the running agent.
+- Notes: forks a session through ACP. Without `message_id` the fork carries the whole parent history.
+- Breakpoint semantics: a fork with `message_id` ends just before the named prompt. The named prompt, its turn, and everything after it stay out of the fork, which leaves the fork ready to receive an edited version of that prompt. acp-stack requires this cut of every adapter it forks at a message id.
+- `message_id` is always an acp-stack prompt message id from the parent session, acknowledged by the agent. acp-stack translates it into the fork point the running adapter reads:
+    - Adapters on the acp-stack dialect receive it verbatim as `_meta.acpStack.messageId` and perform the cut themselves.
+    - Adapters declared `fork_point = "jetbrains-air"` in the agent catalog receive `_meta.jetbrains.air.fork`, which they resolve inclusively. They are handed the agent message id anchoring the turn before the named prompt, so the cut lands in the same place.
+- Naming the first prompt of a session is refused with `400 request.invalid_param` on an adapter that resolves the fork point inclusively: there is no preceding turn to keep, and a fork of nothing is a new session (`POST /v1/sessions`).
 
 ### `POST /v1/sessions/{id}/prompt`
 

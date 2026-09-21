@@ -74,17 +74,19 @@ use crate::error::{Result, StackError};
 use crate::events::EventHub;
 use crate::runtime::agent::acp_bridge::{
     AcpBridge, AcpBridgeExit, AcpBridgeExitReason, AgentCapabilitiesDto,
-    AgentSessionConfigCategory, AgentSessionModeSelection, IGNORED_FEATURE_AGENT_CONFIG_OPTION,
-    IGNORED_FEATURE_AGENT_EFFORT, IGNORED_FEATURE_AGENT_MODE, IGNORED_FEATURE_AGENT_MODEL,
-    IgnoredFeature, PartitionedMcpServers, SessionEventSink, SkippedMcpServer,
-    StateStoreSessionSink, meta_message_id, prompt_message_id_meta, resolve_command_path,
-    session_config_id_for_value, session_mode_selection_for_value, user_prompt_chunk_payload,
+    AgentSessionConfigCategory, AgentSessionModeSelection, ForkPoint,
+    IGNORED_FEATURE_AGENT_CONFIG_OPTION, IGNORED_FEATURE_AGENT_EFFORT, IGNORED_FEATURE_AGENT_MODE,
+    IGNORED_FEATURE_AGENT_MODEL, IgnoredFeature, PartitionedMcpServers, SessionEventSink,
+    SkippedMcpServer, StateStoreSessionSink, meta_message_id, prompt_message_id_meta,
+    resolve_command_path, session_config_id_for_value, session_mode_selection_for_value,
+    user_prompt_chunk_payload,
 };
 use crate::runtime::agent::model_discovery::{
     effort_value_is_explicit_without_discovery, model_applies_from_disk_only,
 };
 use crate::runtime::agent::provider_keys::ResolvedProviderSnapshot;
 use crate::runtime::agent::session_changes::SessionChangesHandle;
+use crate::runtime::install::agent_registry::ForkPointDialect;
 use crate::runtime::mediation::permissions::PermissionService;
 use crate::secrets::SecretStore;
 use crate::state::{
@@ -666,6 +668,17 @@ impl AgentSupervisor {
         if let Err(err) = self.stop(target_id, state, event_hub).await {
             tracing::warn!(error = %err, "agent supervisor: shutdown on serve exit failed");
         }
+    }
+
+    /// Fork-point dialect of the running agent, from the capability snapshot
+    /// the spawn path paired with the catalog entry it launched from.
+    pub async fn fork_point_dialect(&self) -> ForkPointDialect {
+        self.capabilities
+            .read()
+            .await
+            .as_ref()
+            .map(|capabilities| capabilities.fork_point)
+            .unwrap_or_default()
     }
 
     /// Snapshot the supervisor for status handlers.

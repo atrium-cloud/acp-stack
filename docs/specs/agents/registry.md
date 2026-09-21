@@ -9,6 +9,7 @@ Registry entries describe:
 - `id` and display name
 - whether the agent is headless-compatible
 - native command or adapter-backed command
+- optional `adapter.fork_point`, the `_meta` dialect the adapter reads a breakpoint fork point from: `acp-stack` (the default) or `jetbrains-air`
 - optional `harness.acp_args`, used when the harness enters ACP mode through something other than an `acp` subcommand (e.g. a `--acp` flag)
     - must be non-empty; defaults to `["acp"]`
 - install steps and post-install executable checks
@@ -21,7 +22,7 @@ Registry entries describe:
 
 Only headless-compatible entries are offered as supported runtime targets.
 
-The registry carries no MCP or other ACP capability declarations. Those come from the agent's live `initialize` advertisement, captured by the init capability probe and on every agent start.
+The fork-point dialect is the registry's only ACP capability declaration, because no `initialize` advertisement names it. MCP support and every other ACP capability come from the agent's live `initialize` advertisement, captured by the init capability probe and on every agent start.
 
 ## Install Paths
 

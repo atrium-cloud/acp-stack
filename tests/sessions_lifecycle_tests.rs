@@ -469,6 +469,10 @@ async fn session_events(harness: &Harness, session_id: &str) -> Vec<Value> {
 }
 
 async fn await_prompt_settled(harness: &Harness, session_id: &str, prompt_id: &str) {
+    await_prompt_status(harness, session_id, prompt_id, "completed").await;
+}
+
+async fn await_prompt_status(harness: &Harness, session_id: &str, prompt_id: &str, status: &str) {
     let deadline = tokio::time::Instant::now() + PROMPT_SETTLE_BUDGET;
     loop {
         let poll: Value = http()
@@ -483,12 +487,12 @@ async fn await_prompt_settled(harness: &Harness, session_id: &str, prompt_id: &s
             .json()
             .await
             .expect("poll json");
-        if poll["data"]["status"] == "completed" {
+        if poll["data"]["status"] == status {
             return;
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "prompt never completed: {poll}"
+            "prompt never reached {status}: {poll}"
         );
         tokio::time::sleep(PROMPT_SETTLE_POLL_INTERVAL).await;
     }
@@ -655,6 +659,249 @@ async fn fork_session_forwards_message_breakpoint_to_placebo() {
     assert_eq!(metadata["fork"]["parent_session_id"], session_id);
     assert_eq!(metadata["fork"]["strategy"], "acp_native");
     assert_eq!(metadata["fork"]["message_id"], BREAKPOINT_MESSAGE_ID);
+}
+
+/// Registry override that makes the placebo agent look like a vendor adapter
+/// honoring the JetBrains AIR fork extension, which is the only way acp-stack
+/// learns an adapter speaks that dialect.
+fn write_air_registry_override(home: &std::path::Path) {
+    let registry_dir = home.join(".config").join("acp-stack");
+    std::fs::create_dir_all(&registry_dir).expect("registry override dir");
+    std::fs::write(
+        registry_dir.join("agents.toml"),
+        r#"
+[[agents]]
+id = "placebo"
+name = "Placebo Agent"
+kind = "adapter"
+headless_compatible = true
+support_doc = "docs/agents/placebo.md"
+
+[agents.adapter]
+id = "placebo-acp"
+fork_point = "jetbrains-air"
+
+[agents.adapter.install.npm]
+package = "placebo-acp"
+creates = "placebo-acp"
+
+[agents.harness]
+id = "placebo"
+
+[agents.harness.install]
+provided_by = "adapter"
+"#,
+    )
+    .expect("write registry override");
+}
+
+/// Submit a prompt and return `(prompt_id, message_id)` once its row settles.
+async fn submit_and_settle_ids(
+    harness: &Harness,
+    session_id: &str,
+    text: &str,
+) -> (String, String) {
+    let response = submit_prompt_response(harness, session_id, text).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("prompt json");
+    let prompt_id = body["data"]["prompt_id"]
+        .as_str()
+        .expect("prompt id")
+        .to_owned();
+    let message_id = body["data"]["message_id"]
+        .as_str()
+        .expect("message id")
+        .to_owned();
+    await_prompt_settled(harness, session_id, &prompt_id).await;
+    (prompt_id, message_id)
+}
+
+/// Whole chain: the adapter stamps its own id on the chunks of a turn, the
+/// settled turn records it as the anchor, and a fork at the next prompt is
+/// translated into that anchor for an AIR adapter.
+#[tokio::test]
+async fn fork_at_an_air_adapter_names_the_preceding_turns_anchor() {
+    const TURN_ANCHOR: &str = "msg_placebo_turn";
+
+    let home = tempfile::tempdir().expect("home");
+    write_air_registry_override(home.path());
+    let harness = Harness::spawn_with_and_home(
+        |config| {
+            config.agent.args.extend([
+                "--no-cap-fork-message-id".to_owned(),
+                "--no-echo-prompt-message-id".to_owned(),
+                "--agent-message-id".to_owned(),
+                TURN_ANCHOR.to_owned(),
+                "--expect-air-fork-message-id".to_owned(),
+                TURN_ANCHOR.to_owned(),
+            ]);
+        },
+        home.path().to_path_buf(),
+    )
+    .await;
+    let client = http();
+
+    // This is the snapshot a downstream consumer reads to decide whether it may
+    // offer a breakpoint fork. The adapter advertises nothing about it, so the
+    // catalog declaration has to reach the consumer through here.
+    let reported: Value = client
+        .get(format!("{}/v1/agent/capabilities", harness.base_url))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("capabilities")
+        .json()
+        .await
+        .expect("capabilities json");
+    let fork = &reported["data"]["capabilities"]["capabilities"]["sessionCapabilities"]["fork"];
+    assert!(
+        fork["_meta"]["acpStack"]["messageId"].is_object(),
+        "reported fork capability must carry the sub-capability: {reported}"
+    );
+    assert_eq!(
+        reported["data"]["capabilities"]["fork_point"],
+        "jetbrains-air"
+    );
+
+    let session_id = create_session(&harness).await;
+
+    let (_, first_message_id) = submit_and_settle_ids(&harness, &session_id, "first turn").await;
+    let (second_prompt_id, second_message_id) =
+        submit_and_settle_ids(&harness, &session_id, "second turn").await;
+    {
+        let state = harness.state.lock().await;
+        let first = state
+            .get_prompt_by_message_id(&session_id, &first_message_id)
+            .expect("first prompt lookup")
+            .expect("first prompt exists");
+        // The adapter never echoes the acpStack key, so a settled turn is the
+        // acknowledgement on this dialect.
+        assert!(first.message_id_acknowledged);
+        let preceding = state
+            .preceding_prompt(&session_id, &second_prompt_id)
+            .expect("preceding lookup")
+            .expect("the first turn precedes the second");
+        assert_eq!(preceding.id, first.id);
+        assert_eq!(preceding.agent_message_id.as_deref(), Some(TURN_ANCHOR));
+    }
+
+    // Cutting at the second prompt must name the first turn's anchor, because
+    // this adapter keeps the point it is given. The placebo rejects any other
+    // id through `--expect-air-fork-message-id`.
+    let response = client
+        .post(format!(
+            "{}/v1/sessions/{}/fork",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .json(&json!({ "message_id": second_message_id }))
+        .send()
+        .await
+        .expect("fork");
+    assert_eq!(response.status(), StatusCode::OK);
+    let forked: Value = response.json().await.expect("fork json");
+    let child_id = forked["data"]["id"].as_str().expect("child id");
+
+    let state = harness.state.lock().await;
+    let child = state
+        .get_session(child_id)
+        .expect("child lookup")
+        .expect("child exists");
+    let metadata: Value = serde_json::from_str(&child.metadata_json).expect("metadata json");
+    // The public contract still names the acp-stack prompt message id; the
+    // translation is internal.
+    assert_eq!(metadata["fork"]["message_id"], second_message_id);
+}
+
+/// A turn that emits stamped chunks and then fails leaves no anchor, so the
+/// next turn cannot inherit its last chunk id.
+#[tokio::test]
+async fn a_failed_turn_records_no_anchor() {
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.extend([
+            "--agent-message-id".to_owned(),
+            "msg_failed_turn".to_owned(),
+            "--prompt-inference-error-after-update".to_owned(),
+            "upstream returned 503 Service Unavailable".to_owned(),
+        ]);
+    })
+    .await;
+    let session_id = create_session(&harness).await;
+
+    let response = submit_prompt_response(&harness, &session_id, "doomed turn").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("prompt json");
+    let prompt_id = body["data"]["prompt_id"]
+        .as_str()
+        .expect("prompt id")
+        .to_owned();
+    await_prompt_status(&harness, &session_id, &prompt_id, "errored").await;
+
+    let state = harness.state.lock().await;
+    // Any id that sorts after the failed prompt's id makes it the preceding row.
+    let later_prompt_id = format!("{prompt_id}~");
+    let preceding = state
+        .preceding_prompt(&session_id, &later_prompt_id)
+        .expect("preceding lookup")
+        .expect("the failed prompt exists");
+    assert_eq!(preceding.id, prompt_id);
+    assert_eq!(preceding.agent_message_id, None);
+}
+
+#[tokio::test]
+async fn fork_at_the_first_prompt_is_refused_for_an_air_adapter() {
+    const FIRST_MESSAGE_ID: &str = "00000000-0000-4000-8000-00000000000c";
+
+    let home = tempfile::tempdir().expect("home");
+    write_air_registry_override(home.path());
+    let harness = Harness::spawn_with_and_home(
+        |config| {
+            config.agent.args.extend([
+                "--no-cap-fork-message-id".to_owned(),
+                "--no-echo-prompt-message-id".to_owned(),
+            ]);
+        },
+        home.path().to_path_buf(),
+    )
+    .await;
+    let client = http();
+    let session_id = create_session(&harness).await;
+
+    {
+        let state = harness.state.lock().await;
+        state
+            .insert_prompt_with_message_id(
+                NewPromptRecord {
+                    id: "prm_air_only".to_owned(),
+                    session_id: session_id.clone(),
+                    prompt_json: r#"[{"type":"text","text":"first turn"}]"#.to_owned(),
+                },
+                Some(FIRST_MESSAGE_ID.to_owned()),
+            )
+            .expect("prompt inserted");
+        state
+            .acknowledge_prompt_message_id("prm_air_only", FIRST_MESSAGE_ID)
+            .expect("prompt acknowledged");
+    }
+
+    let response = client
+        .post(format!(
+            "{}/v1/sessions/{}/fork",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .json(&json!({ "message_id": FIRST_MESSAGE_ID }))
+        .send()
+        .await
+        .expect("fork");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.expect("error json");
+    assert_eq!(body["error"]["code"], "request.invalid_param");
+    let message = body["error"]["message"].as_str().expect("error message");
+    assert!(
+        message.contains("first prompt"),
+        "unexpected refusal: {message}"
+    );
 }
 
 #[tokio::test]

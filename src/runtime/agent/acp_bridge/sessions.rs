@@ -3,6 +3,21 @@
 
 use super::*;
 
+/// A resolved breakpoint for `session/fork`, already translated into the
+/// dialect the running adapter reads. The supervisor owns the translation
+/// because only it can map an acp-stack prompt message id onto the adapter's
+/// own transcript ids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForkPoint {
+    /// `_meta.acpStack.messageId`, carrying acp-stack's prompt message id
+    /// verbatim. The in-house adapters cut just before that prompt themselves.
+    AcpStackMessageId(String),
+    /// `_meta.jetbrains.air.fork`, carrying an adapter-emitted message id. Both
+    /// vendor adapters keep the named point, so the id named here is the one
+    /// from the turn before the prompt the client asked to cut at.
+    AirMessageId(String),
+}
+
 impl AcpBridge {
     pub(super) async fn connection(&self) -> Result<ConnectionTo<Agent>> {
         let guard = self.connection.lock().await;
@@ -38,14 +53,19 @@ impl AcpBridge {
         session_id: SessionId,
         cwd: PathBuf,
         mcp_servers: Vec<McpServer>,
-        message_id: Option<String>,
+        fork_point: Option<ForkPoint>,
     ) -> Result<ForkSessionResponse> {
         if !self.capabilities.supports_fork_session() {
             return Err(StackError::AgentUnsupportedCapability {
                 name: "session/fork",
             });
         }
-        if message_id.is_some() && !self.capabilities.supports_fork_message_id() {
+        // Only the acp-stack dialect is advertised as a sub-capability. An AIR
+        // fork point is reachable on the catalog declaration alone, which the
+        // supervisor already resolved before building this fork point.
+        if matches!(fork_point, Some(ForkPoint::AcpStackMessageId(_)))
+            && !self.capabilities.supports_fork_message_id()
+        {
             return Err(StackError::AgentUnsupportedCapability {
                 name: "session/fork.messageId",
             });
@@ -54,8 +74,14 @@ impl AcpBridge {
             .reject_unmodeled_mcp_servers(&mcp_servers)?;
         let connection = self.connection().await?;
         let mut request = ForkSessionRequest::new(session_id, cwd).mcp_servers(mcp_servers);
-        if let Some(message_id) = message_id {
-            request = request.meta(prompt_message_id_meta(&message_id));
+        match &fork_point {
+            Some(ForkPoint::AcpStackMessageId(message_id)) => {
+                request = request.meta(prompt_message_id_meta(message_id));
+            }
+            Some(ForkPoint::AirMessageId(message_id)) => {
+                request = request.meta(air_fork_point_meta(message_id));
+            }
+            None => {}
         }
         let response: ForkSessionResponse = connection
             .send_request(request)

@@ -659,6 +659,60 @@ fn prompt_message_id_round_trips_and_acknowledges() {
 }
 
 #[test]
+fn preceding_prompt_carries_the_anchor_of_the_turn_before() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    store
+        .insert_session(NewSessionRecord {
+            id: "sess_anchor".to_owned(),
+            agent_id: "fake".to_owned(),
+            cwd: "/tmp/anchor".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("session inserted");
+    // Prompt ids carry a nanosecond prefix, so these stand in as submission order.
+    for id in ["prm_00000001", "prm_00000002", "prm_00000003"] {
+        store
+            .insert_prompt(NewPromptRecord {
+                id: id.to_owned(),
+                session_id: "sess_anchor".to_owned(),
+                prompt_json: "[]".to_owned(),
+            })
+            .expect("prompt inserted");
+    }
+    store
+        .record_prompt_agent_message_id("prm_00000002", "msg_turn_two")
+        .expect("anchor recorded");
+
+    let preceding = store
+        .preceding_prompt("sess_anchor", "prm_00000003")
+        .expect("preceding lookup")
+        .expect("a preceding prompt exists");
+    assert_eq!(preceding.id, "prm_00000002");
+    assert_eq!(preceding.agent_message_id.as_deref(), Some("msg_turn_two"));
+
+    // A turn whose adapter never emitted a message id leaves no anchor.
+    let preceding = store
+        .preceding_prompt("sess_anchor", "prm_00000002")
+        .expect("preceding lookup")
+        .expect("a preceding prompt exists");
+    assert_eq!(preceding.id, "prm_00000001");
+    assert_eq!(preceding.agent_message_id, None);
+
+    // The first prompt of the session has nothing before it.
+    assert_eq!(
+        store
+            .preceding_prompt("sess_anchor", "prm_00000001")
+            .expect("preceding lookup"),
+        None
+    );
+}
+
+#[test]
 fn active_session_activity_tracks_prompt_status_update_as_agent() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let path = tempdir.path().join("state.sqlite");

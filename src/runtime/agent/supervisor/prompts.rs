@@ -73,6 +73,9 @@ impl AgentSupervisor {
         // writer queue after its prompt task settled. Wait them out so the
         // user row below lands after every row of the turn before it.
         bridge.drain_session_events().await;
+        // Chunks can still land after a cancel, so the slot is emptied here as
+        // well as at settle: this turn must anchor only on its own chunks.
+        bridge.take_last_agent_message_id(&agent_session_id).await;
         let prompt_id = next_prompt_id();
         let message_id = next_prompt_message_id();
         let record = {
@@ -104,6 +107,8 @@ impl AgentSupervisor {
         let session_id_owned = session_id.to_owned();
         let prompt_id_owned = prompt_id.clone();
         let message_id_owned = message_id.clone();
+        let fork_point_dialect = self.fork_point_dialect().await;
+        let agent_session_id_owned = agent_session_id.clone();
         let acp_request = PromptRequest::new(AcpSessionId::new(agent_session_id), prompt_blocks)
             .meta(prompt_message_id_meta(&message_id));
 
@@ -130,20 +135,54 @@ impl AgentSupervisor {
                 result = bridge_call => Outcome::Settled(result),
                 _ = cancel_inner.cancelled() => Outcome::Cancelled,
             };
-            if let Outcome::Settled(Ok(response)) = &outcome
-                && meta_message_id(response.meta.as_ref()) == Some(message_id_owned.as_str())
-            {
-                let guard = state_clone.lock().await;
-                if let Err(err) =
-                    guard.acknowledge_prompt_message_id(&prompt_id_owned, &message_id_owned)
-                {
-                    tracing::warn!(
-                        error = %err,
-                        prompt_id = %prompt_id_owned,
-                        message_id = %message_id_owned,
-                        "failed to acknowledge prompt message id"
-                    );
+            if let Outcome::Settled(Ok(response)) = &outcome {
+                // An adapter on the AIR dialect never sees the acpStack key and
+                // so can never echo it. Its fork point is translated from the
+                // anchor recorded below, which a settled turn is what produces,
+                // so a settled turn is the acknowledgement for that dialect.
+                let acknowledged = match fork_point_dialect {
+                    ForkPointDialect::AcpStack => {
+                        meta_message_id(response.meta.as_ref()) == Some(message_id_owned.as_str())
+                    }
+                    ForkPointDialect::JetbrainsAir => true,
+                };
+                if acknowledged {
+                    let guard = state_clone.lock().await;
+                    if let Err(err) =
+                        guard.acknowledge_prompt_message_id(&prompt_id_owned, &message_id_owned)
+                    {
+                        tracing::warn!(
+                            error = %err,
+                            prompt_id = %prompt_id_owned,
+                            message_id = %message_id_owned,
+                            "failed to acknowledge prompt message id"
+                        );
+                    }
                 }
+                // Trailing chunks can still sit behind the notification worker
+                // when the response lands, and the anchor is the last of them.
+                bridge.drain_session_events().await;
+                if let Some(agent_message_id) = bridge
+                    .take_last_agent_message_id(&agent_session_id_owned)
+                    .await
+                {
+                    let guard = state_clone.lock().await;
+                    if let Err(err) =
+                        guard.record_prompt_agent_message_id(&prompt_id_owned, &agent_message_id)
+                    {
+                        tracing::warn!(
+                            error = %err,
+                            prompt_id = %prompt_id_owned,
+                            "failed to record the agent message id anchoring this turn"
+                        );
+                    }
+                }
+            } else {
+                // A failed or cancelled turn has no anchor, and its last chunk
+                // must not be recorded as the next turn's.
+                bridge
+                    .take_last_agent_message_id(&agent_session_id_owned)
+                    .await;
             }
 
             // The session-event emit must follow the row write so subscribers

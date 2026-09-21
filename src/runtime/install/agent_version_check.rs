@@ -5,7 +5,9 @@ use serde::Serialize;
 
 use crate::error::Result;
 use crate::runtime::install::agent_installer::{STEP_ADAPTER, STEP_HARNESS, STEP_INSTALL};
-use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry, RegistryKind};
+use crate::runtime::install::agent_registry::{
+    ForkPointDialect, RegistryCatalog, RegistryEntry, RegistryKind,
+};
 use crate::state::InstallerRun;
 
 /// Result of comparing the installed managed-agent version against upstream.
@@ -210,6 +212,9 @@ fn expected_agent_check_steps(entry: &RegistryEntry) -> Vec<&'static str> {
 pub struct InstalledComponents {
     pub adapter_id: Option<String>,
     pub steps: Vec<&'static str>,
+    /// Catalog-declared fork-point dialect of the launched adapter. Native
+    /// agents and registry-absent agents keep the acp-stack dialect.
+    pub fork_point: ForkPointDialect,
 }
 
 impl InstalledComponents {
@@ -222,6 +227,9 @@ impl InstalledComponents {
             Some(adapter) => Self {
                 adapter_id: Some(adapter.id.clone()),
                 steps: vec![STEP_ADAPTER],
+                // The catalog owns the dialect declaration, so a
+                // registry-unavailable launch falls back to the acp-stack key.
+                fork_point: ForkPointDialect::default(),
             },
             None => Self::native(),
         }
@@ -231,6 +239,7 @@ impl InstalledComponents {
         Self {
             adapter_id: None,
             steps: vec![STEP_INSTALL],
+            fork_point: ForkPointDialect::default(),
         }
     }
 }
@@ -259,6 +268,11 @@ pub fn installed_components(
     InstalledComponents {
         adapter_id: entry.adapter.as_ref().map(|adapter| adapter.id.clone()),
         steps: expected_agent_check_steps(entry),
+        fork_point: entry
+            .adapter
+            .as_ref()
+            .map(|adapter| adapter.fork_point)
+            .unwrap_or_default(),
     }
 }
 
@@ -357,6 +371,7 @@ provided_by = "adapter"
             InstalledComponents {
                 adapter_id: None,
                 steps: vec![STEP_INSTALL],
+                fork_point: ForkPointDialect::AcpStack,
             }
         );
     }
@@ -369,6 +384,7 @@ provided_by = "adapter"
             InstalledComponents {
                 adapter_id: Some("split-acp".to_owned()),
                 steps: vec![STEP_HARNESS, STEP_ADAPTER],
+                fork_point: ForkPointDialect::AcpStack,
             }
         );
     }
@@ -381,6 +397,7 @@ provided_by = "adapter"
             InstalledComponents {
                 adapter_id: Some("bundled-acp".to_owned()),
                 steps: vec![STEP_ADAPTER],
+                fork_point: ForkPointDialect::AcpStack,
             }
         );
     }
@@ -408,6 +425,7 @@ provided_by = "adapter"
             InstalledComponents {
                 adapter_id: Some("custom-acp".to_owned()),
                 steps: vec![STEP_HARNESS, STEP_ADAPTER],
+                fork_point: ForkPointDialect::AcpStack,
             }
         );
     }
@@ -436,6 +454,7 @@ provided_by = "adapter"
             InstalledComponents {
                 adapter_id: Some("split-acp".to_owned()),
                 steps: vec![STEP_ADAPTER],
+                fork_point: ForkPointDialect::AcpStack,
             }
         );
     }

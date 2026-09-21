@@ -80,6 +80,18 @@ pub(crate) struct AcpArgs {
     pub(crate) cap_mcp_http: bool,
     #[arg(long)]
     pub(crate) expect_fork_message_id: Option<String>,
+    /// Require `_meta.jetbrains.air.fork` to name this id on `session/fork`,
+    /// the way the vendor adapters read their fork point.
+    #[arg(long)]
+    pub(crate) expect_air_fork_message_id: Option<String>,
+    /// Stamp this id as the `messageId` of every `agent_message_chunk`, so a
+    /// test can drive the anchor acp-stack translates an AIR fork point from.
+    #[arg(long)]
+    pub(crate) agent_message_id: Option<String>,
+    /// Drop the `_meta.acpStack.messageId` echo from `PromptResponse`, the way
+    /// an adapter that never implemented the acp-stack extension behaves.
+    #[arg(long)]
+    pub(crate) no_echo_prompt_message_id: bool,
     /// Reject `session/prompt` with `invalidParams` for any session this process
     /// has not opened through `session/new`, `session/load`, `session/resume`, or
     /// `session/fork`, the way a restarted adapter rejects a session id it has

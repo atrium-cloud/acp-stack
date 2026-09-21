@@ -2221,6 +2221,11 @@
             ],
             "description": "Installed version of that adapter (the `adapter` installer step).",
             "default": null
+          },
+          "fork_point": {
+            "$ref": "#/$defs/response/ForkPointDialect",
+            "description": "Catalog-declared `_meta` dialect the launched adapter reads a breakpoint\nfork point from. No ACP capability names the JetBrains AIR extension, so\nthis declaration is what makes `session/fork` at a message id reachable\nfor the adapters that implement it.",
+            "default": "acp-stack"
           }
         },
         "required": [
@@ -2232,9 +2237,25 @@
           "agent_id",
           "harness_version",
           "adapter_id",
-          "adapter_version"
+          "adapter_version",
+          "fork_point"
         ],
         "description": "Our owned view of the `initialize` response. Mirrors the protocol shape\nbut is independent of the SDK's `AgentCapabilities` type so our\n`GET /v1/agent/capabilities` JSON contract stays stable across SDK\nminor-version churn."
+      },
+      "ForkPointDialect": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "acp-stack",
+            "description": "`_meta.acpStack.messageId`, carrying acp-stack's own prompt message id."
+          },
+          {
+            "type": "string",
+            "const": "jetbrains-air",
+            "description": "`_meta.jetbrains.air.fork`, carrying an id the adapter itself emitted as\nthe `messageId` of a `session/update` chunk."
+          }
+        ],
+        "description": "`_meta` dialect an adapter reads the breakpoint fork point from on\n`session/fork`. Declared per adapter because no advertised ACP capability\nnames the JetBrains AIR extension, so the catalog is the only source."
       },
       "AgentStateLabel": {
         "type": "string",
