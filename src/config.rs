@@ -97,7 +97,7 @@ pub struct Config {
 /// [`RawConfig`], where either section alone is enough. Canonical export writes
 /// `[array]` only (`agent` is `#[serde(skip_serializing)]`), legacy files may
 /// write `[agent]` only, and both together are accepted. So neither is
-/// individually required, but at least one must be present — an `anyOf` the
+/// individually required, but at least one must be present, an `anyOf` that the
 /// derive cannot express. The finer per-field cross-checks stay in the loader.
 fn relax_agent_array_requirement(schema: &mut schemars::Schema) {
     const OPTIONAL_SECTIONS: [&str; 2] = ["agent", "array"];
@@ -225,8 +225,9 @@ impl Config {
 
     /// Like [`Config::load_lenient_from_path`], but also reports what was
     /// dropped. Write paths that canonicalize this view back to disk must use
-    /// this variant and warn per dropped entry — healing a hand-edited invalid
-    /// declaration out of the file silently would be an untraceable mutation.
+    /// this variant and warn per dropped entry, because healing a hand-edited
+    /// invalid declaration out of the file silently would be an untraceable
+    /// mutation.
     pub(crate) fn load_lenient_from_path_reporting(
         path: impl AsRef<Path>,
     ) -> Result<(Self, DroppedDeclarations)> {

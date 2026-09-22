@@ -115,8 +115,8 @@ pub fn candidates_for(config: &Config, feature: Option<&str>) -> Vec<DepApplyCan
         .collect()
 }
 
-/// Candidates whose install action is still actionable — the `creates` target
-/// does not yet resolve. Init's deps-apply step uses this to decide whether
+/// Candidates whose install action is still actionable, meaning the `creates`
+/// target does not yet resolve. Init's deps-apply step uses this to decide whether
 /// there is anything to apply and to skip cleanly when everything is present.
 pub fn pending_candidates(config: &Config, feature: Option<&str>) -> Vec<DepApplyCandidate> {
     candidates_for(config, feature)
@@ -137,7 +137,7 @@ pub fn pending_system_candidates(config: &Config, feature: Option<&str>) -> Vec<
 /// Run every eligible install action and return a structured report
 /// containing the before-state, after-state, and per-action outcome.
 /// The caller is responsible for confirming with the operator before
-/// invoking this — the runner never prompts; it just runs.
+/// invoking this, because the runner never prompts; it just runs.
 pub fn apply_dependencies(
     config: &Config,
     feature: Option<&str>,

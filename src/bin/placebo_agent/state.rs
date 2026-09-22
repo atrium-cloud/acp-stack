@@ -117,8 +117,8 @@ impl PlaceboState {
         self.session_cancels.get(session_id).copied().unwrap_or(0)
     }
 
-    /// True once a `session/cancel` for this session has arrived since `start` — the
-    /// count captured when the turn began. Non-consuming, so concurrently parked
+    /// True once a `session/cancel` for this session has arrived since `start`,
+    /// the count captured when the turn began. Non-consuming, so concurrently parked
     /// turns each see the same cancel and a later turn starting at a higher `start`
     /// does not inherit it.
     pub(crate) fn cancelled_since(&self, session_id: &str, start: u64) -> bool {

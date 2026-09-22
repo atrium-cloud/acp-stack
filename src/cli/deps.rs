@@ -98,7 +98,7 @@ fn run_apply(args: DepsApplyArgs, output: OutputFormat) -> Result<()> {
             );
         } else {
             println!(
-                "no dependencies declare an [install] block — declare one to make a dep actionable"
+                "no dependencies declare an [install] block; declare one to make a dep actionable"
             );
         }
         return Ok(());

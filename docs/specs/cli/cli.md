@@ -121,8 +121,8 @@ A daemon restart is required for daemon startup-cached settings:
 - A failed session delete leaves `ok` unchanged. The verdict is prompt completion plus the fs check; a working agent with a flaky delete is not a failed test. A leaked agent child does flip it, reported as `phase: "cleanup"`, `code: "cleanup_failed"`.
 - `elapsed_ms` is measured against the wall clock, so a host suspend mid-run is reflected rather than lost.
 - Apart from `evidence.final_assistant_text`, the document carries no reason string, session id, prompt text, file contents, path, credential, or raw provider error. Reasons embed workspace paths and spawn argv; codes are the machine channel.
-- `evidence.final_assistant_text` is agent-authored: injected env credential values are scrubbed from it, but content the model chose to echo — including prompt or workspace-file text — is retained, since telling model non-compliance from a harness defect is the field's purpose.
-- A failure that happens before the harness can run at all — an unreadable config, an unresolvable home directory — emits no document, only the stderr error and exit 1.
+- `evidence.final_assistant_text` is agent-authored: injected env credential values are scrubbed from it, but content the model chose to echo, including prompt or workspace-file text, is retained, since telling model non-compliance from a harness defect is the field's purpose.
+- A failure that happens before the harness can run at all, such as an unreadable config or an unresolvable home directory, emits no document, only the stderr error and exit 1.
 
 ## Testflight mode cycling
 

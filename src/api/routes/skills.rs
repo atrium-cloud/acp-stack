@@ -1,4 +1,4 @@
-//! `/v1/agent/skills` — day-2 Agent Skills management for the active agent.
+//! `/v1/agent/skills`: day-2 Agent Skills management for the active agent.
 //!
 //! Every handler loads config leniently so one bad hand-edited
 //! `[[skills.sources]]` entry cannot 400 the whole surface; `sources/remove`
@@ -71,7 +71,7 @@ pub(crate) struct SkillCatalogSourceJson {
     catalog: bool,
     trusted: bool,
     /// Selectors accepted by `add` (indexed catalog sources only; empty for
-    /// user sources — use `source get` to enumerate those live).
+    /// user sources, where `source get` enumerates those live).
     skills: Vec<String>,
     /// Subset of `skills` installed by the Standard Setup essentials step.
     essential: Vec<String>,
@@ -486,8 +486,8 @@ pub(crate) async fn skills_source_remove_handler(
 
 /// A config write from a leniently loaded view erases any declarations that
 /// load dropped. Healing them out is the intended trade, but a hand-edited
-/// entry vanishing from the file without a trace is a silent mutation — leave
-/// one warning per erased declaration.
+/// entry vanishing from the file without a trace is a silent mutation, so
+/// leave one warning per erased declaration.
 fn warn_dropped_declarations_healed(dropped: &crate::config::DroppedDeclarations) {
     for (alias, reason) in &dropped.skill_sources {
         tracing::warn!(

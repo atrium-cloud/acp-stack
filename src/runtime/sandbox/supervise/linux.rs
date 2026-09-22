@@ -199,8 +199,8 @@ fn run_with_options(options: SuperviseOptions) -> Result<()> {
     }
 
     // A failed release write must not skip teardown: setup already created
-    // host-side resources. Closing the sync fd keeps the fail-closed guarantee
-    // — the helper can only ever see the release byte or EOF.
+    // host-side resources. Closing the sync fd keeps the fail-closed guarantee,
+    // since the helper can only ever see the release byte or EOF.
     if let Err(error) = write_byte(parent_sync, RELEASE_BYTE) {
         diag.line(&format!("releasing the workload failed: {error}"));
     }

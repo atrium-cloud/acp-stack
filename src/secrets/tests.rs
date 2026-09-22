@@ -374,7 +374,7 @@ fn deposit_and_apply_rolls_back_secrets_when_the_apply_conflicts() {
     // In memory: the overwrite is restored to its prior value and the fresh key never landed.
     assert_eq!(store.get("EXISTING").expect("existing secret"), "old");
     assert!(store.get("FRESH").is_err());
-    // On disk: identical — reopening sees the exact pre-deposit state, watermark still at 7.
+    // On disk: identical, so reopening sees the exact pre-deposit state, watermark still at 7.
     let reopened = SecretStore::open(home.path()).expect("reopen");
     assert_eq!(reopened.get("EXISTING").expect("existing secret"), "old");
     assert!(reopened.get("FRESH").is_err());
@@ -397,8 +397,8 @@ fn deposit_and_apply_commits_the_secrets_and_the_apply_together() {
             "platform-state",
             "provider-credential",
             3,
-            // The deposited secret is visible while the selection resolves — a `source_refs` entry
-            // could name it — proving the deposit lands in memory before resolution runs.
+            // The deposited secret is visible while the selection resolves, so a `source_refs`
+            // entry could name it, proving the deposit lands in memory before resolution runs.
             |store| {
                 assert_eq!(
                     store

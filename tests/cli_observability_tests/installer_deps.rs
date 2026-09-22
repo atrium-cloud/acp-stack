@@ -401,7 +401,7 @@ fn deps_apply_prints_before_and_after_status() {
 
 #[test]
 fn deps_apply_exits_nonzero_and_prints_manual_commands_on_privilege_skip() {
-    // SAFETY: `geteuid()` is always safe — no preconditions.
+    // SAFETY: `geteuid()` is always safe, with no preconditions.
     if unsafe { libc::geteuid() } == 0 {
         // As root the escalation probe short-circuits to "run directly"
         // and the skip path under test is unreachable.

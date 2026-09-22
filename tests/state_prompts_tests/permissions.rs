@@ -120,7 +120,7 @@ fn reconcile_orphaned_commands_settles_dependent_permissions() {
         })
         .expect("dependent permission");
     // An ACP-source pending row belongs to the permission sweep, not the
-    // command sweep — it must survive untouched.
+    // command sweep, so it must survive untouched.
     let acp_pending = store
         .append_permission_request(NewPermissionRequest {
             source: "acp",

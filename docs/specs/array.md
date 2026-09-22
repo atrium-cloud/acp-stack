@@ -48,7 +48,7 @@ restart = "on-crash"
 - `array.targets` is non-empty.
 - Each `targets[].id` starts with an ASCII letter or digit and otherwise contains only ASCII letters, digits, `-`, `_`, or `.`, with no surrounding whitespace.
 - Each `targets[].id` equals its `targets[].agent.id`.
-- Target ids are unique, and harnesses are unique — Array v1 requires a different `agent.id` per target.
+- Target ids are unique, and harnesses are unique, because Array v1 requires a different `agent.id` per target.
 - `primary_target` references an existing target.
 - Each target's agent block passes the same agent validation as a single-agent config; failures name the offending target.
 
@@ -68,7 +68,7 @@ Secret refs in a non-primary target's `env` may intentionally be shared across t
 | `acps array restart auto [--target <id>] [--admin-key <key>]`                  | admin   | queue guarded restarts when selected targets become idle                                                          |
 | `acps agent default set <target>`                                              | local   | repoint `primary_target` at an existing target                                                                    |
 
-`acps array status` reads the local read-only socket and does not require a session key. The four daemon actions call the running daemon with the admin key (required when stdin is not a terminal). With Array off, `start` and `restart` are restricted to the primary target; `install` and `stop` are unrestricted (install is idempotent, and stop on a non-running target is a no-op). When `--target` is omitted, the command attempts every target, prints a per-target result line, and exits non-zero if any target failed — a single failing target never aborts the rest of the batch. `restart auto` uses the same fan-out but queues each restart until the target has no pending/running prompts and no pending ACP permission requests.
+`acps array status` reads the local read-only socket and does not require a session key. The four daemon actions call the running daemon with the admin key (required when stdin is not a terminal). With Array off, `start` and `restart` are restricted to the primary target; `install` and `stop` are unrestricted (install is idempotent, and stop on a non-running target is a no-op). When `--target` is omitted, the command attempts every target, prints a per-target result line, and exits non-zero if any target failed; a single failing target never aborts the rest of the batch. `restart auto` uses the same fan-out but queues each restart until the target has no pending/running prompts and no pending ACP permission requests.
 
 ## API
 
@@ -87,7 +87,7 @@ The un-suffixed `/v1/agent/*` routes operate on `primary_target`. Session routes
 
 Each session row records the `target_id` that owns it and the `agent_session_id` the agent assigned, in addition to the local session `id`. A `UNIQUE(target_id, agent_session_id)` index makes the agent's session id the stable per-target identity; the same agent session id may recur under different targets. See [state-logging.md](state-logging.md#sessions-columns).
 
-Driving ops (`prompt`, `load`, `resume`, `fork`) against a non-primary target require Array to be enabled. Terminal wind-down ops (`close`, `cancel`) always reach a session's stored target, so toggling Array off never strands a session that was opened against a secondary target — an operator can always close or cancel it.
+Driving ops (`prompt`, `load`, `resume`, `fork`) against a non-primary target require Array to be enabled. Terminal wind-down ops (`close`, `cancel`) always reach a session's stored target, so toggling Array off never strands a session that was opened against a secondary target, since an operator can always close or cancel it.
 
 ## Migration And Defaults
 

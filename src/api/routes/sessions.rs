@@ -123,8 +123,8 @@ pub(crate) struct StoredAvailableCommands {
 
 /// Read the last agent-advertised command list off a session's metadata.
 /// `None` means no list was ever stored; a malformed value degrades to `None`
-/// with a warning instead of failing the caller — the reading routes must not
-/// break because one agent wrote an unexpected payload.
+/// with a warning instead of failing the caller, because the reading routes
+/// must not break when one agent wrote an unexpected payload.
 pub(crate) fn stored_available_commands(metadata_json: &str) -> Option<StoredAvailableCommands> {
     let metadata = match serde_json::from_str::<serde_json::Value>(metadata_json) {
         Ok(value) => value,

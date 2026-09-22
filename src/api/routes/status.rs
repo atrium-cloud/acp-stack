@@ -21,9 +21,9 @@ use super::agent::open_agent_environment;
 pub(crate) struct StatusResponse {
     schema_version: i64,
     latest_event: Option<String>,
-    /// True while any dependency apply is running install snippets —
-    /// a `POST /v1/deps/apply`, an `acps deps apply`, or a detached
-    /// background apply spawned by `acps init --deps-apply-async` — derived
+    /// True while any dependency apply is running install snippets,
+    /// whether a `POST /v1/deps/apply`, an `acps deps apply`, or a detached
+    /// background apply spawned by `acps init --deps-apply-async`. Derived
     /// from the live `deps_apply_runs` row (pid-checked) plus the daemon's
     /// own apply lock. Poll `GET /v1/deps/apply/runs/latest` for run identity
     /// and progress. Advisory: a caller about to restart or reconfigure the
@@ -181,7 +181,7 @@ pub(crate) fn configured_providers_or_error(
 /// Restart-required signal for the status view. When resolution failed
 /// (`resolution_failed`) the configured set is unknown, so a running agent
 /// would otherwise read as "restart required" against its still-loaded
-/// snapshot — report false instead, since the signal is unknowable until the
+/// snapshot. Report false instead, since the signal is unknowable until the
 /// credential is fixed.
 pub(crate) fn provider_restart_required_for_status(
     resolution_failed: bool,
@@ -315,7 +315,7 @@ pub(crate) struct HealthLiveResponse {
     server: ServerInfo,
 }
 
-/// `GET /v1/health/live` — session-authenticated liveness. Once the daemon is
+/// `GET /v1/health/live`: session-authenticated liveness. Once the daemon is
 /// accepting authenticated requests, this answers "is the process alive and the
 /// router up?" without touching SQLite, the supervisor, or the workspace.
 /// Readers that want subsystem detail should call `/v1/health/ready`.
@@ -326,7 +326,7 @@ pub(crate) async fn health_live_handler() -> ApiSuccess<HealthLiveResponse> {
     })
 }
 
-/// `GET /v1/health/ready` — collects a fresh `HealthReport` and returns 200
+/// `GET /v1/health/ready`: collects a fresh `HealthReport` and returns 200
 /// when every subsystem is ok, otherwise 503 with the same body shape so
 /// callers can pull the `failing` list and per-subsystem detail from a single
 /// schema regardless of status code.

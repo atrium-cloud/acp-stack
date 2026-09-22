@@ -1079,7 +1079,7 @@ pub(super) fn with_spinner<T>(message: &str, work: impl FnOnce() -> Result<T>) -
 }
 
 /// Masked secret entry; `None` when not interactive. `required` is hosted-wire
-/// metadata only — the server accepts a `null` answer either way.
+/// metadata only, since the server accepts a `null` answer either way.
 pub(super) fn password(
     kind: HostedPromptKind,
     interactive: bool,

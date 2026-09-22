@@ -58,7 +58,7 @@ const EXACT_PATH_LABELS: &[&str] = &[
     "/v1/sessions/-/status",
 ];
 
-/// Parameterized routes, matched in order — the per-collection catch-all MUST stay last within
+/// Parameterized routes, matched in order. The per-collection catch-all MUST stay last within
 /// its prefix group.
 const PATTERN_PATH_LABELS: &[(&str, PathTail, &str)] = &[
     (

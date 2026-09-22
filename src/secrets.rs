@@ -608,8 +608,8 @@ impl SecretStore {
     }
 
     /// Deposit flat secrets and apply a managed-state credential selection as ONE transaction. The
-    /// deposited secrets are made visible to `resolve` first — a `source_refs` entry may name a
-    /// secret this same call deposits — but nothing is written to disk or committed in memory
+    /// deposited secrets are made visible to `resolve` first, so a `source_refs` entry may name a
+    /// secret this same call deposits, but nothing is written to disk or committed in memory
     /// unless the whole operation succeeds. A stale revision, ownership conflict, or invalid
     /// selection restores the store exactly as it was, on disk and in memory, rather than leaving
     /// the deposited secrets behind (which `set_many` followed by a failing apply would do).
@@ -631,7 +631,7 @@ impl SecretStore {
         let secrets_snapshot = self.secrets.clone();
         // `catch_unwind` so a panic inside the transaction (in `resolve`, or the staging it drives)
         // restores the snapshot too, not only an `Err`. Without it a panic would leave the deposit
-        // in memory, poison the mutex, and — because the lock is recovered rather than refused —
+        // in memory, poison the mutex, and, because the lock is recovered rather than refused,
         // let the next successful write persist the orphaned secret. `AssertUnwindSafe` is required
         // only because `&mut self` is not `UnwindSafe`; the snapshot restore below re-establishes a
         // consistent state before the unwind resumes.

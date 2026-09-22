@@ -84,8 +84,8 @@ pub struct IgnoredFeature {
     /// mode/model/effort/config-option value.
     pub value: String,
     /// The capability the agent would have had to advertise
-    /// (`mcpCapabilities.*`), or — for `agent.mode`/`agent.model`/
-    /// `agent.effort`/`agent.config_option` — the `session/new` config
+    /// (`mcpCapabilities.*`), or, for `agent.mode`/`agent.model`/
+    /// `agent.effort`/`agent.config_option`, the `session/new` config
     /// option that would have had to carry the value
     /// (`sessionConfig.configOption` for map entries).
     pub capability: &'static str,
@@ -292,7 +292,7 @@ impl AgentCapabilitiesDto {
 
     /// `Ok(None)` when the agent can accept this server, `Ok(Some(capability))`
     /// when it does not advertise the transport, and `Err` for a transport
-    /// variant we do not model — we cannot reason about a shape we don't know,
+    /// variant we do not model. We cannot reason about a shape we don't know,
     /// so that stays a hard failure.
     ///
     /// stdio has no dedicated advertisement flag in ACP, so it requires at

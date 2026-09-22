@@ -235,7 +235,7 @@ fn redact_secret_values(text: &mut String, secret_values: &[String], text_trunca
     }
 }
 
-/// Redact the longest suffix of `value` that `text` begins with — the tail is
+/// Redact the longest suffix of `value` that `text` begins with. The tail is
 /// truncated from the front, so a straddling secret leaves only a suffix fragment.
 fn redact_leading_secret_fragment(text: &mut String, value: &str) {
     let max = value.len().min(text.len());

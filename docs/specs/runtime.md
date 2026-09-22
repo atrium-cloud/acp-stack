@@ -20,7 +20,7 @@ The supervisor:
 
 1. Creates a private sync socketpair. Spawns the existing `unshare` chain with `--net` added. Injects the runtime-only `--sync-fd` into the in-namespace `__sandbox-exec` helper.
 2. Waits for the helper's readiness byte, sent after tmpfs masking and before the privilege drop. The byte proves the namespaces exist. It then opens `/proc/<unshare-pid>/ns/net` and holds the fd for the whole spawn. This keeps the namespace alive without bind mounts and stays valid through teardown. It also opens and revalidates a pidfd for the blocked helper. Later direct workload signals use that stable handle rather than a reusable numeric PID.
-3. Runs provider `setup` beneath an internal process-group monitor. It writes the release byte only on exit 0. Otherwise the helper sees EOF and exits without ever executing the workload — fail-closed, including timeout. A private liveness socket ties the monitor to the sandbox supervisor. Supervisor death kills the complete in-contract provider process group, even under SIGKILL.
+3. Runs provider `setup` beneath an internal process-group monitor. It writes the release byte only on exit 0. Otherwise the helper sees EOF and exits without ever executing the workload; the exit path stays fail-closed, including on timeout. A private liveness socket ties the monitor to the sandbox supervisor. Supervisor death kills the complete in-contract provider process group, even under SIGKILL.
 4. Waits for the workload with stdio passed through untouched. For agent spawns, that stdio is the ACP transport. Signal and teardown handling:
     - SIGINT/SIGTERM are forwarded to the workload directly, and also to `unshare`, which ignores them while waiting for its child.
     - The first forwarded signal arms a short grace window that escalates to SIGKILL on the chain, so shutdown can never hang.
@@ -108,7 +108,7 @@ With a declared `expected_sha256` pin:
 
 Pre-existing binaries follow the same gate:
 
-- One that fails the gate reads as absent — including on resumed `agent_install` steps — and is reinstalled.
+- One that fails the gate reads as absent, including on resumed `agent_install` steps, and is reinstalled.
 - One that fails its integrity pin is refused execution. It errors on the spot, or, on a resumed step, reads as absent so the reinstall can surface a still-mismatching pin in final verification.
 
 ### Install Environment
@@ -122,7 +122,7 @@ Every variable above is forwarded; one more is computed on the spot: `npm_config
 
 ### GitHub Request Pacing
 
-- Install-flow requests to `api.github.com` — release resolution and asset download, including `acps agent check` — share a process-wide pace with a minimum interval between requests.
+- Install-flow requests to `api.github.com`, covering release resolution and asset download, including `acps agent check`, share a process-wide pace with a minimum interval between requests.
 - A cooldown circuit opens when GitHub answers with a rate-limit response: 429, or 403 with an exhausted quota or a `Retry-After` header. The circuit honors `Retry-After`/`X-RateLimit-Reset`.
 - Waits beyond a hard cap surface as a typed rate-limit error instead of blocking indefinitely.
 - This keeps install retry loops on shared-egress-IP hosts from burning the unauthenticated GitHub quota.
@@ -130,7 +130,7 @@ Every variable above is forwarded; one more is computed on the spot: `npm_config
 
 ## Init
 
-`acps init` creates or validates config and state, initializes encrypted secrets, and generates API keys when absent. The full operator-facing sequence — agents, skills, providers, workspace sources, MCP servers, agent environment, dependency install actions, edge profiles, testflight — is documented in [init.md](init.md) under Flow.
+`acps init` creates or validates config and state, initializes encrypted secrets, and generates API keys when absent. The full operator-facing sequence, covering agents, skills, providers, workspace sources, MCP servers, agent environment, dependency install actions, edge profiles, and testflight, is documented in [init.md](init.md) under Flow.
 
 The init step machine is resumable:
 

@@ -1,6 +1,6 @@
 use super::*;
 
-/// Step: workspace_materialize — clone repos and download/extract data sources into the workspace.
+/// Step: workspace_materialize. Clones repos and downloads/extracts data sources into the workspace.
 pub(super) fn run_workspace_materialize_step(flow: &mut InitFlow) -> Result<()> {
     let output_mode = flow.output_mode;
     let workspace_for_verify = flow.config.workspace.clone();
@@ -59,7 +59,7 @@ pub(super) fn run_workspace_materialize_step(flow: &mut InitFlow) -> Result<()> 
     Ok(())
 }
 
-/// Step: deps_apply — run declared dependency install actions before the agent is launched for provider/model discovery.
+/// Step: deps_apply. Runs declared dependency install actions before the agent is launched for provider/model discovery.
 pub(super) fn run_deps_apply_step(flow: &mut InitFlow) -> Result<()> {
     let output_mode = flow.output_mode;
     let deps_candidates = pending_candidates(&flow.config, None);
@@ -342,7 +342,7 @@ pub(super) fn launch_background_deps_apply(
     Ok((outcome, apply_run_id))
 }
 
-/// Step: capability_probe — handshake-only spawn to capture the agent's ACP `initialize` advertisement. A failed probe never fails init.
+/// Step: capability_probe. Handshake-only spawn to capture the agent's ACP `initialize` advertisement. A failed probe never fails init.
 pub(super) fn run_capability_probe_step(flow: &mut InitFlow) -> Result<()> {
     let output_mode = flow.output_mode;
     init_println!(output_mode, "progress: probing agent capabilities");
@@ -428,7 +428,7 @@ pub(super) fn run_capability_probe_step(flow: &mut InitFlow) -> Result<()> {
     Ok(())
 }
 
-/// Step: mcp_configure — interactive MCP prompting, which must run after the probe because MCP support is only knowable from the installed agent's advertisement.
+/// Step: mcp_configure. Interactive MCP prompting, which must run after the probe because MCP support is only knowable from the installed agent's advertisement.
 pub(super) fn run_mcp_configure_step(flow: &mut InitFlow) -> Result<()> {
     let output_mode = flow.output_mode;
     let mcp_prompting_active =

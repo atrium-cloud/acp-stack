@@ -147,22 +147,22 @@ By default the agent harness and mediated shells run in the same process tree an
 
 `[workspace.sandbox]` wraps every harness and mediated-shell spawn in an isolation backend so the workload cannot read the daemon's sensitive paths or reach its socket. The default is `off`, which preserves single-process behavior unchanged.
 
-The masked set is always derived from the runtime's own path helpers — the config directory (`~/.config/acp-stack`, holding config and the age key) and the state directory (`~/.local/share/acp-stack`, holding the secret store, state database, and local socket) — so an operator cannot misconfigure the protection away. `[workspace.sandbox].mask_paths` only adds to that set.
+The masked set is always derived from the runtime's own path helpers, covering the config directory (`~/.config/acp-stack`, holding config and the age key) and the state directory (`~/.local/share/acp-stack`, holding the secret store, state database, and local socket), so an operator cannot misconfigure the protection away. `[workspace.sandbox].mask_paths` only adds to that set.
 
 Masking comes in two keys, matched to the filesystem object being hidden. `mask_paths` takes directories and covers each with an empty `tmpfs`. `mask_files` takes non-directory paths, a unix socket or a plain file, and binds an empty read-only regular file over each. `mask_files` is an `unshare` feature: config validation rejects a non-empty `mask_files` under `bwrap` or `custom`, and `off` skips every mask. Both take absolute paths. A symlink entry masks the path it resolves to, so access through the link still lands on the mask.
 
 Backends are selected by `[workspace.sandbox].mode`:
 
-- `off` — no wrapping.
-- `unshare` — runs the workload in fresh mount, pid, ipc, and uts namespaces with a private `/proc`, the sensitive directories masked with `tmpfs` and every declared `mask_files` entry masked with an empty read-only file, then all capabilities and `no_new_privs` dropped before exec. Requires the daemon to hold `CAP_SYS_ADMIN`, as in a privileged container.
-- `bwrap` — the same directory masking through `bubblewrap`, for hosts with unprivileged user namespaces.
-- `custom` — an operator-supplied wrapper argv in `[workspace.sandbox].wrapper`, for any other mechanism such as `systemd-run` or `firejail`.
+- `off` applies no wrapping.
+- `unshare` runs the workload in fresh mount, pid, ipc, and uts namespaces with a private `/proc`, the sensitive directories masked with `tmpfs` and every declared `mask_files` entry masked with an empty read-only file, then all capabilities and `no_new_privs` dropped before exec. Requires the daemon to hold `CAP_SYS_ADMIN`, as in a privileged container.
+- `bwrap` applies the same directory masking through `bubblewrap`, for hosts with unprivileged user namespaces.
+- `custom` takes an operator-supplied wrapper argv in `[workspace.sandbox].wrapper`, for any other mechanism such as `systemd-run` or `firejail`.
 
 Secrets referenced in `[agent].env` are still delivered to the harness through its environment under every backend; only on-disk secrets and the control socket are masked. The same wrapping applies to mediated shell commands, so a shell command the agent runs cannot read the daemon's secrets either.
 
 ### Network isolation (`unshare` only)
 
-Per-spawn network-namespace isolation is declared through a `network-provider` extension instance. Declaration rules and fields — the one-instance limit, the unshare requirement, TOML-only configuration — are specified in [extensions.md](extensions.md) under Type `network-provider`. The constraints that shape the security model:
+Per-spawn network-namespace isolation is declared through a `network-provider` extension instance. Declaration rules and fields, covering the one-instance limit, the unshare requirement, and TOML-only configuration, are specified in [extensions.md](extensions.md) under Type `network-provider`. The constraints that shape the security model:
 
 - No declared instance means host networking: the workload shares the host network stack and the wrapper is unchanged byte for byte.
 - A declared instance with a backend other than `unshare` is rejected at config load. In particular `bwrap` network isolation is not implemented, and configuring it would imply an unenforced guarantee.
@@ -180,7 +180,7 @@ provider_timeout = "30s"
 provider_stderr = "daemon"
 ```
 
-Declaring the instance gives every wrapped spawn (agent harness and each mediated command alike) its own fresh network namespace. With an empty `provider` the namespace is deny-all: acp-stack configures nothing, not even loopback. All network policy — veth devices, routes, DNS, gateways, proxies — belongs to the operator-supplied provider. acp-stack never injects proxy variables, configures interfaces, resolves DNS, or inspects traffic.
+Declaring the instance gives every wrapped spawn (agent harness and each mediated command alike) its own fresh network namespace. With an empty `provider` the namespace is deny-all: acp-stack configures nothing, not even loopback. All network policy, including veth devices, routes, DNS, gateways, and proxies, belongs to the operator-supplied provider. acp-stack never injects proxy variables, configures interfaces, resolves DNS, or inspects traffic.
 
 #### Provider Contract
 
@@ -193,10 +193,10 @@ Declaring the instance gives every wrapped spawn (agent harness and each mediate
 
 The cleared environment carries exactly these variables:
 
-- `ACPS_SANDBOX_NETWORK_PROTOCOL=1` — provider protocol version.
-- `ACPS_SANDBOX_NETWORK_ID=<random-id>` — unique identifier for this wrapped spawn.
-- `ACPS_SANDBOX_NETWORK_NAMESPACE=<proc-fd-path>` — namespace handle usable with `setns` or `nsenter`, valid through teardown.
-- `ACPS_SANDBOX_NETWORK_PID=<host-pid>` — namespace-owning process PID, guaranteed during setup only; omitted at teardown.
+- `ACPS_SANDBOX_NETWORK_PROTOCOL=1` carries the provider protocol version.
+- `ACPS_SANDBOX_NETWORK_ID=<random-id>` is a unique identifier for this wrapped spawn.
+- `ACPS_SANDBOX_NETWORK_NAMESPACE=<proc-fd-path>` is a namespace handle usable with `setns` or `nsenter`, valid through teardown.
+- `ACPS_SANDBOX_NETWORK_PID=<host-pid>` is the namespace-owning process PID, guaranteed during setup only; omitted at teardown.
 
 Provider stdout is always discarded so it cannot corrupt the ACP transport. Provider stderr goes to the daemon's diagnostic channel (`provider_stderr = "daemon"`, the default) or is discarded (`"null"`). It is never attached to a mediated command's captured output. A provider killed by supervisor SIGKILL must reconcile any host resources not tied to namespace destruction on its next run.
 
@@ -204,11 +204,11 @@ A network namespace isolates the IPv4/IPv6 stacks and abstract-namespace Unix so
 
 ```mermaid
 flowchart TB
-    subgraph Daemon["Daemon — trusted, holds privilege"]
+    subgraph Daemon["Daemon (trusted, holds privilege)"]
         Sensitive["age key · secret store · config · control socket"]
         Wrap["sandbox::wrap per spawn"]
     end
-    subgraph Workload["Workload — untrusted"]
+    subgraph Workload["Workload (untrusted)"]
         Harness["agent harness / mediated shell"]
     end
     Wrap -->|"new namespaces · tmpfs-mask sensitive paths · drop caps · no_new_privs"| Harness
@@ -225,7 +225,7 @@ Findings include severity (`warning` or `critical`), code, message, an optional 
 
 Every self-check invocation through `GET /v1/security/check` is persisted into the `security_runs` and `security_findings` tables in the local state database. The check response includes the generated `run_id` so operators can correlate the live response with the durable row. Runs are kept indefinitely.
 
-- `GET /v1/security/history?limit=N&after=<run-id>` (admin tier) returns recent runs newest-first with aggregate counts and a `next_cursor` for keyset pagination while a full page is returned — it is `null` once a short page comes back (an exactly-full final page still yields a cursor whose follow-up returns no rows). `limit` defaults to 20 and is capped at 500 (values above it are clamped, not rejected).
+- `GET /v1/security/history?limit=N&after=<run-id>` (admin tier) returns recent runs newest-first with aggregate counts and a `next_cursor` for keyset pagination while a full page is returned. The cursor is `null` once a short page comes back (an exactly-full final page still yields a cursor whose follow-up returns no rows). `limit` defaults to 20 and is capped at 500 (values above it are clamped, not rejected).
 - `GET /v1/security/history/{run_id}` (admin tier) returns a single run with its findings in emit order, replaying exactly what `acps security check` produced.
 - `acps security history [--limit N] [--after <id>] [--json]` prints the operator table or raw JSON.
 - `acps security show <run-id> [--json]` prints the run summary plus its findings.

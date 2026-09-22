@@ -97,7 +97,7 @@ pub(super) fn local_bin_dir(home: &Path) -> PathBuf {
     crate::runtime::install::local_bin_dir(home)
 }
 
-// CONSTANTS — agent install retry.
+// CONSTANTS: agent install retry.
 pub(super) const MAX_INSTALL_ATTEMPTS: u32 = 10;
 const INSTALL_RETRY_BASE_DELAY: Duration = Duration::from_secs(2);
 const INSTALL_RETRY_MAX_DELAY: Duration = Duration::from_secs(60);

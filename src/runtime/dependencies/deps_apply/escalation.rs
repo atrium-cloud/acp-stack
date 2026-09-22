@@ -23,7 +23,7 @@ pub(crate) const ESCALATED_STDOUT_MARKER: &str = "[acps] escalated via `sudo -n`
 /// How the apply runner reaches root for `scope = "system"` actions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrivilegeEscalation {
-    /// euid == 0 — system-scope actions run directly.
+    /// euid == 0, so system-scope actions run directly.
     NotNeeded,
     /// euid != 0 but `sudo -n true` succeeded. `sudo_path` is resolved once at
     /// probe time so probe and run cannot pick different binaries.
@@ -186,6 +186,6 @@ pub fn escalation_notice_lines(
 }
 
 pub(crate) fn current_uid() -> u32 {
-    // SAFETY: `geteuid()` is always safe — no preconditions.
+    // SAFETY: `geteuid()` is always safe, with no preconditions.
     unsafe { libc::geteuid() }
 }

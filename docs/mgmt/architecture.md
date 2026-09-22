@@ -21,59 +21,59 @@ flowchart LR
 
 ### API surfaces
 
-- API — HTTP routes, WebSocket subscriptions, and client-facing contracts.
-- Auth — API key validation, auth tiers, and request envelopes.
-- Local listener — owner-only Unix-socket surface for keyless local `acps` routes.
-- Bootstrap init — hosted init session API before normal keys exist. A typed server-frame surface (`src/cli/init/serve/frames.rs`) forwards raw init-flow signals as `signal` events; the client folds them, and the instance keeps a bounded signal log for hello/status replay. Prompt answers arrive over the WebSocket or the REST twin `POST /v1/init/sessions/{id}/input`, and an init-tier `GET /v1/models` shares the session-tier discovery (`src/api/routes/providers.rs`) through the fresh-from-disk config read in `src/api/core.rs`.
+- API: HTTP routes, WebSocket subscriptions, and client-facing contracts.
+- Auth: API key validation, auth tiers, and request envelopes.
+- Local listener: owner-only Unix-socket surface for keyless local `acps` routes.
+- Bootstrap init: hosted init session API before normal keys exist. A typed server-frame surface (`src/cli/init/serve/frames.rs`) forwards raw init-flow signals as `signal` events; the client folds them, and the instance keeps a bounded signal log for hello/status replay. Prompt answers arrive over the WebSocket or the REST twin `POST /v1/init/sessions/{id}/input`, and an init-tier `GET /v1/models` shares the session-tier discovery (`src/api/routes/providers.rs`) through the fresh-from-disk config read in `src/api/core.rs`.
 
 ### Config, state, and secrets
 
-- Config — load, validate, import, export, and canonicalize TOML.
-- State — SQLite migrations and repositories for durable runtime records.
-- Secrets — age-compatible key management and encrypted values.
+- Config: load, validate, import, export, and canonicalize TOML.
+- State: SQLite migrations and repositories for durable runtime records.
+- Secrets: age-compatible key management and encrypted values.
 
 ### Agent runtime
 
-- Agent supervisor — process lifecycle for each configured ACP agent target.
-- Array — multi-target fleet: per-target supervision with one primary target as the default and coordination point.
-- ACP bridge — ACP initialization, sessions, prompts, updates, and permissions.
-- ACP terminals — client-side `terminal/*` handlers with per-terminal owning tasks, capped output buffers, and command-log recording (`src/runtime/agent/acp_terminal.rs`).
-- Session changes — bounded process-local reduction of explicit ACP diff tool content.
-- State sweeper — background flips of stalled prompts to terminal `stalled` and idle `active` sessions to `available` (`src/runtime/agent/sweeper.rs`).
-- Config options — generic ACP session config-option projection and per-session snapshot (`src/runtime/agent/config_options.rs`).
-- Permissions — durable approval, denial, cancellation, and expiry.
+- Agent supervisor: process lifecycle for each configured ACP agent target.
+- Array: multi-target fleet with per-target supervision and one primary target as the default and coordination point.
+- ACP bridge: ACP initialization, sessions, prompts, updates, and permissions.
+- ACP terminals: client-side `terminal/*` handlers with per-terminal owning tasks, capped output buffers, and command-log recording (`src/runtime/agent/acp_terminal.rs`).
+- Session changes: bounded process-local reduction of explicit ACP diff tool content.
+- State sweeper: background flips of stalled prompts to terminal `stalled` and idle `active` sessions to `available` (`src/runtime/agent/sweeper.rs`).
+- Config options: generic ACP session config-option projection and per-session snapshot (`src/runtime/agent/config_options.rs`).
+- Permissions: durable approval, denial, cancellation, and expiry.
 
 ### Providers and models
 
-- Provider CLI — target activation and status, credential catalog mutation, legacy credential migration, and shared provider validation.
-- Model catalog — cached `models.dev` model metadata for prompt modality gating.
-- Provider model catalog — live provider model-list fetch and per-provider cache (`src/runtime/agent/provider_model_catalog.rs`) backing `GET /v1/models` and `availableModels` provisioning.
-- Agent switch — harness migration planning, provider/API-key compatibility, and the pending-switch journal (`src/runtime/agent/switch_journal.rs`) that makes retries converge.
-- Native config import — redacted inspection and transactional semantic replacement of supported harness global config.
+- Provider CLI: target activation and status, credential catalog mutation, legacy credential migration, and shared provider validation.
+- Model catalog: cached `models.dev` model metadata for prompt modality gating.
+- Provider model catalog: live provider model-list fetch and per-provider cache (`src/runtime/agent/provider_model_catalog.rs`) backing `GET /v1/models` and `availableModels` provisioning.
+- Agent switch: harness migration planning, provider/API-key compatibility, and the pending-switch journal (`src/runtime/agent/switch_journal.rs`) that makes retries converge.
+- Native config import: redacted inspection and transactional semantic replacement of supported harness global config.
 
 ### Install and update
 
-- Install catalogs — curated agent registry, Agent Skills source registry, and the skills installer (init plus day-2 `acps skills` / `/v1/agent/skills`).
-- Agent updates — managed-agent update orchestration and installed-vs-upstream version checks (`src/runtime/install/agent_updater.rs`, `agent_version_check.rs`).
-- Dependencies — declaration checks, explicit install actions, tracked apply runs, and detached init workers.
-- Net rate limit — process-wide per-domain pacing and rate-limit circuit for outbound HTTP to quota-bearing hosts (`src/runtime/net_rate_limit.rs`).
+- Install catalogs: curated agent registry, Agent Skills source registry, and the skills installer (init plus day-2 `acps skills` / `/v1/agent/skills`).
+- Agent updates: managed-agent update orchestration and installed-vs-upstream version checks (`src/runtime/install/agent_updater.rs`, `agent_version_check.rs`).
+- Dependencies: declaration checks, explicit install actions, tracked apply runs, and detached init workers.
+- Net rate limit: process-wide per-domain pacing and rate-limit circuit for outbound HTTP to quota-bearing hosts (`src/runtime/net_rate_limit.rs`).
 
 ### Workspace and isolation
 
-- Workspace — bounded file operations and workspace source materialization.
-- Command gateway — policy-mediated shell command execution and output capture.
-- Sandbox — optional isolation backend wrapping each harness and mediated-shell spawn, masking the daemon's secrets, state, and socket.
-- Extensions — typed, data-declared integration seams (`src/extensions.rs`): the network-provider policy the sandbox consumes and the managed-state apply orchestration.
+- Workspace: bounded file operations and workspace source materialization.
+- Command gateway: policy-mediated shell command execution and output capture.
+- Sandbox: optional isolation backend wrapping each harness and mediated-shell spawn, masking the daemon's secrets, state, and socket.
+- Extensions: typed, data-declared integration seams (`src/extensions.rs`), namely the network-provider policy the sandbox consumes and the managed-state apply orchestration.
 
 ### Observability and edge
 
-- Logging — local event history, metrics, and optional external sink.
-- Edge — reverse-proxy/tunnel artifacts and optional Cloudflare provisioning.
+- Logging: local event history, metrics, and optional external sink.
+- Edge: reverse-proxy/tunnel artifacts and optional Cloudflare provisioning.
 
 ### Dev-only
 
-- HTTP client — single outbound-client constructor (`src/http_client.rs`); `test-fixtures` builds route every non-loopback request to a dead loopback proxy, and `fs_util::home_dir` refuses a HOME outside the temp dir, unless `ACP_STACK_TEST_DISPOSABLE_HOST=1` marks the host as throwaway (docker test image, CI).
-- Schema export — `dev-tools`-only (`src/schema_export.rs`): derives the published `/v1` JSON Schema from the wire DTOs with a coverage check; regenerated via the `generate-api-schema` bin.
+- HTTP client: single outbound-client constructor (`src/http_client.rs`); `test-fixtures` builds route every non-loopback request to a dead loopback proxy, and `fs_util::home_dir` refuses a HOME outside the temp dir, unless `ACP_STACK_TEST_DISPOSABLE_HOST=1` marks the host as throwaway (docker test image, CI).
+- Schema export: `dev-tools`-only (`src/schema_export.rs`); derives the published `/v1` JSON Schema from the wire DTOs with a coverage check, regenerated via the `generate-api-schema` bin.
 
 ## Boundaries
 

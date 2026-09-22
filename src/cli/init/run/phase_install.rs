@@ -1,6 +1,6 @@
 use super::*;
 
-/// Step: agent_install — install the configured agent if requested.
+/// Step: agent_install. Installs the configured agent if requested.
 pub(super) fn run_agent_install_step(flow: &mut InitFlow) -> Result<()> {
     let output_mode = flow.output_mode;
     let install_requested = should_install_agent(&flow.config, &flow.registry)?;
@@ -94,7 +94,7 @@ pub(super) fn run_agent_install_step(flow: &mut InitFlow) -> Result<()> {
     Ok(())
 }
 
-/// Step: native_config_import — apply the reviewed native global config after installation.
+/// Step: native_config_import. Applies the reviewed native global config after installation.
 pub(super) fn run_native_config_import_step(flow: &mut InitFlow) -> Result<()> {
     let output_mode = flow.output_mode;
     let Some(record) = flow.init_native_config_record.as_mut() else {
@@ -156,7 +156,7 @@ pub(super) fn run_native_config_import_step(flow: &mut InitFlow) -> Result<()> {
     Ok(())
 }
 
-/// Step: agent_skills_install — install selected Agent Skills before the first launch.
+/// Step: agent_skills_install. Installs selected Agent Skills before the first launch.
 pub(super) fn run_agent_skills_install_step(flow: &mut InitFlow) -> Result<()> {
     let output_mode = flow.output_mode;
     let skill_step_needs_resume =

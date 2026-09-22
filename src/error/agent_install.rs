@@ -142,7 +142,7 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
             format!("skill source `{alias}` is not configured")
         }
         AgentInstallAllPathsFailed { summary } => {
-            format!("all install paths failed — {summary}")
+            format!("all install paths failed: {summary}")
         }
         DomainRateLimited {
             domain,

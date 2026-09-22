@@ -176,7 +176,7 @@ Provider and model fields are documented in [agents/config.md](agents/config.md)
 
 `[agent.install]` is the operator escape hatch for a custom (non-registry) agent:
 
-- Fields: `type = "shell"`, a `shell` snippet that installs the harness (and any adapter), and `creates` — the path that must resolve to an executable after the install runs.
+- Fields: `type = "shell"`, a `shell` snippet that installs the harness (and any adapter), and `creates`, the path that must resolve to an executable after the install runs.
 - When present for an `id` the registry does not know, the runtime drives the agent from `[agent]`/`[agent.install]` directly. It skips the registry-only support, provider/model auto-config, and managed auto-update.
 - There is no upstream version to resolve, so `acps agent update set` is rejected and the daemon skips it.
 - `acps init --custom-agent-*` writes this block. An adapter-backed custom agent uses the same shape with `command` pointing at the adapter binary.
@@ -197,7 +197,7 @@ Provider and model fields are documented in [agents/config.md](agents/config.md)
 
 - `frequency` accepts hour/day/week units (minimum 1 hour), e.g. `12h`, `1d`, `3d`, or `4w`.
 - Existing configs without this block do not auto-update until the block is added or init writes it for a supported agent.
-- `acps init` writes this block for a managed registry agent — enabled and daily by default, or set explicitly with `--agent-update <on|off>` / `--agent-update-frequency <freq>` (or the interactive prompt). Auto-update can be declined at init rather than only afterward via `acps agent update set --auto-off`.
+- `acps init` writes this block for a managed registry agent, enabled and daily by default, or set explicitly with `--agent-update <on|off>` / `--agent-update-frequency <freq>` (or the interactive prompt). Auto-update can be declined at init rather than only afterward via `acps agent update set --auto-off`.
 - The daemon auto-updater only runs when the agent is stopped and never interrupts a running agent. A continuously running agent is skipped each cycle; apply updates to a live agent with `acps agent update --restart`.
 
 ### `[updates.acp_stack]`
@@ -208,7 +208,7 @@ Provider and model fields are documented in [agents/config.md](agents/config.md)
 - `compatible` also permits same-major, non-breaking regular releases.
 - `manual` disables auto-install.
 - `frequency` uses day/week granularity (minimum a day).
-- `acps init` writes this block — `--stack-update <on|security|off>` and `--stack-update-frequency <freq>`, or the interactive auto-update prompt.
+- `acps init` writes this block from `--stack-update <on|security|off>` and `--stack-update-frequency <freq>`, or from the interactive auto-update prompt.
 - Docker and Railway deployments are check-only and should be updated by redeploying the image.
 
 ## Array
@@ -305,7 +305,7 @@ Value positions (HTTP header `value`, stdio `env` entries, and `[agent].env` ent
 
 - A header sets exactly one of `value_ref` (whole-value secret ref, as before) or `value` (a template). Setting both or neither fails validation.
 - An `env` entry is either a bare ref name `NAME` (env var `NAME` receives the whole secret `NAME`, as before) or `VAR=template` (env var `VAR` receives the composed template value).
-- Template syntax: `${NAME}` interpolates the secret `NAME` at resolve time; `$$` is a literal `$`; any other `$` is rejected. A template must contain at least one `${NAME}` reference — pure literals are rejected so every credential in config comes from a secret ref.
+- Template syntax: `${NAME}` interpolates the secret `NAME` at resolve time; `$$` is a literal `$`; any other `$` is rejected. A template must contain at least one `${NAME}` reference; pure literals are rejected, so every credential in config comes from a secret ref.
 - Refs inside templates may repeat freely across the config, so one secret composes into several values. Whole-value declarations keep the existing duplicate-ref rejection.
 - Within one `env` list, the produced env var names must be unique.
 - The looks-like-a-secret screening that applies to ref names also runs over template literals and the refs inside `${}`. The literals are additionally screened concatenated, so a credential split across a `${}` boundary still trips the heuristic.
@@ -316,14 +316,14 @@ acp-stack treats the composed value as opaque. The referenced secret may be an o
 
 `[[skills.sources]]` declares user Agent Skills sources layered alongside the embedded curated catalog. Fields per entry:
 
-- `alias` — unique, lowercase-alphanumeric with single dashes, at most 64 characters.
-- `github` — `owner/repo`. The owner is a GitHub account name: alphanumerics and dashes, at most 39 characters. The repo allows alphanumerics, `-`, `_`, `.`, at most 100 characters, and must not be `.` or `..`.
-- `branch` — optional, default `main`. Non-empty, at most 255 characters, no leading or trailing `/`. The charset is git-ref-safe (letters, digits, `-`, `_`, `.`, `/`, no `..`) because it is interpolated into the archive URL.
-- `trusted` — optional, default `false`. An operator assertion recorded and surfaced, not enforced.
+- `alias` is unique, lowercase-alphanumeric with single dashes, at most 64 characters.
+- `github` takes `owner/repo`. The owner is a GitHub account name: alphanumerics and dashes, at most 39 characters. The repo allows alphanumerics, `-`, `_`, `.`, at most 100 characters, and must not be `.` or `..`.
+- `branch` is optional, default `main`. Non-empty, at most 255 characters, no leading or trailing `/`. The charset is git-ref-safe (letters, digits, `-`, `_`, `.`, `/`, no `..`) because it is interpolated into the archive URL.
+- `trusted` is optional, default `false`. It is an operator assertion recorded and surfaced, not enforced.
 
 ### Behavior
 
-- The alias is usable anywhere a source is accepted — `acps skills add <alias> <skill>` and `acps skills source get <alias>`.
+- The alias is usable anywhere a source is accepted, such as `acps skills add <alias> <skill>` and `acps skills source get <alias>`.
 - The catalog is resolved before user sources. `acps skills source add` refuses an alias that matches a curated one, and a hand-written collision is inert (the curated source wins).
 - An individually invalid entry is skipped: with a warning at daemon startup, quietly on later runtime reloads. The strict write path (`acps skills source add`) still rejects invalid new entries.
 - A `source add`/`remove` write also drops any previously-skipped invalid entries from the file, with a warning naming each dropped alias.
@@ -342,8 +342,8 @@ trusted = false
 
 `[extensions.<name>]` declares typed integration seam instances:
 
-- `type = "network-provider"` — per-spawn network isolation with an external provider executable. Unshare backend only, at most one instance.
-- `type = "managed-state"` with `capability = "provider-credential"` — a state namespace owned by an external orchestrator through the admin apply endpoint.
+- `type = "network-provider"` declares per-spawn network isolation with an external provider executable. Unshare backend only, at most one instance.
+- `type = "managed-state"` with `capability = "provider-credential"` declares a state namespace owned by an external orchestrator through the admin apply endpoint.
 
 ### Fields
 

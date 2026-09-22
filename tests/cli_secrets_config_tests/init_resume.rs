@@ -329,7 +329,7 @@ fn init_resume_restores_recorded_custom_provider_args_after_secret_failure() {
 #[test]
 fn init_resume_without_prior_run_errors_clearly() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    // No prior `acps init` — the resume target doesn't exist.
+    // No prior `acps init`, so the resume target doesn't exist.
     acps_command(tempdir.path())
         .args(["init", "--resume"])
         .assert()

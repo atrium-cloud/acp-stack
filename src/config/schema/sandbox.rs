@@ -87,7 +87,8 @@ pub struct ExtensionConfig {
     /// `network-provider` only. Environment variables injected into every
     /// workload spawned inside the provider's namespace (agent harness,
     /// mediated commands, ACP terminals) so the workload can reach whatever
-    /// egress path the provider set up — proxy endpoints, CA bundle paths.
+    /// egress path the provider set up, such as proxy endpoints and CA bundle
+    /// paths.
     /// Never passed to the provider executable itself, and never in argv.
     /// `BTreeMap` for deterministic ordering across serialization round-trips.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

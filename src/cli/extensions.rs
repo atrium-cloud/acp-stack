@@ -1,4 +1,4 @@
-//! `acps extensions` — read-only status for declared extension instances. There is no mutating
+//! `acps extensions`: read-only status for declared extension instances. There is no mutating
 //! CLI: a second local writer would blur the store-level provenance the seam depends on.
 
 use clap::Subcommand;

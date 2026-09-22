@@ -39,8 +39,8 @@ pub(crate) struct DepsApplyBody {
     /// a structured preview without spawning any subprocess.
     #[serde(default)]
     confirmation: bool,
-    /// Optional `feature` filter — only deps whose `feature` matches
-    /// are eligible. `None` means apply every actionable dep.
+    /// Optional `feature` filter; only deps whose `feature` matches are
+    /// eligible. `None` means apply every actionable dep.
     #[serde(default)]
     feature: Option<String>,
 }
@@ -61,7 +61,7 @@ pub(crate) struct DepsApplyResponse {
 
 /// Admin-tier (declared at the router): runs operator-declared shell
 /// snippets, including `scope = "system"` actions, so the blast radius
-/// is far beyond what a session-tier caller should have — and when the
+/// is far beyond what a session-tier caller should have. When the
 /// daemon is non-root with passwordless sudo configured, system-scope
 /// actions escalate through `sudo -n`. The CLI route (`acps deps apply`)
 /// uses the same runner.
@@ -290,7 +290,7 @@ pub(crate) struct DepsApplyRunDetailResponse {
 
 /// Open a fresh read connection and reconcile stale `running` rows first, so
 /// every response reflects real process liveness. Never touches the daemon's
-/// shared store mutex — a poll must answer while an apply holds it.
+/// shared store mutex, since a poll must answer while an apply holds it.
 fn open_reconciled_deps_store(state: &AppState) -> crate::error::Result<StateStore> {
     let store = StateStore::open(&state.runtime_paths.state_path)?;
     let is_live = deps_run_liveness();

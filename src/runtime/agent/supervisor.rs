@@ -112,7 +112,7 @@ impl ServerLifecycle {
     /// hand back a lifecycle handle that tracks elapsed wall time for the
     /// `server.stopped` payload. No `status` topic fan-out here because the
     /// event hub is constructed inside `AppState::with_effective_bind`, which
-    /// has not run yet at this point — and a subscriber cannot exist before
+    /// has not run yet at this point, and a subscriber cannot exist before
     /// the listener accepts its first connection anyway.
     pub fn starting(state: &StateStore, bind: &str) -> Result<Self> {
         let payload = json!({ "bind": bind }).to_string();
@@ -366,7 +366,7 @@ pub struct AgentSupervisor {
     loaded_providers: Arc<RwLock<Option<Vec<ResolvedProviderSnapshot>>>>,
     /// In-flight prompt registry. Each entry is a fire-and-forget background
     /// task plus its cancellation token. We never block on these from
-    /// session-tier handlers — the durable `prompts` row is the source of
+    /// session-tier handlers, because the durable `prompts` row is the source of
     /// truth for clients polling status.
     prompts: Arc<TokioMutex<HashMap<String, PromptHandle>>>,
     /// Serializes prompt submission with guarded restarts so `restart auto`
@@ -448,7 +448,7 @@ impl AgentSupervisor {
     }
 
     /// Snapshot of the running bridge for session dispatchers. Returns
-    /// `AgentNotRunning` when stopped/starting/stopping — handlers must
+    /// `AgentNotRunning` when stopped/starting/stopping, and handlers must
     /// surface that as the configured envelope error.
     async fn bridge(&self) -> Result<Arc<AcpBridge>> {
         let guard = self.state.lock().await;
@@ -652,8 +652,8 @@ impl AgentSupervisor {
 
     /// Called from `acps serve` between the HTTP server returning and
     /// `ServerLifecycle::stopped`. Best-effort cleanup so we don't leak the
-    /// agent process past the daemon. Errors are logged but never returned —
-    /// the serve path must continue to record `server.stopped` even if the
+    /// agent process past the daemon. Errors are logged but never returned,
+    /// because the serve path must continue to record `server.stopped` even if the
     /// agent teardown was messy.
     pub async fn shutdown_on_serve_exit(
         &self,
@@ -739,7 +739,7 @@ impl AgentSupervisor {
 
 /// Demote every `active` session to `available` after the agent process is
 /// gone: nothing can still be attached, so `active` would be a lie the DB's
-/// busy predicates act on. Best-effort — teardown must not fail on it.
+/// busy predicates act on. Best-effort, since teardown must not fail on it.
 pub(crate) async fn demote_sessions_on_agent_teardown(
     state: &Arc<TokioMutex<StateStore>>,
     target_id: &str,

@@ -1,7 +1,7 @@
 use super::*;
 
-/// Step: secrets_init — generate or preserve the session + admin verifiers, settle
-/// every secret the config declares, and validate the staged native config.
+/// Step: secrets_init. Generates or preserves the session + admin verifiers, settles
+/// every secret the config declares, and validates the staged native config.
 pub(super) fn run_secrets_phase(flow: &mut InitFlow) -> Result<()> {
     let output_mode = flow.output_mode;
     init_println!(output_mode, "progress: initializing auth");

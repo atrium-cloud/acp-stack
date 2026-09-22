@@ -101,7 +101,7 @@ jobs:
           if [[ "$IS_NIGHTLY" == "true" ]]; then
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
             body_file="$(mktemp)"
-            printf 'Nightly release %s — incremental build from main; not part of the stable update channel.\n' \
+            printf 'Nightly release %s, an incremental build from main. Not part of the stable update channel.\n' \
               "$RELEASE_TAG" >"$body_file"
             echo "body_path=$body_file" >> "$GITHUB_OUTPUT"
           else

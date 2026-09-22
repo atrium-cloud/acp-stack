@@ -129,7 +129,7 @@ fn init_deps_apply_runs_pending_action_and_surfaces_failure() {
 
 #[test]
 fn init_deps_apply_skips_system_scope_without_sudo_and_continues() {
-    // SAFETY: `geteuid()` is always safe — no preconditions.
+    // SAFETY: `geteuid()` is always safe, with no preconditions.
     if unsafe { libc::geteuid() } == 0 {
         // As root the escalation probe runs directly, so the skip path under
         // test is unreachable.

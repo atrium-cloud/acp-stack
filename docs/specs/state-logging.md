@@ -69,11 +69,11 @@ Schema: `migrations/002_auth_failures_schema.sqlite.sql` (and the `.postgres.sql
 
 Message identity columns: `migrations/017_prompt_message_ids.sqlite.sql` and `migrations/027_prompt_agent_message_ids.sqlite.sql`. Failure classification columns: `migrations/015_prompts_lifecycle_extension.sqlite.sql` (each with a `.postgres.sql` twin). Semantics not visible in the schema:
 
-- `message_id` — ACP user prompt message id sent with `session/prompt`.
-- `message_id_acknowledged` — 1 once the agent has confirmed the message id. On the `acp-stack` fork-point dialect that means echoing it back in `_meta.acpStack.messageId` on the prompt response. On the `jetbrains-air` dialect, where the adapter implements no acp-stack extension, a settled prompt response is the confirmation, since the same settled turn produces the `agent_message_id` anchor its fork point is translated from.
-- `agent_message_id` — the adapter's own `messageId` from the last `agent_message_chunk` of this turn. It is the point a breakpoint fork names for an adapter that resolves fork points against its own transcript. NULL when the adapter stamps no message id on its chunks.
-- `failure_class` — internal taxonomy bucket. NULL for non-terminal rows and for terminal rows the taxonomy does not cover.
-- `failure_detail_json` — class-specific JSON envelope. NULL when no structured detail is captured.
+- `message_id` is the ACP user prompt message id sent with `session/prompt`.
+- `message_id_acknowledged` is 1 once the agent has confirmed the message id. On the `acp-stack` fork-point dialect that means echoing it back in `_meta.acpStack.messageId` on the prompt response. On the `jetbrains-air` dialect, where the adapter implements no acp-stack extension, a settled prompt response is the confirmation, since the same settled turn produces the `agent_message_id` anchor its fork point is translated from.
+- `agent_message_id` is the adapter's own `messageId` from the last `agent_message_chunk` of this turn. It is the point a breakpoint fork names for an adapter that resolves fork points against its own transcript. NULL when the adapter stamps no message id on its chunks.
+- `failure_class` is the internal taxonomy bucket. NULL for non-terminal rows and for terminal rows the taxonomy does not cover.
+- `failure_detail_json` is a class-specific JSON envelope. NULL when no structured detail is captured.
 
 `prompts.status` accepts six values: `pending`, `running`, `completed`, `errored`, `cancelled`, `stalled`. `stalled` is terminal and is written only by the stale-prompt sweeper (see `docs/specs/runtime.md`). The index `prompts_status_updated_at_idx` backs the sweeper's stuck-prompt query.
 
@@ -238,14 +238,14 @@ When any sweep settled rows, the daemon records one aggregate event after startu
 
 ### Security Categories
 
-The `security_category` filter clusters the flat `security.*` kinds into operator-facing buckets. The canonical mapping — category labels, their kind sets, and the rejection of unknown labels with a 4xx `invalid_param` — lives in `src/state/security_category.rs` (`SecurityCategory`).
+The `security_category` filter clusters the flat `security.*` kinds into operator-facing buckets. The canonical mapping, covering category labels, their kind sets, and the rejection of unknown labels with a 4xx `invalid_param`, lives in `src/state/security_category.rs` (`SecurityCategory`).
 
 ## Metrics
 
 `GET /v1/metrics/summary` returns counts and percentiles over a `[since, until)` window. Fields:
 
-- `window` — the resolved `{ since, until }` bounds (RFC 3339)
-- `counts` — row totals for `events`, `sessions`, `commands`, `auth_failures`, `agent_lifecycle`, `installer_runs`, `agent_capabilities`, `prompts`, `permission_requests`, and `permission_decisions`
+- `window` is the resolved `{ since, until }` bounds (RFC 3339)
+- `counts` gives row totals for `events`, `sessions`, `commands`, `auth_failures`, `agent_lifecycle`, `installer_runs`, `agent_capabilities`, `prompts`, `permission_requests`, and `permission_decisions`
 - `sessions.active` (rows with `status = 'active'`, meaning attached with activity inside `[sessions].idle_threshold`), `sessions.closed` (rows with `status = 'closed'`; `available` rows count in neither), plus closed-session duration p50/p95
 - `turns.total`, `turns.by_status`, `turns.average_per_session`
 - `commands.total`, `commands.by_status`, command duration p50/p95, `commands.truncated_count`
@@ -282,7 +282,7 @@ Setup is pushed as a versioned Supabase CLI migration:
 
 The security self-check reports persistent external logging delivery failures.
 
-Mirrored tables: `events`, `sessions`, `prompts`, `commands`, `permission_requests`, `permission_decisions`, `auth_failures`, and `agent_lifecycle`. Operator-facing "run history" tables — `installer_runs`, `init_runs`, `init_steps`, `security_runs`, and `security_findings` — are kept local-only by design.
+Mirrored tables: `events`, `sessions`, `prompts`, `commands`, `permission_requests`, `permission_decisions`, `auth_failures`, and `agent_lifecycle`. The operator-facing "run history" tables `installer_runs`, `init_runs`, `init_steps`, `security_runs`, and `security_findings` are kept local-only by design.
 
 - `acps installer history` reads SQLite directly.
 - `acps security history` and `acps security show` route through the admin HTTP API so the daemon's tier checks apply uniformly across the security surface.

@@ -54,7 +54,7 @@ Notes on the shape:
 `[agent.config_options]` maps generic ACP session config-option ids to values: a string for select options, a TOML boolean for boolean options.
 
 - Values apply on session creation, after the typed mode/model/effort settings.
-- Entries the agent does not advertise — unknown id, off-list select value, kind mismatch — are reported through the ignored-features path. They are never a hard error.
+- Entries the agent does not advertise (unknown id, off-list select value, kind mismatch) are reported through the ignored-features path. They are never a hard error.
 - Ids the typed settings own (`mode`, `model`, `effort`, `reasoning_effort`) are rejected at validation with a pointer to the typed key.
 - This is an id check only. An agent-specific id that happens to carry a typed category (e.g. kimi's `thinking` under `thought_level`) passes validation, applies after the typed setting, and wins. Prefer the typed key when one covers the option.
 - A leading `_` is legal. ACP reserves `_`-prefixed ids for implementation-specific options.
@@ -87,7 +87,7 @@ How each harness reads resolved credentials is covered under Secret Uptake in [a
 | OpenCode           | every active provider and an exact `enabled_providers` allowlist are written to OpenCode JSON                                                                                                                         |
 | Pi Agent           | only the default provider/model lane is written to Pi settings                                                                                                                                                        |
 | Amp Code           | no provider selection; model selects the `amp-mode` execution tier (`low`/`medium`/`high`/`ultra`) and mode selects `default`/`bypass` permission behavior, both applied through ACP session config                   |
-| Goose              | provider and model written to `~/.config/goose/config.yaml`, since Goose resolves the model while starting a session; the model is never taken from an ACP advertisement — it comes from the provider catalog where the provider publishes one and is named explicitly otherwise — and is also applied through ACP session config |
+| Goose              | provider and model written to `~/.config/goose/config.yaml`, since Goose resolves the model while starting a session. The model is never taken from an ACP advertisement: it comes from the provider catalog where the provider publishes one and is named explicitly otherwise. It is also applied through ACP session config |
 | Codex              | provider config written to `~/.codex/config.toml`; OpenRouter authenticates through a command-based `auth` block                                                                                                      |
 | Claude Code        | Anthropic-compatible providers are written to Claude settings                                                                                                                                                         |
 | Kimi Code          | provider + model setup                                                                                                                                                                                                |

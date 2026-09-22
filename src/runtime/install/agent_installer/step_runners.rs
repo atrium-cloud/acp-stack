@@ -382,7 +382,7 @@ pub(super) fn github_release_step(
         Ok(outcome) => {
             // A wrong-arch asset extracts fine and only fails at first spawn,
             // so gate here. Safe to spawn because asset checksums were already
-            // verified in the download — unless an `expected_sha256` pin is
+            // verified in the download, unless an `expected_sha256` pin is
             // declared, which only `final_verification` checks, so that lane
             // stays header-only.
             let gate = if pin_declared {

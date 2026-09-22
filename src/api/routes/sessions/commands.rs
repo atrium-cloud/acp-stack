@@ -31,9 +31,9 @@ pub(crate) struct SessionCommandRunResponse {
     message_id: Option<String>,
     /// Whether the command matched the agent's last advertised list. `false`
     /// means the agent may ignore or misinterpret the invocation; omitted
-    /// when no list has ever been advertised. Advisory only — the prompt is
-    /// submitted regardless, because agents accept unadvertised commands and
-    /// the stored list can be stale.
+    /// when no list has ever been advertised. Advisory only: the prompt is
+    /// submitted regardless, since agents accept unadvertised commands and the
+    /// stored list can be stale.
     #[serde(skip_serializing_if = "Option::is_none")]
     advertised: Option<bool>,
 }

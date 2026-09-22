@@ -489,7 +489,7 @@ async fn bootstrap_models_rejects_unknown_and_gated_agent() {
 
     let (app, _store_dir) = app_with_manager(HostedInitManager::new(test_shared_secret_store().0));
     // Array mode is off in the test config, so any non-primary id is rejected
-    // by the same gate `session_agent_target` applies — never a silent
+    // by the same gate `session_agent_target` applies, never a silent
     // fallback to the default target.
     let (status, body) = request_json(
         app,

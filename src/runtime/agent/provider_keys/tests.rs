@@ -413,7 +413,7 @@ fn claude_code_provider_refs_use_agent_specific_profiles() {
         "microsoft-foundry"
     ));
     // Codex's built-in openai lane is key-driven, yet still refused an endpoint
-    // override — a separate capability.
+    // override, which is a separate capability.
     assert!(!provider_uses_agent_native_auth("codex", "openai"));
     assert_eq!(
         env_var_for_agent_provider_id("codex", "openai"),

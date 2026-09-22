@@ -65,7 +65,7 @@ pub struct SkillPortReport {
     pub copied: Vec<SkillInstallEntry>,
     pub overwritten: Vec<SkillInstallEntry>,
     /// Same-named target skills left untouched because they carry no managed
-    /// marker — user-owned content is never replaced.
+    /// marker. User-owned content is never replaced.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub kept_unmanaged: Vec<SkillInstallEntry>,
 }

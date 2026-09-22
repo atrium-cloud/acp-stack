@@ -86,7 +86,7 @@ pub(crate) async fn sessions_delete_handler(
 }
 
 /// When a session closes or is deleted, any in-flight ACP-source permission
-/// rows for that session must be settled — otherwise the operator UI shows
+/// rows for that session must be settled. Otherwise the operator UI shows
 /// stale "pending" rows that won't resolve until the per-request timer fires
 /// (default 5 minutes). The ACP-side prompt-turn is already dead; the durable
 /// row should reflect that immediately. Cancel settles its own inside the

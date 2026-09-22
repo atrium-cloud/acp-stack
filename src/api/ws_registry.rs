@@ -22,7 +22,7 @@ struct WsEntry {
     disconnect_requested: Arc<AtomicBool>,
     /// Free-form text supplied by the operator who requested the disconnect,
     /// recorded on the durable `ws.client_disconnected` event. `None` when the
-    /// request carried no text — there is no server-side default.
+    /// request carried no text, since there is no server-side default.
     operator_reason: Arc<std::sync::RwLock<Option<String>>>,
     notify: Arc<Notify>,
 }

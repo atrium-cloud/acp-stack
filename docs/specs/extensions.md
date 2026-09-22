@@ -24,17 +24,17 @@ capability = "provider-credential"
 
 The table key is the operator-chosen instance name: lowercase alphanumeric with interior hyphens, at most 64 bytes. It becomes an API path segment and a diagnostics label.
 
-Each type accepts only its own fields. A field that is inert for the declared type is rejected at config load. Extensions are declared through TOML alone — imported or directly edited. `acps extensions status` reports the declared instances read-only.
+Each type accepts only its own fields. A field that is inert for the declared type is rejected at config load. Extensions are declared through TOML alone, whether imported or directly edited. `acps extensions status` reports the declared instances read-only.
 
 ## Type `network-provider`
 
-Declaring a `network-provider` instance switches every sandboxed spawn — agent harness and each mediated command alike — to a fresh, per-spawn network namespace. Its policy belongs entirely to the external provider executable. Requires `[workspace.sandbox] mode = "unshare"`. At most one instance may be declared. An empty or omitted `provider` argv means deny-all networking.
+Declaring a `network-provider` instance switches every sandboxed spawn (agent harness and each mediated command alike) to a fresh, per-spawn network namespace. Its policy belongs entirely to the external provider executable. Requires `[workspace.sandbox] mode = "unshare"`. At most one instance may be declared. An empty or omitted `provider` argv means deny-all networking.
 
 Fields: `provider`, `provider_timeout`, `provider_stderr`, `workload_env`. `provider` is the lifecycle executable argv; the executable must be an absolute path. `provider_timeout` defaults to `30s` and applies independently to setup and teardown. `provider_stderr` is `daemon` or `null`. `workload_env` is environment injected into every workload spawned inside the namespace.
 
 A namespace whose policy routes traffic through a proxy or a private CA is usable only when the workload knows to use it. `workload_env` exists for that.
 
-- Entries are injected into the agent harness, mediated commands, and ACP terminals alike — everything that runs inside the namespace.
+- Entries are injected into the agent harness, mediated commands, and ACP terminals alike, covering everything that runs inside the namespace.
 - They are injected into the workload side only. The provider starts from a cleared environment carrying only the `ACPS_SANDBOX_NETWORK_*` contract variables.
 - Values are passed outside argv, keeping them out of process listings.
 
@@ -88,7 +88,7 @@ Request body:
 
 - For a mapped (registry) provider, the contract comes from the embedded mapping. The canonical API-key env var and every required companion must be present, and only contract env vars are accepted.
 - For a provider id outside the mapping, the selection is accepted only when the running agent config declares that id as a custom provider. Its contract is exactly the configured `api_key_ref` as the single env-var key.
-- Config validation keeps that contract unambiguous. Registry ids are reserved for mapped providers. Every declaration of one custom provider id — primary agent, subagents, and Array targets alike — must name the same `api_key_ref`.
+- Config validation keeps that contract unambiguous. Registry ids are reserved for mapped providers. Every declaration of one custom provider id (primary agent, subagents, and Array targets alike) must name the same `api_key_ref`.
 - A provider id outside both the mapping and the configured custom providers is rejected with `request.invalid_param`.
 
 The contract check is provider-scoped, matching the catalog's semantics. Agent-specific env-var mapping happens at spawn-time resolution.
@@ -121,7 +121,7 @@ An endpoint override is written into the configured agent's own native config or
 
 Pairs that have nowhere to write the override, or whose vendor base is unknown, are rejected the same way: codex with its built-in `openai` provider (Codex reserves that id and the replacement table shape is version-dependent; use `openrouter` or a custom provider), hermes providers without a declared `api_mode`, goose providers without a host setting (`mistral`, `groq`, `cerebras`), Claude Code native-auth lanes (Bedrock, Vertex, Foundry), a mapped provider the configured agent does not run, and any mapped provider whose row declares no `base_url` for the agent. An agent switch that would land the overridden provider on such a pair is rejected at plan time.
 
-At most one provider may hold an endpoint override at a time — the native config carries exactly one. A `base_url` selection naming a different provider while another namespace's credential already carries an endpoint is rejected with `request.invalid_param` before the revision persists. The revision stays reusable once the first namespace's endpoint is cleared.
+At most one provider may hold an endpoint override at a time, because the native config carries exactly one. A `base_url` selection naming a different provider while another namespace's credential already carries an endpoint is rejected with `request.invalid_param` before the revision persists. The revision stays reusable once the first namespace's endpoint is cleared.
 
 The native config is rewritten immediately after the store write, under the mutation lock the apply handler already holds. The agent reads it at process start, and the orchestrator restarts the agent after a credential push.
 
@@ -129,7 +129,7 @@ Rewriting also runs on a `noop` replay, so a retry after a failed native-config 
 
 While an override is stored, every agent-change path that would strand it is rejected, keeping the live routing decision intact:
 
-- `acps agent switch` to an agent whose registry entry omits `set_provider_base_url` — rejected at plan time.
+- `acps agent switch` to an agent whose registry entry omits `set_provider_base_url` (rejected at plan time).
 - Selecting an existing Array target whose agent omits it.
 - Re-running init toward such an agent, or toward any custom agent. A custom agent's endpoint surface is entirely self-managed.
 - A switch or init re-confirm whose target provider is the overridden one is rejected the same way. This covers pairs that refuse overrides (codex + `openai`).

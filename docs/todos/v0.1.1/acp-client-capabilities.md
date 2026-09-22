@@ -1,6 +1,6 @@
 # ACP client capabilities
 
-P1–P3 are complete: `acp-stack` advertises `session.configOptions`, `terminal: true`, and `fs.readTextFile`/`fs.writeTextFile`, with all five `terminal/*` handlers and both `fs/*` handlers shipped and placebo-verified. See `docs/specs/acp/acp-bridge.md` (capability table) and `docs/specs/security.md` (terminal mediation, fs containment).
+P1 through P3 are complete: `acp-stack` advertises `session.configOptions`, `terminal: true`, and `fs.readTextFile`/`fs.writeTextFile`, with all five `terminal/*` handlers and both `fs/*` handlers shipped and placebo-verified. See `docs/specs/acp/acp-bridge.md` (capability table) and `docs/specs/security.md` (terminal mediation, fs containment).
 
 ## Open: real-agent terminal observation
 

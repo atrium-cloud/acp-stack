@@ -564,8 +564,8 @@ fn spawn_child_exit_watcher(child: Arc<TokioMutex<Option<Child>>>, exit: ExitRep
 }
 
 /// Spawn-error cleanup: abort the SDK task, kill the whole process group, then
-/// reap. The pgroup kill is required — without it, grandchildren forked between
-/// spawn and initialize-failure survive.
+/// reap. The pgroup kill is required, because without it grandchildren forked
+/// between spawn and initialize-failure survive.
 async fn fail_spawn(child: &mut Child, connection_task: JoinHandle<()>) {
     connection_task.abort();
     let _ = connection_task.await;

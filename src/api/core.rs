@@ -1,5 +1,5 @@
 //! HTTP API surface: `/v1/*` routes behind `authenticate` plus a per-route
-//! `require_tier` gate. Tiering is strict — admin keys are NOT accepted on
+//! `require_tier` gate. Tiering is strict: admin keys are NOT accepted on
 //! session-tier routes (see `docs/specs/security.md`).
 
 use std::net::SocketAddr;
@@ -488,8 +488,9 @@ pub(crate) fn load_active_registry_for_home(home: &Path) -> Result<RegistryCatal
 }
 
 /// Fresh config read from disk with registry-derived adapter metadata filled
-/// in — the read half of `refresh_array_runtime_from_disk`, shared with the
-/// bootstrap init server, which serves `GET /v1/models` without an `AppState`.
+/// in. This is the read half of `refresh_array_runtime_from_disk`, shared with
+/// the bootstrap init server, which serves `GET /v1/models` without an
+/// `AppState`.
 pub(crate) fn load_runtime_config_from_disk(config_path: &Path, home: &Path) -> Result<Config> {
     let mut config = crate::config::load_for_runtime_reload(config_path)?;
     if let Ok(registry) = load_active_registry_for_home(home) {

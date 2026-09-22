@@ -44,7 +44,7 @@ use super::registry_apply::is_custom_agent;
 use super::state_signal::{ApplicabilitySource, InitCategory, InitStateSignal};
 use super::{InitArgs, prompt, prompts_enabled};
 
-// CONSTANTS — discovery pickers and probe retry.
+// CONSTANTS: discovery pickers and probe retry.
 
 /// Display label of the skip choice, which is also the label a hosted answer may
 /// address it by.

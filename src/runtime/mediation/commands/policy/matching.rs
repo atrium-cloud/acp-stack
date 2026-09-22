@@ -92,7 +92,7 @@ pub(super) fn redirection_operator_end(word: &str, operator_prefix: bool) -> Opt
     Some(start + operator_len)
 }
 
-/// Minimal shell-style glob matcher supporting `*` and `?` only — NOT a full
+/// Minimal shell-style glob matcher supporting `*` and `?` only. NOT a full
 /// POSIX-glob implementation.
 pub(super) fn glob_match(pattern: &str, input: &str) -> bool {
     let pattern_bytes = pattern.as_bytes();

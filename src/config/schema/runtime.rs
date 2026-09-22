@@ -176,7 +176,7 @@ impl Default for PromptsConfig {
 
 impl PromptsConfig {
     /// Parsed `stale_threshold`. Falls back to the schema default rather
-    /// than panicking — validation already rejected unparsable values at
+    /// than panicking, because validation already rejected unparsable values at
     /// load time, so this guard only fires for programmatically
     /// constructed configs that bypass `validate_config`.
     pub fn effective_stale_threshold(&self) -> std::time::Duration {

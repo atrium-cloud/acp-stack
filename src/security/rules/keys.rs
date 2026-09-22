@@ -20,7 +20,7 @@ pub(in crate::security) fn check_keys(
                  durable `auth_failures` rows are surfaced there). If a \
                  session key looks compromised, rotate it with `acps auth \
                  regenerate-session-key`. If the admin key is implicated, \
-                 run `acps reset --yes` and re-run `acps init` — the admin \
+                 run `acps reset --yes` and re-run `acps init`; the admin \
                  key cannot be rotated in place.",
             ),
         );

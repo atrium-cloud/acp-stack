@@ -542,7 +542,7 @@ pub enum StackError {
     #[error("skill source `{alias}` is not configured")]
     SkillSourceNotConfigured { alias: String },
 
-    #[error("all install paths failed — {summary}")]
+    #[error("all install paths failed: {summary}")]
     AgentInstallAllPathsFailed { summary: String },
 
     #[error("requests to {domain} are rate limited; retry in {retry_after_secs}s")]

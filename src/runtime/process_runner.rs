@@ -14,11 +14,11 @@ pub const STDERR_TAIL_BYTES: usize = 2 * 1024;
 /// Worst-case wait for reader threads to drain so a stuck thread cannot wedge an HTTP request.
 pub const READER_JOIN_GRACE: Duration = Duration::from_secs(2);
 
-/// Upper bound for any install timeout — `run_captured`'s `Instant::now() + timeout` panics on overflow.
+/// Upper bound for any install timeout, since `run_captured`'s `Instant::now() + timeout` panics on overflow.
 pub const MAX_INSTALL_TIMEOUT_SECS: u64 = 86_400;
 
 /// Forward a single named host env var to a sync `Command`, if present on the
-/// daemon. Unset on the host means unset on the child — never fabricated.
+/// daemon. Unset on the host means unset on the child, never fabricated.
 pub fn forward_host_env(command: &mut Command, name: &str) {
     if let Some(value) = std::env::var_os(name) {
         command.env(name, value);
@@ -107,7 +107,7 @@ pub fn process_is_live(pid: i64) -> bool {
 }
 
 /// Zombie check via `/proc/{pid}/stat`: the state field follows the
-/// parenthesised comm, which may itself contain parentheses — hence `rfind`.
+/// parenthesised comm, which may itself contain parentheses, hence `rfind`.
 #[cfg(unix)]
 fn proc_stat_says_zombie(pid: libc::pid_t) -> bool {
     let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
@@ -295,7 +295,7 @@ pub fn read_to_cap<R: Read>(mut reader: R, cap_bytes: usize) -> String {
 }
 
 /// Same cap as [`read_to_cap`], plus a rolling buffer of the LAST `tail_bytes`
-/// bytes seen — a failed install's diagnostic lives at the very end.
+/// bytes seen, because a failed install's diagnostic lives at the very end.
 pub fn read_to_cap_with_tail<R: Read>(
     mut reader: R,
     cap_bytes: usize,

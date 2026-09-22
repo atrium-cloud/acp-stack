@@ -37,7 +37,7 @@ managed_opencode="${managed_bin}/opencode"
 mkdir -p "$managed_bin"
 # Fetch before running so a curl failure is fatal (no pipefail in POSIX sh).
 # Without it an empty script runs, bash exits 0, and a stale binary left by an
-# earlier run passes the postcheck — hiding the failure and skipping the npm
+# earlier run passes the postcheck, hiding the failure and skipping the npm
 # fallback below, which is the path that survives GitHub API rate limits.
 installer="$(curl -fsSL https://opencode.ai/install)"
 # A fetch that exits 0 with an empty body would replay the same stale-binary
@@ -626,7 +626,7 @@ headless_compatible = true
 sync_id = "antigravity-acp"
 # Auth is env-var based (GEMINI_API_KEY) against the single supported headless
 # provider (Google AI Studio), selected by the `auth.type` key acps writes
-# into ~/.gemini/antigravity-acp/settings.json — there is nothing to select.
+# into ~/.gemini/antigravity-acp/settings.json, so there is nothing to select.
 set_provider = false
 # session/new advertises model and mode configOptions (Gemini 3.x tiers;
 # default/auto_edit/yolo). Model selection matters in practice: the default

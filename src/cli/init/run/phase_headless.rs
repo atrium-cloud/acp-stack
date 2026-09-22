@@ -1,6 +1,6 @@
 use super::*;
 
-/// Step: agent_headless_config — write the agent's local config files so the
+/// Step: agent_headless_config. Writes the agent's local config files so the
 /// harness can start without first-run prompts.
 pub(super) fn run_agent_headless_config_step(flow: &mut InitFlow) -> Result<()> {
     let output_mode = flow.output_mode;
@@ -53,7 +53,7 @@ pub(super) fn run_agent_headless_config_step(flow: &mut InitFlow) -> Result<()> 
     Ok(())
 }
 
-/// Step: edge_artifacts — render Cloudflare config files when an edge profile
+/// Step: edge_artifacts. Renders Cloudflare config files when an edge profile
 /// was requested.
 pub(super) fn run_edge_artifacts_step(flow: &mut InitFlow) -> Result<()> {
     let output_mode = flow.output_mode;

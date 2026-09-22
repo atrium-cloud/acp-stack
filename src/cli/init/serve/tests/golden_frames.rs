@@ -383,7 +383,7 @@ fn golden_hello_frame_carries_the_open_discovery_phase() {
 
 #[test]
 fn golden_encode_failure_frame_is_valid_json() {
-    // Spliced from constants, so it cannot itself fail to encode — but only
+    // Spliced from constants, so it cannot itself fail to encode, but only
     // while neither constant contains a JSON metacharacter.
     let frame = encode_failure_frame();
     assert_eq!(

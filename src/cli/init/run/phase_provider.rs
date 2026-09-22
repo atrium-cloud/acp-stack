@@ -1,6 +1,6 @@
 use super::*;
 
-/// Step: provider_configure — write provider/model into the config and persist
+/// Step: provider_configure. Writes provider/model into the config and persists
 /// canonical TOML if anything changed.
 pub(super) fn run_provider_configure_step(flow: &mut InitFlow) -> Result<()> {
     let output_mode = flow.output_mode;

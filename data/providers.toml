@@ -336,7 +336,7 @@ id = ["kimi-coding", "kimi-for-coding", "kimi-coding-plan", "kimi", "kimi-code"]
 name = "Kimi For Coding"
 agents = ["pi", "opencode", "claude", "hermes", "kimi"]
 base_url = "https://api.kimi.com/coding/v1"
-# No models_url: probed 2026-08-20 with a real subscription key — the coding
+# No models_url: probed 2026-08-20 with a real subscription key. The coding
 # surface has no model-list route (/coding/* variants all 404) and the platform
 # /v1/models rejects coding-plan keys with 401.
 

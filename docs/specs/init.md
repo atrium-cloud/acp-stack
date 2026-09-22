@@ -113,7 +113,7 @@ The operator-facing sequence, in order:
 8. Agent install.
     - Registry agents install from the embedded catalog.
     - Custom agents install through `[agent.install]`.
-    - Adapter-backed agents — including any registry agent with a designated adapter — install both harness and adapter unless the catalog marks the harness as adapter-provided.
+    - Adapter-backed agents, including any registry agent with a designated adapter, install both harness and adapter unless the catalog marks the harness as adapter-provided.
     - Init prepares `workspace.root` and `workspace.uploads` before installer subprocesses run so installers have a valid working directory.
     - Expected-hash checks run when configured.
     - Retry uses bounded exponential backoff, with each attempt recorded in installer history.
@@ -184,8 +184,8 @@ After the steps settle, init prints a summary: the config, state, secret-store, 
 
 When no auth verifier rows exist, init generates two API keys and shows their plaintext values to you exactly once:
 
-- Session key — session-driving and prompt-driving API calls.
-- Admin key — secrets, config import, agent process control, and other elevated operations.
+- Session key covers session-driving and prompt-driving API calls.
+- Admin key covers secrets, config import, agent process control, and other elevated operations.
 
 The handover prints the two values. Save them when shown:
 
@@ -344,7 +344,7 @@ The server bounds its own lifetime so even an abandoned bootstrap eventually fre
 - A session parked in `awaiting_discovery_close` runs the idle clock regardless of connected WebSockets, since a socket held open is not evidence the phase will be closed. Reaching `--idle-timeout` there cancels with reason `discovery_close_timeout`.
 - Reaching either limit before any session was created also exits non-zero. The pre-session idle clock runs from the last authenticated API call, not just server start.
 - When a session turns terminal, the server closes any attached WebSocket after forwarding the final event, so a hung client cannot hold the process past `--max-lifetime`.
-- A session status snapshot includes `last_activity_age_secs` — the idle time leading up to that status request, before the request itself counts as activity — so the hosting backend can make its own reap-vs-wait decisions.
+- A session status snapshot includes `last_activity_age_secs`, the idle time leading up to that status request, before the request itself counts as activity, so the hosting backend can make its own reap-vs-wait decisions.
 
 ## Testflight
 
@@ -367,8 +367,8 @@ Testflight hard-fails on paths outside its supported set: browser-OAuth agents, 
 
 ## Related
 
-- [cli.md](cli/cli.md#initialization) — the `acps init` flag reference.
-- [config.md](config.md) — the config schema init writes.
-- [runtime.md](runtime.md) — the resumable step machine and workspace materialization.
-- [security.md](security.md) — key generation and the admin-key policy.
-- [agents/](agents/) — per-agent install, launch, and auth setup.
+- [cli.md](cli/cli.md#initialization) holds the `acps init` flag reference.
+- [config.md](config.md) holds the config schema init writes.
+- [runtime.md](runtime.md) covers the resumable step machine and workspace materialization.
+- [security.md](security.md) covers key generation and the admin-key policy.
+- [agents/](agents/) covers per-agent install, launch, and auth setup.

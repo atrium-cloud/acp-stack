@@ -1,6 +1,6 @@
 //! Hand-maintained registration point for every top-level body the `/v1` API emits: a new response body must be added here, and the `schema_covers_every_handler_wire_type` coverage test guards the omission.
 
-/// Umbrella over every response payload. Never serialized itself — only its
+/// Umbrella over every response payload. Never serialized itself. Only its
 /// derived `JsonSchema` matters, which forces each variant's type into `$defs`.
 /// The variants have wildly different sizes and a shared `Response` postfix,
 /// but the enum is never constructed, so those clippy lints do not apply.

@@ -220,7 +220,7 @@ pub fn origin_allowed(origin: Option<&str>, sec: &SecurityHttpConfig) -> bool {
 ///   * Refuse new requests from a blocked IP before the bearer-token compare
 ///     runs, so brute-force attempts cost the attacker zero local CPU.
 ///
-/// The block is purely advisory — a daemon restart clears it. Persistent IP
+/// The block is purely advisory, so a daemon restart clears it. Persistent IP
 /// blocks belong in a reverse proxy layer.
 pub struct AuthFailureBlocker {
     failures_per_minute: u64,
@@ -347,14 +347,14 @@ struct TokenBucket {
 
 /// In-process rate limiter. Three independent token buckets:
 ///
-/// * `per_ip` — ticked on every request, keyed by the resolved client IP
+/// * `per_ip` is ticked on every request, keyed by the resolved client IP
 ///   (trusted-proxy-aware). Capacity `burst`, refill
 ///   `rate_limit_per_minute / 60` tokens/sec.
-/// * `per_key` — ticked on requests that successfully match an API key,
+/// * `per_key` is ticked on requests that successfully match an API key,
 ///   keyed by an opaque sha256 fingerprint (first 16 hex chars) of the
 ///   bearer token. The raw key is never stored. Same capacity/refill as
 ///   per_ip.
-/// * `unauthenticated` — ticked on requests that fail bearer parse/match,
+/// * `unauthenticated` is ticked on requests that fail bearer parse/match,
 ///   keyed by client IP, with a stricter capacity/refill (1/4 of the
 ///   authenticated tier). Defense-in-depth against unauthenticated floods
 ///   below the auth-failure-block threshold.

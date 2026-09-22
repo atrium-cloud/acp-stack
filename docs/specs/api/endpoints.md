@@ -8,11 +8,11 @@ Authorization: Bearer <key>
 
 The tier names (`init`, `session`, `admin`, `local`), the response envelope, and the error-code model are defined in [api.md](api.md). Each entry below uses the same fields:
 
-- Tier — which key authorizes the route.
-- Request — query parameters and body shape.
-- Response — the `data` payload of the success envelope.
-- Errors — route-specific typed error codes.
-- Notes — behavioral contract facts.
+- Tier names which key authorizes the route.
+- Request gives query parameters and body shape.
+- Response gives the `data` payload of the success envelope.
+- Errors lists route-specific typed error codes.
+- Notes records behavioral contract facts.
 
 ## Local Socket Exposure
 
@@ -53,7 +53,7 @@ Session-tier HTTP routes are also mounted on the local socket and serve only whi
         - `mcp_http`: array of `{ "name", "url", "headers": [{ "name", "value_ref"?, "value"? }] }`. Each header sets exactly one of `value_ref` (whole-value secret ref) or `value` (a `${SECRET_REF}`-interpolated template). URLs must be https, or http to a loopback host (a local relay endpoint).
         - `skills_source` + `skills`: explicit skill selection, same semantics as `--skills-source`/`--skills`; both must be declared together. `essential_skills`: boolean, conflicts with the explicit pair. An unsatisfiable skills declaration (e.g. the selected agent has no Agent Skills install directory) fails the init session.
         - `deps` and `deps_system`: arrays of `{ "name", "shell" }` install records (user/system scope). `deps_apply` + `deps_apply_yes`: booleans, must be set together (the interactive apply confirmation is never streamed). When set, init runs the declared install actions; otherwise dependencies are declared in config but not installed. `deps_apply_async` requires `deps_apply` and makes the dependency step report disposition `background`. `standard_agent_work_deps` and `browser_use`: booleans enabling the standard dependency bundle and the browser-use profile.
-        - `data_sources`: array of tagged records — `{ "type": "local", "path" }`, `{ "type": "https", "url", "expected_sha256"?, "max_download_bytes"?, "max_extracted_bytes"? }`, or `{ "type": "s3", "bucket", "region", "prefix"?, "access_key_ref", "secret_key_ref" }` — each with an optional `name`.
+        - `data_sources`: array of tagged records, each with an optional `name`. The tagged shapes are `{ "type": "local", "path" }`, `{ "type": "https", "url", "expected_sha256"?, "max_download_bytes"?, "max_extracted_bytes"? }`, and `{ "type": "s3", "bucket", "region", "prefix"?, "access_key_ref", "secret_key_ref" }`.
     - Extensions: `extensions`, a map of extension name to declaration table, e.g. `{ "network-egress": { "type": "network-provider", "provider": [...] } }`.
         - Declarations stage into a freshly-created starter config before any tracked step runs, so a network-provider declaration routes every sandboxed init phase through the egress provider from the start.
         - Applies only when creating a starter config; a request carrying `extensions` against an existing config is rejected on the start request itself (see the `400` starter-only error below). The exception is `resume`: a resumed run keeps the recorded run's original staging, and re-declared `extensions` are ignored, matching `data_sources` and `deps`.
@@ -65,14 +65,14 @@ Session-tier HTTP routes are also mounted on the local socket and serve only whi
         - `agent_update` (`on` | `off`) with optional `agent_update_frequency` (hour/day/week units, e.g. `12h`, `1d`).
         - Each `*_frequency` requires its policy. Omitted policies leave the config schema defaults intact.
         - `agent_update` is honored only for managed registry agents. `agent_update: "on"` against a custom agent fails the session.
-    - `defer_provider_credentials` (boolean, default `false`): declares that the caller will push the configured provider's credential through the managed-state extension after init. A missing ref the push can deliver — a custom provider's api-key ref, or a mapped key-based provider's api-key and companion env vars under the names the agent reads — is not prompted and soft-passes. A ref the push cannot deliver stays required and fails the session: a noncanonical api-key alias, a `VAR=template` inner ref, and an agent-native-auth provider's refs. Without the declaration, a missing provider ref fails the session.
+    - `defer_provider_credentials` (boolean, default `false`): declares that the caller will push the configured provider's credential through the managed-state extension after init. A missing ref the push can deliver is not prompted and soft-passes, covering a custom provider's api-key ref, or a mapped key-based provider's api-key and companion env vars under the names the agent reads. A ref the push cannot deliver stays required and fails the session: a noncanonical api-key alias, a `VAR=template` inner ref, and an agent-native-auth provider's refs. Without the declaration, a missing provider ref fails the session.
 - Response: `{ "session_id": "...", "status": "running" }` in the standard success envelope. `status` is one of `running`, `waiting_for_input`, `awaiting_discovery_close`, `completed_awaiting_ack`, `errored`, `cancelled`, or `closed`. The same set backs the status route and the cancel route's `{session_id, status}` body.
 - Errors:
-    - `409 init.session_active` — another session is running or awaiting result acknowledgement. Also returned while a failure is parked (see lifecycle below).
-    - `400` — a cross-field rule is violated. The error names the offending field and never echoes its value.
-    - `400` — MCP secret-value position violations: env entries and header `value_ref`/`value` carrying pasted-credential shapes (rejected without echoing the value), ref-name or template syntax failures, or headers violating the exactly-one rule.
-    - `400` — a `*_frequency` with no matching policy.
-    - `400` — a starter-only declaration (`extensions`, `sandbox_mask_paths`, `sandbox_mask_files`, `data_sources`, `data_from`, `deps`, `deps_system`, `standard_agent_work_deps`, or `browser_use`) arrives while a config already exists and `resume` is not set. The message names the offending field, or the matching `acps init` flag where the field mirrors one. No session is created, so the caller adapts the body and retries without acknowledging an errored session. MCP declarations (`mcp_preset`, `mcp_stdio`, `mcp_http`) follow the same starter-only rule but are checked in-session after the existing config loads, on resumed runs too, so they fail the session rather than the request.
+    - `409 init.session_active` is returned when another session is running or awaiting result acknowledgement. Also returned while a failure is parked (see lifecycle below).
+    - `400` is returned when a cross-field rule is violated. The error names the offending field and never echoes its value.
+    - `400` is returned for MCP secret-value position violations: env entries and header `value_ref`/`value` carrying pasted-credential shapes (rejected without echoing the value), ref-name or template syntax failures, or headers violating the exactly-one rule.
+    - `400` is returned for a `*_frequency` with no matching policy.
+    - `400` is returned when a starter-only declaration (`extensions`, `sandbox_mask_paths`, `sandbox_mask_files`, `data_sources`, `data_from`, `deps`, `deps_system`, `standard_agent_work_deps`, or `browser_use`) arrives while a config already exists and `resume` is not set. The message names the offending field, or the matching `acps init` flag where the field mirrors one. No session is created, so the caller adapts the body and retries without acknowledging an errored session. MCP declarations (`mcp_preset`, `mcp_stdio`, `mcp_http`) follow the same starter-only rule but are checked in-session after the existing config loads, on resumed runs too, so they fail the session rather than the request.
 - Notes:
     - The route validates request shape, the cross-field rules, and the MCP secret-value positions in full at the boundary. Remaining semantic validation of field values (MCP URL scheme rules, data-source paths, and the enumerated values of `stack_update`, `agent_update`, `sandbox`, and `provider_api`) happens in-session. A declaration invalid only in those ways returns `200` with `"status": "running"` and then fails the init session.
     - Secret values referenced by these declarations (MCP `env`/`value_ref` entries, refs inside `${}` templates, S3 key refs) are never carried in the request body. Init collects any refs missing from the secret store over the prompt stream as `password` inputs with `required: false`.
@@ -110,9 +110,9 @@ Session-tier HTTP routes are also mounted on the local socket and serve only whi
 - Request: `{ "request_id": "...", "value": <any>, "deferred": false }`. The REST twin of the WebSocket `input` frame, with the same fields, defaults, and answer semantics, parsed by the same prompt-driver logic. Unknown fields are ignored, matching the frame, so a client may post a socket frame verbatim (including its `type`).
 - Response: `{ "request_id": "..." }` in the standard success envelope. The `input_accepted` event still reaches subscribed sockets.
 - Errors:
-    - `404 init.session_not_found` — no such init session.
-    - `409 init.input_rejected` — no pending input, or a stale `request_id`, including the superseded id of a discovery lane that has since been re-issued. The HTTP equivalent of the socket's `init.input_rejected` error frame.
-    - `409 init.revision_rejected` — a revision the discovery phase cannot take: the value is not one the addressed prompt offered, or the phase has already closed. The addressed prompt's previously accepted answer stands. The HTTP equivalent of the socket's `init.revision_rejected` error frame.
+    - `404 init.session_not_found` is returned when no such init session exists.
+    - `409 init.input_rejected` is returned when there is no pending input, or a stale `request_id`, including the superseded id of a discovery lane that has since been re-issued. This is the HTTP equivalent of the socket's `init.input_rejected` error frame.
+    - `409 init.revision_rejected` is returned for a revision the discovery phase cannot take, because the value is not one the addressed prompt offered, or the phase has already closed. The addressed prompt's previously accepted answer stands. This is the HTTP equivalent of the socket's `init.revision_rejected` error frame.
 - Notes:
     - A backend that polls over REST answers prompts here instead of holding a socket open; the two transports are interchangeable.
     - A `request_id` naming an accepted discovery prompt of the open phase is a revision rather than a stale answer. It is validated against the options that prompt offered, acknowledged with the usual `input_accepted`, and applied by the wizard, which re-issues the lanes below it.
@@ -123,9 +123,9 @@ Session-tier HTTP routes are also mounted on the local socket and serve only whi
 - Request: none.
 - Response: the post-close `{session_id, status}`. The echoed status may still read `awaiting_discovery_close` when the wizard thread has not yet woken; the authoritative phase state is the `discovery` event and the status body's `discovery` block.
 - Errors:
-    - `404 init.session_not_found` — no such init session.
-    - `409 init.discovery_not_open` — the phase has not opened, has already closed, or a close is already accepted and awaiting the wizard.
-    - `409 init.discovery_busy` — the phase is open but not yet parked: a discovery prompt is pending, a revision is queued, or the wizard is re-probing. Retry once the session reports `awaiting_discovery_close`.
+    - `404 init.session_not_found` is returned when no such init session exists.
+    - `409 init.discovery_not_open` is returned when the phase has not opened, has already closed, or a close is already accepted and awaiting the wizard.
+    - `409 init.discovery_busy` is returned when the phase is open but not yet parked, because a discovery prompt is pending, a revision is queued, or the wizard is re-probing. Retry once the session reports `awaiting_discovery_close`.
 - Notes: the REST twin of the `close_discovery` frame, with the same acceptance rule. An accepted close ends the revisable window at once, before the wizard observes it, so a later revision is refused as `init.revision_rejected` and a second close as `init.discovery_not_open`.
 
 ### `GET /v1/init/sessions/{id}/ws`
@@ -159,7 +159,7 @@ Each `signal` frame reports one raw fact the wizard observed: a step starting or
 
 - Signals are seq-bearing events. They appear in event replay (`after_seq`) alongside `progress`, one event per fact and no dedup.
 - The instance forwards these facts raw; the client folds the stream into a rendered category view.
-- `hello` and the status response body carry a `signals` array — the whole stream so far, in order. A client that connects late, or reconnects after the bounded event history evicted early events, folds the same input as a full-stream client.
+- `hello` and the status response body carry a `signals` array holding the whole stream so far, in order. A client that connects late, or reconnects after the bounded event history evicted early events, folds the same input as a full-stream client.
 - The signal set is bounded by init's structure (a fixed set of steps and nine categories), so the replay is safe to carry in full.
 - A client re-folds from the `hello`/status replay and drops any live frame whose `seq` is at or below the replay's `last_seq`.
 
@@ -180,22 +180,22 @@ Each `signal` frame reports one raw fact the wizard observed: a step starting or
 
 The fold produces all ten categories in this order: `agent`, `provider`, `model`, `mode`, `effort`, `workspace`, `native_config`, `mcp`, `skills`, `deps`. Each takes a `status`, resolved in the precedence below. A category qualifying for more than one takes the first that matches.
 
-- `failed` — with the typed error `code` that broke the lane. A lane that broke did run, so failure outranks a `not_applicable` verdict that arrived before it.
-- `not_applicable` — this run has no such lane (`registry` says the agent takes no provider, a `probe` found no MCP support, `discovery` found no modes, the operator skipped workspace init). A `reason` names what ruled the lane out; it is the only status that carries one. Authority is ranked: a `probe`, `discovery`, or `discovery_unavailable` verdict is the installed harness talking, so a later `registry` claim never revives the lane.
-- `awaiting_input` — the pending prompt belongs to this category. The client derives this from `pending_input` by mapping the prompt's `kind` to a category:
+- `failed` carries the typed error `code` that broke the lane. A lane that broke did run, so failure outranks a `not_applicable` verdict that arrived before it.
+- `not_applicable` means this run has no such lane (`registry` says the agent takes no provider, a `probe` found no MCP support, `discovery` found no modes, the operator skipped workspace init). A `reason` names what ruled the lane out; it is the only status that carries one. Authority is ranked: a `probe`, `discovery`, or `discovery_unavailable` verdict is the installed harness talking, so a later `registry` claim never revives the lane.
+- `awaiting_input` means the pending prompt belongs to this category. The client derives this from `pending_input` by mapping the prompt's `kind` to a category:
     - `agent` → `agent`
     - `provider_id`, `provider_name`, `base_url`, `api_key_ref`, `provider_api_key_value` → `provider`
     - `model` → `model`; `mode` → `mode`; `effort` → `effort`
     - `native_config_review` → `native_config`
     - the MCP prompts (`mcp_add`, `mcp_transport`, `mcp_row_action`, the `mcp_stdio_*` and `mcp_http_*` kinds) → `mcp`
-    - every other kind — secret-ref, testflight, config-source, custom-agent, skills, dependency, data-source, and update-policy prompts — maps to no category and leaves nothing awaiting
+    - every other kind maps to no category and leaves nothing awaiting, covering the secret-ref, testflight, config-source, custom-agent, skills, dependency, data-source, and update-policy prompts
     - A prompt awaits from its `input_required` until the matching `input_accepted`, or until the wizard abandons it to service a discovery revision, which the client observes as a new `input_required` for the same kind. At most one category holds `awaiting_input`, since there is one pending input at a time.
-- `settled` — done, with an optional `value` naming what was written.
+- `settled` means done, with an optional `value` naming what was written.
     - A settlement (`category_settled`) and a failure are this run's own evidence and are never withdrawn as inapplicable. A settled lane still moves to `failed` if the step behind it breaks afterwards.
     - A lane may return to `awaiting_input` and settle again while the discovery phase is open: a revised model re-issues the mode, effort, and `config_option` prompts, and each re-settles with a fresh `category_settled`. The latest settlement for a category wins, so the fold needs no special case.
-    - A `category_provisionally_settled` value — a value read off configuration that predates the run, what a resumed or fully declared run reports for its provider, model, and mode lanes — is withdrawn, value and all, when a `probe` or `discovery` verdict finds the installed agent no longer has the lane. It is never withdrawn merely because that live check could not be made (`discovery_unavailable`).
-- `blocked` — waiting on the category named in `blocked_on`. `provider` waits on `agent`, `model` on `provider`, `mode` and `effort` on `model`, and both `mcp` and `skills` on `agent`. `workspace`, `native_config`, and `deps` wait on nothing.
-- `ready` — applicable, unblocked, not yet settled.
+    - A `category_provisionally_settled` value is read off configuration that predates the run, and is what a resumed or fully declared run reports for its provider, model, and mode lanes. It is withdrawn, value and all, when a `probe` or `discovery` verdict finds the installed agent no longer has the lane. It is never withdrawn merely because that live check could not be made (`discovery_unavailable`).
+- `blocked` means waiting on the category named in `blocked_on`. `provider` waits on `agent`, `model` on `provider`, `mode` and `effort` on `model`, and both `mcp` and `skills` on `agent`. `workspace`, `native_config`, and `deps` wait on nothing.
+- `ready` means applicable, unblocked, and not yet settled.
 
 The client also folds `current_step` from the `step_started`/`step_finished` stream: the last step named, using the step-kind vocabulary (`agent_install`, `capability_probe`, `mcp_configure`, `provider_configure`, and so on), `null` before the first step.
 
@@ -213,7 +213,7 @@ The client also folds `current_step` from the `step_started`/`step_finished` str
 - A run that issued a discovery prompt parks in `awaiting_discovery_close` after the forward pass. The session stays active there, revisions are still accepted, and the run continues once the client sends `close_discovery` or posts its REST twin. Reaching `--idle-timeout` in that state cancels with reason `discovery_close_timeout`, regardless of connected WebSockets.
 - After `result`, the session remains `completed_awaiting_ack`. If the WebSocket drops before acknowledgement, the backend reconnects and sends `replay_result`. `ack_result` is terminal: the server clears the in-memory handoff payload, closes the session, and exits successfully.
 - A failure after key handover still delivers a `result` frame (with `"status": "failed"` and any freshly generated keys) through the normal result/ack path.
-- A failure with no result payload to deliver — before key handover completed — parks instead: the session enters `errored` and the server stays up so the backend can learn the typed failure instead of a dead port.
+- A failure with no result payload to deliver, meaning one that happened before key handover completed, parks instead: the session enters `errored` and the server stays up so the backend can learn the typed failure instead of a dead port.
     - The `error` payload is available through the status route, the reconnect `hello` frame, and `replay_error`. `ack_error` releases the server, which exits non-zero.
     - `cancel` is a no-op on a parked failure, like on an un-acked result.
     - If no `ack_error` arrives within a 2-minute grace (enforced regardless of `--idle-timeout` and of connected WebSockets), the server expires the error with reason `error_ack_timeout` and exits non-zero on its own.
@@ -236,7 +236,7 @@ The client also folds `current_step` from the `step_started`/`step_finished` str
 - Tier: `init`
 - Request: `{operation_id, revision}`.
 - Response: standard envelope.
-- Errors: `409 init.result_unavailable` — unless a result is awaiting acknowledgement (see [init.md](../init.md)).
+- Errors: `409 init.result_unavailable`, returned unless a result is awaiting acknowledgement (see [init.md](../init.md)).
 - Notes: cancels a queued native-config import or rolls back the latest applied one.
 
 ### `POST /v1/init/credential`
@@ -322,10 +322,10 @@ The API withholds secret values from every response. Auth keys live outside the 
 - Request: `{schema_version, revision, desired}`.
 - Response: standard envelope.
 - Errors:
-    - `404 extensions.not_found` — `{name}` does not resolve to a declared `type = "managed-state"` instance.
-    - `409 extensions.revision_conflict` — revision-ordering conflict.
-    - `400 extensions.state_ownership` — provenance refusal.
-    - `400 request.invalid_param` — a provider id that is neither mapped nor configured as a custom provider.
+    - `404 extensions.not_found` is returned when `{name}` does not resolve to a declared `type = "managed-state"` instance.
+    - `409 extensions.revision_conflict` reports a revision-ordering conflict.
+    - `400 extensions.state_ownership` reports a provenance refusal.
+    - `400 request.invalid_param` is returned for a provider id that is neither mapped nor configured as a custom provider.
 - Notes: the managed-state extension seam. Applies one managed-state registry revision to the named extension namespace. Full contract in [extensions.md](../extensions.md).
 
 ## Agent And Providers
@@ -343,7 +343,7 @@ The API withholds secret values from every response. Auth keys live outside the 
 - Request: optional `{ "force": bool }` (default `false`). `force` reinstalls even when the resolved target version matches the installed one.
 - Response: the updater report `{ "agent_id", "updated", "skipped", "reason"?, "steps": [{ "step", "status", "method"?, "installed"?, "latest"?, "message"? }] }`.
     - Step `status` is `updated`, `up_to_date`, `skipped`, or `failed`.
-    - `installed` is the version before the update and `latest` the resolved target (github/npm only — apt and native updates have no capturable version).
+    - `installed` is the version before the update and `latest` the resolved target (github/npm only, because apt and native updates have no capturable version).
     - `up_to_date` is a first-class no-op success.
 - Errors: only infrastructure errors (unreadable registry, state open failure) produce an error envelope. Failed steps still return `200` with per-step `failed` status and `message`.
 - Notes:
@@ -402,9 +402,9 @@ The API withholds secret values from every response. Auth keys live outside the 
     - When the target declares a separate skills discovery directory, `skills_link` reports `linked`, `unchanged`, `conflicts`, `pruned`, and per-skill `errors` entries from the symlink refresh. A failed refresh does not fail the switch and is reported as `skills_link_error` instead.
     - Source cleanup failures are reported as `cleanup_errors` without rolling back a successful switch.
 - Errors:
-    - `409 agent.switch_conflict` — a same-target retry before the config write whose recomputed candidate does not match the journaled fingerprint.
-    - `500 agent.switch_journal_corrupt` — an unreadable journal.
-    - `400 request.invalid_param` — a same-target request carrying `drop`, a same-target `api_key_ref` without `provider`, or a provider the named agent does not support.
+    - `409 agent.switch_conflict` is returned for a same-target retry before the config write whose recomputed candidate does not match the journaled fingerprint.
+    - `500 agent.switch_journal_corrupt` reports an unreadable journal.
+    - `400 request.invalid_param` is returned for a same-target request carrying `drop`, a same-target `api_key_ref` without `provider`, or a provider the named agent does not support.
 - Notes:
     - The route validates provider compatibility, copies compatible provider secret refs when the target expects a different default ref, installs the target harness, provisions agent-owned config without a model, discovers ACP-advertised model values when the target supports model selection, writes canonical config, restarts the supervised agent only if it was already running, and optionally removes source agent-owned config.
     - `drop` does not delete secrets, installed harnesses/adapters, or sessions.
@@ -428,9 +428,9 @@ The switch is journaled at `agent-switch.json` beside the canonical config so re
 - A same-target retry before the config write re-runs the full pipeline, but only if the recomputed candidate matches the journaled fingerprint; a mismatch is `409 agent.switch_conflict`.
 - A same-target provider reconfigure records both target ids identically, and the agent id it commits is the one already on disk, so its commit marker is the candidate fingerprint rather than the agent id.
 - A post-commit retry of an interrupted provider reconfigure must name the committed provider selection. A retry carrying different provider flags fails with `409 agent.switch_conflict` instead of silently adopting the journaled selection.
-- A retry of a completed switch is a side-effect-free no-op success reporting `provider_status: "no_op"` with `restarted: false` — no rewrite, no stop/start. A retry that carries `provider`/`api_key_ref` is planned afresh instead, so a new selection for the same target still applies.
+- A retry of a completed switch is a side-effect-free no-op success reporting `provider_status: "no_op"` with `restarted: false`, so there is no rewrite and no stop/start. A retry that carries `provider`/`api_key_ref` is planned afresh instead, so a new selection for the same target still applies.
 - Any different-target switch while a journal is incomplete, and any unreadable journal (`500 agent.switch_journal_corrupt`), fails rather than abandoning or compounding the in-flight switch.
-- A bare same-target request (no `provider`, `api_key_ref`, or `drop`) with no incomplete journal to resume — journal absent, or completed for a target this request does not name — is accepted as already converged. It returns the same side-effect-free `provider_status: "no_op"` success as a completed-journal retry, without re-running install, provisioning, or the runtime re-apply.
+- A bare same-target request (no `provider`, `api_key_ref`, or `drop`) with no incomplete journal to resume (journal absent, or completed for a target this request does not name) is accepted as already converged. It returns the same side-effect-free `provider_status: "no_op"` success as a completed-journal retry, without re-running install, provisioning, or the runtime re-apply.
 - A same-target request carrying `provider` reconfigures that target's provider in place; one carrying `drop`, or `api_key_ref` without `provider`, keeps its explicit-intent `400 request.invalid_param` rejection.
 - On a post-commit resume, `--drop` source cleanup cannot be reconstructed (the source target was renamed away) and is reported in `cleanup_errors` instead of running.
 
@@ -487,8 +487,8 @@ The switch is journaled at `agent-switch.json` beside the canonical config so re
 - Request: `{ "source": "<alias|github:owner[/repo]>", "skills": ["<selector>", ...] }`.
 - Response: the install report plus a `skills_link`/`skills_link_error` refresh.
 - Errors:
-    - `400 request.invalid_param` (field `agent`) — the active agent is not a managed skills target.
-    - `400 config.invalid` — missing or empty `skills` array.
+    - `400 request.invalid_param` (field `agent`) is returned when the active agent is not a managed skills target.
+    - `400 config.invalid` reports a missing or empty `skills` array.
 - Notes:
     - Installs skills from a catalog alias, a configured alias, or `github:<owner>[/<repo>]` for the active agent. Downloads and installs each skill, skipping ones already installed.
     - The archive is fetched before the agent-config mutation lock is taken, which is held only for the copy into place.
@@ -502,10 +502,10 @@ The switch is journaled at `agent-switch.json` beside the canonical config so re
 - Request: `{ "skill": "<install-name>" }`.
 - Response: `remove` plus the link refresh.
 - Errors:
-    - `404 agent.skill_not_installed` — the name is not installed.
-    - `409 agent.skill_install_target_conflict` — the path exists but is not an acp-stack-managed skill (no `.acp-stack-managed` marker, or no regular `SKILL.md`). Manually added folders are never deleted.
-    - `400 request.invalid_param` (field `agent`) — the active agent is not a managed skills target.
-    - `400 request.invalid_param` (field `skill`) — a malformed `skill` name.
+    - `404 agent.skill_not_installed` is returned when the name is not installed.
+    - `409 agent.skill_install_target_conflict` is returned when the path exists but is not an acp-stack-managed skill (no `.acp-stack-managed` marker, or no regular `SKILL.md`). Manually added folders are never deleted.
+    - `400 request.invalid_param` (field `agent`) is returned when the active agent is not a managed skills target.
+    - `400 request.invalid_param` (field `skill`) reports a malformed `skill` name.
 - Notes: deletes that skill and any emptied group directory. Recorded as `skill.remove` events in the runtime log. Serializes through the agent-config mutation lock like `add`.
 
 ### `POST /v1/agent/skills/sources/add`
@@ -521,7 +521,7 @@ The switch is journaled at `agent-switch.json` beside the canonical config so re
 - Tier: `admin`
 - Request: `{ "alias" }`.
 - Response: standard envelope.
-- Errors: `404 agent.skill_source_not_configured` — the alias is absent.
+- Errors: `404 agent.skill_source_not_configured` is returned when the alias is absent.
 - Notes: removes a configured user skill source. Serializes through the agent-config mutation lock; changes config only and installs nothing. Recorded as `skill.source_remove` events in the runtime log.
 
 #### Skill Route Config Handling
@@ -549,14 +549,14 @@ All skill routes load config leniently, dropping individually invalid `[[skills.
     - The inner `capabilities` map is the agent's `initialize` advertisement with the catalog's fork-point declaration raised into it: for a `jetbrains-air` adapter that advertises `sessionCapabilities.fork`, the map carries `sessionCapabilities.fork._meta.acpStack.messageId` so a consumer reads breakpoint fork support from the same path on every adapter.
     - `fork_point` is the adapter's declared fork-point dialect from `data/agents.toml`: `acp-stack` (the default) or `jetbrains-air`. See [Fork Point Dialects](../acp/acp-bridge.md#fork-point-dialects).
     - `agent_id` is the configured `[agent].id` the snapshot was captured from. `harness_version` and `adapter_version` are the installed versions from the latest successful installer rows (`harness`/`install` and `adapter` steps), read at the moment of capture; `adapter_id` is the adapter the agent was launched through. Each is null when there is nothing to report: native agents carry no adapter fields, a harness bundled by its adapter has no harness version, and shell-recipe installs record no version.
-- Errors: `404 agent.not_initialized` — occurs only when neither the init capability probe nor agent start has run.
+- Errors: `404 agent.not_initialized` occurs only when neither the init capability probe nor agent start has run.
 - Notes: populated by the init capability probe as well as by agent start. Capabilities cannot change between process starts, so the snapshot and its versions describe one launch.
 
 ### `GET /v1/agent/config-options`
 
 - Tier: `session`
 - Request: none.
-- Response: `{ "agent_id", "config_options" }` — the full advertised option set from a fresh provisional session, in the same entry shape as `GET /v1/sessions/{id}/config-options`. Includes the categories the typed lanes do not carry (`model_config`, `_`-prefixed customs, category-less options) and boolean kinds. The probe applies the configured model, and the options it returns are overlaid onto the `session/new` set by option id, so an adapter answering with only the options it touched still yields the full set.
+- Response: `{ "agent_id", "config_options" }`, the full advertised option set from a fresh provisional session, in the same entry shape as `GET /v1/sessions/{id}/config-options`. Includes the categories the typed lanes do not carry (`model_config`, `_`-prefixed customs, category-less options) and boolean kinds. The probe applies the configured model, and the options it returns are overlaid onto the `session/new` set by option id, so an adapter answering with only the options it touched still yields the full set.
 - Errors: discovery failure is a hard error here. There is no catalog fallback, and an empty list would be indistinguishable from an agent that advertises nothing.
 - Notes: each call spawns a provisional agent probe (same cost and timeout as `/v1/models`) that applies the configured model before reading the options, so callers should not poll it. The typed `modes`/`efforts` arrays on `/v1/models` remain the pickers for the `agent.mode`/`agent.effort` settings and are not deprecated by this superset.
 
@@ -588,16 +588,16 @@ All skill routes load config leniently, dropping individually invalid `[[skills.
 
 - Tier: `session`
 - Request: none.
-- Response: `{ "sources": [{ "id", "alias", "name", "repo", "catalog", "trusted", "skills", "essential" }] }` — the curated catalog plus configured user sources.
+- Response: `{ "sources": [{ "id", "alias", "name", "repo", "catalog", "trusted", "skills", "essential" }] }`, the curated catalog plus configured user sources.
     - `catalog` is true for the embedded catalog and false for `[[skills.sources]]` entries.
-    - `skills` are the selectors accepted by add (empty for user sources — use the source route to enumerate those live).
+    - `skills` are the selectors accepted by add (empty for user sources, which the source route enumerates live).
 
 ### `GET /v1/agent/skills/source`
 
 - Tier: `session`
-- Request: `?source=<ref>` — a catalog alias, a configured alias, or `github:<owner>[/<repo>]`.
+- Request: `?source=<ref>`, which is a catalog alias, a configured alias, or `github:<owner>[/<repo>]`.
 - Response: `{ "id", "repo", "branch", "catalog", "trusted", "skills": [{ "selector", "name", "description"?, "path" }] }`.
-- Errors: `400 agent.skill_install_invalid_source` — an unresolvable ref.
+- Errors: `400 agent.skill_install_invalid_source` reports an unresolvable ref.
 - Notes: resolves the ref, then downloads the source and lists its skills plus metadata.
 
 ### `GET /v1/providers`
@@ -738,7 +738,7 @@ Session creation proceeds when a configured `agent.mode`, model, `agent.effort`,
 - Tier: `session`
 - Request: optional `cwd`, `target_id` (alias `target`), and `{ "message_id": "<prompt message id>" }`.
 - Response: standard envelope.
-- Errors: `501 agent.unsupported_capability` — unsupported fork capabilities. `400 request.invalid_param` — the fork point cannot be resolved for the running agent.
+- Errors: `501 agent.unsupported_capability` reports unsupported fork capabilities. `400 request.invalid_param` is returned when the fork point cannot be resolved for the running agent.
 - Notes: forks a session through ACP. Without `message_id` the fork carries the whole parent history.
 - Breakpoint semantics: a fork with `message_id` ends just before the named prompt. The named prompt, its turn, and everything after it stay out of the fork, which leaves the fork ready to receive an edited version of that prompt. acp-stack requires this cut of every adapter it forks at a message id.
 - `message_id` is always an acp-stack prompt message id from the parent session, acknowledged by the agent. acp-stack translates it into the fork point the running adapter reads:
@@ -754,10 +754,10 @@ Session creation proceeds when a configured `agent.mode`, model, `agent.effort`,
     - `null`, an empty array, and any other JSON type are rejected.
 - Response: a prompt id.
 - Errors:
-    - `400 prompt.unsupported_modality` — media-bearing prompt with confidently unsupported image, audio, or video input for the selected target model.
-    - `409 session.prompt_in_flight` — the session already has a prompt the runtime is still driving. Retryable once that turn settles or is cancelled.
-    - `501 session.reattach_unsupported` — the running agent has not opened this session and advertises neither `session/resume` nor `session/load`.
-    - `502 agent.request_failed` — the agent rejected the `session/resume` or `session/load` the re-attach sent. No prompt row is created.
+    - `400 prompt.unsupported_modality` is returned for a media-bearing prompt with confidently unsupported image, audio, or video input for the selected target model.
+    - `409 session.prompt_in_flight` is returned when the session already has a prompt the runtime is still driving. Retryable once that turn settles or is cancelled.
+    - `501 session.reattach_unsupported` is returned when the running agent has not opened this session and advertises neither `session/resume` nor `session/load`.
+    - `502 agent.request_failed` is returned when the agent rejected the `session/resume` or `session/load` the re-attach sent. No prompt row is created.
 - Notes:
     - Clients can poll the prompt status endpoint or subscribe to `sessions.{id}` over WebSocket.
     - One session carries one turn at a time. A submission that arrives while the previous prompt is live is refused without creating a row, and never dispatched to the agent.
@@ -782,7 +782,7 @@ The `agent.inference_*` codes carry a sanitized public message of the form `"inf
 
 - Tier: `session`
 - Request: none.
-- Response: `{ available_commands, updated_at }` — the slash-command list the agent last advertised over ACP `available_commands_update`, and when the stored list last changed.
+- Response: `{ available_commands, updated_at }`, giving the slash-command list the agent last advertised over ACP `available_commands_update`, and when the stored list last changed.
     - Entries are `{ name, description, input_hint? }`, names without a leading slash.
     - Both are empty/`null` when nothing has been advertised.
 
@@ -793,14 +793,14 @@ The `agent.inference_*` codes carry a sanitized public message of the form `"inf
 - Response: the prompt-submit shape plus an advisory `advertised` boolean.
     - `false` means the command was absent from the stored list (the agent may ignore it).
     - The field is omitted when no list was ever advertised.
-- Errors: `409 session.prompt_in_flight` — the session already has a live prompt, as on the prompt route.
+- Errors: `409 session.prompt_in_flight` is returned when the session already has a live prompt, as on the prompt route.
 - Notes: runs an agent slash command as a prompt. Submits the composed `/name args` text through the normal prompt pipeline. The submission is never blocked on the list, which can be stale and does not bound what the agent accepts.
 
 ### `GET /v1/sessions/{id}/config-options`
 
 - Tier: `session`
 - Request: none.
-- Response: `{ config_options, updated_at }` — the session's ACP config options as last observed.
+- Response: `{ config_options, updated_at }`, the session's ACP config options as last observed.
     - Seeded from `session/new` at create, refreshed by `session/set_config_option` responses and `config_option_update` notifications. Empty/`null` for sessions created before any snapshot existed.
     - Each entry is `{ id, name, description?, category?, type: "select"|"boolean", current_value, options? }`.
     - `category` is the ACP category verbatim (including `model_config`, `_`-prefixed customs, and future reserved values; absent when the agent advertised none).
@@ -812,7 +812,7 @@ The `agent.inference_*` codes carry a sanitized public message of the form `"inf
 - Tier: `session`
 - Request: `{ "config_id", "value" }` (string for selects, boolean for booleans).
 - Response: the refreshed config-option list, or the stored snapshot when the agent responded with an empty list.
-- Errors: `400 request.invalid_param` — a `config_id` or value the stored snapshot does not carry. Retryable. The check is skipped while the snapshot is empty, letting the agent arbitrate.
+- Errors: `400 request.invalid_param` is returned for a `config_id` or value the stored snapshot does not carry. Retryable. The check is skipped while the snapshot is empty, letting the agent arbitrate.
 - Notes:
     - Sets one session config option. Forwards `session/set_config_option` to the live agent and rewrites the stored snapshot from the refreshed list in the response.
     - An agent responding with an empty list leaves the snapshot untouched; the response then serves the stored snapshot, which the agent's own `config_option_update` notification refreshes.
@@ -823,7 +823,7 @@ The `agent.inference_*` codes carry a sanitized public message of the form `"inf
 - Tier: `session`
 - Request: none.
 - Response: standard envelope.
-- Errors: `502 agent.request_failed` — the live prompt did not settle as `cancelled`.
+- Errors: `502 agent.request_failed` is returned when the live prompt did not settle as `cancelled`.
 - Notes:
     - Cancels an in-flight prompt. ACP `session/cancel` goes out first, then the runtime waits up to 20 seconds for the live prompt row to reach a terminal status.
     - Any pending ACP permission request for the session is settled as `cancelled` while that wait runs, as the ACP cancellation contract requires. An agent parked on a permission it raised ends its turn once that answer arrives.
@@ -847,7 +847,7 @@ The `agent.inference_*` codes carry a sanitized public message of the form `"inf
 - Tier: `session`
 - Request: none.
 - Response: includes a `deleted` boolean.
-- Errors: `501 agent.unsupported_capability` — the agent does not advertise `sessionCapabilities.delete`. The local row is kept.
+- Errors: `501 agent.unsupported_capability` is returned when the agent does not advertise `sessionCapabilities.delete`. The local row is kept.
 - Notes:
     - Forwards ACP `session/delete` and hard-deletes local history.
     - Idempotent: an unknown or already-deleted id returns success with `deleted: false` and never dials the agent.
@@ -869,7 +869,7 @@ The `agent.inference_*` codes carry a sanitized public message of the form `"inf
 - Request: `after=<event_id>` paginates forward on `(created_at, id)` ascending.
 - Response: durable session events.
 - Errors:
-    - `404 session.event_cursor_unknown` — `after` names an event this session does not have. A cursor stops resolving when the state database is rolled back to a checkpoint that predates the event, so the client re-reads `GET /v1/sessions/{id}/snapshot` for a fresh cursor.
+    - `404 session.event_cursor_unknown` is returned when `after` names an event this session does not have. A cursor stops resolving when the state database is rolled back to a checkpoint that predates the event, so the client re-reads `GET /v1/sessions/{id}/snapshot` for a fresh cursor.
 - Notes:
     - Used for forward catch-up after a snapshot read (`after=last_event_id`).
     - A cursor at the head returns an empty list, which means the client holds every event.
@@ -892,11 +892,11 @@ The `agent.inference_*` codes carry a sanitized public message of the form `"inf
 - Tier: `session`
 - Request: none.
 - Response: the reconnect-bootstrap helper. Carries:
-    - `session` — full session row (id, status, agent id, cwd, title, metadata). The durable `status` is `active`, `available`, or `closed`, distinct from the derived `state` of the status route.
-    - `in_flight_prompts` — prompts currently in `pending` or `running`, capped at 25 (`SNAPSHOT_IN_FLIGHT_PROMPTS_CAP`). Empty when the session is idle. Each entry is the same shape returned by `GET /v1/sessions/{id}/prompts/{prompt_id}`.
-    - `last_event_id` — the id of the newest persisted session event, or `null` when the session has no events. Acts as a tail cursor for forward catch-up via `GET /v1/sessions/{id}/events?after=last_event_id`.
-    - `recent_events` — the latest session events, newest-first, capped at 50. The cap is enforced by `SNAPSHOT_RECENT_EVENTS_LIMIT` in `src/api/routes/sessions/events.rs` and is sized to cover one prompt-turn's worth of updates without bloating the response.
-    - `available_commands` — the agent's last advertised slash-command list, same entry shape as `GET /v1/sessions/{id}/commands`. Empty when nothing has been advertised; may be stale until the agent re-advertises.
+    - `session` is the full session row (id, status, agent id, cwd, title, metadata). The durable `status` is `active`, `available`, or `closed`, distinct from the derived `state` of the status route.
+    - `in_flight_prompts` holds prompts currently in `pending` or `running`, capped at 25 (`SNAPSHOT_IN_FLIGHT_PROMPTS_CAP`). Empty when the session is idle. Each entry is the same shape returned by `GET /v1/sessions/{id}/prompts/{prompt_id}`.
+    - `last_event_id` is the id of the newest persisted session event, or `null` when the session has no events. Acts as a tail cursor for forward catch-up via `GET /v1/sessions/{id}/events?after=last_event_id`.
+    - `recent_events` holds the latest session events, newest-first, capped at 50. The cap is enforced by `SNAPSHOT_RECENT_EVENTS_LIMIT` in `src/api/routes/sessions/events.rs` and is sized to cover one prompt-turn's worth of updates without bloating the response.
+    - `available_commands` is the agent's last advertised slash-command list, same entry shape as `GET /v1/sessions/{id}/commands`. Empty when nothing has been advertised; may be stale until the agent re-advertises.
 - Notes:
     - Reconnect flow: `GET snapshot` once to recover state, subscribe to `sessions.{id}` over WebSocket, then `GET events?after=last_event_id` to catch up on events that landed between the snapshot read and the WebSocket subscribe.
     - For deeper history (older than the 50-event snapshot window), additional pagination is not currently exposed. Older events are reachable only through the durable logs endpoints.
@@ -1033,7 +1033,7 @@ Permission requests are created by ACP permission callbacks and by mediated comm
 - Tier: `session`
 - Request: `{ "option_id": "<id>"?, "reason": "<text>"? }`.
 - Response: standard envelope.
-- Errors: `409 permission.invalid_transition` — the request is already terminal, including approving a permission whose command has since died. Clients should treat it as "the request was already settled" (the decision event names the cause), not as a retryable error.
+- Errors: `409 permission.invalid_transition` is returned when the request is already terminal, including approving a permission whose command has since died. Clients should treat it as "the request was already settled" (the decision event names the cause), not as a retryable error.
 - Notes: for an ACP-source request, `option_id` names one of the ids in the request's `detail.options` and is forwarded to the agent as-is (not validated against that list). Omitting it selects the request's first option. A command-source request has no options.
 
 ### `POST /v1/permissions/{id}/deny`
@@ -1041,7 +1041,7 @@ Permission requests are created by ACP permission callbacks and by mediated comm
 - Tier: `session`
 - Request: `{ "reason": "<text>"? }`.
 - Response: standard envelope.
-- Errors: `409 permission.invalid_transition` — the request is already terminal.
+- Errors: `409 permission.invalid_transition` is returned when the request is already terminal.
 
 ## Dependencies
 
@@ -1067,7 +1067,7 @@ The runtime derives every package-manager command from config-declared install a
     - `feature` filters candidates.
 - Response: a confirmed apply installs and returns `report.apply_run_id` for correlating dependency audit rows.
     - Each result's `outcome.kind` is one of `installed`, `already_present`, `privilege_required`, or `failed`.
-- Errors: `409 deps.apply_in_flight` — another apply is live. The error reports its `apply_run_id`; poll that run before retrying.
+- Errors: `409 deps.apply_in_flight` is returned when another apply is live. The error reports its `apply_run_id`; poll that run before retrying.
 - Notes: runs declared install actions. Every confirmed apply records a durable run and shares one cross-process apply slot with `acps deps apply` and init applies. Repeating the request after a terminal partial failure is safe because already-installed dependencies report `already_present`.
 
 ### `GET /v1/deps/apply/runs`
@@ -1081,14 +1081,14 @@ The runtime derives every package-manager command from config-declared install a
 - Tier: `session`
 - Request: none.
 - Response: the newest apply run plus its per-action `installer_runs` rows. Action metadata never includes captured log contents.
-- Errors: `404 deps.apply_run_not_found` — no run has been recorded.
+- Errors: `404 deps.apply_run_not_found` is returned when no run has been recorded.
 
 ### `GET /v1/deps/apply/runs/{apply_run_id}`
 
 - Tier: `session`
 - Request: the apply run id in the path.
 - Response: the selected apply run plus its per-action `installer_runs` rows.
-- Errors: `404 deps.apply_run_not_found` — the id is unknown.
+- Errors: `404 deps.apply_run_not_found` is returned when the id is unknown.
 
 A `running` row is reconciled to `failed` with `error.code = "deps.apply_abandoned"` once it is abandoned: its owning process is gone, or the daemon left it running after a terminal-state write failed and clears it before the next apply. `retryable` is true for `failed` and `privilege_blocked` runs.
 
@@ -1116,10 +1116,10 @@ A `running` row is reconciled to `failed` with `error.code = "deps.apply_abandon
 - `features` exists because `version` is not a usable capability signal: a nightly build carries its fourth version component only in the git tag, so a nightly with a feature and one without report the same three-part base version.
 - Orchestrators that gate wire calls or config writes on a capability must test membership in `features`. An absent or empty list means none of the listed capabilities are present.
 - The names are a stable contract:
-    - `network-provider-workload-env` — `[extensions.<name>.workload_env]`
-    - `agent-test-json` — `acps agent test --format json`
-    - `managed-credential-base-url` — `base_url` on a managed-state credential selection
-    - `sandbox-mask-files` — `sandbox_mask_files` on the init create body and `[workspace.sandbox].mask_files` masking
+    - `network-provider-workload-env` covers `[extensions.<name>.workload_env]`
+    - `agent-test-json` covers `acps agent test --format json`
+    - `managed-credential-base-url` covers `base_url` on a managed-state credential selection
+    - `sandbox-mask-files` covers `sandbox_mask_files` on the init create body and `[workspace.sandbox].mask_files` masking
 
 ### `GET /v1/status/agent`
 
@@ -1222,9 +1222,9 @@ A `running` row is reconciled to `failed` with `error.code = "deps.apply_abandon
 
 Log query filters are per-route, not one shared set. All log routes accept:
 
-- `limit` — default 100; values above 1000 are clamped, not rejected.
+- `limit` defaults to 100; values above 1000 are clamped, not rejected.
 - `since`, `until`, `after`.
-- `order` — `asc` or `desc`, default `desc`.
+- `order` is `asc` or `desc`, default `desc`.
 - `kind` matches by exact value or, with a trailing `.`, by dotted-namespace prefix.
 
 ### `GET /v1/metrics/summary`
@@ -1236,7 +1236,7 @@ Log query filters are per-route, not one shared set. All log routes accept:
     - A `counts` object of ten totals.
     - `prompt_failures`, so operators can separate upstream inference outages from local runtime failures. Contains `total`, explicit counters for each `failure_class` (`inference_5xx`, `inference_4xx`, `agent_request`, `vm`, `sqlite`, `daemon`, `agent_process`, `stalled`), `by_class`, and inference event breakdowns by HTTP status code and reason category.
     - The `api_connections` block: `request_count`, `average_duration_ms`, `by_status` response buckets, and count maps by method, route template, key kind, event source, origin kind, country code, and region code. Any missing or empty grouping key (including an unauthenticated request's key kind) is bucketed under `unknown`. `request_count` is always present (`0` on an empty window).
-- Errors: `400` — `since > until`.
+- Errors: `400` is returned when `since > until`.
 - Notes: the counts exclude `/v1/ws`, `/v1/health/*`, and `/v1/status*` for public-tier callers; internal `local`-tier calls are still counted.
 
 ### `GET /v1/installer/runs`

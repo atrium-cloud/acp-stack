@@ -123,7 +123,7 @@ pub(crate) fn collect_agent_env_refs_for_init(
         }
         if !is_valid_secret_ref_name(&name) {
             // Screen for a pasted credential first, then complain about shape
-            // without echoing the entry — an unrecognized token may be a secret.
+            // without echoing the entry, since an unrecognized token may be a secret.
             crate::config::screen_ref_name("agent-env-ref", &name)?;
             return Err(StackError::InvalidParam {
                 field: "agent-env-ref",

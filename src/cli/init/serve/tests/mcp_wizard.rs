@@ -169,7 +169,7 @@ fn hosted_mcp_transport_options_follow_the_probed_capabilities() {
 fn a_pasted_credential_in_a_header_ref_is_rejected_without_echoing_it() {
     const PASTED: &str = "sk-live-hosted-mcp-header-value";
     // The screening heuristic matches credential prefixes, so `Bearer sk-...` slips past it and
-    // reaches the header-name check — which is why that error may quote no input at all.
+    // reaches the header-name check, which is why that error may quote no input at all.
     // `screened` marks the forms the heuristic itself catches.
     for (index, entry, screened) in [
         (0, format!("Authorization:{PASTED}"), true),
@@ -224,7 +224,7 @@ fn a_pasted_credential_in_a_header_ref_is_rejected_without_echoing_it() {
 }
 
 // The env-ref prompt takes bare ref names, so a dashed token misses every screening prefix and
-// lands on the name-shape check — which is why that check may not quote the entry back.
+// lands on the name-shape check, which is why that check may not quote the entry back.
 #[test]
 fn a_pasted_credential_in_a_stdio_env_ref_is_rejected_without_echoing_it() {
     const PASTED: &str = "xai-9f2c8b1a-4d7e-11ef-9a3b-0242ac120002";

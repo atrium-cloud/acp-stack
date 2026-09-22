@@ -37,7 +37,7 @@ pub struct ApiErrorEnvelope {
 pub struct ApiError {
     /// Stable machine-readable error identifier. An open, versioned set of
     /// dotted `<domain>.<condition>` strings (e.g. `config.invalid`,
-    /// `request.invalid_param`, `agent.inference_5xx`). Not a closed enum —
+    /// `request.invalid_param`, `agent.inference_5xx`). Not a closed enum, so
     /// clients match known values and treat unknown codes as generic
     /// failures. See docs/specs/api/api.md and docs/specs/state-logging.md.
     pub code: String,
@@ -66,8 +66,8 @@ impl ApiError {
     /// middlewares that turn framework-generated responses (axum's 404/405
     /// fallbacks, body-limit 413s) into `{ok:false, ...}` bodies. Both the
     /// main API and the `acps init --serve` bootstrap server rewrap the same
-    /// statuses, so the tables live here — on the type that owns the wire
-    /// shape — rather than being duplicated per middleware where they can
+    /// statuses, so the tables live here, on the type that owns the wire
+    /// shape, rather than being duplicated per middleware where they can
     /// drift apart.
     pub fn for_status(status: StatusCode) -> Self {
         Self::new(error_code_for_status(status), message_for_status(status))
@@ -89,7 +89,7 @@ impl ApiError {
     }
 
     /// Render this error as an HTTP response with the given status code.
-    /// Use this when an error is produced outside the `StackError` flow —
+    /// Use this when an error is produced outside the `StackError` flow,
     /// notably the auth middleware, which constructs envelopes directly.
     pub fn into_response_with(self, status: StatusCode) -> Response {
         (status, Json(self.into_envelope())).into_response()

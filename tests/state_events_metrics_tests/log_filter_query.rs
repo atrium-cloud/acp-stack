@@ -133,7 +133,7 @@ fn log_filter_since_until_window_excludes_rows_outside_range() {
 #[test]
 fn log_filter_cursor_paginates_across_timestamp_ties() {
     let (_dir, store) = fresh_state("cursor.sqlite");
-    // Three events with the same timestamp — the cursor must still progress.
+    // Three events with the same timestamp, where the cursor must still progress.
     let connection = rusqlite::Connection::open(_dir.path().join("cursor.sqlite")).unwrap();
     connection
         .execute(

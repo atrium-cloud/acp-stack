@@ -1100,7 +1100,7 @@ impl HostedInitSession {
     }
 
     /// True while a failure is parked waiting for `ack_error`, with the time
-    /// since it was recorded — the error-ack grace reaper's input.
+    /// since it was recorded. This is the error-ack grace reaper's input.
     pub(super) fn unacked_error_age(&self) -> Option<std::time::Duration> {
         let inner = lock_unpoisoned(&self.inner);
         if inner.status == "errored" && !inner.error_acked {

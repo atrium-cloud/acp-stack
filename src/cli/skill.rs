@@ -1,4 +1,4 @@
-//! `acps skills` — day-2 Agent Skills management for the active agent.
+//! `acps skills`: day-2 Agent Skills management for the active agent.
 
 use std::io::{self, IsTerminal};
 
@@ -309,7 +309,7 @@ fn print_catalog(data: &Value) {
         let alias = source.get("alias").and_then(Value::as_str).unwrap_or("");
         let id = source.get("id").and_then(Value::as_str).unwrap_or("");
         let repo = source.get("repo").and_then(Value::as_str).unwrap_or("");
-        println!("{alias} ({id}) — {repo}");
+        println!("{alias} ({id}): {repo}");
         let skills = join_str_array(source.get("skills"));
         if skills.is_empty() {
             println!("  skills: (none indexed)");
@@ -438,7 +438,7 @@ fn print_source_get(data: &Value) {
         let selector = skill.get("selector").and_then(Value::as_str).unwrap_or("");
         match skill.get("description").and_then(Value::as_str) {
             Some(description) if !description.is_empty() => {
-                println!("  {selector} — {description}")
+                println!("  {selector}: {description}")
             }
             _ => println!("  {selector}"),
         }

@@ -676,7 +676,7 @@ fn a_mode_only_discovery_failure_skips_the_lane_instead_of_failing_init() {
                 category: InitCategory::Mode,
                 applicable: false,
                 // Not `Discovery`: the session never opened, so the check could not
-                // be made — no grounds to withdraw a mode the config already holds.
+                // be made, leaving no grounds to withdraw a mode the config holds.
                 source: ApplicabilitySource::DiscoveryUnavailable,
                 ..
             }

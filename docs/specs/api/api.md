@@ -82,9 +82,9 @@ Consumers reference it two ways:
 
 The document splits `$defs` into three namespaces because serde's `#[serde(default)]`/`skip_serializing_if` fields belong to `required` under one direction but not the other:
 
-- `request` — what a client sends (deserialize contract).
-- `response` — what the server emits (serialize contract).
-- `config` — the `acps-config.toml` shape.
+- `request` holds what a client sends (deserialize contract).
+- `response` holds what the server emits (serialize contract).
+- `config` holds the `acps-config.toml` shape.
 
 A type used on both sides appears once per namespace.
 
@@ -94,7 +94,7 @@ The few that map cleanly to a structural keyword are emitted (e.g. the config fi
 
 Not covered by the schema, by design:
 
-- WebSocket frames (`/v1/ws` `LiveEvent` and the init streaming frames — hand-built and byte-pinned).
+- WebSocket frames (`/v1/ws` `LiveEvent` and the init streaming frames), which are hand-built and byte-pinned.
 - The envelope-bypassing binary download handler and the hand-built `health/ready` handler.
 - The untyped `config` import response.
 
@@ -160,7 +160,7 @@ The API enforces:
 
 - bearer auth
 - request-size limits
-- origin checks — disallowed browser origins return `403 auth.origin_not_allowed`
+- origin checks, where disallowed browser origins return `403 auth.origin_not_allowed`
 - rate limits
 - auth-failure blocking
 - bounded proxy-header trust

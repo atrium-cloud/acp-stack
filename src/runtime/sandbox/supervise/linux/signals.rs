@@ -80,7 +80,7 @@ pub(super) fn poll_two(fd: i32, signal_fd: i32, timeout_ms: i32) -> (bool, bool)
     // SAFETY: pollfds is a valid array for the duration of the call.
     let rc = unsafe { libc::poll(pollfds.as_mut_ptr(), 2, timeout_ms) };
     if rc <= 0 {
-        // Timeout, or EINTR — the interrupting signal lands in the pipe and
+        // Timeout, or EINTR, where the interrupting signal lands in the pipe and
         // is picked up on the next iteration either way.
         return (false, false);
     }

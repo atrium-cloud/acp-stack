@@ -181,7 +181,7 @@ impl TerminalRegistry {
     /// report `false` (after killing the child) once `drain_all` has closed
     /// the registry. The entries lock MUST stay held from the closed check
     /// through the insert, so a concurrent `drain_all` either sees the new
-    /// terminal or the register sees `closed` — otherwise shutdown leaks an
+    /// terminal or the register sees `closed`. Otherwise shutdown leaks an
     /// orphan process.
     pub(crate) async fn register(
         self: &Arc<Self>,
@@ -888,8 +888,8 @@ fn env_names_json(env: &[EnvVariable]) -> Option<String> {
 
 /// Clean session environment for a terminal child: managed PATH, HOME, and
 /// the vars the agent supplied. Never the `[agent].env` secrets injected into
-/// the agent process itself — a client terminal must not expose provider API
-/// keys to arbitrary shell commands.
+/// the agent process itself, because a client terminal must not expose provider
+/// API keys to arbitrary shell commands.
 pub(crate) fn terminal_environment(
     home: &Path,
     agent_env: &[EnvVariable],

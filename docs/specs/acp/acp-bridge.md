@@ -40,7 +40,7 @@ The initialize request advertises the client capabilities `acp-stack` implements
 
 ## Client terminals
 
-`terminal/create` executes directly — there is no permission-service gate on terminal spawns. The VM is the security boundary; agents send `session/request_permission` separately when their own policy requires review. Every created terminal is recorded in the durable command log as an `acp`-origin `commands` row tied to the local session:
+`terminal/create` executes directly, because there is no permission-service gate on terminal spawns. The VM is the security boundary; agents send `session/request_permission` separately when their own policy requires review. Every created terminal is recorded in the durable command log as an `acp`-origin `commands` row tied to the local session:
 
 - The row carries the terminal id from its insert, so the id the agent holds resolves to exactly one command.
 - Output streams into `command.stdout`/`command.stderr` events, which also fan out live on the `commands.{id}` WebSocket topic (same payload shape as gateway commands).
@@ -66,7 +66,7 @@ Two consequences follow from argv presence being the selector:
 - After the child exits, the owner drains the remaining pipe output before finalizing the command row and publishing the exit status. The drain is bounded by the same post-wait budget as the command gateway, so a detached descendant holding the pipes open cannot wedge the task.
 - A `terminal/wait_for_exit` response therefore guarantees the output visible through `terminal/output` and the command log is complete.
 - `terminal/kill` keeps output readable until `terminal/release`, which drops all terminal state; later calls on the id return resource-not-found.
-- Kill-intent exits — `terminal/kill`, release of a running terminal, or the shutdown drain — finalize the command row as `cancelled` with no exit status, mirroring operator cancel in the command gateway. Natural signal deaths (OOM kill, segfault) finalize as `failed`.
+- Kill-intent exits, meaning `terminal/kill`, release of a running terminal, or the shutdown drain, finalize the command row as `cancelled` with no exit status, mirroring operator cancel in the command gateway. Natural signal deaths (OOM kill, segfault) finalize as `failed`.
 
 ### Output Limits
 
@@ -80,9 +80,9 @@ Output honors `outputByteLimit` in the spec's direction: truncation drops the ol
 ### Working Directory, Environment, And Shutdown
 
 - A `terminal/create` that omits `cwd` defaults to the session's recorded cwd, falling back to the workspace root when no session state is attached.
-- Every cwd — defaulted or explicit — must resolve inside the workspace.
+- Every cwd, defaulted or explicit, must resolve inside the workspace.
 - Terminal children run under the same sandbox profile as the supervised agent.
-- They receive a clean session environment: managed `PATH` and `HOME` plus the env vars from `terminal/create` — never the `[agent].env` provider secrets injected into the agent process.
+- They receive a clean session environment: managed `PATH` and `HOME` plus the env vars from `terminal/create`, never the `[agent].env` provider secrets injected into the agent process.
 - Bridge shutdown (including the crash-monitor path) kills and releases every live terminal and closes the registry.
 - A `terminal/create` racing shutdown is refused and its child killed, so nothing escapes the teardown.
 - Terminal children have their own process groups, so the agent-process-group kill alone would orphan them.
@@ -94,7 +94,7 @@ Output honors `outputByteLimit` in the spec's direction: truncation drops the ol
 - Absolute paths from the agent must resolve inside `[workspace].root` through the same canonicalization and symlink refusal as the workspace API.
 - Reads honor the optional 1-based `line` offset and `limit` line count and are capped at 10 MiB.
 - Writes are atomic write-throughs and record a durable `fs.write` event with source `acp`.
-- Headless, there are no editor buffers — disk is the truth on both methods.
+- Headless, there are no editor buffers, so disk is the truth on both methods.
 
 ## Sessions
 
@@ -186,13 +186,13 @@ An accepted prompt, including a slash command submitted through the commands rou
 Two derived events are lifted out of the verbatim `session.update` stream when the payload shape is recognized:
 
 - `usage.reported`: standard ACP context-window/cost snapshots plus recognized legacy token usage.
-- `tool.execute`: a `tool_call`/`tool_call_update` block whose kind is `execute` — the shell runs an agent performs through its own built-in tools rather than client terminals. The command line is extracted from `rawInput.command` when present.
+- `tool.execute`: a `tool_call`/`tool_call_update` block whose kind is `execute`, meaning a shell run the agent performs through its own built-in tools rather than client terminals. The command line is extracted from `rawInput.command` when present.
 
 Other projections off the same stream:
 
 - Standard `session_info_update` notifications patch the local session title and preserve agent timestamps and metadata in the session record.
 - `available_commands_update` notifications replace the session's stored slash-command list (latest-wins, including an empty list) as a compact bounded projection of `name`, `description`, and the unstructured input hint. Per-command `_meta` is dropped, no derived event is emitted, and the verbatim `session.update` row remains the source of truth.
-- The stored list reflects the last advertisement only — it may be stale until the agent re-advertises. Agents also accept commands they never advertised, so the runtime never validates prompt text against it; `POST /v1/sessions/{id}/commands` reports an advisory `advertised` flag instead.
+- The stored list reflects the last advertisement only, so it may be stale until the agent re-advertises. Agents also accept commands they never advertised, so the runtime never validates prompt text against it; `POST /v1/sessions/{id}/commands` reports an advisory `advertised` flag instead.
 - `tool.execute` fires on every update that states the execute kind. ACP only requires `kind` on the initial `tool_call`, so completion transitions typically remain visible only in the verbatim rows.
 
 ## Permissions
@@ -213,7 +213,7 @@ Cancelling a session settles its still-pending requests as `cancelled` and answe
 
 Configured MCP servers are attached to ACP sessions when the agent and SDK support session MCP configuration. Secret refs for MCP env vars and headers are resolved at attach time; the resolved values stay out of logs and API responses.
 
-Servers whose transport the running agent's advertisement omits are skipped for that session — create, load, resume, and fork proceed with the remaining servers. Each skip is recorded as a session-scoped `mcp.session_skipped` event at level `warn`. The event carries the server name and the capability the agent would have had to advertise.
+Servers whose transport the running agent's advertisement omits are skipped for that session, so create, load, resume, and fork proceed with the remaining servers. Each skip is recorded as a session-scoped `mcp.session_skipped` event at level `warn`. The event carries the server name and the capability the agent would have had to advertise.
 
 Session create applies the same routing in a fixed order: `agent.mode`, then the configured model, then `agent.effort`, and finally every `[agent.config_options]` entry. `agent.effort` maps to the agent's `thought_level` config option and applies after the model, since adapters advertise effort levels per model. Codex with OpenRouter pins `agent.effort` in `~/.codex/config.toml` (`model_reasoning_effort`) at provisioning and skips the ACP set. `agent.mode` resolves against `config_options` first; an agent that advertises modes only in the `session/new` `modes` field has the value applied through `session/set_mode` instead. That native set applies once at create and is not carried in the config-option snapshot below.
 

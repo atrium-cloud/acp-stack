@@ -14,7 +14,7 @@ fn extract_usage_payload_walks_nested_paths() {
     let payload = r#"{"update": {"usage": {"input_tokens": 5}}}"#;
     let usage = super::extract_usage_payload("sess_y", payload).expect("usage should be extracted");
     assert_eq!(usage["input_tokens"].as_i64(), Some(5));
-    // Output tokens absent — must NOT be serialized rather than written as 0.
+    // Output tokens absent: must NOT be serialized rather than written as 0.
     assert!(usage.get("output_tokens").is_none());
 }
 

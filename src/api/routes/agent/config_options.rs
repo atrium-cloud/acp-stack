@@ -10,7 +10,7 @@ use crate::runtime::agent::model_discovery::{
 };
 
 /// `GET /v1/agent/config-options`: every session config option the configured
-/// agent advertises on a provisional `session/new`, projected verbatim —
+/// agent advertises on a provisional `session/new`, projected verbatim,
 /// including `model_config`, `_`-prefixed customs, and category-less options
 /// the typed `/v1/models` lanes do not carry. Discovery failure is a hard
 /// error: unlike `/v1/models` there is no catalog to fall back to, and an

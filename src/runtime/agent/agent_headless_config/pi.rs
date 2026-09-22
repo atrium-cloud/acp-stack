@@ -147,8 +147,9 @@ fn write_pi_mapped_endpoint_override(
                 .get_mut("providers")
                 .and_then(serde_json::Value::as_object_mut)
             {
-                // Only the acps-written shape is removed — an entry with any
-                // other key is an operator's own override, not ours to delete.
+                // Only the acps-written shape is removed, since an entry with
+                // any other key is an operator's own override, not ours to
+                // delete.
                 let acps_written = providers.get(native_provider).is_some_and(|entry| {
                     entry
                         .as_object()

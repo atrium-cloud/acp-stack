@@ -152,7 +152,7 @@ pub fn run_worker(args: Vec<String>) -> Result<()> {
         &args.escalation,
         &home,
         |current, total, name| {
-            // Diagnostic only — machine-readable progress lives on the run row, so a broken log
+            // Diagnostic only. Machine-readable progress lives on the run row, so a broken log
             // pipe must not abort the install.
             if let Err(error) = writeln!(
                 stdout,
@@ -219,7 +219,7 @@ pub fn spawn_detached_worker(
         .spawn()
         .map_err(|source| StackError::ServeIo { source })?;
     let pid = child.id();
-    // setsid changes session, not parenthood, so an unreaped worker sits as a zombie — and
+    // setsid changes session, not parenthood, so an unreaped worker sits as a zombie, and
     // `kill(pid, 0)` reports a zombie as live, blinding the abandoned-run reconcile.
     std::thread::spawn(move || match child.wait() {
         Ok(status) => {

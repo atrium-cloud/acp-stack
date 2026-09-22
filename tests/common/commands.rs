@@ -2,7 +2,7 @@
 //!
 //! `tests/common/api.rs` and `tests/common/sessions.rs` define same-named items
 //! with different key values and signatures. The three sets are deliberately
-//! separate — do not merge or cross-import them.
+//! separate, so do not merge or cross-import them.
 
 use std::path::PathBuf;
 use std::sync::Arc;

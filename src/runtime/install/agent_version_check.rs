@@ -18,7 +18,7 @@ use crate::state::InstallerRun;
 pub enum AgentVersionStatus {
     /// Installed and upstream agree on a non-empty version.
     UpToDate { version: String },
-    /// Both versions are known and they differ — operator should re-run install.
+    /// Both versions are known and they differ, so the operator should re-run install.
     Stale { installed: String, latest: String },
     /// We could not derive an upstream version (shell-recipe install, missing
     /// registry kind, or upstream API error captured as a fall-through).
@@ -120,8 +120,8 @@ pub fn compare_versions(installed: &str, latest: Option<&str>) -> AgentVersionSt
 
 /// Strip a leading `v` so a `v0.11.1` installer row compares equal to a
 /// `0.11.1` npm registry response (and vice versa). Other normalization (e.g.
-/// pre-release tags) is deliberately not applied — we want to flag any other
-/// drift as stale.
+/// pre-release tags) is deliberately not applied, because we want to flag any
+/// other drift as stale.
 pub(crate) fn normalize_version(value: &str) -> &str {
     value
         .trim()

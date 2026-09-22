@@ -863,7 +863,7 @@ async fn resume_committed_switch(
 /// Switch whose target is already in place: either a retry of a switch that
 /// Completed (the journal plus the on-disk primary prove convergence) or a
 /// bare request naming the target that is already the default. Either way the
-/// response is a pure no-op — no rewrite, no stop/start, no install re-run.
+/// response is a pure no-op, with no rewrite, stop/start, or install re-run.
 /// `old_agent_id` reports the current agent (which is the target) because
 /// nothing changed.
 fn completed_switch_response(

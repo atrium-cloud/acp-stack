@@ -88,13 +88,13 @@ fn prompt_stack_update_policy() -> Result<StackUpdatePolicy> {
         prompt::item(
             StackUpdatePolicy::Compatible,
             "on",
-            "On — all compatible updates",
+            "On, all compatible updates",
             "",
         ),
         prompt::item(
             StackUpdatePolicy::Manual,
             "off",
-            "Off — manual updates only",
+            "Off, manual updates only",
             "",
         ),
     ];

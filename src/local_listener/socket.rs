@@ -17,7 +17,7 @@ fn socket_path_for_home(home: &Path) -> PathBuf {
 }
 
 /// Unlinks the socket file on drop, but only when the inode at the path still
-/// matches the bound one — otherwise a second daemon that took over the path
+/// matches the bound one. Otherwise a second daemon that took over the path
 /// would have its live socket unlinked.
 pub struct SocketGuard {
     path: PathBuf,
@@ -69,7 +69,7 @@ pub enum ParentPolicy {
     /// Daemon-managed parent: create if missing, chmod to `0o700` if existing.
     RepairOwnerOnly,
     /// Operator-configured parent: created `0o700`, but an existing one is only
-    /// validated — startup fails rather than silently widening a shared dir.
+    /// validated, so startup fails rather than silently widening a shared dir.
     ValidateOwnerOnly,
 }
 

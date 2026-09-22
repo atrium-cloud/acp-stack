@@ -52,8 +52,8 @@ pub enum DesiredState {
 /// Force `selection` into each variant's `required` list. `selection` is an
 /// `Option`, so schemars omits it from `required`; but the deserializer treats
 /// an absent key as a parse error (a missing key must not read as a destructive
-/// clear). The field schema is left untouched — it stays `CredentialSelection |
-/// null` — so `selection: null` remains valid while omitting the key does not.
+/// clear). The field schema is left untouched, staying `CredentialSelection |
+/// null`, so `selection: null` remains valid while omitting the key does not.
 /// Applied per `oneOf` variant that actually has a `selection` property, so a
 /// future `kind` without one is unaffected.
 fn require_selection_key(schema: &mut schemars::Schema) {
@@ -181,7 +181,7 @@ pub fn apply(
 }
 
 /// Deposit flat secrets and apply a managed-state credential selection in one transaction. Mirrors
-/// [`apply`], but the deposited secrets and the catalog swap commit together — a validation failure
+/// [`apply`], but the deposited secrets and the catalog swap commit together, so a validation failure
 /// (stale revision, ownership conflict, invalid selection) leaves the store untouched rather than
 /// orphaning the secrets a bare `set_many` would already have written. `source_refs` still resolve
 /// against the flat store, so a selection may reference a secret this same body deposits.
@@ -233,7 +233,7 @@ where
 /// Refs resolve at apply time, so a ref-backed selection is replay-stable
 /// only while the referenced secrets are stable: if a ref rotates between an
 /// apply and its retry, the retry compares as different content at the same
-/// revision and conflicts (409) instead of no-oping — the effective
+/// revision and conflicts (409) instead of no-oping, because the effective
 /// credential really did change, so the orchestrator must advance the
 /// revision.
 fn resolve_selection(
@@ -383,8 +383,8 @@ fn validate_base_url(base_url: &str) -> Result<()> {
 }
 
 /// Reject the endpoint override before any watermark or catalog persist when
-/// the configured agent has no native config surface to write it into —
-/// otherwise the revision applies and the endpoint silently never takes effect.
+/// the configured agent has no native config surface to write it into.
+/// Otherwise the revision applies and the endpoint silently never takes effect.
 fn require_agent_supports_base_url(home: &Path, config: &Config) -> Result<()> {
     if crate::runtime::install::agent_supports_provider_base_url(home, &config.agent.id)? {
         return Ok(());
@@ -401,7 +401,7 @@ fn require_agent_supports_base_url(home: &Path, config: &Config) -> Result<()> {
 
 /// The registry endpoint capability is agent-level, but a few agent/provider
 /// pairs still have nowhere to write the override. Rejecting here, before any
-/// watermark or catalog persist, keeps the revision reusable — otherwise
+/// watermark or catalog persist, keeps the revision reusable. Otherwise
 /// provisioning fails once the store is already durable and every retry at the
 /// same revision replays the same failure.
 fn require_provider_accepts_base_url(config: &Config, provider_id: &str) -> Result<()> {
@@ -424,7 +424,7 @@ fn require_provider_accepts_base_url(config: &Config, provider_id: &str) -> Resu
 /// At most one provider may be rerouted at a time: the agent's native config
 /// carries exactly one endpoint override, and two namespaces each rerouting a
 /// different provider would have provisioning arbitrarily pick a winner.
-/// Rejecting here — before any watermark or catalog persist — keeps the
+/// Rejecting here, before any watermark or catalog persist, keeps the
 /// revision reusable once the first namespace's endpoint is cleared.
 ///
 /// The applying namespace's own rerouted credentials do not count against it:
@@ -449,7 +449,7 @@ fn require_single_endpoint_override(
                 field: "desired.selection.base_url",
                 reason: format!(
                     "provider `{existing_id}` is already routed through a custom endpoint; only \
-                     one provider may be rerouted at a time — clear that namespace's credential \
+                     one provider may be rerouted at a time; clear that namespace's credential \
                      endpoint first"
                 ),
             });

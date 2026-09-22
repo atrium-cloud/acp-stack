@@ -4,7 +4,7 @@ pub fn run() -> Result<()> {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(error) => {
-            // `use_stderr()` is false for DisplayHelp / DisplayVersion — those are not failures.
+            // `use_stderr()` is false for DisplayHelp / DisplayVersion, which are not failures.
             if error.use_stderr() {
                 record_cli_error_message(&strip_ansi(&error.to_string()));
             }

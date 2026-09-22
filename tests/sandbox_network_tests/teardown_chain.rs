@@ -63,7 +63,7 @@ fn sigkill_of_the_supervisor_kills_the_chain() {
         }
         assert!(
             Instant::now() < deadline,
-            "the unshare chain survived the supervisor's SIGKILL — pdeathsig did not fire"
+            "the unshare chain survived the supervisor's SIGKILL, so pdeathsig did not fire"
         );
         std::thread::sleep(Duration::from_millis(100));
     }

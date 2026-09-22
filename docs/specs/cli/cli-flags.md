@@ -94,7 +94,7 @@ acps init \
 #### Provider, model, mode, effort
 
 - `--provider <provider-id>`, `--api-key-ref <ref>`, `--model <model-id>`: select provider, credential ref, and model. Where `--model` skips advertisement validation (a custom provider, or a harness that reads the model from its own config), the value is trimmed, rejected when empty, and otherwise written as given.
-- `--mode <mode-id>`, `--effort <effort-id>`: set a session mode or reasoning effort non-interactively. Both are validated against the agent's ACP-advertised values. Codex with OpenRouter validates `--effort` against the provider catalog's reasoning-effort values for the configured model, since the adapter advertises none for OpenRouter models. Goose resolves its model while starting a session, so both flags require a model — pass `--model` alongside them or configure one first.
+- `--mode <mode-id>`, `--effort <effort-id>`: set a session mode or reasoning effort non-interactively. Both are validated against the agent's ACP-advertised values. Codex with OpenRouter validates `--effort` against the provider catalog's reasoning-effort values for the configured model, since the adapter advertises none for OpenRouter models. Goose resolves its model while starting a session, so both flags require a model. Pass `--model` alongside them or configure one first.
 - The mode lane applies only to agents that support session modes. The effort lane applies only to agents that advertise a reasoning-effort (`thought_level`) config option.
 - A non-interactive run without `--mode`/`--effort` writes no mode or effort.
 - `--custom-provider --provider <id> --provider-name <name> --base-url <url> --api-key-ref <ref> --model <model-id>`: declare a custom provider.
@@ -425,7 +425,7 @@ acps agent switch <agent> [--drop] [--provider <provider-id>] [--api-key-ref <re
 - Installed Agent Skills are copied into the target skills directory when needed. Same-named target skills without the managed marker are left untouched and printed as kept unmanaged. Symlinks are refreshed when the target declares a separate discovery directory, e.g. Claude Code's `~/.claude/skills`. The marker and link rules: [skills.md](../agents/skills.md).
 - Switch clears the model and prints advertised model values only when the target supports model selection. Interactive runs can select and apply a model before the command exits. Non-interactive runs print `acps agent set --model <model-id>` as the follow-up only when model selection is supported.
 - Switch preserves runtime-scoped config: workspace, MCP declarations, permissions, secrets config, and sessions. By default it also preserves source agent-owned config, secrets, and installed harnesses/adapters, so switching back is fast.
-- A switch is journaled in `agent-switch.json` beside the canonical config, so a failure after the config write — e.g. the new agent's first start — does not strand the daemon.
+- A switch is journaled in `agent-switch.json` beside the canonical config, so a failure after the config write, such as the new agent's first start, does not strand the daemon.
 - Retrying the same target resumes the interrupted switch and converges it (`provider_status: "resumed"`). Retrying a finished switch is a no-op success (`provider_status: "no_op"`). Requesting a different target while a switch is incomplete fails with `409 agent.switch_conflict`.
 - Naming the current default target with `--provider` keeps the harness and commits the new provider (`provider_status: "set"`), restarting the agent only when it was already running. Repeating the same selection with no intervening config change is a no-op success. Retrying an interrupted reconfigure with different provider flags fails with `409 agent.switch_conflict`. `--drop`, and `--api-key-ref` without `--provider`, stay refused for the current default target.
 
@@ -719,7 +719,7 @@ acps skills source remove <alias> [--admin-key <key>]
 - `catalog` prints the embedded catalog sources and their selectors, plus configured user sources. User sources are shown with `(none indexed)`; enumerate those live with `source get`.
 - Reads use `--session-key`/`ACP_STACK_SESSION_KEY`, falling back to the local read-only socket when `[local].session_auth = "keyless"` is active.
 - `add` installs one or more skills; already-installed skills are skipped. `remove` uninstalls one skill. Removal needs no confirmation: only skills installed by acp-stack can be removed, and they are re-downloadable via `add`. Both mutations require the admin key and refresh the harness link directory afterward.
-- `source get` fetches a source — a catalog alias, a configured alias, or `github:<owner>[/<repo>]` — and lists its installable skills with the `name` and `description` from each `SKILL.md`.
+- `source get` fetches a source (a catalog alias, a configured alias, or `github:<owner>[/<repo>]`) and lists its installable skills with the `name` and `description` from each `SKILL.md`.
 - `source add` registers a user source in `[[skills.sources]]`; the alias then works anywhere a source is accepted. It cannot shadow a catalog alias: the add is refused, and even a hand-edited collision is ignored in favor of the catalog.
 - `source remove` unregisters the alias. `source add`/`remove` require the admin key and edit config through the daemon; they do not install or delete any skills.
 
@@ -840,7 +840,7 @@ acps deps apply [--yes] [--admin-key <key>]
 
 - `deps check` reports declared dependency status from local config.
 - `deps apply` runs only install actions declared in config and requires confirmation unless `--yes` is passed.
-- System-scope actions escalate through `sudo -n` when the process is non-root and passwordless sudo is available. Otherwise they are recorded as `privilege_required`. Text output then prints the manual `sudo <shell> -c '…'` commands, and the command exits non-zero — unlike init, which skips and continues. With `--format json`, the skips are reported through the error summary and exit code.
+- System-scope actions escalate through `sudo -n` when the process is non-root and passwordless sudo is available. Otherwise they are recorded as `privilege_required`. Text output then prints the manual `sudo <shell> -c '…'` commands, and the command exits non-zero, unlike init, which skips and continues. With `--format json`, the skips are reported through the error summary and exit code.
 - Apply output includes the durable `apply_run_id`; failed runs point operators to `acps installer history --agent deps_apply`.
 
 ## `acps installer history`

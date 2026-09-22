@@ -42,8 +42,8 @@ async fn start_agent_target(
 ///
 /// A genuinely misconfigured agent still fails: this only spawns, it does not
 /// soften the config, secret, or initialize errors `start` propagates.
-/// `restart = "never"` opts a target out entirely — an operator who forbade
-/// crash restarts does not want request traffic spawning agents either.
+/// `restart = "never"` opts a target out entirely, because an operator who
+/// forbade crash restarts does not want request traffic spawning agents either.
 pub(crate) async fn ensure_agent_started(state: &AppState, target_id: &str) -> Result<()> {
     let target = state.agent_target(target_id)?;
     match target.supervisor.await_start_readiness().await {
@@ -206,8 +206,8 @@ pub(crate) struct AgentRestartQueuedResponse {
 /// the freshly-on-disk `[agent]` block instead of the daemon's
 /// in-memory `Arc<Config>` snapshot. Used by operators after
 /// `acps agent set` writes provider/model changes that require a
-/// process-level config reload — agents that read provider/model from
-/// their on-disk config at process start can only see updated values
+/// process-level config reload, because agents that read provider/model
+/// from their on-disk config at process start can only see updated values
 /// after a restart. Goose model changes do NOT need this endpoint;
 /// clients can switch live via `session/set_config_option`.
 ///

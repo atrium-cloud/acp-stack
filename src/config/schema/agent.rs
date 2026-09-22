@@ -138,7 +138,7 @@ pub struct AgentConfig {
 }
 
 /// One `[agent.config_options]` value. `Bool` must stay first in the untagged
-/// order so TOML `true` never parses as the string `"true"` — a select option
+/// order so TOML `true` never parses as the string `"true"`. A select option
 /// may legitimately advertise the ValueId `"true"`, and only the TOML type
 /// distinguishes the two.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]

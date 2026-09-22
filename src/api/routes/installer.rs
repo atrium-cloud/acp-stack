@@ -9,8 +9,8 @@ use crate::envelope::ApiSuccess;
 use crate::error::StackError;
 use crate::state::{INSTALLER_STATUS_RUNNING, InstallerRun, StateStore};
 
-/// Per-request cap on `limit=` for history queries — same reasoning as the
-/// logs endpoints (an authenticated caller must not pull unbounded history
+/// Per-request cap on `limit=` for history queries, with the same reasoning as
+/// the logs endpoints (an authenticated caller must not pull unbounded history
 /// into one response). Active-only queries ignore `limit`: the number of
 /// concurrently running steps is bounded by the installers themselves.
 pub(super) const MAX_RUNS_LIMIT: u32 = 1000;

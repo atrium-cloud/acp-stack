@@ -1,10 +1,10 @@
 # Agent Skills
 
-acp-stack installs Agent Skills — portable `SKILL.md` capability packages — into the configured agent's skills directory and manages them afterwards.
+acp-stack installs Agent Skills, portable `SKILL.md` capability packages, into the configured agent's skills directory and manages them afterwards.
 
 ## The Catalog
 
-`data/skills.toml` is the embedded catalog of reviewed Agent Skills sources. Each source records its CLI alias, trust metadata, pinned or indexed commit, discovery roots, exact installable skill paths, and any reviewed exclusions. Trust flags live in the file — for example, K-Dense carries the trusted flag as a community source, with the official Anthropic or OpenAI marking left off. OpenAI `.system` skills are non-installable.
+`data/skills.toml` is the embedded catalog of reviewed Agent Skills sources. Each source records its CLI alias, trust metadata, pinned or indexed commit, discovery roots, exact installable skill paths, and any reviewed exclusions. Trust flags live in the file. For example, K-Dense carries the trusted flag as a community source, with the official Anthropic or OpenAI marking left off. OpenAI `.system` skills are non-installable.
 
 ### Curation Rules
 
@@ -32,7 +32,7 @@ An agent whose harness discovers skills somewhere else also declares a link dire
 Linking is a one-way mirror:
 
 - The install directory is the source of truth; the link directory only receives symlinks.
-- Only symlinks pointing into the install directory are managed, wherever they sit — the refresh recurses into group directories.
+- Only symlinks pointing into the install directory are managed, wherever they sit, because the refresh recurses into group directories.
 - Dangling managed links left by removed skills are pruned, and a directory emptied by pruning is removed.
 - Everything else in the link directory is user-owned and left untouched.
 - Nested skills are linked under group directories, so a managed link may be added inside a pre-existing directory of the same name.
@@ -45,7 +45,7 @@ Skills installed by acp-stack carry a `.acp-stack-managed` marker file. Its cont
 
 The marker lives inside the skill directory and travels with the files. Only marker-carrying directories count as managed; every other directory is user content, so removal is refused with a conflict and the directory stays intact.
 
-Skills installed by a release predating the marker carry no marker. They are treated as user content — delete them by hand and re-add them with `acps skills add`.
+Skills installed by a release predating the marker carry no marker. They are treated as user content, so delete them by hand and re-add them with `acps skills add`.
 
 Day-2 installs and removals are recorded as `skill.install` / `skill.remove` events in the runtime log. Init-time installs are recorded in the `agent_skills_install` init-step payload.
 
@@ -57,7 +57,7 @@ Day-2 installs and removals are recorded as `skill.install` / `skill.remove` eve
 
 `acps agent switch` copies valid installed skills from the source agent's canonical skills directory to the target agent's before committing the switch:
 
-- An existing same-named target skill is replaced only when acp-stack installed it — that is, when it carries the managed marker. A same-named folder added by hand is left untouched.
+- An existing same-named target skill is replaced only when acp-stack installed it, that is, when it carries the managed marker. A same-named folder added by hand is left untouched.
 - A source skill directory lacking a portable install name fails the switch.
 - All supported agents share `~/.agents/skills`, so switches between them skip copying.
 

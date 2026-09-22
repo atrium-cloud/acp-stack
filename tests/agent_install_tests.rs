@@ -52,8 +52,8 @@ impl<'a> EnvGuard<'a> {
 
 impl Drop for EnvGuard<'_> {
     fn drop(&mut self) {
-        // SAFETY: `ENV_LOCK` is still held here — drop fires before `_lock`
-        // releases — so the threading argument from `new` still holds.
+        // SAFETY: `ENV_LOCK` is still held here, because drop fires before
+        // `_lock` releases, so the threading argument from `new` still holds.
         unsafe {
             match &self.previous {
                 Some(value) => std::env::set_var(self.key, value),

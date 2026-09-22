@@ -2,8 +2,8 @@
 //! `acps_schema` pulls them into `#/$defs/request/*`. A NEW REQUEST TYPE MUST BE
 //! ADDED HERE; `schema_covers_every_handler_wire_type` guards the omission.
 
-/// Umbrella over every request payload and query. Never deserialized itself —
-/// only its derived `JsonSchema` matters, which forces each variant's type into
+/// Umbrella over every request payload and query. Never deserialized itself.
+/// Only its derived `JsonSchema` matters, which forces each variant's type into
 /// `$defs`. The enum is never constructed, so its variant-size spread and shared
 /// postfixes do not warrant the usual clippy lints.
 #[derive(schemars::JsonSchema)]

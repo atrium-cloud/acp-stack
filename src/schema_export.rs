@@ -30,7 +30,7 @@ enum AcpsSharedTypes {
 pub const SCHEMA_PATH: &str = "docs/specs/api/acps-schema.json";
 /// In-repo location of the generated schema version/definition-count sidecar.
 pub const META_PATH: &str = "docs/specs/api/acps-schema.meta.json";
-/// `$id` of the published schema — the durable stable-release download URL.
+/// `$id` of the published schema, the durable stable-release download URL.
 const SCHEMA_ID: &str =
     "https://github.com/atrium-cloud/acp-stack/releases/latest/download/acps-schema.json";
 const SCHEMA_TITLE: &str = "acp-stack /v1 API and configuration contract";
@@ -39,12 +39,12 @@ const SCHEMA_TITLE: &str = "acp-stack /v1 API and configuration contract";
 /// is, how the three namespaces differ, that the root is a container rather
 /// than a validatable body, and what is deliberately absent.
 const SCHEMA_DESCRIPTION: &str = concat!(
-    "Generated from the Rust wire types of acp-stack; do not edit by hand — regenerate with ",
+    "Generated from the Rust wire types of acp-stack; do not edit by hand. Regenerate with ",
     "`cargo run --features dev-tools --bin generate-api-schema`. This root is a container of ",
     "definitions, not a validatable body: validate a payload against ",
     "`#/$defs/<namespace>/<TypeName>`. `$defs` splits into three namespaces because serde's ",
     "`default` and `skip_serializing_if` attributes place a field in `required` under one ",
-    "direction but not the other — `request` is the deserialize contract (what a client sends), ",
+    "direction but not the other. `request` is the deserialize contract (what a client sends), ",
     "`response` is the serialize contract (what the server emits), and `config` is the ",
     "deserialize contract for `acps-config.toml`. A type used on both sides appears once per ",
     "namespace. `$defs/AuthTier` sits outside the namespaces as a sibling: it is the shared ",
@@ -85,12 +85,12 @@ fn generator(contract: Contract) -> SchemaGenerator {
 /// Run one umbrella pass and return its (flat) `$defs` re-keyed under
 /// `namespace`: every intra-pass `#/$defs/X` ref is rewritten to
 /// `#/$defs/<namespace>/X` so the three passes coexist after the merge. The
-/// umbrella root itself is discarded — only the definitions it pulled in are
+/// umbrella root itself is discarded, so only the definitions it pulled in are
 /// kept.
 ///
 /// `pub(crate)` so modules that own module-private DTOs (e.g. the bootstrap
 /// init API) can run their own umbrella through it without exposing the DTO
-/// types to this module — the generic is monomorphized at the call site, where
+/// types to this module. The generic is monomorphized at the call site, where
 /// the umbrella and its members are visible.
 pub(crate) fn pass_defs<T: schemars::JsonSchema>(contract: Contract, namespace: &str) -> Value {
     let schema = generator(contract).into_root_schema_for::<T>().to_value();
@@ -126,7 +126,7 @@ fn rewrite_refs(value: &mut Value, namespace: &str) {
 /// `$defs` by a type's short name. One type legitimately arrives twice when it
 /// is reached from two umbrellas in the same namespace (e.g.
 /// `NativeConfigInspection`, pulled by both the main-API and init response
-/// passes) — those definitions are byte-identical and collapse harmlessly. But
+/// passes), and those definitions are byte-identical and collapse harmlessly. But
 /// two *different* types sharing a short name would overwrite each other and the
 /// published schema would describe the wrong type. This is a dev-tools-only
 /// generator, so a hard panic on a *conflicting* redefinition is the correct
@@ -148,7 +148,7 @@ fn merge_defs(defs: Value, accumulator: &mut Map<String, Value>) {
 }
 
 /// Merge one umbrella pass's definitions into `accumulator`. A namespace can be
-/// built from several umbrellas — e.g. the init API's module-private DTOs are
+/// built from several umbrellas, e.g. the init API's module-private DTOs are
 /// contributed separately by `crate::cli::init_*_defs`.
 fn merge_pass<T: schemars::JsonSchema>(
     contract: Contract,
@@ -271,7 +271,7 @@ mod tests {
         let report = coverage_report();
         assert!(
             report.is_complete(),
-            "schema is missing handler wire types — request gaps: {:?}, response gaps: {:?}. \
+            "schema is missing handler wire types. Request gaps: {:?}, response gaps: {:?}. \
              Add them to the umbrellas in src/schema_export/{{requests,responses}}.rs, or list \
              them as documented gaps if they are intentionally untyped.",
             report.request.uncovered,

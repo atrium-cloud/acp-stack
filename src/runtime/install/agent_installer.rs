@@ -141,7 +141,7 @@ pub trait InstallerRunSink: Sync {
 }
 
 /// Sink over the daemon's shared store handle. Uses `blocking_lock`, so it is
-/// only legal off the async executor — callers must run steps in
+/// only legal off the async executor. Callers must run steps in
 /// `spawn_blocking`.
 pub struct SharedInstallerSink {
     state: std::sync::Arc<tokio::sync::Mutex<StateStore>>,
@@ -582,7 +582,7 @@ pub fn resolve_creates_for_init_resume(
 }
 
 /// Spawn gate for installed binaries. Callers MUST run integrity checks
-/// (`expected_sha256`) before this gate — the probe executes the file, so a
+/// (`expected_sha256`) before this gate: the probe executes the file, so a
 /// binary that fails the operator's pin must never reach it.
 pub(crate) fn verify_binary_spawns(
     path: &Path,

@@ -27,8 +27,8 @@ pub struct DependencyEntry {
     /// command is "check-only" and `acps deps apply` will report it as
     /// not actionable rather than guessing a package manager. This
     /// keeps Dependency Apply narrowly scoped per the Phase 4 spec:
-    /// no cross-distro reconciliation, no auto-derived package names —
-    /// the operator declares each install action explicitly.
+    /// no cross-distro reconciliation, no auto-derived package names.
+    /// The operator declares each install action explicitly.
     /// Only valid under `[[dependencies.commands]]`; declaring it under
     /// `packages`, `runtimes`, or `mcp` fails config load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -43,14 +43,14 @@ fn default_dependency_required() -> bool {
 /// minimal: a single shell snippet, an optional `creates` postcheck,
 /// and a scope marker that distinguishes "runs as the runtime user"
 /// from "needs OS-wide privilege" so the apply runner knows when to
-/// escalate — and never silently downgrades privileged work to user
+/// escalate, and never silently downgrades privileged work to user
 /// scope behind the operator's back.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DependencyInstallAction {
     /// Shell snippet executed via `[workspace].default_shell -c`.
-    /// Operator declares it verbatim — no apt/brew/yum derivation in
-    /// the runtime.
+    /// Operator declares it verbatim, with no apt/brew/yum derivation
+    /// in the runtime.
     pub shell: String,
     /// PATH name that must resolve to an executable after `shell`
     /// completes. Defaults to the dependency entry's `name`. The apply
@@ -66,7 +66,7 @@ pub struct DependencyInstallAction {
     #[serde(default)]
     pub scope: DependencyInstallScope,
     /// Optional timeout override in seconds. Defaults to 600s
-    /// (10 minutes) — same cap as the agent installer. Bounded above at
+    /// (10 minutes), the same cap as the agent installer. Bounded above at
     /// validation by `MAX_INSTALL_TIMEOUT_SECS` (86400, 24 hours); `0` is
     /// rejected, so omit the field rather than zeroing it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -88,7 +88,7 @@ pub enum DependencyInstallScope {
     /// under /usr or /opt). Runs directly when the process is root,
     /// escalates through passwordless `sudo -n` when it isn't (never a
     /// password prompt), and otherwise refuses early with a clear
-    /// "privilege required" outcome — the runner never falls back to
+    /// "privilege required" outcome. The runner never falls back to
     /// user scope.
     System,
 }

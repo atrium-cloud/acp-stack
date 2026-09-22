@@ -465,8 +465,8 @@ fn choose_update_plan(
     component: &UpdateComponent<'_>,
     installed_row: Option<&InstallerRun>,
 ) -> Result<UpdatePlan> {
-    // A harness_version pin is a GitHub Release tag, so only the github path
-    // can satisfy it — it wins over the recorded install method.
+    // A harness_version pin is a GitHub Release tag, which only the github
+    // path can satisfy, so it wins over the recorded install method.
     if component.version_pin.is_some() && component.install.github.is_some() {
         return github_plan(entry, component);
     }

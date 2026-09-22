@@ -152,8 +152,8 @@ async fn ws_connection(
 }
 
 /// Monotonically-increasing connection identifier. Pairs the connect/disconnect
-/// events for a single client across the durable event log. Reset per process
-/// — durability of the pair is provided by the timestamp + connection_id
+/// events for a single client across the durable event log. Reset per process,
+/// so durability of the pair is provided by the timestamp + connection_id
 /// composite, not the counter alone.
 fn next_ws_connection_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};

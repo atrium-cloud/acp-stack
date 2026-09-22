@@ -453,7 +453,7 @@ mod tests {
 
     #[test]
     fn signing_key_derivation_matches_aws_test_vector() {
-        // From the AWS SigV4 test suite — example secret/date/region/service.
+        // From the AWS SigV4 test suite: example secret/date/region/service.
         let key = derive_signing_key(
             "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
             "20150830",

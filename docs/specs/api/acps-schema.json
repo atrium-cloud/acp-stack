@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/atrium-cloud/acp-stack/releases/latest/download/acps-schema.json",
   "title": "acp-stack /v1 API and configuration contract",
-  "description": "Generated from the Rust wire types of acp-stack; do not edit by hand — regenerate with `cargo run --features dev-tools --bin generate-api-schema`. This root is a container of definitions, not a validatable body: validate a payload against `#/$defs/<namespace>/<TypeName>`. `$defs` splits into three namespaces because serde's `default` and `skip_serializing_if` attributes place a field in `required` under one direction but not the other — `request` is the deserialize contract (what a client sends), `response` is the serialize contract (what the server emits), and `config` is the deserialize contract for `acps-config.toml`. A type used on both sides appears once per namespace. `$defs/AuthTier` sits outside the namespaces as a sibling: it is the shared auth-tier vocabulary (`init`, `session`, `admin`, `local`), described per tier by the root `x-auth-tiers` annotation. Conventions: timestamp fields are RFC 3339 strings; an optional response field is omitted when absent rather than emitted as null, so its nullable type means absent and null are equivalent. Not covered, by design: the `/v1/ws` `LiveEvent` frames and the `acps init serve` streaming frames and state signals (hand-built and byte-pinned by golden tests), the envelope-bypassing binary download handler and the `health/ready` handler (whose readiness body is hand-built, not a typed DTO), and the untyped `config` import response. Cross-field rules (mutually-required or mutually-exclusive fields, exactly-one-of constraints, blank-as-absent) are mostly inexpressible in JSON Schema and stay enforced in code; `ApiError.code` is likewise an open dotted-namespace string rather than a closed enum. See docs/specs/api/api.md for both.",
+  "description": "Generated from the Rust wire types of acp-stack; do not edit by hand. Regenerate with `cargo run --features dev-tools --bin generate-api-schema`. This root is a container of definitions, not a validatable body: validate a payload against `#/$defs/<namespace>/<TypeName>`. `$defs` splits into three namespaces because serde's `default` and `skip_serializing_if` attributes place a field in `required` under one direction but not the other. `request` is the deserialize contract (what a client sends), `response` is the serialize contract (what the server emits), and `config` is the deserialize contract for `acps-config.toml`. A type used on both sides appears once per namespace. `$defs/AuthTier` sits outside the namespaces as a sibling: it is the shared auth-tier vocabulary (`init`, `session`, `admin`, `local`), described per tier by the root `x-auth-tiers` annotation. Conventions: timestamp fields are RFC 3339 strings; an optional response field is omitted when absent rather than emitted as null, so its nullable type means absent and null are equivalent. Not covered, by design: the `/v1/ws` `LiveEvent` frames and the `acps init serve` streaming frames and state signals (hand-built and byte-pinned by golden tests), the envelope-bypassing binary download handler and the `health/ready` handler (whose readiness body is hand-built, not a typed DTO), and the untyped `config` import response. Cross-field rules (mutually-required or mutually-exclusive fields, exactly-one-of constraints, blank-as-absent) are mostly inexpressible in JSON Schema and stay enforced in code; `ApiError.code` is likewise an open dotted-namespace string rather than a closed enum. See docs/specs/api/api.md for both.",
   "x-auth-tiers": {
     "init": "one-off bearer token for `acps init serve`, valid only while hosted setup runs before session/admin keys exist; supplied via process input",
     "session": "everyday key for sessions, workspace files, mediated commands, logs, status, and pending permissions",
@@ -259,7 +259,7 @@
               "string",
               "null"
             ],
-            "description": "Optional `feature` filter — only deps whose `feature` matches\nare eligible. `None` means apply every actionable dep.",
+            "description": "Optional `feature` filter; only deps whose `feature` matches are\neligible. `None` means apply every actionable dep.",
             "default": null
           }
         }
@@ -1771,7 +1771,7 @@
           },
           "workload_env": {
             "type": "object",
-            "description": "`network-provider` only. Environment variables injected into every\nworkload spawned inside the provider's namespace (agent harness,\nmediated commands, ACP terminals) so the workload can reach whatever\negress path the provider set up — proxy endpoints, CA bundle paths.\nNever passed to the provider executable itself, and never in argv.\n`BTreeMap` for deterministic ordering across serialization round-trips.",
+            "description": "`network-provider` only. Environment variables injected into every\nworkload spawned inside the provider's namespace (agent harness,\nmediated commands, ACP terminals) so the workload can reach whatever\negress path the provider set up, such as proxy endpoints and CA bundle\npaths.\nNever passed to the provider executable itself, and never in argv.\n`BTreeMap` for deterministic ordering across serialization round-trips.",
             "additionalProperties": {
               "type": "string"
             }
@@ -2080,7 +2080,7 @@
         "properties": {
           "code": {
             "type": "string",
-            "description": "Stable machine-readable error identifier. An open, versioned set of\ndotted `<domain>.<condition>` strings (e.g. `config.invalid`,\n`request.invalid_param`, `agent.inference_5xx`). Not a closed enum —\nclients match known values and treat unknown codes as generic\nfailures. See docs/specs/api/api.md and docs/specs/state-logging.md."
+            "description": "Stable machine-readable error identifier. An open, versioned set of\ndotted `<domain>.<condition>` strings (e.g. `config.invalid`,\n`request.invalid_param`, `agent.inference_5xx`). Not a closed enum, so\nclients match known values and treat unknown codes as generic\nfailures. See docs/specs/api/api.md and docs/specs/state-logging.md."
           },
           "message": {
             "type": "string"
@@ -2284,7 +2284,7 @@
           "agent_id",
           "config_options"
         ],
-        "description": "`GET /v1/agent/config-options`: every session config option the configured\nagent advertises on a provisional `session/new`, projected verbatim —\nincluding `model_config`, `_`-prefixed customs, and category-less options\nthe typed `/v1/models` lanes do not carry. Discovery failure is a hard\nerror: unlike `/v1/models` there is no catalog to fall back to, and an\nempty list would be indistinguishable from \"advertises nothing\"."
+        "description": "`GET /v1/agent/config-options`: every session config option the configured\nagent advertises on a provisional `session/new`, projected verbatim,\nincluding `model_config`, `_`-prefixed customs, and category-less options\nthe typed `/v1/models` lanes do not carry. Discovery failure is a hard\nerror: unlike `/v1/models` there is no catalog to fall back to, and an\nempty list would be indistinguishable from \"advertises nothing\"."
       },
       "SessionConfigOptionSnapshot": {
         "type": "object",
@@ -2819,7 +2819,7 @@
             "items": {
               "$ref": "#/$defs/response/SkillInstallEntry"
             },
-            "description": "Same-named target skills left untouched because they carry no managed\nmarker — user-owned content is never replaced."
+            "description": "Same-named target skills left untouched because they carry no managed\nmarker. User-owned content is never replaced."
           }
         },
         "required": [
@@ -3116,7 +3116,7 @@
               "installed",
               "latest"
             ],
-            "description": "Both versions are known and they differ — operator should re-run install."
+            "description": "Both versions are known and they differ, so the operator should re-run install."
           },
           {
             "type": "object",
@@ -6142,7 +6142,7 @@
               "boolean",
               "null"
             ],
-            "description": "Whether the command matched the agent's last advertised list. `false`\nmeans the agent may ignore or misinterpret the invocation; omitted\nwhen no list has ever been advertised. Advisory only — the prompt is\nsubmitted regardless, because agents accept unadvertised commands and\nthe stored list can be stale."
+            "description": "Whether the command matched the agent's last advertised list. `false`\nmeans the agent may ignore or misinterpret the invocation; omitted\nwhen no list has ever been advertised. Advisory only: the prompt is\nsubmitted regardless, since agents accept unadvertised commands and the\nstored list can be stale."
           }
         },
         "required": [
@@ -6303,7 +6303,7 @@
           },
           "capability": {
             "type": "string",
-            "description": "The capability the agent would have had to advertise\n(`mcpCapabilities.*`), or — for `agent.mode`/`agent.model`/\n`agent.effort`/`agent.config_option` — the `session/new` config\noption that would have had to carry the value\n(`sessionConfig.configOption` for map entries)."
+            "description": "The capability the agent would have had to advertise\n(`mcpCapabilities.*`), or, for `agent.mode`/`agent.model`/\n`agent.effort`/`agent.config_option`, the `session/new` config\noption that would have had to carry the value\n(`sessionConfig.configOption` for map entries)."
           },
           "reason": {
             "type": "string"
@@ -6891,7 +6891,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Selectors accepted by `add` (indexed catalog sources only; empty for\nuser sources — use `source get` to enumerate those live)."
+            "description": "Selectors accepted by `add` (indexed catalog sources only; empty for\nuser sources, where `source get` enumerates those live)."
           },
           "essential": {
             "type": "array",
@@ -7218,7 +7218,7 @@
           },
           "deps_apply_in_flight": {
             "type": "boolean",
-            "description": "True while any dependency apply is running install snippets —\na `POST /v1/deps/apply`, an `acps deps apply`, or a detached\nbackground apply spawned by `acps init --deps-apply-async` — derived\nfrom the live `deps_apply_runs` row (pid-checked) plus the daemon's\nown apply lock. Poll `GET /v1/deps/apply/runs/latest` for run identity\nand progress. Advisory: a caller about to restart or reconfigure the\nruntime should wait for it to clear; the apply itself survives a\ndaemon restart (install children run in their own sessions)."
+            "description": "True while any dependency apply is running install snippets,\nwhether a `POST /v1/deps/apply`, an `acps deps apply`, or a detached\nbackground apply spawned by `acps init --deps-apply-async`. Derived\nfrom the live `deps_apply_runs` row (pid-checked) plus the daemon's\nown apply lock. Poll `GET /v1/deps/apply/runs/latest` for run identity\nand progress. Advisory: a caller about to restart or reconfigure the\nruntime should wait for it to clear; the apply itself survives a\ndaemon restart (install children run in their own sessions)."
           },
           "server": {
             "$ref": "#/$defs/response/ServerInfo"
@@ -8516,7 +8516,7 @@
             "title": "Text"
           }
         ],
-        "description": "One `[agent.config_options]` value. `Bool` must stay first in the untagged\norder so TOML `true` never parses as the string `\"true\"` — a select option\nmay legitimately advertise the ValueId `\"true\"`, and only the TOML type\ndistinguishes the two."
+        "description": "One `[agent.config_options]` value. `Bool` must stay first in the untagged\norder so TOML `true` never parses as the string `\"true\"`. A select option\nmay legitimately advertise the ValueId `\"true\"`, and only the TOML type\ndistinguishes the two."
       },
       "AgentAdapterOverrideConfig": {
         "type": "object",
@@ -9110,18 +9110,18 @@
                 "type": "null"
               }
             ],
-            "description": "Optional install action for `acps deps apply`. When absent, the\ncommand is \"check-only\" and `acps deps apply` will report it as\nnot actionable rather than guessing a package manager. This\nkeeps Dependency Apply narrowly scoped per the Phase 4 spec:\nno cross-distro reconciliation, no auto-derived package names —\nthe operator declares each install action explicitly.\nOnly valid under `[[dependencies.commands]]`; declaring it under\n`packages`, `runtimes`, or `mcp` fails config load."
+            "description": "Optional install action for `acps deps apply`. When absent, the\ncommand is \"check-only\" and `acps deps apply` will report it as\nnot actionable rather than guessing a package manager. This\nkeeps Dependency Apply narrowly scoped per the Phase 4 spec:\nno cross-distro reconciliation, no auto-derived package names.\nThe operator declares each install action explicitly.\nOnly valid under `[[dependencies.commands]]`; declaring it under\n`packages`, `runtimes`, or `mcp` fails config load."
           }
         },
         "additionalProperties": false
       },
       "DependencyInstallAction": {
         "type": "object",
-        "description": "Operator-declared install action for one dependency. Intentionally\nminimal: a single shell snippet, an optional `creates` postcheck,\nand a scope marker that distinguishes \"runs as the runtime user\"\nfrom \"needs OS-wide privilege\" so the apply runner knows when to\nescalate — and never silently downgrades privileged work to user\nscope behind the operator's back.",
+        "description": "Operator-declared install action for one dependency. Intentionally\nminimal: a single shell snippet, an optional `creates` postcheck,\nand a scope marker that distinguishes \"runs as the runtime user\"\nfrom \"needs OS-wide privilege\" so the apply runner knows when to\nescalate, and never silently downgrades privileged work to user\nscope behind the operator's back.",
         "properties": {
           "shell": {
             "type": "string",
-            "description": "Shell snippet executed via `[workspace].default_shell -c`.\nOperator declares it verbatim — no apt/brew/yum derivation in\nthe runtime."
+            "description": "Shell snippet executed via `[workspace].default_shell -c`.\nOperator declares it verbatim, with no apt/brew/yum derivation\nin the runtime."
           },
           "creates": {
             "type": [
@@ -9142,7 +9142,7 @@
             ],
             "format": "uint64",
             "minimum": 1,
-            "description": "Optional timeout override in seconds. Defaults to 600s\n(10 minutes) — same cap as the agent installer. Bounded above at\nvalidation by `MAX_INSTALL_TIMEOUT_SECS` (86400, 24 hours); `0` is\nrejected, so omit the field rather than zeroing it.",
+            "description": "Optional timeout override in seconds. Defaults to 600s\n(10 minutes), the same cap as the agent installer. Bounded above at\nvalidation by `MAX_INSTALL_TIMEOUT_SECS` (86400, 24 hours); `0` is\nrejected, so omit the field rather than zeroing it.",
             "maximum": 86400
           }
         },
@@ -9161,7 +9161,7 @@
           {
             "type": "string",
             "const": "system",
-            "description": "Action needs OS-wide privilege (system package manager, writes\nunder /usr or /opt). Runs directly when the process is root,\nescalates through passwordless `sudo -n` when it isn't (never a\npassword prompt), and otherwise refuses early with a clear\n\"privilege required\" outcome — the runner never falls back to\nuser scope."
+            "description": "Action needs OS-wide privilege (system package manager, writes\nunder /usr or /opt). Runs directly when the process is root,\nescalates through passwordless `sudo -n` when it isn't (never a\npassword prompt), and otherwise refuses early with a clear\n\"privilege required\" outcome. The runner never falls back to\nuser scope."
           }
         ]
       },
@@ -9357,7 +9357,7 @@
           },
           "workload_env": {
             "type": "object",
-            "description": "`network-provider` only. Environment variables injected into every\nworkload spawned inside the provider's namespace (agent harness,\nmediated commands, ACP terminals) so the workload can reach whatever\negress path the provider set up — proxy endpoints, CA bundle paths.\nNever passed to the provider executable itself, and never in argv.\n`BTreeMap` for deterministic ordering across serialization round-trips.",
+            "description": "`network-provider` only. Environment variables injected into every\nworkload spawned inside the provider's namespace (agent harness,\nmediated commands, ACP terminals) so the workload can reach whatever\negress path the provider set up, such as proxy endpoints and CA bundle\npaths.\nNever passed to the provider executable itself, and never in argv.\n`BTreeMap` for deterministic ordering across serialization round-trips.",
             "additionalProperties": {
               "type": "string"
             }
