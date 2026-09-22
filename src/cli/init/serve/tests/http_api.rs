@@ -519,6 +519,72 @@ async fn bootstrap_models_not_ready_before_config_is_staged() {
     assert_eq!(body["error"]["code"], "init.config_not_ready");
 }
 
+#[cfg(feature = "test-fixtures")]
+#[tokio::test]
+async fn start_route_rejects_starter_only_fields_against_existing_config() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let home = write_models_test_home(tempdir.path(), MODELS_TEST_CONFIG_TOML);
+    let _guard = TestEnvGuard::set(&[("HOME", home.as_path())]);
+
+    let manager = HostedInitManager::new(test_shared_secret_store().0);
+    let (app, _store_dir) = app_with_manager(manager.clone());
+    let (status, body) = request_json(
+        app,
+        Method::POST,
+        "/v1/init/sessions",
+        Some(json!({
+            "extensions": {
+                "network-egress": { "type": "network-provider", "provider": [] }
+            }
+        })),
+        Some(TEST_TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert_eq!(body["error"]["code"], "request.invalid_param");
+    assert_eq!(
+        body["error"]["message"],
+        "invalid parameter `extensions`: extension declarations apply only when creating a starter config"
+    );
+    assert!(
+        manager.session_current().is_none(),
+        "a rejected start must not create a session"
+    );
+}
+
+#[cfg(feature = "test-fixtures")]
+#[tokio::test]
+async fn start_route_exempts_resume_from_starter_only_rejection() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let home = write_models_test_home(tempdir.path(), MODELS_TEST_CONFIG_TOML);
+    let _guard = TestEnvGuard::set(&[("HOME", home.as_path())]);
+
+    let manager = HostedInitManager::new(test_shared_secret_store().0);
+    let (app, _store_dir) = app_with_manager(manager.clone());
+    let (status, body) = request_json(
+        app,
+        Method::POST,
+        "/v1/init/sessions",
+        Some(json!({
+            "resume": true,
+            "extensions": {
+                "network-egress": { "type": "network-provider", "provider": [] }
+            }
+        })),
+        Some(TEST_TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["data"]["status"], "running");
+    let session = manager
+        .session_current()
+        .expect("a resumed start must reach start_session");
+    assert_eq!(session.id, body["data"]["session_id"]);
+    // With no recorded run to resume, the spawned wizard settles the session on
+    // its own; wait for that instead of leaving the run in flight at test exit.
+    wait_for_status(&session, "errored");
+}
+
 #[tokio::test]
 async fn startup_discovery_close_route_releases_the_phase() {
     let session = test_session("init_close_rest");

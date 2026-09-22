@@ -45,7 +45,7 @@ use super::state_signal::InitStateSignal;
 use super::state_signal::{ApplicabilitySource, InitCategory, category_for_step_kind};
 use super::{
     InitArgs, InitMcpHttpHeader, InitMcpHttpServer, InitMcpStdioServer, InitMode,
-    InitNativeConfigUpload, run_hosted_init,
+    InitNativeConfigUpload, reject_starter_only_args_for_existing_config, run_hosted_init,
 };
 
 mod frames;

@@ -163,6 +163,22 @@ async fn create_session_handler(
         Ok(init_args) => init_args,
         Err(error) => return error.into_response(),
     };
+    // Starter-only declarations against a kept config must fail as an HTTP 400,
+    // so a client can adapt the body and retry; the same check inside the init
+    // thread only ever surfaces as an errored session. The probe with
+    // `creating_config = false` says whether the body carries any such
+    // declaration, so HOME is only resolved when one is present.
+    if let Err(error) = reject_starter_only_args_for_existing_config(&init_args, false) {
+        match config::default_config_path() {
+            Ok(config_path) if config_path.exists() => return error.into_response(),
+            Ok(_) => {}
+            // The init thread resolves HOME again and owns that failure.
+            Err(path_error) => tracing::warn!(
+                error = %path_error,
+                "could not resolve the config path for the starter-only check; deferring to the init run",
+            ),
+        }
+    }
     match state.manager.start_session(init_args) {
         Ok(response) => ApiSuccess::new(response).into_response(),
         Err(StartSessionError::Active) => api_error(
