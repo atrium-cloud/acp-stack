@@ -711,6 +711,7 @@ Session creation proceeds when a configured `agent.mode`, model, `agent.effort`,
 - Response: compact windowed session turn status. Each row includes a derived `state`: `idle`, `prompt_sent`, `working`, `permission_required`, `done`, `stopped`, `error`, `cancelled`, or `closed`.
     - `done` means the latest prompt completed with `stop_reason = "end_turn"`.
     - `available` rows derive their `state` from activity like `active` rows do; the durable `status` field on the same row tells them apart.
+    - A fork child's state starts from its own prompts: a new fork reports `idle` until it is first prompted.
 - Notes: also exposed on the local Unix socket without bearer auth.
 
 ### `GET /v1/sessions/{id}`
@@ -739,9 +740,13 @@ Session creation proceeds when a configured `agent.mode`, model, `agent.effort`,
 - Request: optional `cwd`, `target_id` (alias `target`), and `{ "message_id": "<prompt message id>" }`.
 - Response: standard envelope.
 - Errors: `501 agent.unsupported_capability` reports unsupported fork capabilities. `400 request.invalid_param` is returned when the fork point cannot be resolved for the running agent.
-- Notes: forks a session through ACP. Without `message_id` the fork carries the whole parent history.
+- Notes: forks a session through ACP. Without `message_id` the fork carries the parent's settled history: the turns settled when the fork is dispatched. A turn still in flight at that moment, and one submitted while the fork request is outstanding, stay with the parent.
 - Breakpoint semantics: a fork with `message_id` ends just before the named prompt. The named prompt, its turn, and everything after it stay out of the fork, which leaves the fork ready to receive an edited version of that prompt. acp-stack requires this cut of every adapter it forks at a message id.
-- `message_id` is always an acp-stack prompt message id from the parent session, acknowledged by the agent. acp-stack translates it into the fork point the running adapter reads:
+- Child history: the child's durable record opens with the part of the parent's conversation the fork holds, written with the child row in one transaction.
+    - `GET /v1/sessions/{id}/events` on the child replays the parent's conversation rows up to the fork point in their original `(created_at, id)` order, followed by the child's own `session.forked` row. The parent's lifecycle rows stay with the parent.
+    - The child's prompt rows include the parent's prompts up to the fork point, with their message ids and acknowledgement, so the child can itself be forked at an inherited `message_id`.
+    - See [Fork Inheritance](../state-logging.md#fork-inheritance) for which rows are carried and how they are keyed.
+- `message_id` is always an acp-stack prompt message id from the parent session, acknowledged by the agent. When the parent is itself a fork, its inherited prompts qualify too. acp-stack translates it into the fork point the running adapter reads:
     - Adapters on the acp-stack dialect receive it verbatim as `_meta.acpStack.messageId` and perform the cut themselves.
     - Adapters declared `fork_point = "jetbrains-air"` in the agent catalog receive `_meta.jetbrains.air.fork`, which they resolve inclusively. They are handed the agent message id anchoring the turn before the named prompt, so the cut lands in the same place.
 - Naming the first prompt of a session is refused with `400 request.invalid_param` on an adapter that resolves the fork point inclusively: there is no preceding turn to keep, and a fork of nothing is a new session (`POST /v1/sessions`).

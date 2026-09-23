@@ -347,7 +347,7 @@ impl AgentSupervisor {
         guard.append_session_event(
             session_id,
             "info",
-            "session.cancel_requested",
+            EVENT_KIND_SESSION_CANCEL_REQUESTED,
             "cancel requested",
             &json!({ "agent_session_id": agent_session_id }).to_string(),
         )?;

@@ -6,12 +6,13 @@ use rusqlite::{OptionalExtension, params};
 
 use super::core::StateStore;
 use super::events::{EVENT_SOURCE_ACP, EVENT_SOURCE_SYSTEM, Event, row_to_event};
-use super::ids::{current_timestamp, next_event_id};
+use super::ids::{current_timestamp, next_event_id, next_prompt_id};
 use super::records::{LogOrder, SessionFilter};
 use super::rows::validate_json_payload;
 use super::sink_outbox;
 
 mod events;
+mod fork;
 mod prompts;
 mod queries;
 
@@ -42,6 +43,14 @@ pub const EVENT_KIND_MCP_SESSION_SKIPPED: &str = "mcp.session_skipped";
 pub const EVENT_KIND_SESSION_CAPABILITY_IGNORED: &str = "session.capability_ignored";
 /// The session was demoted from `active` to `available`; payload names the reason.
 pub const EVENT_KIND_SESSION_AVAILABLE: &str = "session.available";
+/// The agent honored a `session/cancel`; the turn it interrupted ends here.
+pub const EVENT_KIND_SESSION_CANCEL_REQUESTED: &str = "session.cancel_requested";
+/// Permission decisions; an ACP-source decision is scoped to the session that
+/// raised the request.
+pub const EVENT_KIND_PERMISSION_APPROVED: &str = "permission.approved";
+pub const EVENT_KIND_PERMISSION_DENIED: &str = "permission.denied";
+pub const EVENT_KIND_PERMISSION_CANCELLED: &str = "permission.cancelled";
+pub const EVENT_KIND_PERMISSION_EXPIRED: &str = "permission.expired";
 /// An ACP client terminal reached a terminal state; payload joins the tool
 /// call's `terminalId` to its `commands` row and carries the run's verdict.
 pub const EVENT_KIND_TERMINAL_FINISHED: &str = "terminal.finished";

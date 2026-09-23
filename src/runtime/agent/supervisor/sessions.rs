@@ -445,34 +445,33 @@ impl AgentSupervisor {
         parent_session_id: &str,
         message_id: &str,
         state: &Arc<TokioMutex<StateStore>>,
-    ) -> Result<ForkPoint> {
-        let prompt = {
+    ) -> Result<BreakpointFork> {
+        let (prompt, preceding) = {
             let guard = state.lock().await;
-            guard.get_prompt_by_message_id(parent_session_id, message_id)?
-        }
-        .ok_or_else(|| StackError::InvalidParam {
-            field: "message_id",
-            reason: format!(
-                "session `{parent_session_id}` has no prompt with message id `{message_id}`"
-            ),
-        })?;
+            let prompt = guard
+                .get_prompt_by_message_id(parent_session_id, message_id)?
+                .ok_or_else(|| StackError::InvalidParam {
+                    field: "message_id",
+                    reason: format!(
+                        "session `{parent_session_id}` has no prompt with message id `{message_id}`"
+                    ),
+                })?;
+            let preceding = guard.preceding_prompt(parent_session_id, &prompt.id)?;
+            (prompt, preceding)
+        };
         if !prompt.message_id_acknowledged {
             return Err(StackError::InvalidParam {
                 field: "message_id",
                 reason: format!("message id `{message_id}` was not acknowledged by the agent"),
             });
         }
-        match self.fork_point_dialect().await {
-            ForkPointDialect::AcpStack => Ok(ForkPoint::AcpStackMessageId(message_id.to_owned())),
+        let fork_point = match self.fork_point_dialect().await {
+            ForkPointDialect::AcpStack => ForkPoint::AcpStackMessageId(message_id.to_owned()),
             ForkPointDialect::JetbrainsAir => {
-                let preceding = {
-                    let guard = state.lock().await;
-                    guard.preceding_prompt(parent_session_id, &prompt.id)?
-                };
                 // The named prompt opens the session, so there is no turn to
                 // keep. A fork of nothing is a new session, which the client
                 // asks for through `POST /v1/sessions` instead.
-                let preceding = preceding.ok_or_else(|| StackError::InvalidParam {
+                let preceding = preceding.as_ref().ok_or_else(|| StackError::InvalidParam {
                     field: "message_id",
                     reason: format!(
                         "message id `{message_id}` names the first prompt of session `{parent_session_id}`, and this agent cannot fork at a point with no preceding turn"
@@ -480,18 +479,27 @@ impl AgentSupervisor {
                 })?;
                 preceding
                     .agent_message_id
+                    .clone()
                     .map(ForkPoint::AirMessageId)
                     .ok_or_else(|| StackError::InvalidParam {
                         field: "message_id",
                         reason: format!(
                             "the turn before message id `{message_id}` produced no agent message this agent can be forked at"
                         ),
-                    })
+                    })?
             }
-        }
+        };
+        Ok(BreakpointFork {
+            fork_point,
+            held_through_prompt_id: preceding.map(|preceding| preceding.id),
+        })
     }
 
     /// `POST /v1/sessions/{id}/fork`. `ignored` is always empty: provisioning happens at create.
+    ///
+    /// ACP `session/fork` streams no history, so the child's durable record is
+    /// written here from the parent's: the turns the fork holds, cut at the
+    /// same prompt the adapter cuts at (see `StateStore::insert_forked_session`).
     pub async fn fork_session(
         &self,
         parent_session_id: &str,
@@ -504,12 +512,23 @@ impl AgentSupervisor {
         let bridge = self.bridge().await?;
         let parent = fetch_open_session(state, parent_session_id).await?;
         let breakpoint_message_id = message_id;
-        let fork_point = match breakpoint_message_id.as_deref() {
-            Some(message_id) => Some(
-                self.resolve_fork_point(parent_session_id, message_id, state)
-                    .await?,
-            ),
-            None => None,
+        // Taken before dispatch: a head fork holds the turns settled by the
+        // time the adapter is asked, so a turn still in flight, or one
+        // submitted while the fork is outstanding, stays with the parent.
+        let (fork_point, held_through_prompt_id) = match breakpoint_message_id.as_deref() {
+            Some(message_id) => {
+                let breakpoint = self
+                    .resolve_fork_point(parent_session_id, message_id, state)
+                    .await?;
+                (
+                    Some(breakpoint.fork_point),
+                    breakpoint.held_through_prompt_id,
+                )
+            }
+            None => {
+                let guard = state.lock().await;
+                (None, guard.newest_settled_prompt_id(parent_session_id)?)
+            }
         };
         let resolved_cwd = resolve_session_cwd(
             Some(cwd.unwrap_or_else(|| stored_or_workspace_cwd(&parent.cwd, workspace_root))),
@@ -519,6 +538,10 @@ impl AgentSupervisor {
         let PartitionedMcpServers { accepted, skipped } =
             bridge.capabilities().partition_mcp_servers(mcp_servers)?;
         let accepted_names = crate::runtime::agent::mcp::server_names(&accepted);
+        // The held turns have settled, so their trailing notifications are
+        // already queued; they must be durable before the parent's log is
+        // copied.
+        bridge.drain_session_events().await;
         let response = bridge
             .fork_session(
                 AcpSessionId::new(parent_agent_session_id.clone()),
@@ -547,10 +570,12 @@ impl AgentSupervisor {
             metadata_json,
         };
         let guard = state.lock().await;
-        let inserted = guard.insert_session_for_target(
+        let inserted = guard.insert_forked_session(
             &parent.target_id,
             child_agent_session_id.clone(),
             record,
+            parent_session_id,
+            held_through_prompt_id.as_deref(),
         )?;
         let payload = json!({
             "target_id": &parent.target_id,
@@ -693,6 +718,14 @@ impl AgentSupervisor {
         }
         Ok(snapshot)
     }
+}
+
+/// A breakpoint resolved for the running adapter.
+struct BreakpointFork {
+    fork_point: ForkPoint,
+    /// The parent's last prompt the fork holds: the one before the named
+    /// prompt, `None` when the named prompt opens the session.
+    held_through_prompt_id: Option<String>,
 }
 
 /// Which ACP method [`AgentSupervisor::attach_session`] sends for an existing session.

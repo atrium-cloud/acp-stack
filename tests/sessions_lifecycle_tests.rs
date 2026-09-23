@@ -661,6 +661,225 @@ async fn fork_session_forwards_message_breakpoint_to_placebo() {
     assert_eq!(metadata["fork"]["message_id"], BREAKPOINT_MESSAGE_ID);
 }
 
+/// `session.update` rows the placebo leaves per turn: the user chunk and its
+/// two agent chunks.
+const PLACEBO_CONVERSATION_ROWS_PER_TURN: usize = 3;
+
+/// A session's log once every `session.update` row of its `turns` settled
+/// turns is durable; the last turn's tail can trail its prompt row.
+async fn log_after_turns(harness: &Harness, session_id: &str, turns: usize) -> Vec<Value> {
+    let deadline = tokio::time::Instant::now() + PROMPT_SETTLE_BUDGET;
+    loop {
+        let events = session_events(harness, session_id).await;
+        let rows = events
+            .iter()
+            .filter(|event| event["kind"] == "session.update")
+            .count();
+        if rows >= turns * PLACEBO_CONVERSATION_ROWS_PER_TURN {
+            return events;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{turns} turns never became durable: {events:#?}"
+        );
+        tokio::time::sleep(PROMPT_SETTLE_POLL_INTERVAL).await;
+    }
+}
+
+async fn fork_at(harness: &Harness, session_id: &str, message_id: Option<&str>) -> String {
+    let body = match message_id {
+        Some(message_id) => json!({ "message_id": message_id }),
+        None => json!({}),
+    };
+    let response = http()
+        .post(format!(
+            "{}/v1/sessions/{}/fork",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .json(&body)
+        .send()
+        .await
+        .expect("fork");
+    assert_eq!(response.status(), StatusCode::OK);
+    let forked: Value = response.json().await.expect("fork json");
+    forked["data"]["id"].as_str().expect("child id").to_owned()
+}
+
+/// What a fork copy keeps of its original: everything but the row id.
+fn row_projection(event: &Value) -> (Value, Value, Value, Value) {
+    (
+        event["created_at"].clone(),
+        event["kind"].clone(),
+        event["source"].clone(),
+        event["payload_json"].clone(),
+    )
+}
+
+fn conversation(events: &[Value]) -> Vec<(Value, Value, Value, Value)> {
+    events
+        .iter()
+        .filter(|event| event["kind"] == "session.update")
+        .map(row_projection)
+        .collect()
+}
+
+/// The rows a fork child's log holds before its own `session.forked` row.
+fn inherited_rows(child_events: &[Value]) -> Vec<(Value, Value, Value, Value)> {
+    let forked_at = child_events
+        .iter()
+        .position(|event| event["kind"] == "session.forked")
+        .expect("the child records its fork");
+    child_events[..forked_at]
+        .iter()
+        .map(row_projection)
+        .collect()
+}
+
+/// Position of the named prompt's user chunk, where a breakpoint fork cuts.
+fn user_chunk_position(events: &[Value], prompt_id: &str) -> usize {
+    events
+        .iter()
+        .position(|event| {
+            chunk_kind(event).as_deref() == Some("user_message_chunk")
+                && serde_json::from_str::<Value>(event["payload_json"].as_str().unwrap_or(""))
+                    .map(|payload| payload["update"]["_meta"]["acpStack"]["promptId"] == prompt_id)
+                    .unwrap_or(false)
+        })
+        .expect("the prompt's user chunk is logged")
+}
+
+#[tokio::test]
+async fn a_head_fork_carries_the_parent_conversation_before_its_fork_marker() {
+    let harness = Harness::spawn().await;
+    let session_id = create_session(&harness).await;
+    let (_, first_message_id) = submit_and_settle_ids(&harness, &session_id, "first turn").await;
+    let (_, second_message_id) = submit_and_settle_ids(&harness, &session_id, "second turn").await;
+    let parent_events = log_after_turns(&harness, &session_id, 2).await;
+
+    let child_id = fork_at(&harness, &session_id, None).await;
+
+    // The child replays as the whole conversation, then its own fork marker;
+    // the parent's lifecycle rows stay with the parent.
+    let child_events = session_events(&harness, &child_id).await;
+    assert_eq!(
+        inherited_rows(&child_events),
+        conversation(&parent_events),
+        "child = {child_events:#?}"
+    );
+    let state = harness.state.lock().await;
+    for message_id in [&first_message_id, &second_message_id] {
+        let inherited = state
+            .get_prompt_by_message_id(&child_id, message_id)
+            .expect("child prompt lookup")
+            .expect("the child holds the parent's prompt");
+        assert!(inherited.message_id_acknowledged);
+        assert_eq!(inherited.status, "completed");
+    }
+}
+
+#[tokio::test]
+async fn a_breakpoint_fork_carries_the_parent_conversation_strictly_before_the_named_prompt() {
+    let harness = Harness::spawn().await;
+    let session_id = create_session(&harness).await;
+    let (_, first_message_id) = submit_and_settle_ids(&harness, &session_id, "first turn").await;
+    let (second_prompt_id, second_message_id) =
+        submit_and_settle_ids(&harness, &session_id, "second turn").await;
+    let (_, third_message_id) = submit_and_settle_ids(&harness, &session_id, "third turn").await;
+    let parent_events = log_after_turns(&harness, &session_id, 3).await;
+
+    let child_id = fork_at(&harness, &session_id, Some(&second_message_id)).await;
+
+    let cut = user_chunk_position(&parent_events, &second_prompt_id);
+    let expected = conversation(&parent_events[..cut]);
+    assert_eq!(expected.len(), PLACEBO_CONVERSATION_ROWS_PER_TURN);
+    let child_events = session_events(&harness, &child_id).await;
+    assert_eq!(
+        inherited_rows(&child_events),
+        expected,
+        "child = {child_events:#?}"
+    );
+    let state = harness.state.lock().await;
+    assert!(
+        state
+            .get_prompt_by_message_id(&child_id, &first_message_id)
+            .expect("child prompt lookup")
+            .is_some()
+    );
+    for message_id in [&second_message_id, &third_message_id] {
+        assert!(
+            state
+                .get_prompt_by_message_id(&child_id, message_id)
+                .expect("child prompt lookup")
+                .is_none(),
+            "the named prompt and everything after it stay with the parent"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_fork_of_a_fork_resolves_inherited_prompts_ahead_of_its_own() {
+    let harness = Harness::spawn().await;
+    let session_id = create_session(&harness).await;
+    let (_, first_message_id) = submit_and_settle_ids(&harness, &session_id, "first turn").await;
+    let (second_prompt_id, second_message_id) =
+        submit_and_settle_ids(&harness, &session_id, "second turn").await;
+    let parent_events = log_after_turns(&harness, &session_id, 2).await;
+    let child_id = fork_at(&harness, &session_id, None).await;
+
+    let (third_prompt_id, third_message_id) =
+        submit_and_settle_ids(&harness, &child_id, "third turn").await;
+    let child_events = log_after_turns(&harness, &child_id, 3).await;
+    {
+        let state = harness.state.lock().await;
+        let second_inherited = state
+            .get_prompt_by_message_id(&child_id, &second_message_id)
+            .expect("child prompt lookup")
+            .expect("second prompt inherited");
+        let preceding = state
+            .preceding_prompt(&child_id, &third_prompt_id)
+            .expect("preceding lookup")
+            .expect("an inherited prompt precedes the child's own");
+        assert_eq!(preceding.id, second_inherited.id);
+    }
+
+    // A breakpoint at an inherited prompt resolves on the child exactly as it
+    // would on the parent.
+    let at_inherited = fork_at(&harness, &child_id, Some(&second_message_id)).await;
+    let cut = user_chunk_position(&parent_events, &second_prompt_id);
+    assert_eq!(
+        inherited_rows(&session_events(&harness, &at_inherited).await),
+        conversation(&parent_events[..cut])
+    );
+    {
+        let state = harness.state.lock().await;
+        assert!(
+            state
+                .get_prompt_by_message_id(&at_inherited, &first_message_id)
+                .expect("prompt lookup")
+                .is_some()
+        );
+        assert!(
+            state
+                .get_prompt_by_message_id(&at_inherited, &second_message_id)
+                .expect("prompt lookup")
+                .is_none()
+        );
+    }
+
+    // A breakpoint at the child's own prompt holds every inherited turn.
+    let at_own = fork_at(&harness, &child_id, Some(&third_message_id)).await;
+    let cut = user_chunk_position(&child_events, &third_prompt_id);
+    assert_eq!(
+        inherited_rows(&session_events(&harness, &at_own).await),
+        conversation(&child_events[..cut])
+    );
+    assert_eq!(
+        conversation(&child_events[..cut]),
+        conversation(&parent_events)
+    );
+}
+
 /// Registry override that makes the placebo agent look like a vendor adapter
 /// honoring the JetBrains AIR fork extension, which is the only way acp-stack
 /// learns an adapter speaks that dialect.

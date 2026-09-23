@@ -475,6 +475,10 @@ impl StateStore {
                            ) AS row_number
                     FROM prompts p
                     JOIN window_sessions ws ON ws.session_id = p.session_id
+                    JOIN sessions owner ON owner.id = p.session_id
+                    -- A fork child's inherited prompts predate the child; its
+                    -- state starts from its own first prompt.
+                    WHERE p.created_at >= owner.created_at
                 )
                 WHERE row_number = 1
             ),
@@ -681,40 +685,9 @@ impl StateStore {
         record: NewSessionRecord,
     ) -> Result<SessionRecord> {
         validate_json_payload(self.connection(), &record.metadata_json)?;
-        let now = current_timestamp();
-        let row = SessionRecord {
-            id: record.id,
-            target_id: target_id.to_owned(),
-            agent_session_id,
-            created_at: now.clone(),
-            updated_at: now,
-            status: SESSION_STATUS_ACTIVE.to_owned(),
-            agent_id: record.agent_id,
-            cwd: record.cwd,
-            title: record.title,
-            metadata_json: record.metadata_json,
-        };
+        let row = new_active_session_row(target_id, agent_session_id, record);
         self.persist_with_outbox("sessions", &row.id, &row.created_at, |conn| {
-            conn.execute(
-                r#"
-                INSERT INTO sessions
-                    (id, target_id, agent_session_id, created_at, updated_at, status, agent_id, cwd, title, metadata_json)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-                "#,
-                params![
-                    row.id,
-                    row.target_id,
-                    row.agent_session_id,
-                    row.created_at,
-                    row.updated_at,
-                    row.status,
-                    row.agent_id,
-                    row.cwd,
-                    row.title,
-                    row.metadata_json,
-                ],
-            )?;
-            Ok(())
+            insert_session_row(conn, &row)
         })?;
         Ok(row)
     }
@@ -1015,6 +988,50 @@ impl StateStore {
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
     }
+}
+
+/// The row a created or forked session starts as.
+pub(super) fn new_active_session_row(
+    target_id: &str,
+    agent_session_id: String,
+    record: NewSessionRecord,
+) -> SessionRecord {
+    let now = current_timestamp();
+    SessionRecord {
+        id: record.id,
+        target_id: target_id.to_owned(),
+        agent_session_id,
+        created_at: now.clone(),
+        updated_at: now,
+        status: SESSION_STATUS_ACTIVE.to_owned(),
+        agent_id: record.agent_id,
+        cwd: record.cwd,
+        title: record.title,
+        metadata_json: record.metadata_json,
+    }
+}
+
+pub(super) fn insert_session_row(conn: &rusqlite::Connection, row: &SessionRecord) -> Result<()> {
+    conn.execute(
+        r#"
+        INSERT INTO sessions
+            (id, target_id, agent_session_id, created_at, updated_at, status, agent_id, cwd, title, metadata_json)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        "#,
+        params![
+            row.id,
+            row.target_id,
+            row.agent_session_id,
+            row.created_at,
+            row.updated_at,
+            row.status,
+            row.agent_id,
+            row.cwd,
+            row.title,
+            row.metadata_json,
+        ],
+    )?;
+    Ok(())
 }
 
 fn normalize_listed_session_timestamp(raw: &str) -> Result<String> {

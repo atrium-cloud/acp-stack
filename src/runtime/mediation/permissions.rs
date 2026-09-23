@@ -14,8 +14,9 @@ use crate::config::{AcpPromptAction, PermissionTimeoutAction};
 use crate::error::{Result, StackError};
 use crate::events::EventHub;
 use crate::state::{
-    NewPermissionRequest, PermissionDecisionRecord, PermissionRequestRecord, PermissionStatus,
-    StateStore,
+    EVENT_KIND_PERMISSION_APPROVED, EVENT_KIND_PERMISSION_CANCELLED, EVENT_KIND_PERMISSION_DENIED,
+    EVENT_KIND_PERMISSION_EXPIRED, NewPermissionRequest, PermissionDecisionRecord,
+    PermissionRequestRecord, PermissionStatus, StateStore,
 };
 
 /// Source of a permission request. ACP-source requests originate from a
@@ -245,7 +246,7 @@ impl PermissionService {
             )?
         };
         self.publish_created_event(&record).await;
-        self.publish_decision_event(&record.id, &decision, "permission.approved")
+        self.publish_decision_event(&record.id, &decision, EVENT_KIND_PERMISSION_APPROVED)
             .await;
         Ok((record, decision_view(decision)))
     }
@@ -442,10 +443,10 @@ impl PermissionService {
         }
 
         let kind = match outcome {
-            PermissionOutcome::Approved { .. } => "permission.approved",
-            PermissionOutcome::Denied { .. } => "permission.denied",
-            PermissionOutcome::Canceled { .. } => "permission.cancelled",
-            PermissionOutcome::Expired => "permission.expired",
+            PermissionOutcome::Approved { .. } => EVENT_KIND_PERMISSION_APPROVED,
+            PermissionOutcome::Denied { .. } => EVENT_KIND_PERMISSION_DENIED,
+            PermissionOutcome::Canceled { .. } => EVENT_KIND_PERMISSION_CANCELLED,
+            PermissionOutcome::Expired => EVENT_KIND_PERMISSION_EXPIRED,
         };
         self.publish_decision_event(id, &decision, kind).await;
 
@@ -489,7 +490,7 @@ impl PermissionService {
                 PermissionTimeoutAction::Deny => (
                     PermissionStatus::Expired,
                     PermissionOutcome::Expired,
-                    "permission.expired",
+                    EVENT_KIND_PERMISSION_EXPIRED,
                 ),
                 PermissionTimeoutAction::Approve => (
                     PermissionStatus::Approved,
@@ -497,7 +498,7 @@ impl PermissionService {
                         option_id: None,
                         reason: Some("auto-approved on timeout".to_owned()),
                     },
-                    "permission.approved",
+                    EVENT_KIND_PERMISSION_APPROVED,
                 ),
             };
 
@@ -678,10 +679,10 @@ async fn persist_and_publish_permission_event(
     };
     let message = match kind {
         "permission.created" => "permission requested",
-        "permission.approved" => "permission approved",
-        "permission.denied" => "permission denied",
-        "permission.cancelled" => "permission cancelled",
-        "permission.expired" => "permission expired",
+        EVENT_KIND_PERMISSION_APPROVED => "permission approved",
+        EVENT_KIND_PERMISSION_DENIED => "permission denied",
+        EVENT_KIND_PERMISSION_CANCELLED => "permission cancelled",
+        EVENT_KIND_PERMISSION_EXPIRED => "permission expired",
         _ => "permission event",
     };
     {

@@ -152,6 +152,10 @@ The anchor is the `messageId` of the last `agent_message_chunk` of a turn, kept 
 
 Adapters on the `jetbrains-air` dialect implement no acp-stack extension, so they never echo `_meta.acpStack.messageId` and could never acknowledge a prompt. For them a settled `session/prompt` response is the acknowledgment, because the same settled turn is what produces the anchor their fork point is translated from.
 
+### Fork History
+
+An adapter answers `session/fork` with the new session id and continues the fork from its own copy of the history; `session/load` is the method that streams history back as `session/update`. acp-stack therefore writes the child's durable history itself once the fork is confirmed: the parent's conversation rows and prompt rows up to the point the adapter cuts at. A head fork dispatched during a turn holds the turns settled before it, matching adapters that fork from their last settled turn. See [Fork Inheritance](../state-logging.md#fork-inheritance) for the carried rows.
+
 ### Session Attachment
 
 The bridge records every agent session id it opens, through `session/new`, `session/load`, `session/resume`, and `session/fork`, and drops the ones `session/close` and `session/delete` retire. The set lives with the bridge instance, so a restarted agent starts with none of them.
@@ -180,6 +184,8 @@ ACP session lifecycle calls pass CWDs as paths because ACP has no directory-hand
 ## Streaming
 
 ACP `session/update` notifications are persisted as durable events and published to WebSocket subscribers. Explicit `type: "diff"` tool-call content is also reduced into the bounded process-local snapshot returned by `GET /v1/sessions/{id}/changes`; no diff is inferred from tool kind, locations, filesystem calls, or Git. Prompt submission returns quickly with a prompt id; clients can follow live updates or poll durable prompt state.
+
+Known gap: a notification is persisted against the local session row its agent session id resolves to. Notifications an adapter sends for a new session between the `session/new` or `session/fork` response and the insert of that row are dropped, so a session's earliest updates (such as an `available_commands_update` sent as it opens) can be missing from its log and its stored projections.
 
 An accepted prompt, including a slash command submitted through the commands route, is recorded on the same stream as a `user_message_chunk`, one event per content block. It is written after the previous turn's notifications have drained and before the ACP request is dispatched, so each user turn sits between the agent output of the turn before it and its own. See the user-prompt entry under Session Update Events in `docs/specs/state-logging.md` for the row shape.
 

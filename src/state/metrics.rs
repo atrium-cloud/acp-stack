@@ -310,9 +310,15 @@ impl StateStore {
 
     fn turn_metrics(&self, window: &MetricsWindow, session_count: i64) -> Result<TurnMetrics> {
         let mut by_status = std::collections::BTreeMap::new();
+        // A fork child's inherited prompts keep their original timestamps, so
+        // they are the rows older than the child itself; the session that ran
+        // the turn already counts it.
         let mut statement = self.connection().prepare(
-            "SELECT status, COUNT(*) FROM prompts \
-             WHERE created_at >= ?1 AND created_at < ?2 GROUP BY status",
+            "SELECT p.status, COUNT(*) FROM prompts p \
+             JOIN sessions s ON s.id = p.session_id \
+             WHERE p.created_at >= ?1 AND p.created_at < ?2 \
+               AND p.created_at >= s.created_at \
+             GROUP BY p.status",
         )?;
         let rows = statement.query_map(params![window.since, window.until], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
@@ -337,12 +343,15 @@ impl StateStore {
 
     fn prompt_failure_metrics(&self, window: &MetricsWindow) -> Result<PromptFailureMetrics> {
         let mut out = PromptFailureMetrics::default();
+        // Same own-rows rule as `turn_metrics`.
         let mut statement = self.connection().prepare(
-            "SELECT failure_class, COUNT(*) FROM prompts \
-             WHERE status IN ('errored', 'stalled') \
-               AND failure_class IS NOT NULL \
-               AND updated_at >= ?1 AND updated_at < ?2 \
-             GROUP BY failure_class",
+            "SELECT p.failure_class, COUNT(*) FROM prompts p \
+             JOIN sessions s ON s.id = p.session_id \
+             WHERE p.status IN ('errored', 'stalled') \
+               AND p.failure_class IS NOT NULL \
+               AND p.updated_at >= ?1 AND p.updated_at < ?2 \
+               AND p.created_at >= s.created_at \
+             GROUP BY p.failure_class",
         )?;
         let rows = statement.query_map(params![window.since, window.until], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
@@ -365,8 +374,10 @@ impl StateStore {
         }
 
         let mut event_statement = self.connection().prepare(
-            "SELECT payload_json FROM events \
-             WHERE kind = ?1 AND created_at >= ?2 AND created_at < ?3",
+            "SELECT e.payload_json FROM events e \
+             JOIN sessions s ON s.id = e.session_id \
+             WHERE e.kind = ?1 AND e.created_at >= ?2 AND e.created_at < ?3 \
+               AND e.created_at >= s.created_at",
         )?;
         let event_rows = event_statement.query_map(
             params![

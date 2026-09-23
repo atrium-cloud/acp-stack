@@ -208,6 +208,35 @@ The `reason` field in a decision payload (and in `permission_decisions.reason`) 
 
 A command that reaches a terminal status while its permission request is still `pending` cancels that permission with one of the reasons above. A permission request always ends with its command.
 
+### Fork Inheritance
+
+A fork child starts with the part of its parent's durable record that the fork holds, written together with the child's `sessions` row in one transaction. The fork point is the first parent prompt the fork leaves out:
+
+- A breakpoint fork leaves out the named prompt.
+- A head fork leaves out the first turn in flight when the fork is dispatched, or else the first turn submitted while the fork request is outstanding. With neither, it holds every prompt.
+
+The child receives:
+
+- Events: the parent's conversation rows older than the fork point (all of them when the fork holds every prompt), in their original `(created_at, id)` order. The child's own `session.forked` row follows them.
+- Conversation rows: `session.update` from both sources, `prompt.inference_failed`, `prompt.stalled`, `prompt.errored`, `session.cancel_requested`, `terminal.finished`, and the session-scoped ACP permission decisions (`permission.approved`, `permission.denied`, `permission.cancelled`, `permission.expired`). Every other session-scoped kind stays with the parent:
+    - `session.created`, `session.loaded`, `session.resumed`, `session.available`, and `session.closed` track the parent session's own lifecycle.
+    - `session.forked` and `session.fork.created_child` mark the parent's own place in fork lineage. The child writes its own `session.forked`.
+    - `session.capability_ignored`, `mcp.session_attached`, and `mcp.session_skipped` record what the parent's create or attach provisioned. The fork writes the child's own `mcp.session_skipped` when it skips servers.
+    - `session.config_option_set` records a config change a client made on the parent through `POST /v1/sessions/{id}/config-options`. The child keeps that change's effect in the adapter's forked session and through the inherited `config_option_update` rows.
+    - `usage.reported` and `tool.execute` are derived from `session.update` payloads the child already carries verbatim, so each usage report and shell run counts once, on the session that produced it.
+- Prompts: a copy of each held prompt row, with the parent's message id, acknowledgement, `agent_message_id` anchor, status, and timestamps. A breakpoint fork of the child resolves an inherited message id exactly as it does on the parent. Copies take fresh prompt ids minted in the parent's submission order, so they sort before every prompt later sent to the child.
+
+Copies are verbatim in every column but the row id and `session_id`:
+
+- A carried payload still names the agent session and the prompt row that recorded it, in `sessionId`, `_meta.acpStack.promptId`, and `prompt_id`. The turn's message id is the identity the child's prompt row shares with its carried chunks.
+- Inherited rows keep their original `created_at`, so a session's inherited rows are exactly its rows older than the session's own `created_at`. The `turns` and `prompt_failures` metrics use this comparison to count a turn once, on the session that ran it, and the session status view uses it to start a new fork at `idle`.
+- Inherited rows are ordinary rows of the child everywhere else, each under the child's session id:
+    - `GET /v1/sessions/{id}/events` and the snapshot on the child.
+    - The global event log routes (`GET /v1/logs/events`, `GET /v1/logs/permissions`) and `acps logs query`. A filter such as `permission_id` or `command_id` returns the original row plus one copy per fork that holds its turn.
+    - The metrics row counts `counts.events` and `counts.prompts`.
+    - The mirror, where every copy is its own row and the `session_turns` view counts an inherited prompt as a turn of the child.
+- The child's `sessions.{id}` topic carries the child's own rows; inherited rows are read from the durable log.
+
 ### Startup Reconcile Event
 
 The startup sweeps (orphaned prompts, permissions, commands) are individually best-effort:
@@ -257,6 +286,8 @@ The `security_category` filter clusters the flat `security.*` kinds into operato
 - `prompt_failures.total`, explicit `failure_class` counters, `by_class`, `by_status_code`, and `by_reason_category`
 
 `prompt_failures` counts terminal `errored` and `stalled` prompt rows by `failure_class` using `prompts.updated_at` for the metrics window. The inference breakdowns are derived from sanitized `prompt.inference_failed` events.
+
+`turns` and `prompt_failures` count each session's own prompt rows and events. A fork child's inherited rows count once, on the session that ran the turn (see [Fork Inheritance](#fork-inheritance)).
 
 ### Usage Fields
 

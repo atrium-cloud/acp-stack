@@ -91,10 +91,11 @@ use crate::runtime::mediation::permissions::PermissionService;
 use crate::secrets::SecretStore;
 use crate::state::{
     EVENT_KIND_MCP_SESSION_SKIPPED, EVENT_KIND_PROMPT_ERRORED, EVENT_KIND_PROMPT_INFERENCE_FAILED,
-    EVENT_KIND_SESSION_AVAILABLE, EVENT_KIND_SESSION_CAPABILITY_IGNORED, EVENT_KIND_SESSION_UPDATE,
-    EVENT_SOURCE_SYSTEM, FailureClass, ListedSessionRecord, NewPromptRecord, NewSessionRecord,
-    PromptRecord, PromptStatus, SESSION_STATUS_ACTIVE, SESSION_STATUS_CLOSED, SessionRecord,
-    StateStore, next_prompt_id, next_prompt_message_id, next_session_id,
+    EVENT_KIND_SESSION_AVAILABLE, EVENT_KIND_SESSION_CANCEL_REQUESTED,
+    EVENT_KIND_SESSION_CAPABILITY_IGNORED, EVENT_KIND_SESSION_UPDATE, EVENT_SOURCE_SYSTEM,
+    FailureClass, ListedSessionRecord, NewPromptRecord, NewSessionRecord, PromptRecord,
+    PromptStatus, SESSION_STATUS_ACTIVE, SESSION_STATUS_CLOSED, SessionRecord, StateStore,
+    next_prompt_id, next_prompt_message_id, next_session_id,
 };
 
 use self::bridge::*;

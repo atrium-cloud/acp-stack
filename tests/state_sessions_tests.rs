@@ -1,6 +1,6 @@
 use acp_stack::state::{
     EVENT_SOURCE_ACP, EVENT_SOURCE_SYSTEM, ListedSessionRecord, NewPermissionRequest,
-    NewPromptRecord, NewSessionRecord, PromptStatus, SESSION_ACTIVITY_ACTOR_AGENT,
+    NewPromptRecord, NewSessionRecord, PromptRecord, PromptStatus, SESSION_ACTIVITY_ACTOR_AGENT,
     SESSION_ACTIVITY_ACTOR_USER, SESSION_STATUS_ACTIVE, SESSION_STATUS_AVAILABLE,
     SESSION_STATUS_CLOSED, SessionAvailableCommand, StateStore,
 };
@@ -1322,4 +1322,552 @@ fn mark_idle_sessions_skips_inflight_and_fresh_rows() {
             .expect("repeat sweep")
             .is_empty()
     );
+}
+
+// --- Fork inheritance ---
+
+const FORK_PARENT: &str = "sess_fork_parent";
+const FORK_CHILD: &str = "sess_fork_child";
+/// Kinds a fork child inherits; the fixtures below also write the parent's
+/// lifecycle and accounting kinds, which the child must not carry.
+const CONVERSATION_KINDS: &[&str] = &[
+    "session.update",
+    "prompt.inference_failed",
+    "prompt.stalled",
+    "prompt.errored",
+    "session.cancel_requested",
+    "terminal.finished",
+    "permission.approved",
+    "permission.denied",
+    "permission.cancelled",
+    "permission.expired",
+];
+/// Keeps rows of consecutive writes on distinct timestamps on coarse clocks,
+/// the way a client round trip separates one turn from the next prompt.
+const TURN_GAP: std::time::Duration = std::time::Duration::from_millis(2);
+
+struct SeededTurn {
+    prompt_id: String,
+    message_id: String,
+}
+
+fn insert_fork_session(store: &StateStore, id: &str) {
+    store
+        .insert_session(NewSessionRecord {
+            id: id.to_owned(),
+            agent_id: "fake".to_owned(),
+            cwd: format!("/tmp/{id}"),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("session inserted");
+}
+
+fn fork_child(
+    store: &StateStore,
+    child_id: &str,
+    parent_id: &str,
+    held_through_prompt_id: Option<&str>,
+) {
+    store
+        .insert_forked_session(
+            "fake",
+            format!("agent_{child_id}"),
+            NewSessionRecord {
+                id: child_id.to_owned(),
+                agent_id: "fake".to_owned(),
+                cwd: format!("/tmp/{child_id}"),
+                title: None,
+                metadata_json: "{}".to_owned(),
+            },
+            parent_id,
+            held_through_prompt_id,
+        )
+        .expect("fork child inserted");
+}
+
+fn append_session_event(
+    store: &StateStore,
+    session_id: &str,
+    kind: &str,
+    source: &str,
+    payload: &str,
+) {
+    store
+        .append_session_event_with_source(session_id, "info", kind, source, kind, payload)
+        .expect("event appended");
+}
+
+/// One turn written the way the supervisor writes it: the prompt row, its user
+/// chunk, then the agent's chunk, leaving the prompt `running`.
+fn seed_turn(store: &StateStore, session_id: &str, text: &str) -> SeededTurn {
+    std::thread::sleep(TURN_GAP);
+    let turn = SeededTurn {
+        prompt_id: acp_stack::state::next_prompt_id(),
+        message_id: acp_stack::state::next_prompt_message_id(),
+    };
+    store
+        .insert_prompt_with_message_id(
+            NewPromptRecord {
+                id: turn.prompt_id.clone(),
+                session_id: session_id.to_owned(),
+                prompt_json: serde_json::json!([{ "type": "text", "text": text }]).to_string(),
+            },
+            Some(turn.message_id.clone()),
+        )
+        .expect("prompt inserted");
+    let user_chunk = serde_json::json!({
+        "sessionId": "agent_parent",
+        "update": {
+            "sessionUpdate": "user_message_chunk",
+            "content": { "type": "text", "text": text },
+            "messageId": turn.message_id,
+            "_meta": { "acpStack": { "promptId": turn.prompt_id } },
+        },
+    });
+    append_session_event(
+        store,
+        session_id,
+        "session.update",
+        EVENT_SOURCE_SYSTEM,
+        &user_chunk.to_string(),
+    );
+    store
+        .update_prompt_status(
+            &turn.prompt_id,
+            PromptStatus::Running,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("prompt running");
+    let agent_chunk = serde_json::json!({
+        "sessionId": "agent_parent",
+        "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": { "type": "text", "text": format!("reply to {text}") },
+            "messageId": format!("agent_{}", turn.message_id),
+        },
+    });
+    append_session_event(
+        store,
+        session_id,
+        "session.update",
+        EVENT_SOURCE_ACP,
+        &agent_chunk.to_string(),
+    );
+    store
+        .acknowledge_prompt_message_id(&turn.prompt_id, &turn.message_id)
+        .expect("message id acknowledged");
+    store
+        .record_prompt_agent_message_id(&turn.prompt_id, &format!("agent_{}", turn.message_id))
+        .expect("anchor recorded");
+    turn
+}
+
+fn complete_turn(store: &StateStore, turn: &SeededTurn) {
+    store
+        .update_prompt_status(
+            &turn.prompt_id,
+            PromptStatus::Completed,
+            Some("end_turn"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("prompt completed");
+}
+
+/// Fail a turn on an upstream 503, with the row and event the supervisor writes.
+fn fail_turn_on_inference(store: &StateStore, session_id: &str, turn: &SeededTurn) {
+    store
+        .update_prompt_status(
+            &turn.prompt_id,
+            PromptStatus::Errored,
+            None,
+            Some("agent.inference_5xx"),
+            Some("inference endpoint returned 503 (service_unavailable)"),
+            Some("inference_5xx"),
+            Some(r#"{"status_code":503,"reason_category":"service_unavailable"}"#),
+        )
+        .expect("prompt errored");
+    let payload = serde_json::json!({
+        "prompt_id": turn.prompt_id,
+        "status_code": 503,
+        "reason_category": "service_unavailable",
+        "cause": "inference endpoint returned 503 (service_unavailable)",
+    });
+    append_session_event(
+        store,
+        session_id,
+        "prompt.inference_failed",
+        EVENT_SOURCE_SYSTEM,
+        &payload.to_string(),
+    );
+}
+
+/// A parent with three turns, interleaved with the lifecycle and accounting
+/// rows a real session accumulates: turn one completes after a permission and
+/// a terminal run, turn two fails upstream, turn three completes.
+fn seed_fork_parent(store: &StateStore) -> [SeededTurn; 3] {
+    insert_fork_session(store, FORK_PARENT);
+    append_session_event(
+        store,
+        FORK_PARENT,
+        "session.created",
+        EVENT_SOURCE_SYSTEM,
+        "{}",
+    );
+    let first = seed_turn(store, FORK_PARENT, "first turn");
+    append_session_event(
+        store,
+        FORK_PARENT,
+        "permission.approved",
+        "permission",
+        r#"{"id":"perm_1"}"#,
+    );
+    append_session_event(
+        store,
+        FORK_PARENT,
+        "terminal.finished",
+        EVENT_SOURCE_ACP,
+        r#"{"terminal_id":"term_1"}"#,
+    );
+    append_session_event(
+        store,
+        FORK_PARENT,
+        "usage.reported",
+        EVENT_SOURCE_ACP,
+        r#"{"input_tokens":10}"#,
+    );
+    append_session_event(
+        store,
+        FORK_PARENT,
+        "tool.execute",
+        EVENT_SOURCE_ACP,
+        r#"{"command":"ls"}"#,
+    );
+    complete_turn(store, &first);
+    append_session_event(
+        store,
+        FORK_PARENT,
+        "session.config_option_set",
+        EVENT_SOURCE_SYSTEM,
+        r#"{"config_id":"model"}"#,
+    );
+    append_session_event(
+        store,
+        FORK_PARENT,
+        "session.fork.created_child",
+        EVENT_SOURCE_SYSTEM,
+        "{}",
+    );
+    let second = seed_turn(store, FORK_PARENT, "second turn");
+    fail_turn_on_inference(store, FORK_PARENT, &second);
+    let third = seed_turn(store, FORK_PARENT, "third turn");
+    complete_turn(store, &third);
+    [first, second, third]
+}
+
+/// Every column a fork copy carries over from its original.
+fn event_projection(
+    event: &acp_stack::state::Event,
+) -> (String, String, String, String, String, String) {
+    (
+        event.created_at.clone(),
+        event.level.clone(),
+        event.kind.clone(),
+        event.source.clone(),
+        event.message.clone(),
+        event.payload_json.clone(),
+    )
+}
+
+fn session_log(store: &StateStore, session_id: &str) -> Vec<acp_stack::state::Event> {
+    store
+        .query_session_events(session_id, None, 1_000)
+        .expect("session events")
+}
+
+#[test]
+fn a_fork_child_carries_the_parent_conversation_before_the_first_prompt_it_does_not_hold() {
+    let (_dir, store) = fresh_state("fork_breakpoint.sqlite");
+    let [first, second, third] = seed_fork_parent(&store);
+    let third_row = store
+        .get_prompt(&third.prompt_id)
+        .expect("prompt lookup")
+        .expect("third prompt exists");
+
+    // A fork at the third prompt holds the first two turns.
+    fork_child(&store, FORK_CHILD, FORK_PARENT, Some(&second.prompt_id));
+
+    let parent_log = session_log(&store, FORK_PARENT);
+    let expected: Vec<_> = parent_log
+        .iter()
+        .filter(|event| event.created_at < third_row.created_at)
+        .filter(|event| CONVERSATION_KINDS.contains(&event.kind.as_str()))
+        .map(event_projection)
+        .collect();
+    let child_log = session_log(&store, FORK_CHILD);
+    assert_eq!(
+        child_log.iter().map(event_projection).collect::<Vec<_>>(),
+        expected
+    );
+    // The held turns' permission, terminal, and failure rows all came along.
+    for kind in [
+        "permission.approved",
+        "terminal.finished",
+        "prompt.inference_failed",
+    ] {
+        assert!(
+            child_log.iter().any(|event| event.kind == kind),
+            "{kind} missing from {child_log:#?}"
+        );
+    }
+    assert!(
+        child_log
+            .iter()
+            .all(|event| !event.payload_json.contains(&third.prompt_id)),
+        "the named prompt's turn stays with the parent: {child_log:#?}"
+    );
+    assert!(
+        child_log
+            .iter()
+            .all(|event| parent_log.iter().all(|original| original.id != event.id)),
+        "copies are rows of their own"
+    );
+
+    for turn in [&first, &second] {
+        let original = store
+            .get_prompt_by_message_id(FORK_PARENT, &turn.message_id)
+            .expect("parent prompt lookup")
+            .expect("parent prompt exists");
+        let inherited = store
+            .get_prompt_by_message_id(FORK_CHILD, &turn.message_id)
+            .expect("child prompt lookup")
+            .expect("the child resolves an inherited message id");
+        assert_ne!(inherited.id, original.id);
+        assert_eq!(inherited.session_id, FORK_CHILD);
+        assert_eq!(
+            PromptRecord {
+                id: original.id.clone(),
+                session_id: original.session_id.clone(),
+                ..inherited
+            },
+            original
+        );
+    }
+    assert!(
+        store
+            .get_prompt_by_message_id(FORK_CHILD, &third.message_id)
+            .expect("child prompt lookup")
+            .is_none()
+    );
+
+    // The inherited anchor resolves through the child's own prompt order.
+    let second_inherited = store
+        .get_prompt_by_message_id(FORK_CHILD, &second.message_id)
+        .expect("child prompt lookup")
+        .expect("second prompt inherited");
+    let preceding = store
+        .preceding_prompt(FORK_CHILD, &second_inherited.id)
+        .expect("preceding lookup")
+        .expect("the first inherited prompt precedes the second");
+    assert_eq!(
+        preceding.agent_message_id,
+        Some(format!("agent_{}", first.message_id))
+    );
+}
+
+#[test]
+fn a_prompt_sent_to_a_fork_child_sorts_after_every_inherited_prompt() {
+    let (_dir, store) = fresh_state("fork_prompt_order.sqlite");
+    let [_, _, third] = seed_fork_parent(&store);
+    fork_child(&store, FORK_CHILD, FORK_PARENT, Some(&third.prompt_id));
+
+    let own = seed_turn(&store, FORK_CHILD, "fourth turn");
+    let third_inherited = store
+        .get_prompt_by_message_id(FORK_CHILD, &third.message_id)
+        .expect("child prompt lookup")
+        .expect("third prompt inherited");
+    let preceding = store
+        .preceding_prompt(FORK_CHILD, &own.prompt_id)
+        .expect("preceding lookup")
+        .expect("an inherited prompt precedes the child's own");
+    assert_eq!(preceding.id, third_inherited.id);
+
+    // A fork of the child at its own prompt holds every inherited turn.
+    fork_child(
+        &store,
+        "sess_fork_grandchild",
+        FORK_CHILD,
+        Some(&third_inherited.id),
+    );
+    let grandchild_log = session_log(&store, "sess_fork_grandchild");
+    let child_log = session_log(&store, FORK_CHILD);
+    let own_row = store
+        .get_prompt(&own.prompt_id)
+        .expect("prompt lookup")
+        .expect("own prompt exists");
+    assert_eq!(
+        grandchild_log
+            .iter()
+            .map(event_projection)
+            .collect::<Vec<_>>(),
+        child_log
+            .iter()
+            .filter(|event| event.created_at < own_row.created_at)
+            .map(event_projection)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_fork_child_reports_idle_until_its_own_first_prompt() {
+    let (_dir, store) = fresh_state("fork_status.sqlite");
+    let [_, _, third] = seed_fork_parent(&store);
+    fork_child(&store, FORK_CHILD, FORK_PARENT, Some(&third.prompt_id));
+    let child_status = |store: &StateStore| {
+        store
+            .query_session_status_window("1970-01-01T00:00:00.000000000Z", None, 10)
+            .expect("status rows")
+            .into_iter()
+            .find(|row| row.id == FORK_CHILD)
+            .expect("the child is in the window")
+    };
+
+    let fresh = child_status(&store);
+    assert_eq!(fresh.latest_prompt, None);
+    assert_eq!(fresh.prompt_stream_started_at, None);
+
+    let own = seed_turn(&store, FORK_CHILD, "fourth turn");
+    assert_eq!(
+        child_status(&store).latest_prompt.map(|prompt| prompt.id),
+        Some(own.prompt_id)
+    );
+}
+
+#[test]
+fn a_head_fork_holds_the_settled_turns_before_a_turn_in_flight() {
+    let (_dir, store) = fresh_state("fork_head.sqlite");
+    insert_fork_session(&store, FORK_PARENT);
+    assert_eq!(
+        store
+            .newest_settled_prompt_id(FORK_PARENT)
+            .expect("settled lookup"),
+        None
+    );
+    let first = seed_turn(&store, FORK_PARENT, "first turn");
+    complete_turn(&store, &first);
+    let second = seed_turn(&store, FORK_PARENT, "second turn");
+
+    let held = store
+        .newest_settled_prompt_id(FORK_PARENT)
+        .expect("settled lookup");
+    assert_eq!(held.as_deref(), Some(first.prompt_id.as_str()));
+    fork_child(&store, FORK_CHILD, FORK_PARENT, held.as_deref());
+    let child_log = session_log(&store, FORK_CHILD);
+    assert_eq!(child_log.len(), 2, "one settled turn: {child_log:#?}");
+    assert!(
+        child_log
+            .iter()
+            .all(|event| !event.payload_json.contains(&second.prompt_id)),
+        "the running turn stays with the parent: {child_log:#?}"
+    );
+    assert!(
+        store
+            .get_prompt_by_message_id(FORK_CHILD, &second.message_id)
+            .expect("child prompt lookup")
+            .is_none()
+    );
+
+    complete_turn(&store, &second);
+    assert_eq!(
+        store
+            .newest_settled_prompt_id(FORK_PARENT)
+            .expect("settled lookup")
+            .as_deref(),
+        Some(second.prompt_id.as_str())
+    );
+}
+
+#[test]
+fn a_fork_of_a_session_with_no_prompts_carries_its_whole_conversation() {
+    let (_dir, store) = fresh_state("fork_promptless.sqlite");
+    insert_fork_session(&store, FORK_PARENT);
+    append_session_event(
+        &store,
+        FORK_PARENT,
+        "session.created",
+        EVENT_SOURCE_SYSTEM,
+        "{}",
+    );
+    append_session_event(
+        &store,
+        FORK_PARENT,
+        "session.update",
+        EVENT_SOURCE_ACP,
+        r#"{"sessionId":"agent_parent","update":{"sessionUpdate":"available_commands_update","availableCommands":[]}}"#,
+    );
+
+    fork_child(&store, FORK_CHILD, FORK_PARENT, None);
+
+    let child_log = session_log(&store, FORK_CHILD);
+    assert_eq!(child_log.len(), 1, "{child_log:#?}");
+    assert_eq!(child_log[0].kind, "session.update");
+}
+
+#[test]
+fn metrics_count_an_inherited_turn_on_the_session_that_ran_it() {
+    let (_dir, store) = fresh_state("fork_metrics.sqlite");
+    let [_, _, third] = seed_fork_parent(&store);
+    let window = || acp_stack::state::MetricsWindow {
+        since: "1970-01-01T00:00:00.000000000Z".to_owned(),
+        until: "2999-01-01T00:00:00.000000000Z".to_owned(),
+    };
+    let before = store.metrics_summary(window()).expect("metrics");
+
+    fork_child(&store, FORK_CHILD, FORK_PARENT, Some(&third.prompt_id));
+
+    let after = store.metrics_summary(window()).expect("metrics");
+    assert_eq!(after.turns.total, before.turns.total);
+    assert_eq!(after.turns.by_status, before.turns.by_status);
+    assert_eq!(after.prompt_failures.total, before.prompt_failures.total);
+    assert_eq!(
+        after.prompt_failures.by_status_code,
+        before.prompt_failures.by_status_code
+    );
+}
+
+#[test]
+fn a_fork_child_and_its_inherited_rows_are_queued_for_the_mirror() {
+    let (_dir, mut store) = fresh_state("fork_outbox.sqlite");
+    let [first, second, _] = seed_fork_parent(&store);
+    store.set_external_logging_enabled(true);
+
+    fork_child(&store, FORK_CHILD, FORK_PARENT, Some(&second.prompt_id));
+
+    let mut queued: Vec<String> = store
+        .next_sink_outbox_batch(1_000, "2999-01-01T00:00:00.000000000Z")
+        .expect("outbox batch")
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    let mut expected = vec![format!("sessions:{FORK_CHILD}")];
+    for event in session_log(&store, FORK_CHILD) {
+        expected.push(format!("events:{}", event.id));
+    }
+    for turn in [&first, &second] {
+        let prompt = store
+            .get_prompt_by_message_id(FORK_CHILD, &turn.message_id)
+            .expect("child prompt lookup")
+            .expect("child prompt exists");
+        expected.push(format!("prompts:{}", prompt.id));
+    }
+    queued.sort();
+    expected.sort();
+    assert_eq!(queued, expected);
 }
