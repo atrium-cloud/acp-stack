@@ -1268,7 +1268,10 @@ Log query filters are per-route, not one shared set. All log routes accept:
 - Tier: `session`
 - Request: WebSocket upgrade. Clients authenticate with the session key and send a `{ "type": "subscribe", "topics": [...] }` frame to subscribe. Frames of any other `type` are ignored.
 - Response: the WebSocket event stream.
-- Notes: topics are `logs`, `workspace`, `permissions`, `status`, `commands.{id}`, `sessions.{id}`, and `agent.lifecycle`. Frames on `sessions.{id}` carry `payload.kind`, `payload.source`, and `payload.data`, where `source` is the durable event's source column.
+- Notes:
+    - Topics are `logs`, `workspace`, `permissions`, `status`, `commands.{id}`, `sessions.{id}`, and `agent.lifecycle`. Frames on `sessions.{id}` carry `payload.kind`, `payload.source`, and `payload.data`, where `source` is the durable event's source column.
+    - The stream is live delivery, and the durable event log is its replay surface.
+    - A subscriber that falls more than 1024 events behind the server's shared event channel is closed with code `1013` (Try Again Later) and reason `lagged`, and its `ws.client_disconnected` event records `reason: "lagged"`. The client reconnects and reads what it missed from the durable log after its last-seen event id.
 
 ### `GET /v1/ws/connections`
 

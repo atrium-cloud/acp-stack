@@ -755,12 +755,14 @@ acps logs tail [--session-key <key>]
 - `--json`: emit the `{ events, next_cursor }` envelope to stdout and suppress the human "more rows" hint.
 - `--category <rate_limit|origin_cors|ip_block|oversized_request>`: scope to one security category.
 - `--follow`: subscribes to the daemon's `logs` WebSocket topic, drains matching durable backlog in ascending pages, then continues with live events. Requires the session key.
+    - When the daemon closes the stream with `1013` (`lagged`), `--follow` reports it on stderr, reconnects, and drains the durable backlog again from the last event it printed, so output continues with no gap and no repeated rows.
 
 ### Output
 
 - `logs query` reads durable events without a session key.
 - With `--json --follow`, stdout is newline-delimited `EventJson` objects rather than the non-follow envelope.
 - `logs tail` opens a WebSocket subscription to the running daemon and requires the session key.
+- `logs tail` exits non-zero with the close code and reason on stderr when the daemon closes the stream with `1013` (`lagged`). It prints live frames only, so `logs query --follow` is the follower that recovers from the durable log.
 
 ## `acps metrics summary`
 

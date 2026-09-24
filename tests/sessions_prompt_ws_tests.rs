@@ -7,6 +7,7 @@ mod common;
 use std::time::Duration;
 
 use acp_stack::config::ArrayTargetConfig;
+use acp_stack::events::EVENT_CHANNEL_CAPACITY;
 use common::sessions::{
     Harness, admin_bearer, create_session, http, prompt_count_for_session, recv_matching_event,
     session_bearer, websocket_request,
@@ -808,6 +809,54 @@ async fn session_disconnect_records_supplied_reason() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn lagging_subscriber_is_closed_to_reconnect() {
+    let harness = Harness::spawn().await;
+    let session_id = create_session(&harness).await;
+    let topic = format!("sessions.{session_id}");
+    let request = websocket_request(&harness, session_bearer());
+    let (mut ws, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .expect("websocket connects");
+    ws.send(tokio_tungstenite::tungstenite::Message::Text(
+        json!({ "type": "subscribe", "topics": [topic.clone()] })
+            .to_string()
+            .into(),
+    ))
+    .await
+    .expect("subscribe");
+    let connection_id = await_ws_connection_id(&harness, std::slice::from_ref(&topic)).await;
+
+    // The test runtime is single-threaded, so the connection task cannot drain
+    // the channel while this burst holds the thread: every write lands unread,
+    // and one past capacity puts the subscriber behind.
+    {
+        let store = harness.state.lock().await;
+        for sequence in 0..=EVENT_CHANNEL_CAPACITY {
+            store
+                .append_session_event_with_source(
+                    &session_id,
+                    "info",
+                    "session.update",
+                    acp_stack::state::EVENT_SOURCE_ACP,
+                    "ACP session update",
+                    &format!(r#"{{"seq":{sequence}}}"#),
+                )
+                .expect("event inserted");
+        }
+    }
+
+    let close = await_close_frame(&mut ws).await;
+    assert_eq!(
+        close.code,
+        tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Again
+    );
+    assert_eq!(close.reason.as_str(), "lagged");
+
+    let payload = await_disconnect_payload(&harness, &connection_id).await;
+    assert_eq!(payload["reason"], "lagged");
+}
+
 /// Poll `/v1/ws/connections` until a connection carrying every `required_topics` entry is listed. Neither the registry insert nor the subscribe frame is observable when the client call returns; both run on the server's connection task.
 async fn await_ws_connection_id(harness: &Harness, required_topics: &[String]) -> String {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -846,6 +895,26 @@ async fn await_ws_connection_id(harness: &Harness, required_topics: &[String]) -
             "websocket connection never registered"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Read until the server's close frame, skipping any event frames sent before it.
+async fn await_close_frame(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> tokio_tungstenite::tungstenite::protocol::CloseFrame {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let message = tokio::time::timeout(remaining, ws.next())
+            .await
+            .expect("close frame before timeout")
+            .expect("socket open until the close frame")
+            .expect("ws message ok");
+        if let tokio_tungstenite::tungstenite::Message::Close(frame) = message {
+            return frame.expect("close frame carries a code");
+        }
     }
 }
 

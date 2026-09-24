@@ -4,7 +4,9 @@ use tokio::sync::broadcast;
 
 use crate::state::Event;
 
-const EVENT_CHANNEL_CAPACITY: usize = 1024;
+/// Frames a live subscriber may fall behind by before its next read reports a
+/// lag; `/v1/ws` closes a lagged subscriber.
+pub const EVENT_CHANNEL_CAPACITY: usize = 1024;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct LiveEvent {

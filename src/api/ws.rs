@@ -2,14 +2,20 @@ use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code};
 use axum::extract::{ConnectInfo, State};
 use axum::response::{IntoResponse, Response};
 use http::StatusCode;
 use serde::Deserialize;
+use tokio::sync::broadcast::error::RecvError;
 
 use super::auth::{persist_security_event, reject};
 use super::core::AppState;
+
+/// RFC 6455 "Try Again Later": the subscriber fell behind the event channel,
+/// and a reconnect that backfills from the durable log recovers what it missed.
+pub(crate) const WS_LAGGED_CLOSE_CODE: u16 = close_code::AGAIN;
+pub(crate) const WS_LAGGED_CLOSE_REASON: &str = "lagged";
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub(crate) struct WsClientMessage {
@@ -103,8 +109,35 @@ async fn ws_connection(
                 }
             }
             event = receiver.recv() => {
-                let Ok(event) = event else {
-                    continue;
+                let event = match event {
+                    Ok(event) => event,
+                    // The socket serves no replay, so a skipped frame would be a hole
+                    // the subscriber cannot see. Closing hands recovery to its
+                    // reconnect, which reads the durable log from its own cursor.
+                    Err(RecvError::Lagged(skipped)) => {
+                        tracing::warn!(
+                            connection_id = %connection_id,
+                            skipped,
+                            "closing websocket subscriber that fell behind the event channel"
+                        );
+                        disconnect_reason = "lagged";
+                        let close = CloseFrame {
+                            code: WS_LAGGED_CLOSE_CODE,
+                            reason: WS_LAGGED_CLOSE_REASON.into(),
+                        };
+                        if let Err(error) = socket.send(Message::Close(Some(close))).await {
+                            tracing::debug!(
+                                connection_id = %connection_id,
+                                %error,
+                                "websocket ended before the lagged close frame was sent"
+                            );
+                        }
+                        break;
+                    }
+                    Err(RecvError::Closed) => {
+                        disconnect_reason = "event_hub_closed";
+                        break;
+                    }
                 };
                 if !subscribed_topics.contains(&event.topic) {
                     continue;

@@ -1,3 +1,4 @@
+use crate::api::ws::{WS_LAGGED_CLOSE_CODE, WS_LAGGED_CLOSE_REASON};
 use crate::config::Config;
 use crate::error::{Result, StackError};
 use crate::fs_util::{
@@ -467,6 +468,17 @@ async fn tail_ws_loop(base_url: &str, session_key: &str, topics: Vec<String>) ->
                 match message {
                     Message::Text(text) => println!("{text}"),
                     Message::Binary(_) | Message::Ping(_) | Message::Pong(_) => {}
+                    // Tail has no cursor to resume from, so a reconnect would print
+                    // around a silent gap; failing is the honest outcome.
+                    Message::Close(Some(frame)) if is_lagged_close(&frame) => {
+                        return Err(StackError::ServeIo {
+                            source: std::io::Error::other(format!(
+                                "acps logs tail: the daemon closed the stream with {} ({}) because this subscriber fell behind the live event channel",
+                                u16::from(frame.code),
+                                frame.reason
+                            )),
+                        });
+                    }
                     Message::Close(_) => return Ok(()),
                     Message::Frame(_) => {}
                 }
@@ -484,46 +496,73 @@ async fn follow_query_loop(
 ) -> Result<()> {
     use tokio_tungstenite::tungstenite::protocol::Message;
 
-    let (mut writer, mut reader) = open_ws_stream(&context.base_url, &context.session_key).await?;
-    subscribe_to_logs(&mut writer).await?;
-    let mut stdout = std::io::stdout().lock();
-    let watermark = drain_follow_backfill(store, &filter, page_limit, json_output, &mut stdout)?;
-    drop(stdout);
-
     let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
+    // The last event printed, backfill or live. A reconnect backfills from here,
+    // so output resumes exactly where it stopped.
+    let mut watermark = Watermark::default();
     loop {
-        tokio::select! {
-            biased;
-            _ = &mut ctrl_c => {
-                if let Err(error) = writer.send(Message::Close(None)).await {
-                    eprintln!("acps logs query --follow: close send failed: {error}");
+        let (mut writer, mut reader) =
+            open_ws_stream(&context.base_url, &context.session_key).await?;
+        subscribe_to_logs(&mut writer).await?;
+        let mut stdout = std::io::stdout().lock();
+        watermark = drain_follow_backfill(
+            store,
+            &filter,
+            page_limit,
+            json_output,
+            &watermark,
+            &mut stdout,
+        )?;
+        drop(stdout);
+
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut ctrl_c => {
+                    if let Err(error) = writer.send(Message::Close(None)).await {
+                        eprintln!("acps logs query --follow: close send failed: {error}");
+                    }
+                    return Ok(());
                 }
-                return Ok(());
-            }
-            frame = reader.next() => {
-                let Some(frame) = frame else { return Ok(()); };
-                let message = frame.map_err(|source| StackError::ServeIo {
-                    source: std::io::Error::other(format!("websocket read failed: {source}")),
-                })?;
-                let text = match message {
-                    Message::Text(text) => text,
-                    Message::Binary(_) | Message::Ping(_) | Message::Pong(_) => continue,
-                    Message::Close(_) => return Ok(()),
-                    Message::Frame(_) => continue,
-                };
-                let Some(event) = parse_logs_frame(text.as_str())? else { continue };
-                if !watermark.is_strictly_after(&event.created_at, &event.id) {
-                    continue;
+                frame = reader.next() => {
+                    let Some(frame) = frame else { return Ok(()); };
+                    let message = frame.map_err(|source| StackError::ServeIo {
+                        source: std::io::Error::other(format!("websocket read failed: {source}")),
+                    })?;
+                    let text = match message {
+                        Message::Text(text) => text,
+                        Message::Binary(_) | Message::Ping(_) | Message::Pong(_) => continue,
+                        Message::Close(Some(frame)) if is_lagged_close(&frame) => {
+                            eprintln!(
+                                "acps logs query --follow: the daemon closed the stream with {} ({}); reconnecting and resuming from the durable log",
+                                u16::from(frame.code),
+                                frame.reason
+                            );
+                            break;
+                        }
+                        Message::Close(_) => return Ok(()),
+                        Message::Frame(_) => continue,
+                    };
+                    let Some(event) = parse_logs_frame(text.as_str())? else { continue };
+                    if !watermark.is_strictly_after(&event.created_at, &event.id) {
+                        continue;
+                    }
+                    let log_filter = filter.as_log_filter(0, None, LogOrder::Asc);
+                    if !log_filter.matches(&event) {
+                        continue;
+                    }
+                    let mut stdout = std::io::stdout().lock();
+                    write_event_line(&mut stdout, &event, json_output)?;
+                    watermark = event_watermark(&event);
                 }
-                let log_filter = filter.as_log_filter(0, None, LogOrder::Asc);
-                if !log_filter.matches(&event) {
-                    continue;
-                }
-                let mut stdout = std::io::stdout().lock();
-                write_event_line(&mut stdout, &event, json_output)?;
             }
         }
     }
+}
+
+/// Whether the daemon closed this subscriber for falling behind its event channel.
+fn is_lagged_close(frame: &tokio_tungstenite::tungstenite::protocol::CloseFrame) -> bool {
+    u16::from(frame.code) == WS_LAGGED_CLOSE_CODE && frame.reason.as_str() == WS_LAGGED_CLOSE_REASON
 }
 
 async fn subscribe_to_logs(writer: &mut WsWriter) -> Result<()> {
@@ -540,11 +579,14 @@ async fn subscribe_to_logs(writer: &mut WsWriter) -> Result<()> {
         })
 }
 
+/// Print matching durable rows after `from` through the current high-water
+/// event and return the new watermark. An empty `from` starts at the oldest row.
 fn drain_follow_backfill(
     store: &StateStore,
     filter: &OwnedLogFilter,
     page_limit: u32,
     json_output: bool,
+    from: &Watermark,
     writer: &mut impl Write,
 ) -> Result<Watermark> {
     if page_limit == 0 {
@@ -559,10 +601,13 @@ fn drain_follow_backfill(
         .into_iter()
         .next();
     let Some(high_water) = high_water else {
-        return Ok(Watermark::default());
+        return Ok(from.clone());
     };
+    if !from.is_strictly_after(&high_water.created_at, &high_water.id) {
+        return Ok(from.clone());
+    }
     let target = event_watermark(&high_water);
-    let mut cursor: Option<String> = None;
+    let mut cursor: Option<String> = (!from.id.is_empty()).then(|| from.id.clone());
 
     loop {
         let page = store.query_events(filter.as_log_filter(
@@ -718,8 +763,15 @@ mod tests {
             ..OwnedLogFilter::default()
         };
         let mut output = Vec::new();
-        let watermark =
-            drain_follow_backfill(&store, &filter, 2, false, &mut output).expect("backfill");
+        let watermark = drain_follow_backfill(
+            &store,
+            &filter,
+            2,
+            false,
+            &Watermark::default(),
+            &mut output,
+        )
+        .expect("backfill");
         let rendered = String::from_utf8(output).expect("utf8 output");
 
         for index in 0..5 {
@@ -732,6 +784,80 @@ mod tests {
             watermark.id.starts_with("evt_"),
             "high-water id should come from the newest durable event"
         );
+    }
+
+    #[test]
+    fn lagged_close_requires_both_the_code_and_the_reason() {
+        use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+        use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+
+        let lagged = CloseFrame {
+            code: CloseCode::from(WS_LAGGED_CLOSE_CODE),
+            reason: WS_LAGGED_CLOSE_REASON.into(),
+        };
+        assert!(is_lagged_close(&lagged));
+        let operator = CloseFrame {
+            code: CloseCode::Normal,
+            reason: "".into(),
+        };
+        assert!(!is_lagged_close(&operator));
+        let other_reason = CloseFrame {
+            code: CloseCode::from(WS_LAGGED_CLOSE_CODE),
+            reason: "overloaded".into(),
+        };
+        assert!(!is_lagged_close(&other_reason));
+    }
+
+    #[test]
+    fn follow_backfill_resumes_after_watermark_without_reprinting() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let path = tempdir.path().join("state.sqlite");
+        let store = StateStore::open(&path).expect("state should open");
+        store.migrate().expect("migration should pass");
+
+        let mut printed = Vec::new();
+        for index in 0..3 {
+            printed.push(
+                store
+                    .append_event("info", "test.resume", &format!("row-{index}"), "{}")
+                    .expect("seed event"),
+            );
+        }
+        for index in 3..6 {
+            store
+                .append_event("info", "test.resume", &format!("row-{index}"), "{}")
+                .expect("seed event");
+        }
+
+        let filter = OwnedLogFilter {
+            kind: Some("test.resume".to_owned()),
+            ..OwnedLogFilter::default()
+        };
+        let from = event_watermark(printed.last().expect("printed row"));
+        let mut output = Vec::new();
+        let watermark = drain_follow_backfill(&store, &filter, 2, false, &from, &mut output)
+            .expect("resumed backfill");
+        let rendered = String::from_utf8(output).expect("utf8 output");
+
+        for index in 0..3 {
+            assert!(
+                !rendered.contains(&format!("row-{index}")),
+                "row-{index} was already printed: {rendered}"
+            );
+        }
+        for index in 3..6 {
+            assert!(
+                rendered.contains(&format!("row-{index}")),
+                "missing row-{index}: {rendered}"
+            );
+        }
+
+        let mut caught_up = Vec::new();
+        let unchanged =
+            drain_follow_backfill(&store, &filter, 2, false, &watermark, &mut caught_up)
+                .expect("caught-up backfill");
+        assert!(caught_up.is_empty(), "a caught-up watermark prints nothing");
+        assert_eq!(unchanged.id, watermark.id);
     }
 
     #[test]
@@ -752,7 +878,8 @@ mod tests {
             ..OwnedLogFilter::default()
         };
         let mut output = Vec::new();
-        drain_follow_backfill(&store, &filter, 1, true, &mut output).expect("json backfill");
+        drain_follow_backfill(&store, &filter, 1, true, &Watermark::default(), &mut output)
+            .expect("json backfill");
         let rendered = String::from_utf8(output).expect("utf8 output");
         let lines = rendered.lines().collect::<Vec<_>>();
 

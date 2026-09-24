@@ -261,7 +261,10 @@ When any sweep settled rows, the daemon records one aggregate event after startu
 1. Subscribes to the live `logs` topic.
 2. Records a durable high-water event.
 3. Drains matching durable rows through that high-water in ascending pages.
-4. Prints matching live frames after it.
+4. Prints matching live frames after it, moving its watermark to each printed event.
+5. On a `1013` (`lagged`) close, reconnects and repeats from step 1, draining from its watermark rather than from the oldest row.
+
+`acps logs tail` exits non-zero on a `1013` (`lagged`) close and names the code and reason on stderr.
 
 `--json --follow` emits newline-delimited event objects. The live frame format is set by `EventHub::publish_log_event` in `src/events.rs`.
 

@@ -17,5 +17,7 @@ mod init_status;
 mod installer_deps;
 #[path = "cli_observability_tests/logs_errors.rs"]
 mod logs_errors;
+#[path = "cli_observability_tests/logs_follow.rs"]
+mod logs_follow;
 #[path = "cli_observability_tests/permissions_repair.rs"]
 mod permissions_repair;
