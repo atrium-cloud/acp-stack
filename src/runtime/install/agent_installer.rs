@@ -549,6 +549,7 @@ pub(super) enum ResolvedInstallSpec {
         asset_pattern: String,
         archive: ArchiveKind,
         archive_binary_name: Option<String>,
+        bundle_binary_path: Option<String>,
         binary_name: String,
         checksums_asset: Option<String>,
         version_pin: Option<String>,

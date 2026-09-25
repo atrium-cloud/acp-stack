@@ -251,6 +251,20 @@ fn embedded_registry_contains_only_curated_examples() {
             .script
             .contains("https://pi.dev/install.sh")
     );
+    // The release archive is a directory bundle, so it must install whole.
+    let pi_harness_github = pi_harness
+        .install
+        .github
+        .as_ref()
+        .expect("pi harness github install");
+    assert_eq!(
+        pi_harness_github.bundle_binary_path.as_deref(),
+        Some("pi/pi")
+    );
+    assert_eq!(
+        pi_harness_github.checksums_asset.as_deref(),
+        Some("SHA256SUMS")
+    );
     let goose = catalog.lookup("goose").expect("goose entry exists");
     assert_eq!(goose.kind, RegistryKind::Native);
     assert!(goose.headless_compatible);

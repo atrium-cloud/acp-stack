@@ -156,6 +156,33 @@ pub fn replace_symlink_atomically(_target: &Path, link: &Path) -> Result<()> {
     })
 }
 
+/// Remove every release directory under `releases` except `keep` and `previous`, the one it
+/// replaced, which processes started before the swap may still be running from. Failures are
+/// logged; stale releases are harmless.
+pub fn prune_release_dirs(
+    releases: &Path,
+    keep: &std::ffi::OsStr,
+    previous: Option<&std::ffi::OsStr>,
+) {
+    let entries = match std::fs::read_dir(releases) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(%error, path = %releases.display(), "could not list releases for pruning");
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name.as_os_str() == keep || Some(name.as_os_str()) == previous {
+            continue;
+        }
+        let path = entry.path();
+        if let Err(error) = std::fs::remove_dir_all(&path) {
+            tracing::warn!(%error, path = %path.display(), "could not prune a stale release");
+        }
+    }
+}
+
 pub fn home_dir() -> Result<PathBuf> {
     let home = std::env::var_os("HOME")
         .filter(|value| !value.is_empty())
@@ -523,6 +550,28 @@ mod tests {
         assert!(!path_is_under_temp_dir(Path::new(
             "/definitely/missing/home"
         )));
+    }
+
+    #[test]
+    fn prune_release_dirs_keeps_the_new_and_previous_release() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        for name in ["old", "previous", "new"] {
+            std::fs::create_dir(tempdir.path().join(name)).expect("release dir");
+        }
+
+        prune_release_dirs(
+            tempdir.path(),
+            std::ffi::OsStr::new("new"),
+            Some(std::ffi::OsStr::new("previous")),
+        );
+
+        let mut remaining: Vec<String> = std::fs::read_dir(tempdir.path())
+            .expect("read releases")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        remaining.sort();
+        assert_eq!(remaining, ["new", "previous"]);
     }
 
     #[test]

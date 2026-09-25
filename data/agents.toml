@@ -217,10 +217,13 @@ required_tools = ["curl", "node", "npm"]
 package = "@earendil-works/pi-coding-agent"
 creates = "pi"
 
+# The release archive is a directory bundle; `pi` resolves its bundled files relative to itself.
 [agents.harness.install.github]
 asset_pattern = "pi-linux-{arch}.tar.gz"
 archive = "tar.gz"
+bundle_binary_path = "pi/pi"
 binary_name = "pi"
+checksums_asset = "SHA256SUMS"
 
 [agents.harness.install.github.arch]
 x86_64 = "x64"

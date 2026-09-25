@@ -9,7 +9,7 @@ use std::time::Duration;
 use crate::dev_gates::{NODE_DIST_BASE_ENV, TEST_SKIP_NODE_RUNTIME_ENV};
 use crate::error::{Result, StackError};
 use crate::fs_util::{
-    ExclusiveFileLock, acquire_exclusive_lock_file, replace_symlink_atomically,
+    ExclusiveFileLock, acquire_exclusive_lock_file, prune_release_dirs, replace_symlink_atomically,
     try_acquire_exclusive_lock_file,
 };
 use crate::runtime::process_runner::{CaptureOutcome, kill_process_group, run_captured};
@@ -414,7 +414,11 @@ fn install_latest(home: &Path, root: &Path, node_arch: &str, dist_base: &str) ->
         .and_then(|target| target.file_name().map(|name| name.to_owned()));
     replace_symlink_atomically(&Path::new(RELEASES_DIR_NAME).join(&release_name), &current)?;
     drop(staging);
-    prune_releases(&releases, &release_name, previous_release.as_deref());
+    prune_release_dirs(
+        &releases,
+        std::ffi::OsStr::new(&release_name),
+        previous_release.as_deref(),
+    );
     tracing::info!(%version, "installed managed Node.js");
     Ok(version)
 }
@@ -552,28 +556,6 @@ fn probe_version(node: &Path) -> Result<String> {
         )));
     }
     Ok(version)
-}
-
-/// Remove every release except the new one and the one it replaced, which processes started
-/// before the swap may still be running from. Failures are logged; stale releases are harmless.
-fn prune_releases(releases: &Path, keep: &str, previous: Option<&std::ffi::OsStr>) {
-    let entries = match std::fs::read_dir(releases) {
-        Ok(entries) => entries,
-        Err(error) => {
-            tracing::warn!(%error, "could not list managed Node.js releases for pruning");
-            return;
-        }
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        if name == keep || Some(name.as_os_str()) == previous {
-            continue;
-        }
-        let path = entry.path();
-        if let Err(error) = std::fs::remove_dir_all(&path) {
-            tracing::warn!(%error, path = %path.display(), "could not prune a managed Node.js release");
-        }
-    }
 }
 
 /// Point `~/.local/bin/{node,npm,npx}` at the managed tools. Symlinks, including stale ones into

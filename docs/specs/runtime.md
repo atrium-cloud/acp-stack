@@ -82,6 +82,7 @@ Adding an override to an agent first installed as a native entry relabels its ex
 
 - refuse unsupported catalog entries
 - install into runtime-managed paths
+- unpack a GitHub Release archive declared as a directory bundle whole into `~/.local/lib/acp-stack/bundles/<binary>/releases/<tag>/`, link its executable into `~/.local/bin`, and keep the new release plus the one it replaced
 - verify declared executables after install
 - record install outcomes for operator inspection
 - never receive provider API keys

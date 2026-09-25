@@ -175,6 +175,99 @@ timeout_secs = 9999999999
     }
 }
 
+fn bundle_registry_body(github_install: &str) -> String {
+    format!(
+        r#"
+[[agents]]
+id = "bundled"
+name = "Bundled"
+kind = "native"
+headless_compatible = true
+support_doc = "docs/agents/bundled.md"
+github = "owner/bundled"
+
+[agents.harness]
+id = "bundled"
+
+[agents.harness.install.github]
+asset_pattern = "bundled-linux.tar.gz"
+{github_install}
+"#
+    )
+}
+
+#[test]
+fn github_install_accepts_a_tar_gz_bundle() {
+    let body = bundle_registry_body(
+        r#"archive = "tar.gz"
+bundle_binary_path = "bundled/bin/bundled"
+binary_name = "bundled""#,
+    );
+    let catalog = RegistryCatalog::from_toml(&body).expect("bundle mode must parse");
+    let github = catalog
+        .lookup("bundled")
+        .and_then(|entry| entry.harness.as_ref())
+        .and_then(|harness| harness.install.github.as_ref())
+        .expect("github install");
+    assert_eq!(
+        github.bundle_binary_path.as_deref(),
+        Some("bundled/bin/bundled")
+    );
+}
+
+#[test]
+fn validate_rejects_invalid_bundle_declarations() {
+    let cases = [
+        (
+            r#"archive = "zip"
+bundle_binary_path = "bundled/bundled"
+binary_name = "bundled""#,
+            "requires archive = \"tar.gz\"",
+        ),
+        (
+            r#"archive = "none"
+bundle_binary_path = "bundled/bundled"
+binary_name = "bundled""#,
+            "requires archive = \"tar.gz\"",
+        ),
+        (
+            r#"archive = "tar.gz"
+archive_binary_name = "bundled"
+bundle_binary_path = "bundled/bundled"
+binary_name = "bundled""#,
+            "cannot be combined with archive_binary_name",
+        ),
+        (
+            r#"archive = "tar.gz"
+bundle_binary_path = "../bundled"
+binary_name = "bundled""#,
+            "must be a non-empty relative path",
+        ),
+        (
+            r#"archive = "tar.gz"
+bundle_binary_path = "/opt/bundled"
+binary_name = "bundled""#,
+            "must be a non-empty relative path",
+        ),
+        (
+            r#"archive = "tar.gz"
+bundle_binary_path = "bundled/bundled"
+binary_name = "nested/bundled""#,
+            "binary_name must be a single path component",
+        ),
+    ];
+    for (github_install, expected) in cases {
+        let err = RegistryCatalog::from_toml(&bundle_registry_body(github_install))
+            .expect_err(github_install);
+        match err {
+            StackError::RegistryLoad { reason } => {
+                assert!(reason.contains(expected), "reason: {reason}");
+            }
+            other => panic!("expected RegistryLoad, got {other:?}"),
+        }
+    }
+}
+
 #[test]
 fn github_values_accept_path_shorthand_and_derive_repo() {
     assert_eq!(

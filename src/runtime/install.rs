@@ -22,6 +22,15 @@ pub fn local_bin_dir(home: &Path) -> PathBuf {
     home.join(".local").join("bin")
 }
 
+/// Root of the unpacked directory-bundle releases that `~/.local/bin` links into. It must stay
+/// outside `sandbox::sensitive_mask_paths`, or sandboxed agents would see an empty directory.
+pub fn managed_bundles_dir(home: &Path) -> PathBuf {
+    home.join(".local")
+        .join("lib")
+        .join("acp-stack")
+        .join("bundles")
+}
+
 /// Whether `agent_id`'s registry entry declares a per-provider endpoint field acp-stack can
 /// write, resolved through embedded-plus-override so an operator entry adding it is honored.
 pub fn agent_supports_provider_base_url(home: &Path, agent_id: &str) -> crate::error::Result<bool> {

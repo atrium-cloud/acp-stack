@@ -1,11 +1,14 @@
 //! GitHub Release-driven installer for agent harnesses and adapter binaries: resolve the release,
 //! glob-match the asset, download, optionally checksum-verify, extract, and `chmod +x` into
-//! `dest_dir`. No shell is spawned, so reqwest's timeout bounds the whole install.
+//! `dest_dir`. A directory-bundle archive instead unpacks whole into a versioned release under
+//! the managed bundles root, and `dest_dir` gets a symlink to its executable. No shell is
+//! spawned, so reqwest's timeout bounds the whole install.
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::fs;
 use std::io::Cursor;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -13,7 +16,9 @@ use sha2::{Digest, Sha256};
 
 use crate::dev_gates::{GITHUB_API_BASE_ENV, fixture_string};
 use crate::error::{Result, StackError};
+use crate::fs_util::{acquire_exclusive_lock_file, prune_release_dirs, replace_symlink_atomically};
 use crate::runtime::install::agent_registry::ArchiveKind;
+use crate::runtime::install::managed_bundles_dir;
 use crate::runtime::net_rate_limit;
 
 const GITHUB_API_BASE: &str = "https://api.github.com";
@@ -22,6 +27,11 @@ const USER_AGENT: &str = concat!("acp-stack/", env!("CARGO_PKG_VERSION"));
 const HEADER_RETRY_AFTER: &str = "retry-after";
 const HEADER_RATELIMIT_REMAINING: &str = "x-ratelimit-remaining";
 const HEADER_RATELIMIT_RESET: &str = "x-ratelimit-reset";
+const BUNDLE_LOCK_FILE_NAME: &str = ".lock";
+const BUNDLE_RELEASES_DIR_NAME: &str = "releases";
+const BUNDLE_STAGING_PREFIX: &str = ".staging-";
+const BUNDLE_UNPACK_DIR_NAME: &str = "unpacked";
+const BUNDLE_REPLACED_DIR_NAME: &str = "replaced";
 
 fn github_api_base() -> String {
     if let Some(value) = fixture_string(GITHUB_API_BASE_ENV) {
@@ -43,6 +53,7 @@ pub struct GithubReleaseInstall<'a> {
     pub asset_pattern: &'a str,
     pub archive: ArchiveKind,
     pub archive_binary_name: Option<&'a str>,
+    pub bundle_binary_path: Option<&'a str>,
     pub binary_name: &'a str,
     pub checksums_asset: Option<&'a str>,
 }
@@ -76,6 +87,7 @@ pub fn install(
     spec: GithubReleaseInstall<'_>,
     version: Option<&str>,
     dest_dir: &Path,
+    home: &Path,
     _agent_env: &HashMap<String, String>,
 ) -> Result<GithubReleaseOutcome> {
     let mut log = LogBuf::new();
@@ -143,40 +155,58 @@ pub fn install(
     let binary_path = dest_dir.join(spec.binary_name);
     let archive_binary_name = spec.archive_binary_name.unwrap_or(spec.binary_name);
 
-    match spec.archive {
-        ArchiveKind::None => {
-            write_binary(&binary_path, &asset_bytes, spec.repo)?;
-            log.line(format!("wrote raw binary to {}", binary_path.display()));
+    if let Some(bundle_binary_path) = spec.bundle_binary_path {
+        let target = install_bundle(&BundleInstall {
+            bytes: &asset_bytes,
+            root: &managed_bundles_dir(home).join(spec.binary_name),
+            bundle_binary_path,
+            release_tag: &release.tag_name,
+            link: &binary_path,
+            repo: spec.repo,
+        })?;
+        log.line(format!(
+            "unpacked tar.gz bundle; {} links to {}",
+            binary_path.display(),
+            target.display()
+        ));
+    } else {
+        // A bundle install leaves a symlink here, and the raw and zip writes would follow it into
+        // the versioned release instead of replacing it.
+        remove_symlink(&binary_path, spec.repo)?;
+        match spec.archive {
+            ArchiveKind::None => {
+                write_binary(&binary_path, &asset_bytes, spec.repo)?;
+                log.line(format!("wrote raw binary to {}", binary_path.display()));
+            }
+            ArchiveKind::TarGz => {
+                extract_tar_gz(
+                    &asset_bytes,
+                    dest_dir,
+                    archive_binary_name,
+                    spec.binary_name,
+                    spec.repo,
+                )?;
+                log.line(format!(
+                    "extracted tar.gz; binary at {}",
+                    binary_path.display()
+                ));
+            }
+            ArchiveKind::Zip => {
+                extract_zip(
+                    &asset_bytes,
+                    dest_dir,
+                    archive_binary_name,
+                    spec.binary_name,
+                    spec.repo,
+                )?;
+                log.line(format!(
+                    "extracted zip; binary at {}",
+                    binary_path.display()
+                ));
+            }
         }
-        ArchiveKind::TarGz => {
-            extract_tar_gz(
-                &asset_bytes,
-                dest_dir,
-                archive_binary_name,
-                spec.binary_name,
-                spec.repo,
-            )?;
-            log.line(format!(
-                "extracted tar.gz; binary at {}",
-                binary_path.display()
-            ));
-        }
-        ArchiveKind::Zip => {
-            extract_zip(
-                &asset_bytes,
-                dest_dir,
-                archive_binary_name,
-                spec.binary_name,
-                spec.repo,
-            )?;
-            log.line(format!(
-                "extracted zip; binary at {}",
-                binary_path.display()
-            ));
-        }
+        set_executable(&binary_path, spec.repo)?;
     }
-
-    set_executable(&binary_path, spec.repo)?;
 
     Ok(GithubReleaseOutcome {
         binary_path,
@@ -436,6 +466,20 @@ fn parse_checksum_line(line: &str, asset_name: &str) -> Option<String> {
     }
 }
 
+fn remove_symlink(path: &Path, repo: &str) -> Result<()> {
+    let is_symlink = fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_symlink());
+    if !is_symlink {
+        return Ok(());
+    }
+    fs::remove_file(path).map_err(|source| StackError::GithubReleaseArchiveExtract {
+        repo: repo.to_owned(),
+        reason: format!(
+            "failed to remove the existing link at {}: {source}",
+            path.display()
+        ),
+    })
+}
+
 fn write_binary(path: &Path, bytes: &[u8], repo: &str) -> Result<()> {
     fs::write(path, bytes).map_err(|source| StackError::GithubReleaseArchiveExtract {
         repo: repo.to_owned(),
@@ -555,6 +599,111 @@ fn extract_zip(
         repo: repo.to_owned(),
         reason: format!("`{archive_binary_name}` not found in zip archive"),
     })
+}
+
+struct BundleInstall<'a> {
+    bytes: &'a [u8],
+    /// Per-binary root holding the lock and the `releases/` directory.
+    root: &'a Path,
+    bundle_binary_path: &'a str,
+    release_tag: &'a str,
+    link: &'a Path,
+    repo: &'a str,
+}
+
+/// Unpack a tar.gz bundle into `<root>/releases/<tag>/` and atomically point `link` at its
+/// executable, keeping the release `link` pointed at before. Returns the link target.
+fn install_bundle(bundle: &BundleInstall<'_>) -> Result<PathBuf> {
+    let extract_failed = |reason: String| StackError::GithubReleaseArchiveExtract {
+        repo: bundle.repo.to_owned(),
+        reason,
+    };
+    if !is_single_normal_component(bundle.release_tag) {
+        return Err(extract_failed(format!(
+            "release tag `{}` is not usable as a directory name",
+            bundle.release_tag
+        )));
+    }
+    let releases = bundle.root.join(BUNDLE_RELEASES_DIR_NAME);
+    fs::create_dir_all(&releases).map_err(|source| StackError::DirectoryCreate {
+        path: releases.clone(),
+        source,
+    })?;
+    // Serializes concurrent installs of the same bundle across processes; the daemon and a CLI
+    // update can otherwise race on the release swap and prune.
+    let _lock = acquire_exclusive_lock_file(&bundle.root.join(BUNDLE_LOCK_FILE_NAME))?;
+
+    let staging = tempfile::Builder::new()
+        .prefix(BUNDLE_STAGING_PREFIX)
+        .tempdir_in(&releases)
+        .map_err(|source| extract_failed(format!("failed to create staging dir: {source}")))?;
+    let unpacked = staging.path().join(BUNDLE_UNPACK_DIR_NAME);
+    tar::Archive::new(flate2::read::GzDecoder::new(bundle.bytes))
+        .unpack(&unpacked)
+        .map_err(|source| extract_failed(format!("failed to unpack tar bundle: {source}")))?;
+    let staged_binary = unpacked.join(bundle.bundle_binary_path);
+    // An archive symlink standing in for a parent directory could resolve the path outside the
+    // bundle, so the real location must stay under the unpack dir.
+    let inside_bundle = fs::canonicalize(&staged_binary)
+        .ok()
+        .zip(fs::canonicalize(&unpacked).ok())
+        .is_some_and(|(binary, unpacked)| binary.starts_with(unpacked));
+    if !inside_bundle
+        || !fs::symlink_metadata(&staged_binary).is_ok_and(|metadata| metadata.is_file())
+    {
+        return Err(extract_failed(format!(
+            "`{}` not found as a regular file inside the tar bundle",
+            bundle.bundle_binary_path
+        )));
+    }
+    set_executable(&staged_binary, bundle.repo)?;
+
+    let release_dir = releases.join(bundle.release_tag);
+    if fs::symlink_metadata(&release_dir).is_ok() {
+        // Reinstalling the linked tag: move it aside instead of deleting it in place, so the live
+        // link dangles only between two renames and the old copy goes when staging drops.
+        let replaced = staging.path().join(BUNDLE_REPLACED_DIR_NAME);
+        fs::rename(&release_dir, &replaced).map_err(|source| {
+            extract_failed(format!(
+                "failed to move stale release {} aside: {source}",
+                release_dir.display()
+            ))
+        })?;
+    }
+    fs::rename(&unpacked, &release_dir).map_err(|source| {
+        extract_failed(format!(
+            "failed to move bundle into {}: {source}",
+            release_dir.display()
+        ))
+    })?;
+    let previous = previous_bundle_release(bundle.link, &releases);
+    let target = release_dir.join(bundle.bundle_binary_path);
+    replace_symlink_atomically(&target, bundle.link)?;
+    drop(staging);
+    prune_release_dirs(
+        &releases,
+        OsStr::new(bundle.release_tag),
+        previous.as_deref(),
+    );
+    Ok(target)
+}
+
+/// The release directory name `link` currently resolves into, or `None` when it points anywhere
+/// else (another install method's link, a regular file, nothing).
+fn previous_bundle_release(link: &Path, releases: &Path) -> Option<std::ffi::OsString> {
+    let target = fs::read_link(link).ok()?;
+    match target.strip_prefix(releases).ok()?.components().next()? {
+        Component::Normal(name) => Some(name.to_owned()),
+        _ => None,
+    }
+}
+
+fn is_single_normal_component(value: &str) -> bool {
+    let mut components = Path::new(value).components();
+    matches!(
+        (components.next(), components.next()),
+        (Some(Component::Normal(_)), None)
+    )
 }
 
 #[cfg(unix)]
@@ -910,5 +1059,284 @@ mod tests {
             "destination must be the regular file, not the symlink entry"
         );
         assert_eq!(std::fs::read(&dest).expect("read dest"), b"#!/bin/sh\n");
+    }
+
+    const BUNDLE_REPO: &str = "earendil-works/pi";
+    const BUNDLE_BINARY_PATH: &str = "pi/pi";
+
+    fn bundle_tar_gz(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut tar_bytes = Vec::new();
+        {
+            let encoder =
+                flate2::write::GzEncoder::new(&mut tar_bytes, flate2::Compression::default());
+            let mut builder = tar::Builder::new(encoder);
+            for (path, payload) in entries {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(payload.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, path, *payload)
+                    .expect("tar entry should append");
+            }
+            let encoder = builder.into_inner().expect("tar should finish");
+            encoder.finish().expect("gzip should finish");
+        }
+        tar_bytes
+    }
+
+    fn pi_bundle() -> Vec<u8> {
+        bundle_tar_gz(&[
+            (BUNDLE_BINARY_PATH, b"#!/bin/sh\n"),
+            ("pi/package.json", b"{}"),
+            ("pi/theme/dark.json", b"{}"),
+        ])
+    }
+
+    struct BundleFixture {
+        home: tempfile::TempDir,
+    }
+
+    impl BundleFixture {
+        fn new() -> Self {
+            let home = tempfile::tempdir().expect("tempdir");
+            fs::create_dir_all(home.path().join("bin")).expect("bin dir");
+            Self { home }
+        }
+
+        fn root(&self) -> PathBuf {
+            self.home.path().join("bundles").join("pi")
+        }
+
+        fn releases(&self) -> PathBuf {
+            self.root().join(BUNDLE_RELEASES_DIR_NAME)
+        }
+
+        fn link(&self) -> PathBuf {
+            self.home.path().join("bin").join("pi")
+        }
+
+        fn install(&self, bytes: &[u8], release_tag: &str) -> Result<PathBuf> {
+            install_bundle(&BundleInstall {
+                bytes,
+                root: &self.root(),
+                bundle_binary_path: BUNDLE_BINARY_PATH,
+                release_tag,
+                link: &self.link(),
+                repo: BUNDLE_REPO,
+            })
+        }
+
+        fn release_names(&self) -> Vec<String> {
+            let mut names: Vec<String> = fs::read_dir(self.releases())
+                .expect("read releases")
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundle_install_unpacks_the_whole_archive_and_links_the_binary() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = BundleFixture::new();
+
+        let target = fixture.install(&pi_bundle(), "v1.0.0").expect("bundle");
+
+        let release = fixture.releases().join("v1.0.0");
+        assert_eq!(target, release.join(BUNDLE_BINARY_PATH));
+        assert_eq!(fs::read_link(fixture.link()).expect("link"), target);
+        assert!(release.join("pi/package.json").is_file());
+        assert!(release.join("pi/theme/dark.json").is_file());
+        let mode = fs::metadata(&target).expect("stat").permissions().mode();
+        assert_ne!(mode & 0o111, 0, "bundle binary must be executable");
+        assert_eq!(fixture.release_names(), ["v1.0.0"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundle_install_replaces_a_regular_file_at_the_link() {
+        let fixture = BundleFixture::new();
+        fs::write(fixture.link(), b"single-file binary").expect("old binary");
+
+        let target = fixture.install(&pi_bundle(), "v1.0.0").expect("bundle");
+
+        let metadata = fs::symlink_metadata(fixture.link()).expect("link");
+        assert!(metadata.file_type().is_symlink());
+        assert_eq!(fs::read_link(fixture.link()).expect("link"), target);
+    }
+
+    #[test]
+    fn bundle_install_without_the_binary_fails_and_leaves_the_link() {
+        let fixture = BundleFixture::new();
+        fs::write(fixture.link(), b"old").expect("old binary");
+        let bytes = bundle_tar_gz(&[("pi/package.json", b"{}")]);
+
+        let err = fixture
+            .install(&bytes, "v1.0.0")
+            .expect_err("missing binary");
+
+        assert!(
+            matches!(err, StackError::GithubReleaseArchiveExtract { ref reason, .. } if reason.contains("pi/pi")),
+            "{err:?}"
+        );
+        assert_eq!(fs::read(fixture.link()).expect("link"), b"old");
+        assert!(
+            fixture.release_names().is_empty(),
+            "no release or staging dir may remain"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundle_install_skips_entries_that_climb_out_of_the_bundle() {
+        fn contains_file_named(dir: &Path, name: &str) -> bool {
+            fs::read_dir(dir).expect("read dir").flatten().any(|entry| {
+                let path = entry.path();
+                entry.file_name() == name
+                    || (path.is_dir() && !path.is_symlink() && contains_file_named(&path, name))
+            })
+        }
+        let mut tar_bytes = Vec::new();
+        {
+            let encoder =
+                flate2::write::GzEncoder::new(&mut tar_bytes, flate2::Compression::default());
+            let mut builder = tar::Builder::new(encoder);
+            // `append_data` refuses `..`, so the hostile name goes straight into the header.
+            let escape = b"../../escape";
+            let mut header = tar::Header::new_gnu();
+            header.as_gnu_mut().expect("gnu header").name[..escape.len()].copy_from_slice(escape);
+            header.set_size(1);
+            header.set_mode(0o644);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_cksum();
+            builder.append(&header, &b"x"[..]).expect("raw entry");
+            let payload = b"#!/bin/sh\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(payload.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, BUNDLE_BINARY_PATH, &payload[..])
+                .expect("binary entry");
+            let encoder = builder.into_inner().expect("tar should finish");
+            encoder.finish().expect("gzip should finish");
+        }
+        let fixture = BundleFixture::new();
+
+        fixture.install(&tar_bytes, "v1.0.0").expect("bundle");
+
+        assert!(!contains_file_named(fixture.home.path(), "escape"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundle_install_keeps_only_the_new_and_previous_release() {
+        let fixture = BundleFixture::new();
+
+        for tag in ["v1.0.0", "v2.0.0", "v3.0.0"] {
+            fixture.install(&pi_bundle(), tag).expect("bundle");
+        }
+
+        assert_eq!(fixture.release_names(), ["v2.0.0", "v3.0.0"]);
+        assert_eq!(
+            fs::read_link(fixture.link()).expect("link"),
+            fixture.releases().join("v3.0.0").join(BUNDLE_BINARY_PATH)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundle_install_reinstalling_the_linked_tag_replaces_it() {
+        let fixture = BundleFixture::new();
+        fixture.install(&pi_bundle(), "v1.0.0").expect("bundle");
+        fixture.install(&pi_bundle(), "v2.0.0").expect("bundle");
+        let refreshed = bundle_tar_gz(&[
+            (BUNDLE_BINARY_PATH, b"#!/bin/sh\n"),
+            ("pi/package.json", b"{\"refreshed\":true}"),
+        ]);
+
+        let target = fixture.install(&refreshed, "v2.0.0").expect("reinstall");
+
+        assert_eq!(fs::read_link(fixture.link()).expect("link"), target);
+        assert!(target.is_file());
+        let release = fixture.releases().join("v2.0.0");
+        assert_eq!(
+            fs::read(release.join("pi/package.json")).expect("package.json"),
+            b"{\"refreshed\":true}"
+        );
+        assert!(
+            !release.join("pi/theme").exists(),
+            "the old copy must be gone"
+        );
+        assert_eq!(fixture.release_names(), ["v2.0.0"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundle_install_rejects_a_binary_reached_through_an_escaping_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let outside = tempfile::tempdir().expect("outside");
+        let outside_binary = outside.path().join("pi");
+        fs::write(&outside_binary, b"#!/bin/sh\n").expect("outside binary");
+        fs::set_permissions(&outside_binary, fs::Permissions::from_mode(0o644)).expect("chmod");
+        let mut tar_bytes = Vec::new();
+        {
+            let encoder =
+                flate2::write::GzEncoder::new(&mut tar_bytes, flate2::Compression::default());
+            let mut builder = tar::Builder::new(encoder);
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_size(0);
+            builder
+                .append_link(&mut header, "pi", outside.path())
+                .expect("symlink entry");
+            let encoder = builder.into_inner().expect("tar should finish");
+            encoder.finish().expect("gzip should finish");
+        }
+        let fixture = BundleFixture::new();
+
+        let err = fixture
+            .install(&tar_bytes, "v1.0.0")
+            .expect_err("escaping binary");
+
+        assert!(
+            matches!(err, StackError::GithubReleaseArchiveExtract { .. }),
+            "{err:?}"
+        );
+        assert!(fs::symlink_metadata(fixture.link()).is_err());
+        let mode = fs::metadata(&outside_binary)
+            .expect("stat")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o644, "the outside file must not be chmodded");
+    }
+
+    #[test]
+    fn bundle_install_rejects_a_tag_that_is_not_one_path_component() {
+        let fixture = BundleFixture::new();
+        for tag in ["../v1", "team/v1", ".", ""] {
+            let err = fixture.install(&pi_bundle(), tag).expect_err(tag);
+            assert!(
+                matches!(err, StackError::GithubReleaseArchiveExtract { .. }),
+                "{err:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn previous_bundle_release_ignores_links_outside_the_releases_dir() {
+        let fixture = BundleFixture::new();
+        std::os::unix::fs::symlink(fixture.home.path().join("elsewhere/pi"), fixture.link())
+            .expect("foreign link");
+
+        assert_eq!(
+            previous_bundle_release(&fixture.link(), &fixture.releases()),
+            None
+        );
     }
 }

@@ -71,6 +71,11 @@ const HARNESS_ASSET: &str = "fake-harness";
 const ADAPTER_ASSET: &str = "fake-adapter";
 const HARNESS_TAG: &str = "v0.4.2";
 const ADAPTER_TAG: &str = "v1.0.0";
+const BUNDLE_REPO: &str = "test-owner/bundle-repo";
+const BUNDLE_ASSET: &str = "fake-harness-linux.tar.gz";
+const BUNDLE_TAG: &str = "v2.0.0";
+const BUNDLE_BINARY_PATH: &str = "fake-harness/fake-harness";
+const BUNDLE_SIBLING_PATH: &str = "fake-harness/package.json";
 
 /// Mock GitHub releases server serving release JSON and asset bytes.
 struct MockGithub {
@@ -87,6 +92,31 @@ fn binary_bytes(label: &str) -> Vec<u8> {
     format!("#!/bin/sh\necho {label}\n").into_bytes()
 }
 
+/// A directory-bundle archive: the executable plus a sibling file it would resolve at runtime.
+fn bundle_bytes() -> Vec<u8> {
+    let mut tar_bytes = Vec::new();
+    {
+        let encoder = flate2::write::GzEncoder::new(&mut tar_bytes, flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        let entries = [
+            (BUNDLE_BINARY_PATH, binary_bytes("bundle"), 0o755),
+            (BUNDLE_SIBLING_PATH, b"{}".to_vec(), 0o644),
+        ];
+        for (path, payload, mode) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(payload.len() as u64);
+            header.set_mode(mode);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, path, payload.as_slice())
+                .expect("tar entry should append");
+        }
+        let encoder = builder.into_inner().expect("tar should finish");
+        encoder.finish().expect("gzip should finish");
+    }
+    tar_bytes
+}
+
 async fn release_handler(
     State(state): State<MockState>,
     AxPath((owner, repo)): AxPath<(String, String)>,
@@ -95,6 +125,7 @@ async fn release_handler(
     let (tag, asset_name, asset_bytes) = match full.as_str() {
         HARNESS_REPO => (HARNESS_TAG, HARNESS_ASSET, binary_bytes("harness")),
         ADAPTER_REPO => (ADAPTER_TAG, ADAPTER_ASSET, binary_bytes("adapter")),
+        BUNDLE_REPO => (BUNDLE_TAG, BUNDLE_ASSET, bundle_bytes()),
         _ => return (StatusCode::NOT_FOUND, "unknown repo").into_response(),
     };
     let body = json!({
@@ -114,6 +145,7 @@ async fn asset_handler(AxPath(filename): AxPath<String>) -> impl IntoResponse {
     let bytes = match filename.as_str() {
         HARNESS_ASSET => binary_bytes("harness"),
         ADAPTER_ASSET => binary_bytes("adapter"),
+        BUNDLE_ASSET => bundle_bytes(),
         _ => return (StatusCode::NOT_FOUND, "unknown asset").into_response(),
     };
     (
@@ -192,6 +224,7 @@ fn adapter_kind_entry() -> RegistryEntry {
                     asset_pattern: HARNESS_ASSET.to_owned(),
                     archive: ArchiveKind::None,
                     archive_binary_name: None,
+                    bundle_binary_path: None,
                     binary_name: HARNESS_BIN.to_owned(),
                     checksums_asset: None,
                     arch: ArchMap {
@@ -213,6 +246,7 @@ fn adapter_kind_entry() -> RegistryEntry {
                     asset_pattern: ADAPTER_ASSET.to_owned(),
                     archive: ArchiveKind::None,
                     archive_binary_name: None,
+                    bundle_binary_path: None,
                     binary_name: ADAPTER_BIN.to_owned(),
                     checksums_asset: None,
                     arch: ArchMap {
@@ -406,6 +440,114 @@ fn install_resolved_runs_adapter_step_for_native_entry_with_override() {
     assert_eq!(adapter_row.status, "ran");
     assert!(dest_dir.path().join(HARNESS_BIN).is_file());
     assert!(adapter_path.is_file());
+}
+
+#[test]
+fn install_resolved_links_a_bundle_release_into_the_bin_dir() {
+    let mock = start_mock_github();
+    let home = tempfile::tempdir().expect("home tempdir");
+
+    let _env = EnvGuard::new(
+        "ACP_STACK_GITHUB_API_BASE",
+        &format!("http://{}", mock.addr),
+    );
+    let mut entry = adapter_kind_entry();
+    entry.github = Some(format!("https://github.com/{BUNDLE_REPO}"));
+    let harness = entry.harness.as_mut().expect("harness");
+    harness.install.github = Some(GithubInstall {
+        asset_pattern: BUNDLE_ASSET.to_owned(),
+        archive: ArchiveKind::TarGz,
+        archive_binary_name: None,
+        bundle_binary_path: Some(BUNDLE_BINARY_PATH.to_owned()),
+        binary_name: HARNESS_BIN.to_owned(),
+        checksums_asset: None,
+        arch: ArchMap::default(),
+    });
+    let result = install_resolved_capture(
+        &agent_config(ADAPTER_BIN),
+        &entry,
+        std::collections::HashMap::new(),
+        home.path(),
+        home.path(),
+        None,
+        home.path(),
+    );
+
+    result
+        .outcome
+        .expect("bundle install against the mock should succeed");
+    let harness_row = result
+        .rows
+        .iter()
+        .find(|r| r.step == "harness")
+        .expect("harness row missing");
+    assert_eq!(harness_row.status, "ran");
+    assert_eq!(harness_row.version.as_deref(), Some(BUNDLE_TAG));
+
+    let release = acp_stack::runtime::install::managed_bundles_dir(home.path())
+        .join(HARNESS_BIN)
+        .join("releases")
+        .join(BUNDLE_TAG);
+    let link = home.path().join(HARNESS_BIN);
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .expect("stat link")
+            .file_type()
+            .is_symlink(),
+        "the bin-dir entry must link into the bundle",
+    );
+    assert_eq!(
+        std::fs::read_link(&link).expect("read link"),
+        release.join(BUNDLE_BINARY_PATH)
+    );
+    assert!(
+        release.join(BUNDLE_SIBLING_PATH).is_file(),
+        "the bundle must unpack whole, not only its executable",
+    );
+}
+
+#[test]
+fn install_resolved_replaces_a_bundle_link_instead_of_writing_through_it() {
+    let mock = start_mock_github();
+    let home = tempfile::tempdir().expect("home tempdir");
+    let release = tempfile::tempdir().expect("release tempdir");
+    let release_binary = release.path().join(HARNESS_BIN);
+    std::fs::write(&release_binary, b"bundled binary").expect("release binary");
+    let link = home.path().join(HARNESS_BIN);
+    std::os::unix::fs::symlink(&release_binary, &link).expect("bundle link");
+
+    let _env = EnvGuard::new(
+        "ACP_STACK_GITHUB_API_BASE",
+        &format!("http://{}", mock.addr),
+    );
+    let result = install_resolved_capture(
+        &agent_config(ADAPTER_BIN),
+        &adapter_kind_entry(),
+        std::collections::HashMap::new(),
+        home.path(),
+        home.path(),
+        None,
+        home.path(),
+    );
+
+    result
+        .outcome
+        .expect("raw-binary install against the mock should succeed");
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .expect("stat harness")
+            .is_file(),
+        "the raw binary must replace the link",
+    );
+    assert_eq!(
+        std::fs::read(&link).expect("read harness"),
+        binary_bytes("harness")
+    );
+    assert_eq!(
+        std::fs::read(&release_binary).expect("read release binary"),
+        b"bundled binary",
+        "the linked release must stay untouched",
+    );
 }
 
 #[test]

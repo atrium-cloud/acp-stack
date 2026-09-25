@@ -126,6 +126,7 @@ pub(super) fn resolve_github_install(
         asset_pattern,
         archive: github.archive,
         archive_binary_name,
+        bundle_binary_path: github.bundle_binary_path.clone(),
         binary_name: github.binary_name.clone(),
         checksums_asset: github.checksums_asset.clone(),
         version_pin: version_pin.map(str::to_owned),
@@ -215,6 +216,7 @@ pub(super) fn run_install_step(
             asset_pattern,
             archive,
             archive_binary_name,
+            bundle_binary_path,
             binary_name,
             checksums_asset,
             version_pin,
@@ -224,6 +226,7 @@ pub(super) fn run_install_step(
                 asset_pattern: &asset_pattern,
                 archive,
                 archive_binary_name: archive_binary_name.as_deref(),
+                bundle_binary_path: bundle_binary_path.as_deref(),
                 binary_name: &binary_name,
                 checksums_asset: checksums_asset.as_deref(),
             };
@@ -377,7 +380,7 @@ pub(super) fn github_release_step(
     home: &Path,
 ) -> StepResult {
     let binary_path = dest_dir.join(install.binary_name);
-    let result = github_release::install(install, version_pin, dest_dir, agent_env);
+    let result = github_release::install(install, version_pin, dest_dir, home, agent_env);
     let finished_at = current_timestamp();
     match result {
         Ok(outcome) => {

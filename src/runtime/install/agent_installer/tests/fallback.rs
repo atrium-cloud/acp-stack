@@ -373,6 +373,7 @@ fn github_release_install_path_has_no_host_tool_prerequisites() {
         asset_pattern: "agent-linux-x86_64.tar.gz".to_owned(),
         archive: ArchiveKind::TarGz,
         archive_binary_name: None,
+        bundle_binary_path: None,
         binary_name: "agent".to_owned(),
         checksums_asset: None,
         version_pin: None,

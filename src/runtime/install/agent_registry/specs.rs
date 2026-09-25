@@ -287,6 +287,11 @@ pub struct GithubInstall {
     pub archive: ArchiveKind,
     #[serde(default)]
     pub archive_binary_name: Option<String>,
+    /// Executable's path inside a directory-bundle archive. When set, the whole archive unpacks
+    /// into a versioned release directory and `binary_name` in the bin directory links to it,
+    /// because the executable resolves its bundled files relative to itself.
+    #[serde(default)]
+    pub bundle_binary_path: Option<String>,
     pub binary_name: String,
     #[serde(default)]
     pub checksums_asset: Option<String>,
@@ -309,6 +314,9 @@ impl GithubInstall {
             )?;
         }
         validate_nonempty(agent_id, &format!("{field}.binary_name"), &self.binary_name)?;
+        if let Some(bundle_binary_path) = &self.bundle_binary_path {
+            self.validate_bundle(agent_id, field, bundle_binary_path)?;
+        }
         if self.asset_pattern.contains("{arch}")
             || self
                 .archive_binary_name
@@ -319,6 +327,44 @@ impl GithubInstall {
         }
         Ok(())
     }
+
+    fn validate_bundle(&self, agent_id: &str, field: &str, bundle_binary_path: &str) -> Result<()> {
+        let invalid = |detail: &str| StackError::RegistryLoad {
+            reason: format!("agent `{agent_id}` {field}.bundle_binary_path {detail}"),
+        };
+        if self.archive != ArchiveKind::TarGz {
+            return Err(invalid("requires archive = \"tar.gz\""));
+        }
+        if self.archive_binary_name.is_some() {
+            return Err(invalid("cannot be combined with archive_binary_name"));
+        }
+        if !is_relative_normal_path(bundle_binary_path) {
+            return Err(invalid(
+                "must be a non-empty relative path without `.` or `..` components",
+            ));
+        }
+        // `binary_name` names the bundle's directory under the managed bundles root.
+        if !is_relative_normal_path(&self.binary_name)
+            || std::path::Path::new(&self.binary_name).components().count() != 1
+        {
+            return Err(StackError::RegistryLoad {
+                reason: format!(
+                    "agent `{agent_id}` {field}.binary_name must be a single path component in bundle mode"
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Non-empty relative path made only of normal components, so joining it under a directory can
+/// never escape that directory.
+fn is_relative_normal_path(value: &str) -> bool {
+    let path = std::path::Path::new(value);
+    !value.trim().is_empty()
+        && path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]

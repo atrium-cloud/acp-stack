@@ -533,6 +533,7 @@ pub fn adapter_spec_from_override(
                         crate::config::AgentAdapterOverrideArchiveKind::Zip => ArchiveKind::Zip,
                     },
                     archive_binary_name: github.archive_binary_name.clone(),
+                    bundle_binary_path: None,
                     binary_name: github.binary_name.clone(),
                     checksums_asset: github.checksums_asset.clone(),
                     arch: ArchMap {

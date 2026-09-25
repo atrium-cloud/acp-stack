@@ -499,6 +499,9 @@ fn github_asset_patterns(pattern: &str, install: &GithubInstall) -> BTreeSet<Str
     } else {
         patterns.insert(pattern.to_owned());
     }
+    if let Some(checksums_asset) = &install.checksums_asset {
+        patterns.insert(checksums_asset.clone());
+    }
     patterns
 }
 
