@@ -151,7 +151,7 @@ pub(super) fn stage_init_config(
     let native_config_pending =
         pending_init_native_config.is_some() || args.native_config_revision.is_some();
     prompt::emit_state_signals(|| {
-        agent_settlement_signals(&config, &registry, &args, native_config_pending)
+        agent_settlement_signals(&config, &registry, &args, native_config_pending, &home)
     });
 
     let recorded_native_config_operation: Option<

@@ -35,6 +35,7 @@ async fn status_returns_200_with_session_key() {
         "agent-test-json",
         "managed-credential-base-url",
         "sandbox-mask-files",
+        "managed-node-runtime",
     ] {
         assert!(
             features.iter().any(|entry| entry == feature),

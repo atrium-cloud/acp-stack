@@ -41,6 +41,7 @@ impl AcpBridge {
         network_provider: Option<&crate::extensions::NetworkProviderExtension>,
         command_log: Option<TerminalCommandLog>,
     ) -> Result<Self> {
+        wait_for_managed_node(home).await;
         let mut env = build_agent_process_env(agent, home, env)?;
         // Last write wins, so the namespace owner's declaration overrides both
         // `[agent].env` and the runtime-managed rewrites above it.
@@ -104,6 +105,22 @@ impl AcpBridge {
             terminals,
             attached_sessions: TokioMutex::new(HashSet::new()),
         })
+    }
+}
+
+/// Wait out an in-flight managed Node.js install, so a Node-script agent never starts on whatever
+/// host Node precedes it. Never installs: a missing runtime is logged and the spawn proceeds.
+async fn wait_for_managed_node(home: &Path) {
+    let home = home.to_path_buf();
+    match tokio::task::spawn_blocking(move || crate::runtime::node_runtime::wait_ready(&home)).await
+    {
+        Ok(crate::runtime::node_runtime::NodeRuntimeStatus::NotReady) => {
+            tracing::warn!(
+                "managed Node.js is not installed; the agent starts with any host Node.js on PATH"
+            );
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!(%error, "managed Node.js readiness check did not complete"),
     }
 }
 
@@ -613,10 +630,5 @@ pub(crate) fn agent_process_path(home: &Path) -> Option<std::ffi::OsString> {
 }
 
 fn command_search_paths(home: &Path) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    paths.push(home.join(".local").join("bin"));
-    paths.extend(std::env::split_paths(
-        &std::env::var_os("PATH").unwrap_or_default(),
-    ));
-    paths
+    crate::runtime::process_runner::managed_search_dirs(home, &[])
 }

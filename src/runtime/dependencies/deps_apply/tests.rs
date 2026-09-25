@@ -496,12 +496,31 @@ fn pending_system_candidates_filters_scope_and_presence() {
             timeout_secs: None,
         }),
     });
-    let pending = pending_system_candidates(&config, None);
+    let pending =
+        pending_system_candidates(&config, None, Path::new("/nonexistent-acp-stack-home"));
     assert_eq!(pending.len(), 1);
     assert_eq!(
         pending[0].name,
         "definitely-not-installed-acps-system-pending"
     );
+}
+
+#[test]
+fn install_shells_put_the_managed_node_bin_first_on_path() {
+    let home = Path::new("/home/u");
+
+    let env = scrubbed_env(home);
+
+    let path = env.get("PATH").expect("PATH");
+    let dirs: Vec<PathBuf> = std::env::split_paths(path).collect();
+    assert_eq!(
+        dirs[..2],
+        [
+            crate::runtime::node_runtime::managed_bin_dir(home),
+            crate::runtime::install::local_bin_dir(home),
+        ]
+    );
+    assert_eq!(env.get("HOME").map(String::as_str), Some("/home/u"));
 }
 
 #[test]

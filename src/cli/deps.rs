@@ -45,7 +45,7 @@ pub(super) fn run_deps_command(command: DepsCommand, output: OutputFormat) -> Re
 
 fn run_check(output: OutputFormat) -> Result<()> {
     let config = Config::load_from_default_path()?;
-    let report = crate::runtime::dependencies::deps::check_dependencies(&config);
+    let report = crate::runtime::dependencies::deps::check_dependencies(&config, &home_dir()?);
     if output.is_json() {
         print_json(
             &serde_json::to_value(&report).map_err(|source| StackError::ServeIo {
@@ -106,7 +106,7 @@ fn run_apply(args: DepsApplyArgs, output: OutputFormat) -> Result<()> {
 
     let shell = &config.workspace.default_shell;
     let home = home_dir()?;
-    let system_candidates = pending_system_candidates(&config, args.feature.as_deref());
+    let system_candidates = pending_system_candidates(&config, args.feature.as_deref(), &home);
     let escalation = if system_candidates.is_empty() {
         PrivilegeEscalation::NotNeeded
     } else {

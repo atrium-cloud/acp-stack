@@ -54,10 +54,19 @@ fn applicability_of(signals: &[InitStateSignal], wanted: InitCategory) -> Option
     })
 }
 
+/// Settlement signals only resolve dependency commands in the home; none exist here.
+const SETTLEMENT_TEST_HOME: &str = "/nonexistent-acp-stack-home";
+
 fn settlement_signals_for(agent_id: &str) -> Vec<InitStateSignal> {
     let registry = RegistryCatalog::load_embedded().expect("registry");
     let args = parse_init_args(&[]);
-    agent_settlement_signals(&config_for_agent(agent_id), &registry, &args, false)
+    agent_settlement_signals(
+        &config_for_agent(agent_id),
+        &registry,
+        &args,
+        false,
+        Path::new(SETTLEMENT_TEST_HOME),
+    )
 }
 
 // No embedded agent is mode-only anymore, so set_model=false paths run against
@@ -90,7 +99,13 @@ fn registry_verdict_outranks_a_configured_root_model() {
     let mut config = config_for_agent("amp");
     config.agent.model = Some("gpt-5-codex".to_owned());
     let args = parse_init_args(&[]);
-    let signals = agent_settlement_signals(&config, &registry, &args, false);
+    let signals = agent_settlement_signals(
+        &config,
+        &registry,
+        &args,
+        false,
+        Path::new(SETTLEMENT_TEST_HOME),
+    );
     assert_eq!(applicability_of(&signals, InitCategory::Model), Some(false));
 }
 
@@ -184,7 +199,13 @@ fn registry_derivation_reports_mcp_nowhere_and_reads_flags_for_the_rest() {
 fn registry_derivation_honors_no_skills() {
     let registry = RegistryCatalog::load_embedded().expect("registry");
     let args = parse_init_args(&["--no-skills"]);
-    let signals = agent_settlement_signals(&config_for_agent("amp"), &registry, &args, false);
+    let signals = agent_settlement_signals(
+        &config_for_agent("amp"),
+        &registry,
+        &args,
+        false,
+        Path::new(SETTLEMENT_TEST_HOME),
+    );
     assert_eq!(
         applicability_of(&signals, InitCategory::Skills),
         Some(false)
@@ -234,7 +255,13 @@ fn a_resume_that_inherits_a_skill_plan_leaves_the_skills_lane_alone() {
 fn registry_derivation_reports_a_pending_native_config_as_applicable() {
     let registry = RegistryCatalog::load_embedded().expect("registry");
     let args = parse_init_args(&[]);
-    let signals = agent_settlement_signals(&config_for_agent("amp"), &registry, &args, true);
+    let signals = agent_settlement_signals(
+        &config_for_agent("amp"),
+        &registry,
+        &args,
+        true,
+        Path::new(SETTLEMENT_TEST_HOME),
+    );
     assert_eq!(
         applicability_of(&signals, InitCategory::NativeConfig),
         Some(true)
@@ -260,7 +287,13 @@ fn registry_derivation_reports_pending_dependencies_as_applicable() {
         }],
         ..Default::default()
     };
-    let signals = agent_settlement_signals(&config, &registry, &args, false);
+    let signals = agent_settlement_signals(
+        &config,
+        &registry,
+        &args,
+        false,
+        Path::new(SETTLEMENT_TEST_HOME),
+    );
     assert_eq!(applicability_of(&signals, InitCategory::Deps), Some(true));
 }
 
@@ -984,11 +1017,12 @@ fn store_with_live_background_apply(init_run_id: &str) -> (tempfile::TempDir, St
 
 #[test]
 fn background_deps_launch_adopts_only_this_runs_live_apply() {
-    let (_dir, store) = store_with_live_background_apply("irun_owner");
+    let (dir, store) = store_with_live_background_apply("irun_owner");
     let config = config_for_agent("placebo");
     let (outcome, apply_run_id) = launch_background_deps_apply(
         &store,
         &config,
+        dir.path(),
         "irun_owner",
         &PrivilegeEscalation::NotNeeded,
         InitOutputMode::Text,
@@ -1008,11 +1042,12 @@ fn background_deps_launch_adopts_only_this_runs_live_apply() {
 fn background_deps_launch_rejects_a_foreign_live_apply() {
     // Adopting a DIFFERENT run's apply would record this run's deps step against
     // foreign work and silently skip its own declared deps.
-    let (_dir, store) = store_with_live_background_apply("irun_other");
+    let (dir, store) = store_with_live_background_apply("irun_other");
     let config = config_for_agent("placebo");
     let error = launch_background_deps_apply(
         &store,
         &config,
+        dir.path(),
         "irun_this",
         &PrivilegeEscalation::NotNeeded,
         InitOutputMode::Text,

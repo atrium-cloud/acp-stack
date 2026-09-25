@@ -324,7 +324,7 @@ pub(super) fn open_mcp_servers(
         return Ok(Vec::new());
     }
     let store = SecretStore::open(home)?;
-    crate::runtime::agent::mcp::resolve_mcp_servers(&config.mcp, &store)
+    crate::runtime::agent::mcp::resolve_mcp_servers(&config.mcp, &store, home)
 }
 
 pub(crate) fn ensure_array_process_start_allowed(config: &Config, target_id: &str) -> Result<()> {

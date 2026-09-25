@@ -5,7 +5,7 @@
 use acp_stack::api::{self, AppState, RuntimePaths};
 use acp_stack::auth::{AuthVerifierSet, KeyKind};
 use acp_stack::config::load_config_from_str;
-use acp_stack::dev_gates::TEST_SKIP_AGENT_INSTALL_ENV;
+use acp_stack::dev_gates::{TEST_SKIP_AGENT_INSTALL_ENV, TEST_SKIP_NODE_RUNTIME_ENV};
 use acp_stack::secrets::{ProviderCredential, ProviderCredentialSet, SecretStore};
 use acp_stack::state::{StateStore, default_state_path};
 use assert_cmd::Command;
@@ -42,6 +42,8 @@ pub fn acps_command_without_placebo(home: &std::path::Path) -> Command {
     // An exported disposable-host var (e.g. copied from CI config) would silently disable the
     // fixture guards in the spawned binary; the developer suite must always run guarded.
     command.env_remove("ACP_STACK_TEST_DISPOSABLE_HOST");
+    // Installer runs would otherwise try to fetch the managed Node.js runtime.
+    command.env(TEST_SKIP_NODE_RUNTIME_ENV, "1");
     command
 }
 

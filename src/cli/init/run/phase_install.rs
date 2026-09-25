@@ -39,6 +39,9 @@ pub(super) fn run_agent_install_step(flow: &mut InitFlow) -> Result<()> {
                     &config.workspace,
                 )?;
             }
+            // Run ahead of the installer's own call so the operator sees the Node outcome;
+            // the installer then takes the offline fast path.
+            prepare_node_runtime(home, output_mode);
             // Snapshot before and after so the payload lists exactly the installer rows this
             // attempt produced.
             let prior_ids: std::collections::HashSet<String> = store
@@ -92,6 +95,32 @@ pub(super) fn run_agent_install_step(flow: &mut InitFlow) -> Result<()> {
         return finalize_with_error(&flow.store, &flow.init_run, error);
     }
     Ok(())
+}
+
+/// Install or confirm the managed Node.js runtime before any agent installer runs. A failure is
+/// reported and init continues: a recipe that needs Node fails its own prerequisite check.
+fn prepare_node_runtime(home: &Path, output_mode: InitOutputMode) {
+    use crate::runtime::node_runtime::{NODE_MAJOR, NodeRuntimeStatus, ensure, is_managed_host};
+    // Unmanaged hosts are left to the installer's own call, which logs the fallback.
+    if !is_managed_host() {
+        return;
+    }
+    init_println!(
+        output_mode,
+        "progress: preparing Node.js {NODE_MAJOR} runtime"
+    );
+    match ensure(home) {
+        Ok(NodeRuntimeStatus::Ready { version }) => {
+            init_println!(output_mode, "progress: Node.js {version} ready");
+        }
+        Ok(NodeRuntimeStatus::Unsupported { .. } | NodeRuntimeStatus::NotReady) => {}
+        Err(error) => {
+            init_println!(
+                output_mode,
+                "warning: managed Node.js is unavailable: {error}"
+            );
+        }
+    }
 }
 
 /// Step: native_config_import. Applies the reviewed native global config after installation.

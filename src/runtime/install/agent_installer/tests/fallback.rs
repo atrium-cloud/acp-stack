@@ -378,5 +378,30 @@ fn github_release_install_path_has_no_host_tool_prerequisites() {
         version_pin: None,
     };
     let tempdir = TempDir::new().expect("tempdir");
-    assert!(missing_required_tools(&spec, tempdir.path(), tempdir.path()).is_empty());
+    assert!(
+        missing_required_tools(&spec, tempdir.path(), tempdir.path(), tempdir.path()).is_empty()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn required_tools_resolve_from_the_managed_node_bin() {
+    let home = TempDir::new().expect("home");
+    let bin = crate::runtime::node_runtime::managed_bin_dir(home.path());
+    std::fs::create_dir_all(&bin).expect("managed bin");
+    std::fs::write(bin.join("acp-stack-test-node"), "#!/bin/sh\n").expect("managed node");
+    let spec = ResolvedInstallSpec::Shell {
+        script: "true".to_owned(),
+        creates: "agent".to_owned(),
+        required_tools: vec![
+            "acp-stack-test-node".to_owned(),
+            "definitely-not-installed-tool-12345".to_owned(),
+        ],
+        timeout: std::time::Duration::from_secs(1),
+    };
+
+    assert_eq!(
+        missing_required_tools(&spec, home.path(), home.path(), home.path()),
+        ["definitely-not-installed-tool-12345"]
+    );
 }

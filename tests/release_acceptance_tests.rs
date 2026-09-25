@@ -38,6 +38,7 @@ fn acps_command(home: &Path) -> Command {
             "ACP_STACK_DEV_PLACEBO_REGISTRY",
             env!("CARGO_BIN_EXE_placebo-agent"),
         )
+        .env(acp_stack::dev_gates::TEST_SKIP_NODE_RUNTIME_ENV, "1")
         .env("NO_COLOR", "1");
     command
 }
@@ -160,6 +161,7 @@ fn start_serve(home: &Path) -> (ServeProcess, String) {
             "ACP_STACK_DEV_PLACEBO_REGISTRY",
             env!("CARGO_BIN_EXE_placebo-agent"),
         )
+        .env(acp_stack::dev_gates::TEST_SKIP_NODE_RUNTIME_ENV, "1")
         .env("NO_COLOR", "1")
         .args(["serve", "--bind", "127.0.0.1:0"])
         .stdout(Stdio::null())

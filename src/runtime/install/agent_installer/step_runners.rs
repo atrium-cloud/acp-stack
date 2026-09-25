@@ -11,7 +11,7 @@ use crate::runtime::install::agent_registry::{GithubInstall, InstallSet, github_
 use crate::runtime::install::github_release::{self, GithubReleaseInstall};
 use crate::runtime::process_runner::{
     CaptureOutcome, apply_non_interactive_env, forward_host_env, join_reader_bounded,
-    kill_process_group, path_env_with_extra_dirs, resolved_python_interpreter, run_captured,
+    kill_process_group, managed_path_env, resolved_python_interpreter, run_captured,
 };
 
 use super::{
@@ -302,6 +302,7 @@ pub(super) fn shell_step_with_creates(
                 creates_check.creates,
                 creates_check.workspace_root,
                 creates_check.extra_path_dirs,
+                home,
             )
             .ok_or_else(|| StackError::AgentInstallerCreatesMissing {
                 name: creates_check.creates.to_owned(),
@@ -481,11 +482,12 @@ pub(super) fn finalize_shell_step(
                 };
             }
             let outcome = (|| {
-                let resolved = resolve_creates(creates, workspace_root, &[]).ok_or_else(|| {
-                    StackError::AgentInstallerCreatesMissing {
-                        name: creates.to_owned(),
-                    }
-                })?;
+                let resolved =
+                    resolve_creates(creates, workspace_root, &[], home).ok_or_else(|| {
+                        StackError::AgentInstallerCreatesMissing {
+                            name: creates.to_owned(),
+                        }
+                    })?;
                 let sha256 = sha256_of_file(&resolved)?;
                 verify_expected_sha256(expected_sha256, &sha256)?;
                 verify_binary_spawns(&resolved, workspace_root, &[], home)?;
@@ -794,7 +796,7 @@ fn run_program_install(
     command.args(args).current_dir(workspace_root).env_clear();
 
     // Minimal env so the installer is no wider a door than the agent itself.
-    let path_env = path_env_with_extra_dirs(extra_path_dirs);
+    let path_env = managed_path_env(home, extra_path_dirs);
     if let Some(path) = &path_env {
         command.env("PATH", path);
     }

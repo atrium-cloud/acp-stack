@@ -3,17 +3,19 @@ use crate::auth::{AuthVerifierEnsureOutcome, ensure_auth_verifier_pair};
 use crate::config::{self, SupabaseLoggingBackend};
 use crate::error::{Result, StackError};
 use crate::fs_util::{
-    create_dir_owner_only, home_dir, parent_dir, pre_create_owner_only, set_owner_only_dir,
-    set_owner_only_file,
+    ExclusiveFileLock, create_dir_owner_only, home_dir, parent_dir, pre_create_owner_only,
+    set_owner_only_dir, set_owner_only_file,
 };
 use crate::runtime::agent::supervisor::ServerLifecycle;
 use crate::runtime::agent::sweeper::StateSweeper;
 use crate::runtime::install::agent_auto_update::AgentAutoUpdater;
 use crate::runtime::logging::supabase_mirror::SUPABASE_DEFAULT_DB_URL_REF;
 use crate::runtime::logging::supabase_sink::{SupabaseSink, SupabaseSinkCredential};
+use crate::runtime::node_runtime::{self, NodeRuntimeOutcome, NodeRuntimeState};
 use crate::secrets::SecretStore;
 use crate::state::{StateStore, default_state_path};
 use clap::Args;
+use std::path::PathBuf;
 
 #[derive(Debug, Args)]
 pub struct ServeArgs {
@@ -37,6 +39,9 @@ const ALLOW_ROOT_ENV: &str = "ACP_STACK_ALLOW_ROOT";
 
 /// Cap on the command-id list embedded in the `server.reconciled` event payload.
 const RECONCILED_COMMAND_IDS_CAP: usize = 50;
+
+const NODE_STARTUP_TASK_FAILED: &str = "managed Node.js startup install did not complete";
+const NODE_STARTUP_THREAD_NAME: &str = "acps-node-runtime";
 
 fn allow_root_env_enabled() -> bool {
     std::env::var(ALLOW_ROOT_ENV).is_ok_and(|value| value == "1")
@@ -254,6 +259,15 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
 
     let bind = args.bind.unwrap_or_else(|| config.api.bind.clone());
 
+    // Taken before the listener binds, so no request can start an agent ahead of the install.
+    let node_startup_lock = match node_runtime::try_lock_for_startup(&home) {
+        Ok(lock) => lock,
+        Err(error) => {
+            tracing::warn!(%error, "could not take the managed Node.js lock at startup");
+            None
+        }
+    };
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -292,6 +306,7 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
             local.clone(),
             runtime_paths,
         );
+        spawn_node_runtime_ensure(app_state.node_runtime.clone(), home.clone(), node_startup_lock);
         crate::api::routes::native_config::recover_native_config_imports(&app_state).await?;
         let state_handle = app_state.state.clone();
         let event_hub = app_state.event_hub.clone();
@@ -424,6 +439,44 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
         eprintln!("acps serve: stopped ({reason})");
         serve_result
     })
+}
+
+/// Install or confirm the managed Node.js off the startup path: the listener binds without
+/// waiting, while agent spawns and installers wait on the lock this thread holds. A plain thread
+/// rather than the blocking pool, because runtime shutdown waits for blocking-pool tasks and a
+/// stalled download must not hold `acps serve` open after a stop signal.
+fn spawn_node_runtime_ensure(
+    state: NodeRuntimeState,
+    home: PathBuf,
+    lock: Option<ExclusiveFileLock>,
+) {
+    state.set(NodeRuntimeOutcome::Pending);
+    let thread_state = state.clone();
+    let spawned = std::thread::Builder::new()
+        .name(NODE_STARTUP_THREAD_NAME.to_owned())
+        .spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                node_runtime::ensure_holding(&home, lock)
+            }));
+            let outcome = match result {
+                Ok(Ok(status)) => Ok(status),
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "managed Node.js startup install failed");
+                    Err(error.public_message())
+                }
+                Err(_) => {
+                    tracing::warn!("managed Node.js startup install panicked");
+                    Err(NODE_STARTUP_TASK_FAILED.to_owned())
+                }
+            };
+            thread_state.set(NodeRuntimeOutcome::Settled(outcome));
+        });
+    if let Err(error) = spawned {
+        tracing::warn!(%error, "could not start the managed Node.js startup install");
+        state.set(NodeRuntimeOutcome::Settled(Err(
+            NODE_STARTUP_TASK_FAILED.to_owned()
+        )));
+    }
 }
 
 #[cfg(test)]

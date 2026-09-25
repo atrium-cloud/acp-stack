@@ -251,6 +251,7 @@ pub(in crate::cli::init) fn agent_settlement_signals(
     registry: &RegistryCatalog,
     args: &InitArgs,
     native_config_pending: bool,
+    home: &Path,
 ) -> Vec<InitStateSignal> {
     let mut signals = vec![InitStateSignal::CategorySettled {
         category: InitCategory::Agent,
@@ -310,7 +311,7 @@ pub(in crate::cli::init) fn agent_settlement_signals(
     ));
     signals.push(args_applicability(
         InitCategory::Deps,
-        !pending_candidates(config, None).is_empty(),
+        !pending_candidates(config, None, home).is_empty(),
         "no pending dependency install actions",
     ));
     // These four rest on the config on disk rather than on anything this run did, so they settle

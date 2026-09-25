@@ -21,7 +21,7 @@ use crate::runtime::install::agent_registry::{
 use crate::runtime::install::agent_version_check::normalize_version;
 use crate::runtime::process_runner::{
     CaptureOutcome, apply_non_interactive_env, forward_host_env, join_reader_bounded,
-    kill_process_group, path_env_with_extra_dirs, run_captured,
+    kill_process_group, managed_path_env, run_captured,
 };
 use crate::state::{
     INSTALLER_METHOD_APT, INSTALLER_METHOD_GITHUB, INSTALLER_METHOD_NATIVE, INSTALLER_METHOD_NPM,
@@ -173,6 +173,7 @@ pub fn update_agent_for_config(
     }
 
     entry.ensure_supported()?;
+    crate::runtime::node_runtime::ensure_before_install(home);
     let entry =
         crate::runtime::install::agent_registry::effective_registry_entry(entry, &config.agent)?;
     let entry = entry.as_ref();
@@ -678,7 +679,7 @@ fn run_native_update_step(
     home: &Path,
 ) -> crate::runtime::install::agent_installer::InstallerRowDraft {
     let started_at = crate::runtime::install::agent_installer::current_timestamp();
-    let Some(path) = resolve_creates(command, workspace_root, &[dest_dir]) else {
+    let Some(path) = resolve_creates(command, workspace_root, &[dest_dir], home) else {
         return command_error_row(
             step,
             INSTALL_METHOD_NATIVE,
@@ -887,7 +888,7 @@ fn run_command_step_with_started_at(
     // developer's real home when tests drive the updater in-process.
     command.env("HOME", context.home);
     forward_host_env(&mut command, "LANG");
-    if let Some(path) = path_env_with_extra_dirs(&[context.dest_dir]) {
+    if let Some(path) = managed_path_env(context.home, &[context.dest_dir]) {
         command.env("PATH", path);
     }
     apply_non_interactive_env(&mut command);

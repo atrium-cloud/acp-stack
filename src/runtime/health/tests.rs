@@ -1,6 +1,59 @@
 use super::*;
 
 #[test]
+fn node_health_maps_each_outcome_and_only_failed_is_failing() {
+    let home = tempfile::tempdir().expect("home");
+    let cases = [
+        (NodeRuntimeOutcome::Unmanaged, NODE_STATUS_UNMANAGED),
+        (NodeRuntimeOutcome::Pending, NODE_STATUS_PENDING),
+        (
+            NodeRuntimeOutcome::Settled(Ok(NodeRuntimeStatus::Ready {
+                version: "v26.1.0".to_owned(),
+            })),
+            NODE_STATUS_READY,
+        ),
+        (
+            NodeRuntimeOutcome::Settled(Ok(NodeRuntimeStatus::Unsupported {
+                reason: "no managed Node.js 26 build for macos/aarch64".to_owned(),
+            })),
+            NODE_STATUS_UNSUPPORTED,
+        ),
+        (
+            NodeRuntimeOutcome::Settled(Ok(NodeRuntimeStatus::NotReady)),
+            NODE_STATUS_FAILED,
+        ),
+        (
+            NodeRuntimeOutcome::Settled(Err("managed Node.js runtime install failed".to_owned())),
+            NODE_STATUS_FAILED,
+        ),
+    ];
+    for (outcome, expected) in cases {
+        assert_eq!(collect_node(outcome, home.path()).status, expected);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn node_health_reads_ready_when_a_later_install_healed_a_failed_startup() {
+    let home = tempfile::tempdir().expect("home");
+    let root = node_runtime::managed_root(home.path());
+    let bin = root.join("releases/node-v26.1.0-linux-x64/bin");
+    std::fs::create_dir_all(&bin).expect("release bin");
+    std::fs::write(bin.join("node"), "#!/bin/sh\n").expect("node");
+    std::os::unix::fs::symlink("releases/node-v26.1.0-linux-x64", root.join("current"))
+        .expect("current");
+
+    let health = collect_node(
+        NodeRuntimeOutcome::Settled(Err("managed Node.js runtime install failed".to_owned())),
+        home.path(),
+    );
+
+    assert_eq!(health.status, NODE_STATUS_READY);
+    assert_eq!(health.version.as_deref(), Some("v26.1.0"));
+    assert_eq!(health.reason, None);
+}
+
+#[test]
 fn orphan_probe_without_started_processes_is_empty() {
     let probe = AgentProcessProbe::default();
     assert!(orphaned_agent_process_pids(&probe, &std::collections::BTreeSet::new()).is_empty());

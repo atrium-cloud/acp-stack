@@ -12,6 +12,8 @@ pub fn install_resolved_capture(
     progress: Option<&InstallProgress<'_>>,
     home: &Path,
 ) -> InstallerSequenceResult {
+    // Before the prerequisite checks below, which look for `npm` and recipe tools like `node`.
+    crate::runtime::node_runtime::ensure_before_install(home);
     let mut rows = Vec::new();
     let installer_env = HashMap::new();
     // An operator adapter override turns the entry adapter-kind, so the sequencing below drives the operator's adapter alongside the managed harness recipe.
@@ -281,7 +283,7 @@ pub(crate) fn install_one_with_fallback(
             }
         };
         let kind = path_kind_of(&spec);
-        let missing_for_path = missing_required_tools(&spec, workspace_root, dest_dir);
+        let missing_for_path = missing_required_tools(&spec, workspace_root, dest_dir, home);
         if !missing_for_path.is_empty() {
             attempts.push((
                 path_label_of(kind),
@@ -438,6 +440,7 @@ pub(super) fn missing_required_tools(
     spec: &ResolvedInstallSpec,
     workspace_root: &Path,
     dest_dir: &Path,
+    home: &Path,
 ) -> Vec<String> {
     let required_tools: Vec<&str> = match spec {
         ResolvedInstallSpec::Shell { required_tools, .. } => {
@@ -448,7 +451,7 @@ pub(super) fn missing_required_tools(
     };
     required_tools
         .into_iter()
-        .filter(|tool| resolve_creates(tool, workspace_root, &[dest_dir]).is_none())
+        .filter(|tool| resolve_creates(tool, workspace_root, &[dest_dir], home).is_none())
         .map(str::to_owned)
         .collect()
 }

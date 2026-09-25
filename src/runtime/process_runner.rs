@@ -25,17 +25,34 @@ pub fn forward_host_env(command: &mut Command, name: &str) {
     }
 }
 
-/// Prepend `extra_path_dirs` (in order) to the daemon's PATH, joined for `Command::env("PATH", _)`.
-pub fn path_env_with_extra_dirs(extra_path_dirs: &[&Path]) -> Option<OsString> {
-    let existing = std::env::var_os("PATH").unwrap_or_default();
-    let mut paths = Vec::new();
-    for dir in extra_path_dirs {
-        if !dir.as_os_str().is_empty() {
-            paths.push((*dir).to_path_buf());
-        }
-    }
-    paths.extend(std::env::split_paths(&existing));
-    std::env::join_paths(paths).ok()
+/// Directories every runtime child searches first: the managed Node `bin`, so it wins over any
+/// host Node, then `~/.local/bin`, where managed agents and `npm -g` bins land.
+pub fn managed_path_dirs(home: &Path) -> Vec<PathBuf> {
+    vec![
+        crate::runtime::node_runtime::managed_bin_dir(home),
+        crate::runtime::install::local_bin_dir(home),
+    ]
+}
+
+/// [`managed_path_dirs`], then `extra_path_dirs` in order, then the daemon's PATH: the search
+/// order of [`managed_path_env`], for resolving a bare name the way the child will.
+pub fn managed_search_dirs(home: &Path, extra_path_dirs: &[&Path]) -> Vec<PathBuf> {
+    let mut dirs = managed_path_dirs(home);
+    dirs.extend(
+        extra_path_dirs
+            .iter()
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .map(|dir| dir.to_path_buf()),
+    );
+    dirs.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    dirs
+}
+
+/// [`managed_search_dirs`] joined for `Command::env("PATH", _)`.
+pub fn managed_path_env(home: &Path, extra_path_dirs: &[&Path]) -> Option<OsString> {
+    std::env::join_paths(managed_search_dirs(home, extra_path_dirs)).ok()
 }
 
 /// Resolve a bare command name against the daemon's PATH; slash-containing paths pass through.
@@ -438,6 +455,31 @@ pub fn join_reader_bounded<T>(handle: JoinHandle<T>) -> Option<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_node_bin_precedes_local_bin_extras_and_daemon_path() {
+        let home = Path::new("/home/u");
+        let extra = Path::new("/opt/extra");
+
+        let dirs = managed_search_dirs(home, &[extra, Path::new("")]);
+
+        assert_eq!(
+            dirs[..3],
+            [
+                PathBuf::from("/home/u/.local/lib/acp-stack/node/current/bin"),
+                PathBuf::from("/home/u/.local/bin"),
+                PathBuf::from("/opt/extra"),
+            ]
+        );
+        let daemon_path: Vec<PathBuf> =
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
+        assert_eq!(dirs[3..], daemon_path[..]);
+        let joined = managed_path_env(home, &[extra]).expect("joinable PATH");
+        assert_eq!(
+            std::env::split_paths(&joined).collect::<Vec<_>>(),
+            managed_search_dirs(home, &[extra])
+        );
+    }
 
     #[cfg(unix)]
     #[test]

@@ -118,17 +118,25 @@ pub fn candidates_for(config: &Config, feature: Option<&str>) -> Vec<DepApplyCan
 /// Candidates whose install action is still actionable, meaning the `creates`
 /// target does not yet resolve. Init's deps-apply step uses this to decide whether
 /// there is anything to apply and to skip cleanly when everything is present.
-pub fn pending_candidates(config: &Config, feature: Option<&str>) -> Vec<DepApplyCandidate> {
+pub fn pending_candidates(
+    config: &Config,
+    feature: Option<&str>,
+    home: &Path,
+) -> Vec<DepApplyCandidate> {
     candidates_for(config, feature)
         .into_iter()
-        .filter(|candidate| resolve_command(&candidate.creates).is_none())
+        .filter(|candidate| resolve_command(&candidate.creates, home).is_none())
         .collect()
 }
 
 /// Pending candidates whose install action declares `scope = "system"`.
 /// Drives the escalation probe, the preflight notice, and the skip warning.
-pub fn pending_system_candidates(config: &Config, feature: Option<&str>) -> Vec<DepApplyCandidate> {
-    pending_candidates(config, feature)
+pub fn pending_system_candidates(
+    config: &Config,
+    feature: Option<&str>,
+    home: &Path,
+) -> Vec<DepApplyCandidate> {
+    pending_candidates(config, feature, home)
         .into_iter()
         .filter(|candidate| candidate.scope == DependencyInstallScope::System)
         .collect()
@@ -173,7 +181,7 @@ pub fn apply_dependencies_with_escalation(
     apply_run_id: Option<&str>,
     mut progress: impl FnMut(usize, usize, &str) -> Result<()>,
 ) -> Result<DepsApplyReport> {
-    let before = compute_before_after_report(config);
+    let before = compute_before_after_report(config, home);
     let mut results = Vec::new();
     // A caller-supplied id keeps the per-action `installer_runs.apply_run_id`
     // identical to a pre-claimed `deps_apply_runs.id`.
@@ -207,7 +215,7 @@ pub fn apply_dependencies_with_escalation(
             home,
         )?);
     }
-    let after = compute_before_after_report(config);
+    let after = compute_before_after_report(config, home);
     Ok(DepsApplyReport {
         apply_run_id,
         before,
@@ -220,14 +228,14 @@ pub fn apply_dependencies_with_escalation(
 /// `install` block (so absolute `creates` paths resolve) and the
 /// default checker for everything else (packages, runtimes, MCP, and
 /// command deps without an install action).
-fn compute_before_after_report(config: &Config) -> Vec<DepStatus> {
-    let mut report = check_dependencies(config).dependencies;
+fn compute_before_after_report(config: &Config, home: &Path) -> Vec<DepStatus> {
+    let mut report = check_dependencies(config, home).dependencies;
     for entry in &config.dependencies.commands {
         if entry.install.is_none() {
             continue;
         }
         if let Some(existing) = report.iter_mut().find(|s| s.name == entry.name) {
-            *existing = check_one(entry);
+            *existing = check_one(entry, home);
         }
     }
     report
@@ -347,7 +355,7 @@ fn apply_one(
     let started_at = current_timestamp();
 
     // Idempotence: an already-resolving `creates` skips the shell entirely.
-    if let Some(_path) = resolve_command(&creates) {
+    if let Some(_path) = resolve_command(&creates, home) {
         let finished_at = current_timestamp();
         append_deps_run(
             state,
@@ -359,7 +367,7 @@ fn apply_one(
             "",
             Some(0),
         )?;
-        let post_status = check_one(entry);
+        let post_status = check_one(entry, home);
         return Ok(DepApplyResult {
             name: entry.name.clone(),
             outcome: DepApplyOutcome::AlreadyPresent,
@@ -408,7 +416,7 @@ fn apply_one(
                     &cap_stream(&stderr_message),
                     None,
                 )?;
-                let post_status = check_one(entry);
+                let post_status = check_one(entry, home);
                 return Ok(DepApplyResult {
                     name: entry.name.clone(),
                     outcome: DepApplyOutcome::PrivilegeRequired { uid },
@@ -450,7 +458,7 @@ fn apply_one(
     };
     let finished_at = current_timestamp();
 
-    let post_status = check_one(entry);
+    let post_status = check_one(entry, home);
     let outcome = if timed_out {
         DepApplyOutcome::Failed {
             exit_code: None,
@@ -541,13 +549,13 @@ fn apply_one(
 /// install action drops a binary outside `$PATH` (e.g. an absolute
 /// `creates = "/opt/foo/bin/agent"`) would be reported as missing
 /// after a perfectly successful install.
-fn check_one(entry: &DependencyEntry) -> DepStatus {
+fn check_one(entry: &DependencyEntry, home: &Path) -> DepStatus {
     let creates = entry
         .install
         .as_ref()
         .and_then(|i| i.creates.clone())
         .unwrap_or_else(|| entry.name.clone());
-    match resolve_command(&creates) {
+    match resolve_command(&creates, home) {
         Some(path) => DepStatus {
             name: entry.name.clone(),
             kind: crate::runtime::dependencies::deps::DepKind::Command,

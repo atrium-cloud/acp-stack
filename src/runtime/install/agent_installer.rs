@@ -394,11 +394,12 @@ pub fn run_installer_capture(
         }
     };
     let started_at = current_timestamp();
+    crate::runtime::node_runtime::ensure_before_install(home);
 
     // Integrity first: the spawn gate executes the file, and a binary failing
     // the operator's sha256 pin must never run. A present binary that fails the
     // gate reads as absent so the recipe re-runs and replaces it.
-    if let Some(path) = resolve_creates(&install.creates, workspace_root, &[]) {
+    if let Some(path) = resolve_creates(&install.creates, workspace_root, &[], home) {
         let integrity = (|| {
             let sha256 = sha256_of_file(&path)?;
             verify_expected_sha256(expected_sha256, &sha256)?;
@@ -507,12 +508,11 @@ pub(super) fn final_verification(
     home: &Path,
 ) -> InstallerSequenceResult {
     let outcome = (|| {
-        let path =
-            resolve_creates(&agent.command, workspace_root, &[dest_dir]).ok_or_else(|| {
-                StackError::AgentInstallerCreatesMissing {
-                    name: agent.command.clone(),
-                }
-            })?;
+        let path = resolve_creates(&agent.command, workspace_root, &[dest_dir], home).ok_or_else(
+            || StackError::AgentInstallerCreatesMissing {
+                name: agent.command.clone(),
+            },
+        )?;
         let sha256 = sha256_of_file(&path)?;
         verify_expected_sha256(agent.expected_sha256.as_deref(), &sha256)?;
         verify_binary_spawns(&path, workspace_root, &[dest_dir], home)?;
@@ -565,7 +565,7 @@ pub fn resolve_creates_for_init_resume(
     expected_sha256: Option<&str>,
     home: &Path,
 ) -> Option<PathBuf> {
-    let path = resolve_creates(name, workspace_root, extra_path_dirs)?;
+    let path = resolve_creates(name, workspace_root, extra_path_dirs, home)?;
     if expected_sha256.is_some() {
         let pinned = sha256_of_file(&path)
             .and_then(|sha256| verify_expected_sha256(expected_sha256, &sha256));
@@ -619,8 +619,7 @@ fn version_probe_command(
     home: &Path,
 ) -> std::process::Command {
     use crate::runtime::process_runner::{
-        apply_non_interactive_env, detach_into_new_session, forward_host_env,
-        path_env_with_extra_dirs,
+        apply_non_interactive_env, detach_into_new_session, forward_host_env, managed_path_env,
     };
     // The probe changes cwd to `workspace_root`, so a relative `path` would
     // resolve differently here than it did in `resolve_creates`.
@@ -633,7 +632,7 @@ fn version_probe_command(
     if workspace_root.is_dir() {
         command.current_dir(workspace_root);
     }
-    if let Some(path_env) = path_env_with_extra_dirs(extra_path_dirs) {
+    if let Some(path_env) = managed_path_env(home, extra_path_dirs) {
         command.env("PATH", path_env);
     }
     // HOME is the boot-time runtime home, not the daemon's process env, for
@@ -759,11 +758,13 @@ pub(crate) fn verify_executable_header(path: &Path) -> Result<()> {
 }
 
 /// Resolve `[agent.install].creates` to a real path, per the lookup order in
-/// `docs/specs/runtime.md`.
+/// `docs/specs/runtime.md`. A bare name searches the managed Node `bin` first,
+/// so `node`/`npm` prerequisites resolve to it, then `extra_path_dirs`, then PATH.
 pub(crate) fn resolve_creates(
     name: &str,
     workspace_root: &Path,
     extra_path_dirs: &[&Path],
+    home: &Path,
 ) -> Option<PathBuf> {
     if name.is_empty() {
         return None;
@@ -784,20 +785,13 @@ pub(crate) fn resolve_creates(
             None
         };
     }
-    for dir in extra_path_dirs {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    let path_env = std::env::var_os("PATH").unwrap_or_default();
-    for dir in std::env::split_paths(&path_env) {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+    std::iter::once(crate::runtime::node_runtime::managed_bin_dir(home))
+        .chain(extra_path_dirs.iter().map(|dir| dir.to_path_buf()))
+        .chain(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ))
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
 }
 
 pub(super) fn sha256_of_file(path: &Path) -> Result<String> {

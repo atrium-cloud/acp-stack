@@ -51,7 +51,10 @@ impl PrivilegeEscalation {
 /// to `Unavailable` rather than Err. Deliberately uncached, so a long-lived
 /// daemon cannot pin stale sudoers state across a config change.
 pub fn probe_privilege_escalation(home: &Path) -> PrivilegeEscalation {
-    probe_privilege_escalation_with(current_uid(), resolve_command(SUDO_PROGRAM), home)
+    // `sudo` comes from the daemon's PATH only: the managed PATH directories are writable by the
+    // runtime user, so nothing there may stand in for it.
+    let sudo_path = crate::runtime::process_runner::resolve_in_path(SUDO_PROGRAM);
+    probe_privilege_escalation_with(current_uid(), sudo_path, home)
 }
 
 /// Testable core of [`probe_privilege_escalation`]; uid and sudo path are
@@ -106,7 +109,7 @@ pub(crate) fn escalation_for(
     feature: Option<&str>,
     home: &Path,
 ) -> PrivilegeEscalation {
-    if pending_system_candidates(config, feature).is_empty() {
+    if pending_system_candidates(config, feature, home).is_empty() {
         PrivilegeEscalation::NotNeeded
     } else {
         probe_privilege_escalation(home)

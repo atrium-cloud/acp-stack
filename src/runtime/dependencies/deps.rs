@@ -1,12 +1,13 @@
 //! Declarative dependency checker: reports the status of `[dependencies]`
 //! entries and installs nothing.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde::Serialize;
 
 use crate::config::{Config, DependencyEntry};
+use crate::runtime::process_runner::managed_search_dirs;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -33,16 +34,16 @@ pub struct DepsReport {
     pub dependencies: Vec<DepStatus>,
 }
 
-pub fn check_dependencies(config: &Config) -> DepsReport {
+pub fn check_dependencies(config: &Config, home: &Path) -> DepsReport {
     let mut dependencies = Vec::new();
     for entry in &config.dependencies.commands {
-        dependencies.push(check_command(entry));
+        dependencies.push(check_command(entry, home));
     }
     for entry in &config.dependencies.packages {
-        dependencies.push(check_package(entry));
+        dependencies.push(check_package(entry, home));
     }
     for entry in &config.dependencies.runtimes {
-        dependencies.push(check_runtime(entry));
+        dependencies.push(check_runtime(entry, home));
     }
     for entry in &config.dependencies.mcp {
         dependencies.push(check_mcp(entry, config));
@@ -50,21 +51,21 @@ pub fn check_dependencies(config: &Config) -> DepsReport {
     DepsReport { dependencies }
 }
 
-fn check_command(entry: &DependencyEntry) -> DepStatus {
-    check_executable(entry, DepKind::Command, "command")
+fn check_command(entry: &DependencyEntry, home: &Path) -> DepStatus {
+    check_executable(entry, DepKind::Command, "command", home)
 }
 
-fn check_runtime(entry: &DependencyEntry) -> DepStatus {
-    check_executable(entry, DepKind::Runtime, "runtime")
+fn check_runtime(entry: &DependencyEntry, home: &Path) -> DepStatus {
+    check_executable(entry, DepKind::Runtime, "runtime", home)
 }
 
-fn check_executable(entry: &DependencyEntry, kind: DepKind, label: &str) -> DepStatus {
+fn check_executable(entry: &DependencyEntry, kind: DepKind, label: &str, home: &Path) -> DepStatus {
     let expected = entry
         .install
         .as_ref()
         .and_then(|install| install.creates.as_deref())
         .unwrap_or(&entry.name);
-    match resolve_command_path(expected) {
+    match resolve_command_path(expected, home) {
         Some(path) => DepStatus {
             name: entry.name.clone(),
             kind,
@@ -124,10 +125,10 @@ const LINUX_PACKAGE_CHECKERS: &[PackageChecker] = &[
     },
 ];
 
-fn check_package(entry: &DependencyEntry) -> DepStatus {
+fn check_package(entry: &DependencyEntry, home: &Path) -> DepStatus {
     let mut available_checkers = Vec::new();
     for checker in LINUX_PACKAGE_CHECKERS {
-        let Some(checker_path) = resolve_command_path(checker.command) else {
+        let Some(checker_path) = resolve_command_path(checker.command, home) else {
             continue;
         };
         available_checkers.push(checker.command);
@@ -251,7 +252,9 @@ fn check_mcp(entry: &DependencyEntry, config: &Config) -> DepStatus {
     }
 }
 
-pub(crate) fn resolve_command_path(command: &str) -> Option<PathBuf> {
+/// Resolve `command` the way a runtime child's managed PATH would: managed Node, `~/.local/bin`,
+/// then the daemon's PATH.
+pub(crate) fn resolve_command_path(command: &str, home: &Path) -> Option<PathBuf> {
     if command.contains('/') {
         let candidate = PathBuf::from(command);
         if executable_file(&candidate) {
@@ -259,14 +262,10 @@ pub(crate) fn resolve_command_path(command: &str) -> Option<PathBuf> {
         }
         return None;
     }
-    let path_env = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_env) {
-        let candidate = dir.join(command);
-        if executable_file(&candidate) {
-            return Some(candidate);
-        }
-    }
-    None
+    managed_search_dirs(home, &[])
+        .into_iter()
+        .map(|dir| dir.join(command))
+        .find(|candidate| executable_file(candidate))
 }
 
 fn executable_file(path: &std::path::Path) -> bool {
@@ -300,6 +299,26 @@ mod tests {
         config.dependencies = deps;
         config.mcp = mcp;
         config
+    }
+
+    fn check_dependencies(config: &Config) -> DepsReport {
+        super::check_dependencies(config, Path::new("/nonexistent-acp-stack-home"))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_in_the_managed_node_bin_resolves_ahead_of_the_daemon_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempfile::tempdir().expect("home");
+        let bin = crate::runtime::node_runtime::managed_bin_dir(home.path());
+        std::fs::create_dir_all(&bin).expect("managed bin");
+        let managed_sh = bin.join("sh");
+        std::fs::write(&managed_sh, "#!/bin/sh\n").expect("managed sh");
+        std::fs::set_permissions(&managed_sh, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+
+        assert_eq!(resolve_command_path("sh", home.path()), Some(managed_sh));
     }
 
     #[test]

@@ -38,6 +38,8 @@ jobs:
     env:
       # Ephemeral runner: fixture binaries may use the runner HOME and the network.
       ACP_STACK_TEST_DISPOSABLE_HOST: "1"
+      # The lifted egress guard would otherwise let every in-process installer test download Node.
+      ACP_STACK_TEST_SKIP_NODE_RUNTIME: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4

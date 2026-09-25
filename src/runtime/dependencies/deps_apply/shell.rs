@@ -106,12 +106,14 @@ pub(crate) fn cap_stream(value: &str) -> String {
     value[..cutoff].to_owned()
 }
 
-/// Minimal env for install shells. `home` is resolved once by the caller at
-/// process entry and threaded down, so a mutated process HOME cannot leak a
-/// different value into an installer that runs much later.
+/// Minimal env for install shells, on the managed PATH so managed Node wins over any host Node.
+/// `home` is resolved once by the caller at process entry and threaded down, so a mutated process
+/// HOME cannot leak a different value into an installer that runs much later.
 pub(crate) fn scrubbed_env(home: &Path) -> HashMap<String, String> {
     let mut env = HashMap::new();
-    if let Ok(value) = std::env::var("PATH") {
+    if let Some(value) = crate::runtime::process_runner::managed_path_env(home, &[])
+        .and_then(|value| value.into_string().ok())
+    {
         env.insert("PATH".to_owned(), value);
     }
     env.insert("HOME".to_owned(), home.to_string_lossy().into_owned());
@@ -121,19 +123,16 @@ pub(crate) fn scrubbed_env(home: &Path) -> HashMap<String, String> {
     env
 }
 
-pub(crate) fn resolve_command(name: &str) -> Option<std::path::PathBuf> {
+/// Resolve `name` along the same managed PATH [`scrubbed_env`] hands the shells.
+pub(crate) fn resolve_command(name: &str, home: &Path) -> Option<std::path::PathBuf> {
     if name.contains('/') {
         let path = Path::new(name).to_path_buf();
         return is_executable_file(&path).then_some(path);
     }
-    let path_env = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_env) {
-        let candidate = dir.join(name);
-        if is_executable_file(&candidate) {
-            return Some(candidate);
-        }
-    }
-    None
+    crate::runtime::process_runner::managed_search_dirs(home, &[])
+        .into_iter()
+        .map(|dir| dir.join(name))
+        .find(|candidate| is_executable_file(candidate))
 }
 
 /// True when `path` is a regular file with at least one execute bit set; without the mode check a failed `chmod` would let the postcheck pass against a non-executable placeholder.

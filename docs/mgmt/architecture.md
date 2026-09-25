@@ -56,6 +56,7 @@ flowchart LR
 - Install catalogs: curated agent registry, Agent Skills source registry, and the skills installer (init plus day-2 `acps skills` / `/v1/agent/skills`).
 - Agent updates: managed-agent update orchestration and installed-vs-upstream version checks (`src/runtime/install/agent_updater.rs`, `agent_version_check.rs`).
 - Dependencies: declaration checks, explicit install actions, tracked apply runs, and detached init workers.
+- Managed Node runtime: installs and keeps the Node.js major that agents, installers, and dependency shells resolve first on the managed `PATH` (`src/runtime/node_runtime.rs`, `process_runner::managed_path_dirs`).
 - Net rate limit: process-wide per-domain pacing and rate-limit circuit for outbound HTTP to quota-bearing hosts (`src/runtime/net_rate_limit.rs`).
 
 ### Workspace and isolation

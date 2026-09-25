@@ -9,7 +9,11 @@ pub(super) fn mcp_secret_store_paths(config_path: &Path, state_path: &Path) -> (
     (config_dir.join("age.key"), state_dir.join("secrets.age"))
 }
 
-pub(super) fn collect_mcp(config: &McpConfig, secret_paths: &(PathBuf, PathBuf)) -> McpHealth {
+pub(super) fn collect_mcp(
+    config: &McpConfig,
+    secret_paths: &(PathBuf, PathBuf),
+    home: &Path,
+) -> McpHealth {
     let required_refs = mcp_secret_refs(config);
     let (secret_names, secret_probe_reason) = if required_refs.is_empty() {
         (BTreeSet::new(), None)
@@ -28,7 +32,9 @@ pub(super) fn collect_mcp(config: &McpConfig, secret_paths: &(PathBuf, PathBuf))
     let servers: Vec<_> = config
         .servers
         .iter()
-        .map(|server| collect_mcp_server(server, &secret_names, secret_probe_reason.as_deref()))
+        .map(|server| {
+            collect_mcp_server(server, &secret_names, secret_probe_reason.as_deref(), home)
+        })
         .collect();
     let failing_count = servers.iter().filter(|server| !server.ok).count();
     McpHealth {
@@ -66,10 +72,11 @@ fn collect_mcp_server(
     server: &McpServerConfig,
     secret_names: &BTreeSet<String>,
     secret_probe_reason: Option<&str>,
+    home: &Path,
 ) -> McpServerHealth {
     match server {
         McpServerConfig::Stdio(stdio) => {
-            let command_path = resolve_command_path(&stdio.command)
+            let command_path = resolve_command_path(&stdio.command, home)
                 .map(|path| path.to_string_lossy().into_owned());
             // Report by secret-ref name (what `acps secrets set` takes), not env var name.
             let refs: Vec<String> = stdio
@@ -154,7 +161,11 @@ mod tests {
     #[test]
     fn collect_mcp_with_no_servers_is_healthy() {
         let home = tempfile::tempdir().expect("tempdir");
-        let health = collect_mcp(&McpConfig::default(), &empty_secret_paths(&home));
+        let health = collect_mcp(
+            &McpConfig::default(),
+            &empty_secret_paths(&home),
+            home.path(),
+        );
         assert_eq!(health.configured_count, 0);
         assert_eq!(health.failing_count, 0);
         assert!(health.servers.is_empty());
@@ -171,7 +182,7 @@ mod tests {
                 env: vec![],
             })],
         };
-        let health = collect_mcp(&config, &empty_secret_paths(&home));
+        let health = collect_mcp(&config, &empty_secret_paths(&home), home.path());
         assert_eq!(health.failing_count, 0);
         assert!(health.servers[0].ok);
         assert!(health.servers[0].command_path.is_some());
@@ -188,7 +199,7 @@ mod tests {
                 env: vec![],
             })],
         };
-        let health = collect_mcp(&config, &empty_secret_paths(&home));
+        let health = collect_mcp(&config, &empty_secret_paths(&home), home.path());
         assert_eq!(health.failing_count, 1);
         assert!(!health.servers[0].ok);
         assert!(
@@ -217,7 +228,7 @@ mod tests {
                 env: vec![],
             })],
         };
-        let health = collect_mcp(&config, &empty_secret_paths(&home));
+        let health = collect_mcp(&config, &empty_secret_paths(&home), home.path());
         assert_eq!(health.failing_count, 1);
         assert!(!health.servers[0].ok);
         assert!(
@@ -240,7 +251,7 @@ mod tests {
                 headers: vec![HttpHeaderRef::from_ref("Authorization", "LINEAR_API_KEY")],
             })],
         };
-        let health = collect_mcp(&config, &paths);
+        let health = collect_mcp(&config, &paths, home.path());
         assert_eq!(health.failing_count, 0);
         assert!(health.servers[0].ok);
         assert!(health.servers[0].missing_secret_refs.is_empty());
@@ -257,7 +268,7 @@ mod tests {
                 headers: vec![HttpHeaderRef::from_ref("Authorization", "LINEAR_API_KEY")],
             })],
         };
-        let health = collect_mcp(&config, &paths);
+        let health = collect_mcp(&config, &paths, home.path());
         assert_eq!(health.failing_count, 1);
         assert!(!health.servers[0].ok);
         assert_eq!(
@@ -288,7 +299,7 @@ mod tests {
                 }),
             ],
         };
-        let health = collect_mcp(&config, &paths);
+        let health = collect_mcp(&config, &paths, home.path());
         assert_eq!(health.failing_count, 2);
         assert_eq!(health.servers[0].missing_secret_refs, vec!["RELAY_TOKEN"]);
         assert_eq!(health.servers[1].missing_secret_refs, vec!["DB_PASS"]);

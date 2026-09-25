@@ -15,7 +15,12 @@ use crate::error::{Result, StackError};
 use crate::runtime::dependencies::deps::resolve_command_path;
 use crate::secrets::SecretStore;
 
-pub fn resolve_mcp_servers(config: &McpConfig, store: &SecretStore) -> Result<Vec<McpServer>> {
+/// Stdio commands resolve on the agent's managed PATH, so an `npx` server finds the managed Node.
+pub fn resolve_mcp_servers(
+    config: &McpConfig,
+    store: &SecretStore,
+    home: &std::path::Path,
+) -> Result<Vec<McpServer>> {
     let mut out = Vec::with_capacity(config.servers.len());
     for server in &config.servers {
         match server {
@@ -25,7 +30,7 @@ pub fn resolve_mcp_servers(config: &McpConfig, store: &SecretStore) -> Result<Ve
                     let (var_name, value) = resolve_env_entry("mcp.servers.env", env_entry, store)?;
                     env_vars.push(EnvVariable::new(var_name, value));
                 }
-                let command = resolve_command_path(&stdio.command)
+                let command = resolve_command_path(&stdio.command, home)
                     .and_then(|path| path.canonicalize().ok())
                     .ok_or_else(|| StackError::InvalidMcpServer {
                         name: stdio.name.clone(),
@@ -142,7 +147,7 @@ mod tests {
                 env: vec!["SLACK_BOT_TOKEN".into()],
             })],
         };
-        let servers = resolve_mcp_servers(&config, &store).expect("resolve");
+        let servers = resolve_mcp_servers(&config, &store, home.path()).expect("resolve");
         assert_eq!(servers.len(), 1);
         match &servers[0] {
             McpServer::Stdio(stdio) => {
@@ -167,7 +172,7 @@ mod tests {
                 headers: vec![HttpHeaderRef::from_ref("Authorization", "LINEAR_API_KEY")],
             })],
         };
-        let servers = resolve_mcp_servers(&config, &store).expect("resolve");
+        let servers = resolve_mcp_servers(&config, &store, home.path()).expect("resolve");
         match &servers[0] {
             McpServer::Http(http) => {
                 assert_eq!(http.headers[0].name, "Authorization");
@@ -191,7 +196,7 @@ mod tests {
                 )],
             })],
         };
-        let servers = resolve_mcp_servers(&config, &store).expect("resolve");
+        let servers = resolve_mcp_servers(&config, &store, home.path()).expect("resolve");
         match &servers[0] {
             McpServer::Http(http) => {
                 assert_eq!(http.headers[0].name, "Authorization");
@@ -213,7 +218,7 @@ mod tests {
                 env: vec!["DATABASE_URL=postgres://u:${DB_PASS}@h/db".into()],
             })],
         };
-        let servers = resolve_mcp_servers(&config, &store).expect("resolve");
+        let servers = resolve_mcp_servers(&config, &store, home.path()).expect("resolve");
         match &servers[0] {
             McpServer::Stdio(stdio) => {
                 assert_eq!(stdio.env[0].name, "DATABASE_URL");
@@ -238,7 +243,7 @@ mod tests {
                 )],
             })],
         };
-        let err = resolve_mcp_servers(&config, &store).expect_err("must fail");
+        let err = resolve_mcp_servers(&config, &store, home.path()).expect_err("must fail");
         assert!(matches!(err, StackError::SecretNotFound { .. }), "{err:?}");
     }
 
@@ -275,8 +280,39 @@ mod tests {
                 env: vec!["MISSING".into()],
             })],
         };
-        let err = resolve_mcp_servers(&config, &store).expect_err("must fail");
+        let err = resolve_mcp_servers(&config, &store, home.path()).expect_err("must fail");
         assert!(matches!(err, StackError::SecretNotFound { .. }), "{err:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stdio_command_resolves_from_the_managed_node_bin() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = TempDir::new().expect("tempdir");
+        let store = SecretStore::open_or_create(home.path()).expect("store");
+        let bin = crate::runtime::node_runtime::managed_bin_dir(home.path());
+        std::fs::create_dir_all(&bin).expect("managed bin");
+        let npx = bin.join("acp-stack-test-npx");
+        std::fs::write(&npx, "#!/bin/sh\n").expect("managed npx");
+        std::fs::set_permissions(&npx, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let config = McpConfig {
+            servers: vec![McpServerConfig::Stdio(McpStdioServer {
+                name: "fetch".into(),
+                command: "acp-stack-test-npx".into(),
+                args: vec![],
+                env: vec![],
+            })],
+        };
+
+        let servers = resolve_mcp_servers(&config, &store, home.path()).expect("resolve");
+
+        match &servers[0] {
+            McpServer::Stdio(stdio) => {
+                assert_eq!(stdio.command, npx.canonicalize().expect("canonical npx"));
+            }
+            _ => panic!("expected stdio"),
+        }
     }
 
     #[test]
@@ -294,7 +330,7 @@ mod tests {
             })],
         };
 
-        let error = resolve_mcp_servers(&config, &store).expect_err("must fail");
+        let error = resolve_mcp_servers(&config, &store, home.path()).expect_err("must fail");
         assert!(
             matches!(
                 error,

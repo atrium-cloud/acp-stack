@@ -137,6 +137,8 @@ pub fn apply_dependencies_tracked(
         }
     };
 
+    // After the claim, so a lost single-flight race returns without waiting on a Node install.
+    crate::runtime::node_runtime::ensure_before_install(home);
     let result = apply_dependencies_with_escalation(
         config,
         feature,

@@ -15,6 +15,7 @@ use crate::error::Result;
 use crate::ownership;
 use crate::runtime::dependencies::deps::resolve_command_path;
 use crate::runtime::dependencies::deps_apply::{DEPS_APPLY_AGENT_ID, DEPS_APPLY_STEP};
+use crate::runtime::node_runtime::{self, NodeRuntimeOutcome, NodeRuntimeStatus};
 use crate::secrets::SecretStore;
 use crate::state::{AgentStartedProcess, InstallerRun, StateStore};
 
@@ -24,6 +25,13 @@ use self::mcp::{collect_mcp, mcp_secret_store_paths};
 pub use self::deps::deps_cluster_has_failure_for_latest;
 
 const SINK_FAILURE_FAIL_THRESHOLD: i64 = 1;
+
+const NODE_STATUS_UNMANAGED: &str = "unmanaged";
+const NODE_STATUS_PENDING: &str = "pending";
+const NODE_STATUS_READY: &str = "ready";
+const NODE_STATUS_UNSUPPORTED: &str = "unsupported";
+const NODE_STATUS_FAILED: &str = "failed";
+const NODE_NOT_INSTALLED_REASON: &str = "managed Node.js is not installed";
 
 // `installer_runs.status` values written by `acps deps apply`, mirroring
 // `deps_apply.rs::DepApplyOutcome::status_label`. Shared with `cli::status` so
@@ -55,6 +63,18 @@ pub struct HealthReport {
     pub deps: DepsHealth,
     pub mcp: McpHealth,
     pub prompts: PromptsHealth,
+    pub node: NodeHealth,
+}
+
+/// The managed Node.js runtime as `acps serve` left it at startup.
+#[derive(Debug, Clone, Serialize)]
+pub struct NodeHealth {
+    /// `unmanaged` | `pending` | `ready` | `unsupported` | `failed`; only `failed` degrades readiness.
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -197,7 +217,9 @@ impl HealthReport {
                 &state.runtime_paths.config_path,
                 &state.runtime_paths.state_path,
             ),
+            &state.runtime_paths.home,
         );
+        let node = collect_node(state.node_runtime.get(), &state.runtime_paths.home);
 
         let mut failing = Vec::new();
         if !sqlite.reachable {
@@ -224,6 +246,9 @@ impl HealthReport {
         if agent.orphan_probe_error.is_some() || agent.orphaned_process_count > 0 {
             failing.push("agent".to_owned());
         }
+        if node.status == NODE_STATUS_FAILED {
+            failing.push("node".to_owned());
+        }
         Self {
             ok: failing.is_empty(),
             failing,
@@ -234,7 +259,36 @@ impl HealthReport {
             deps,
             mcp,
             prompts,
+            node,
         }
+    }
+}
+
+/// A failed startup install re-checks the disk, so a later install from any installer entry
+/// clears the failure without a restart.
+fn collect_node(outcome: NodeRuntimeOutcome, home: &Path) -> NodeHealth {
+    let health = |status, version, reason| NodeHealth {
+        status,
+        version,
+        reason,
+    };
+    let failed_unless_installed = |reason: String| match node_runtime::installed_version(home) {
+        Some(version) => health(NODE_STATUS_READY, Some(version), None),
+        None => health(NODE_STATUS_FAILED, None, Some(reason)),
+    };
+    match outcome {
+        NodeRuntimeOutcome::Unmanaged => health(NODE_STATUS_UNMANAGED, None, None),
+        NodeRuntimeOutcome::Pending => health(NODE_STATUS_PENDING, None, None),
+        NodeRuntimeOutcome::Settled(Ok(NodeRuntimeStatus::Ready { version })) => {
+            health(NODE_STATUS_READY, Some(version), None)
+        }
+        NodeRuntimeOutcome::Settled(Ok(NodeRuntimeStatus::Unsupported { reason })) => {
+            health(NODE_STATUS_UNSUPPORTED, None, Some(reason))
+        }
+        NodeRuntimeOutcome::Settled(Ok(NodeRuntimeStatus::NotReady)) => {
+            failed_unless_installed(NODE_NOT_INSTALLED_REASON.to_owned())
+        }
+        NodeRuntimeOutcome::Settled(Err(reason)) => failed_unless_installed(reason),
     }
 }
 

@@ -307,7 +307,8 @@ fn run_supabase_status(output: OutputFormat) -> Result<()> {
 }
 
 fn run_supabase_setup(args: SupabaseSetupArgs, output: OutputFormat) -> Result<()> {
-    crate::runtime::dependencies::deps::resolve_command_path("supabase").ok_or_else(|| {
+    // Checked on the process PATH, which is what `run_supabase_cli` spawns from.
+    crate::runtime::process_runner::resolve_in_path("supabase").ok_or_else(|| {
         StackError::InvalidParam {
             field: "supabase",
             reason: "`supabase` CLI not found or not executable on PATH".to_owned(),

@@ -99,7 +99,10 @@ pub(crate) async fn security_check_handler(
         .and_then(|(_window, _count, last_error, _observed)| last_error);
     let recent_origin_counts = recent_cloudflare_origin_counts(&store)?;
     drop(store);
-    let dependency_report = crate::runtime::dependencies::deps::check_dependencies(&state.config);
+    let dependency_report = crate::runtime::dependencies::deps::check_dependencies(
+        &state.config,
+        &state.runtime_paths.home,
+    );
     let dependency_failures = crate::security::dependency_security_failures(&dependency_report);
     let (path_postures, path_issues) = collect_path_inspections(
         &state.runtime_paths.config_path,

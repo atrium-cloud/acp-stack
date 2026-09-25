@@ -20,7 +20,10 @@ pub(crate) async fn deps_get_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<crate::runtime::dependencies::deps::DepsReport>, StackError> {
     Ok(ApiSuccess::new(
-        crate::runtime::dependencies::deps::check_dependencies(&state.config),
+        crate::runtime::dependencies::deps::check_dependencies(
+            &state.config,
+            &state.runtime_paths.home,
+        ),
     ))
 }
 
@@ -28,7 +31,10 @@ pub(crate) async fn deps_check_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<crate::runtime::dependencies::deps::DepsReport>, StackError> {
     Ok(ApiSuccess::new(
-        crate::runtime::dependencies::deps::check_dependencies(&state.config),
+        crate::runtime::dependencies::deps::check_dependencies(
+            &state.config,
+            &state.runtime_paths.home,
+        ),
     ))
 }
 

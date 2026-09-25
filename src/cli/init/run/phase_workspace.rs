@@ -62,7 +62,7 @@ pub(super) fn run_workspace_materialize_step(flow: &mut InitFlow) -> Result<()> 
 /// Step: deps_apply. Runs declared dependency install actions before the agent is launched for provider/model discovery.
 pub(super) fn run_deps_apply_step(flow: &mut InitFlow) -> Result<()> {
     let output_mode = flow.output_mode;
-    let deps_candidates = pending_candidates(&flow.config, None);
+    let deps_candidates = pending_candidates(&flow.config, None, &flow.home);
     if deps_candidates.is_empty() {
         // Re-asserted rather than trusted from the earlier derivation: the install and workspace
         // steps in between can satisfy the last pending action.
@@ -76,7 +76,7 @@ pub(super) fn run_deps_apply_step(flow: &mut InitFlow) -> Result<()> {
         });
     }
     // Probed once and reused, so the prompt cannot promise a mode the apply won't use.
-    let deps_escalation = if pending_system_candidates(&flow.config, None).is_empty() {
+    let deps_escalation = if pending_system_candidates(&flow.config, None, &flow.home).is_empty() {
         PrivilegeEscalation::NotNeeded
     } else {
         probe_privilege_escalation(&flow.home)
@@ -108,12 +108,13 @@ pub(super) fn run_deps_apply_step(flow: &mut InitFlow) -> Result<()> {
         &flow.init_run,
         10,
         step_kind::DEPS_APPLY,
-        || Ok(pending_candidates(config, None).is_empty()),
+        || Ok(pending_candidates(config, None, home).is_empty()),
         || {
             if deps_apply_async {
                 let (outcome, apply_run_id) = launch_background_deps_apply(
                     store,
                     config,
+                    home,
                     &init_run_id,
                     &deps_escalation,
                     output_mode,
@@ -181,7 +182,7 @@ pub(super) fn run_deps_apply_step(flow: &mut InitFlow) -> Result<()> {
                     // The outcome carries the real euid; `deps_escalation.uid()` reports 0 under `NotNeeded`.
                     uid = skipped_privilege_uid.unwrap_or_default(),
                 );
-                for candidate in pending_system_candidates(config, None) {
+                for candidate in pending_system_candidates(config, None, home) {
                     init_println!(
                         output_mode,
                         "  - {name}: {manual}",
@@ -225,6 +226,7 @@ pub(super) fn run_deps_apply_step(flow: &mut InitFlow) -> Result<()> {
 pub(super) fn launch_background_deps_apply(
     store: &StateStore,
     config: &Config,
+    home: &Path,
     init_run_id: &str,
     escalation: &PrivilegeEscalation,
     output_mode: InitOutputMode,
@@ -259,7 +261,7 @@ pub(super) fn launch_background_deps_apply(
     }
 
     let apply_run_id = crate::state::next_deps_apply_run_id();
-    let pending = pending_candidates(config, None).len();
+    let pending = pending_candidates(config, None, home).len();
     store.claim_deps_apply_run(
         NewDepsApplyRun {
             id: &apply_run_id,
@@ -275,7 +277,7 @@ pub(super) fn launch_background_deps_apply(
     // From here the row is `running` with a null pid, so every fallible step before the worker
     // exists must settle the row on failure or the single-flight slot wedges until the grace expires.
     let spawn_result = (|| -> Result<(u32, std::path::PathBuf)> {
-        let log_dir = crate::state::default_installer_log_base(&home_dir()?)
+        let log_dir = crate::state::default_installer_log_base(home)
             .join("deps_apply")
             .join(&apply_run_id);
         create_dir_owner_only(&log_dir)?;
@@ -383,6 +385,7 @@ pub(super) fn run_capability_probe_step(flow: &mut InitFlow) -> Result<()> {
                     match crate::runtime::agent::mcp::resolve_mcp_servers(
                         &config.mcp,
                         &lock_shared_secret_store(&secret_store),
+                        home,
                     )
                     .and_then(|declared| capabilities.ignored_mcp_features(declared))
                     {

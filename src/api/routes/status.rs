@@ -44,12 +44,14 @@ pub const FEATURE_NETWORK_PROVIDER_WORKLOAD_ENV: &str = "network-provider-worklo
 pub const FEATURE_AGENT_TEST_JSON: &str = "agent-test-json";
 pub const FEATURE_MANAGED_CREDENTIAL_BASE_URL: &str = "managed-credential-base-url";
 pub const FEATURE_SANDBOX_MASK_FILES: &str = "sandbox-mask-files";
+pub const FEATURE_MANAGED_NODE_RUNTIME: &str = "managed-node-runtime";
 
 const SERVER_FEATURES: &[&str] = &[
     FEATURE_NETWORK_PROVIDER_WORKLOAD_ENV,
     FEATURE_AGENT_TEST_JSON,
     FEATURE_MANAGED_CREDENTIAL_BASE_URL,
     FEATURE_SANDBOX_MASK_FILES,
+    FEATURE_MANAGED_NODE_RUNTIME,
 ];
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -59,9 +61,9 @@ pub(crate) struct ServerInfo {
     /// a feature report the same version. Test `features` membership instead.
     version: &'static str,
     /// Advertised capability names, currently `network-provider-workload-env`,
-    /// `agent-test-json`, `managed-credential-base-url`, and
-    /// `sandbox-mask-files`. The list grows over time; an absent or empty list
-    /// means none are present.
+    /// `agent-test-json`, `managed-credential-base-url`, `sandbox-mask-files`,
+    /// and `managed-node-runtime`. The list grows over time; an absent or empty
+    /// list means none are present.
     features: &'static [&'static str],
 }
 
@@ -375,6 +377,7 @@ mod tests {
                 "agent-test-json",
                 "managed-credential-base-url",
                 "sandbox-mask-files",
+                "managed-node-runtime",
             ])
         );
     }

@@ -249,8 +249,13 @@ fn settlement_fixture_config() -> config::Config {
 fn apply_settlement_signals(session: &HostedInitSession, config: &config::Config, args: &InitArgs) {
     let registry = crate::runtime::install::agent_registry::RegistryCatalog::load_embedded()
         .expect("registry");
-    for signal in super::super::super::run::agent_settlement_signals(config, &registry, args, false)
-    {
+    for signal in super::super::super::run::agent_settlement_signals(
+        config,
+        &registry,
+        args,
+        false,
+        std::path::Path::new("/nonexistent-acp-stack-home"),
+    ) {
         session.apply_state_signal(signal);
     }
 }

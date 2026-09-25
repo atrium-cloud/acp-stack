@@ -7,7 +7,7 @@ The runtime starts from config, prepares local state and secrets, and launches t
 The supervisor owns the configured agent process. It starts the agent with:
 
 - the configured command, args, cwd, and restart policy
-- a scrubbed environment with managed `PATH` and the runtime user's `HOME`; `[agent].env` cannot override these reserved keys
+- a scrubbed environment with managed `PATH` (the managed Node.js `bin`, then `~/.local/bin`, then the daemon's `PATH`) and the runtime user's `HOME`; `[agent].env` cannot override these reserved keys
 - secret values listed in `[agent].env` and each selected active-provider credential bundle
 
 When `[workspace.sandbox]` is enabled, the agent process and mediated shells launch inside an isolation backend. The backend masks the daemon's secrets, config, state, and control socket from the workload. It runs as the same user as the daemon, so the managed `HOME`, `PATH`, and workspace are unchanged; only the runtime's own sensitive paths are hidden. See [security.md#sandbox](security.md#sandbox).
@@ -115,7 +115,7 @@ Pre-existing binaries follow the same gate:
 
 Install steps run with a scrubbed environment:
 
-- `PATH` (plus the destination directory), `HOME`, `LANG`, and the non-interactive hints
+- the managed `PATH` plus the destination directory, `HOME`, `LANG`, and the non-interactive hints
 - `[agent].env` values, with the former keys reserved
 
 Every variable above is forwarded; one more is computed on the spot: `npm_config_python` is set to the path `python3` reports as its own executable, so node-gyp's repeated `python3` spawns bypass version-manager shims. A registry entry that needs a different interpreter can still override it through `[agent].env`.
@@ -127,6 +127,28 @@ Every variable above is forwarded; one more is computed on the spot: `npm_config
 - Waits beyond a hard cap surface as a typed rate-limit error instead of blocking indefinitely.
 - This keeps install retry loops on shared-egress-IP hosts from burning the unauthenticated GitHub quota.
 - `acps update` does not go through this pacing.
+
+## Managed Node Runtime
+
+The runtime installs and owns one Node.js major line, currently 26, for agents, installer shells, and dependency install actions. Any release on that line satisfies it, and it resolves ahead of any host Node on every runtime `PATH`.
+
+- Location: `~/.local/lib/acp-stack/node`, outside every sandbox-masked path, with `current` pointing at one release under `releases/`. `~/.local/bin/{node,npm,npx}` link to `current`, replacing earlier symlinks; a regular file at those paths stays.
+- npm global prefix: `~/.local`, set in each release's bundled npm config, so `npm -g` bins land in `~/.local/bin` and survive a release swap.
+- Install: fetches `latest-v26.x/SHASUMS256.txt` from nodejs.org, downloads the Linux x64 or arm64 archive, and verifies its SHA256. It checks that the unpacked `node --version` reports the managed major, then swaps `current` atomically. A mismatched checksum fails with `node_runtime.checksum_mismatch` and leaves `current` unchanged. The previous release is kept and older ones are pruned.
+- A present release on the managed major needs no network: every later ensure is a local check.
+- One lock file in the root serializes `acps serve`, `acps init`, and every CLI or worker process that installs.
+
+### When It Runs
+
+- `acps serve` takes the lock before its listener binds and installs in the background, so the API is up immediately. Agent spawns wait on the lock and never install; installer and dependency runs wait on it and retry a failed install.
+- `acps init` ensures it before the agent install step, and every agent install, agent update, and dependency apply ensures it first.
+- An install failure is logged and the work proceeds on whatever Node is on `PATH`. A recipe that needs Node declares it in `required_tools`, so on a host with no Node at all it fails with a typed prerequisites error.
+- A failed install of any kind (unreachable dist, checksum mismatch, or a build that will not run) is retried by the first ensure at least 10 minutes later, across serve restarts; earlier ensures return the recorded failure without touching the network.
+- Linux x64 and arm64 get the managed runtime. Other platforms log a warning and use the host Node.
+
+### Readiness
+
+`/v1/health/ready` carries a `node` object whose `status` is `unmanaged`, `pending`, `ready`, `unsupported`, or `failed`. Only `failed`, meaning the startup install failed and no managed release is present, degrades readiness. A later successful install from any installer entry reads as `ready` without a restart.
 
 ## Init
 
@@ -327,7 +349,8 @@ idle_threshold = "30s"
 ### Dependency Declarations
 
 - Declarations report whether expected tools, packages, runtimes, and MCP servers are present.
-- Commands and runtimes are checked as executables on PATH.
+- Commands and runtimes are checked as executables on the managed `PATH`.
+- User-scope install actions run on the managed `PATH`; `scope = "system"` actions escalated through sudo get sudo's `secure_path`.
 - Package checks use local Linux package databases when available.
 - Install actions run only when explicitly declared for a command dependency.
 

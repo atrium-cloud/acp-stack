@@ -1114,7 +1114,7 @@ A `running` row is reconciled to `failed` with `error.code = "deps.apply_abandon
 ```json
 {
   "version": "0.1.9",
-  "features": ["network-provider-workload-env", "agent-test-json", "managed-credential-base-url", "sandbox-mask-files"]
+  "features": ["network-provider-workload-env", "agent-test-json", "managed-credential-base-url", "sandbox-mask-files", "managed-node-runtime"]
 }
 ```
 
@@ -1125,6 +1125,7 @@ A `running` row is reconciled to `failed` with `error.code = "deps.apply_abandon
     - `agent-test-json` covers `acps agent test --format json`
     - `managed-credential-base-url` covers `base_url` on a managed-state credential selection
     - `sandbox-mask-files` covers `sandbox_mask_files` on the init create body and `[workspace.sandbox].mask_files` masking
+    - `managed-node-runtime` covers the runtime-installed Node.js 26 that agents, installers, and dependency install actions run on (see [runtime.md](../runtime.md#managed-node-runtime))
 
 ### `GET /v1/status/agent`
 
@@ -1169,6 +1170,16 @@ A `running` row is reconciled to `failed` with `error.code = "deps.apply_abandon
     - Stdio server rows may include `command_path`. Failing rows may include `missing_secret_refs` and `reason`.
     - HTTP MCP readiness validates declaration shape and secret refs only; it does not call the remote MCP endpoint.
     - Readiness also reports orphaned agent process groups under `agent.orphaned_process_count` and `agent.orphaned_process_pids`. Any live process group from an older `agent.started` lifecycle row, excluding the currently supervised PID, degrades readiness with `agent` in `failing`.
+    - Includes a `node` object for the managed Node.js runtime (see [runtime.md](../runtime.md#managed-node-runtime)):
+
+```json
+{
+  "status": "ready",
+  "version": "v26.10.0"
+}
+```
+
+    - `status` is `unmanaged`, `pending`, `ready`, `unsupported`, or `failed`. `unsupported` and `failed` rows carry a `reason`. Only `failed` degrades readiness, with `node` in `failing`.
 
 ### `GET /v1/security/check`
 
