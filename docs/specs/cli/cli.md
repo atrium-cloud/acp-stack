@@ -84,7 +84,7 @@ A daemon restart is required for daemon startup-cached settings:
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "ok": true,
   "phase": "done",
   "code": "ok",
@@ -104,13 +104,15 @@ A daemon restart is required for daemon startup-cached settings:
   "fs_check": { "status": "ok", "bytes": 128 },
   "cleanup": { "session_delete": "deleted", "process": "terminated" },
   "mode_used": "build",
-  "mode_attempts": 2
+  "mode_attempts": 2,
+  "prompt_failure": null
 }
 ```
 
 - `phase` is one of `spawn`, `initialize`, `session_new`, `session_config`, `prompt`, `fs_check`, `cleanup`, `done`. It is derived from `code`, so the two can never disagree.
 - `code` is one of `ok`, `agent_spawn_failed`, `agent_initialize_failed`, `session_create_failed`, `session_config_failed`, `session_mode_failed`, `prompt_failed`, `prompt_timeout`, `progress_timeout`, `unexpected_stop_reason`, `fs_check_missing`, `fs_check_empty`, `fs_check_not_regular_file`, `fs_check_outside_workspace`, `fs_check_failed`, `cleanup_failed`, `config_invalid`, `agent_unsupported`.
 - `prompt_source` is `provided`, `registry`, or `default`. `stop_reason` is `null` when the prompt phase was never reached.
+- `prompt_failure` is `null` except under `code: "prompt_failed"`, where it classifies the agent's rejection of the prompt with the same sanitized pair a daemon prompt records for `prompt.inference_failed` (see [State and logging](../state-logging.md)). `status_code` is the upstream HTTP status (400 to 599) the classifier found in the rejection, or `null`. `reason_category` is `rate_limit`, `internal_server_error`, `bad_gateway`, `service_unavailable`, `gateway_timeout`, `server_overloaded`, `client_error`, or `unknown`. A rejection carrying no recognizable status reads `{ "status_code": null, "reason_category": "unknown" }`.
 - `mode_used` is the session mode of the passing attempt, or `null` for the agent's own default mode. `mode_attempts` counts the modes tried, including the first. On total failure `mode_used` reports the first attempt while `mode_attempts` still counts every mode tried. See [Testflight mode cycling](#testflight-mode-cycling).
 - `evidence` retains the final 2 KiB of assistant text with the run's injected env credential values scrubbed, marks truncation, and counts message, thought, tool-call, and tool-call-update events on every exit path.
 - `fs_check.status` is `ok`, `skipped`, or `failed`. `skipped` covers both a registry entry that declares no `testflight_expect_fs` and a run that failed before the check. `bytes` is `null` unless the status is `ok`. Artifact paths resolve against the session cwd within the workspace, and missing or empty artifacts are re-polled for two seconds.

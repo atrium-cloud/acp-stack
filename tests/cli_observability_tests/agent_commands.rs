@@ -400,13 +400,14 @@ fn agent_test_json_success_document_has_the_full_schema() {
             "mode_used",
             "ok",
             "phase",
+            "prompt_failure",
             "prompt_source",
             "schema_version",
             "stop_reason",
             "updates",
         ]
     );
-    assert_eq!(document["schema_version"], 2);
+    assert_eq!(document["schema_version"], 3);
     assert_eq!(document["ok"], true);
     assert_eq!(document["phase"], "done");
     assert_eq!(document["code"], "ok");
@@ -418,6 +419,7 @@ fn agent_test_json_success_document_has_the_full_schema() {
     // the agent's native default (null) after a single attempt.
     assert_eq!(document["mode_used"], Value::Null);
     assert_eq!(document["mode_attempts"], 1);
+    assert_eq!(document["prompt_failure"], Value::Null);
     assert!(document["elapsed_ms"].is_u64());
     assert_eq!(
         json_keys(&document["evidence"]),
@@ -485,9 +487,61 @@ fn agent_test_json_failure_document_reports_phase_and_code() {
     assert_eq!(document["phase"], "session_new");
     assert_eq!(document["code"], "session_create_failed");
     assert_eq!(document["stop_reason"], Value::Null);
+    assert_eq!(document["prompt_failure"], Value::Null);
     assert!(!document.to_string().contains("fake session/new failure"));
     assert_eq!(document["cleanup"]["session_delete"], "skipped");
     assert_eq!(document["cleanup"]["process"], "terminated");
+}
+
+#[test]
+fn agent_test_json_classifies_an_inference_rejection_without_its_text() {
+    let cases = [
+        (
+            "upstream https://api.example.test/v1?key=sk-leak-marker returned status: 429 Too Many Requests",
+            429,
+            "rate_limit",
+        ),
+        ("HTTP/1.1 401 Unauthorized", 401, "client_error"),
+        ("status code 503", 503, "service_unavailable"),
+        // The shape pi relays verbatim from the openai SDK.
+        ("403 status code (no body)", 403, "client_error"),
+    ];
+    for (message, status_code, reason_category) in cases {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        write_fake_agent_home(tempdir.path(), &["--prompt-inference-error", message]);
+
+        let document = agent_test_json(tempdir.path(), &["--prompt", "hello"], false);
+
+        assert_eq!(document["phase"], "prompt", "{message}");
+        assert_eq!(document["code"], "prompt_failed", "{message}");
+        assert_eq!(
+            document["prompt_failure"],
+            serde_json::json!({
+                "status_code": status_code,
+                "reason_category": reason_category,
+            }),
+            "{message}"
+        );
+        let raw = document.to_string();
+        assert!(!raw.contains("sk-leak-marker"), "{raw}");
+        assert!(!raw.contains("api.example.test"), "{raw}");
+        assert!(!raw.contains("Unauthorized"), "{raw}");
+    }
+}
+
+#[test]
+fn agent_test_json_reports_an_unclassified_prompt_rejection_as_unknown() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    write_fake_agent_home(tempdir.path(), &["--prompt-error"]);
+
+    let document = agent_test_json(tempdir.path(), &["--prompt", "hello"], false);
+
+    assert_eq!(document["code"], "prompt_failed");
+    assert_eq!(
+        document["prompt_failure"],
+        serde_json::json!({ "status_code": null, "reason_category": "unknown" })
+    );
+    assert!(!document.to_string().contains("fake prompt failure"));
 }
 
 #[test]

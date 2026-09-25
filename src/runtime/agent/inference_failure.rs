@@ -84,10 +84,16 @@ fn reason_for(status_code: u16) -> &'static str {
     }
 }
 
-/// First plausible 3-digit status code (400..600) preceded by a recognizable
-/// prefix word or followed by a canonical reason phrase; the required context
-/// is what keeps timestamps and ids from matching.
+/// First plausible 3-digit status code (400..600) leading the message, preceded
+/// by a recognizable prefix word, or followed by a canonical reason phrase; the
+/// required context is what keeps timestamps and ids from matching.
 fn extract_status_code(rendered: &str) -> Option<u16> {
+    // The SDK's own leading status outranks any prefix or phrase quoted in the
+    // body that follows it.
+    if let Some(code) = leading_status_code(rendered) {
+        return Some(code);
+    }
+
     let lower = rendered.to_ascii_lowercase();
 
     const PREFIX_PATTERNS: &[&str] = &[
@@ -135,6 +141,21 @@ fn extract_status_code(rendered: &str) -> Option<u16> {
     }
 
     None
+}
+
+/// A status the message opens with, as SDKs that pass provider errors through
+/// render them: `403 status code (no body)`, `401 <message>`, `401: <body>`.
+/// Anchored at the start and delimited by whitespace or a colon, so a number
+/// inside a message or glued to a unit (`500ms`) never matches.
+fn leading_status_code(rendered: &str) -> Option<u16> {
+    let trimmed = rendered.trim_start();
+    let code = parse_status_at(trimmed)?;
+    // `parse_status_at` matched exactly three ASCII digits, so byte 3 is a char boundary.
+    match trimmed[3..].chars().next() {
+        Some(':') => Some(code),
+        Some(delimiter) if delimiter.is_whitespace() => Some(code),
+        _ => None,
+    }
 }
 
 /// Parse a 3-digit code (400..600) from the head of a slice. The digit run
@@ -284,6 +305,89 @@ mod tests {
         );
         assert!(!result.reason_category.contains("openai"));
         assert!(!result.reason_category.contains("sk-secret"));
+    }
+
+    #[test]
+    fn classifies_a_status_leading_a_passed_through_sdk_error() {
+        // The shapes pi relays verbatim: the openai SDK's `<status> <message>`
+        // and bodiless form, and pi-ai's `<status>: <body>`.
+        let cases: &[(&str, FailureClass, u16, &str)] = &[
+            (
+                "403 status code (no body)",
+                FailureClass::Inference4xx,
+                403,
+                reason::CLIENT_ERROR,
+            ),
+            (
+                "401 Incorrect API key provided: sk-test-secret.",
+                FailureClass::Inference4xx,
+                401,
+                reason::CLIENT_ERROR,
+            ),
+            (
+                r#"401: {"error":{"message":"No auth credentials found","code":401}}"#,
+                FailureClass::Inference4xx,
+                401,
+                reason::CLIENT_ERROR,
+            ),
+            (
+                "404 The model `gpt-9` does not exist or you do not have access to it.",
+                FailureClass::Inference4xx,
+                404,
+                reason::CLIENT_ERROR,
+            ),
+            (
+                "429 Rate limit reached for requests",
+                FailureClass::Inference4xx,
+                429,
+                reason::RATE_LIMIT,
+            ),
+            (
+                "503: upstream connect error",
+                FailureClass::Inference5xx,
+                503,
+                reason::SERVICE_UNAVAILABLE,
+            ),
+        ];
+        for (message, class, status_code, reason_category) in cases {
+            let result = classify(&make_error(message));
+            assert_eq!(result.class, *class, "case `{message}`");
+            assert_eq!(result.status_code, Some(*status_code), "case `{message}`");
+            assert_eq!(result.reason_category, *reason_category, "case `{message}`");
+        }
+    }
+
+    #[test]
+    fn a_leading_status_outranks_a_phrase_quoted_in_the_body() {
+        let result = classify(&make_error(
+            r#"401: {"error":{"message":"auth proxy returned Internal Server Error"}}"#,
+        ));
+        assert_eq!(result.class, FailureClass::Inference4xx);
+        assert_eq!(result.status_code, Some(401));
+        assert_eq!(result.reason_category, reason::CLIENT_ERROR);
+    }
+
+    #[test]
+    fn ignores_numbers_that_do_not_lead_the_message_as_a_status() {
+        for message in [
+            "Connection error.",
+            "request failed after 403 retries",
+            "4031 status code (no body)",
+            "403abc",
+            "500ms deadline exceeded",
+            "429",
+            "200 OK",
+            "600 unknown",
+        ] {
+            let result = classify(&make_error(message));
+            assert_eq!(
+                result.class,
+                FailureClass::AgentRequest,
+                "case `{message}` must stay unclassified"
+            );
+            assert_eq!(result.status_code, None, "case `{message}`");
+            assert_eq!(result.reason_category, reason::UNKNOWN, "case `{message}`");
+        }
     }
 
     #[test]

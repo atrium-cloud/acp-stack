@@ -301,6 +301,12 @@ sweep_interval  = "30s"
 
 The agent's `session/prompt` call can fail when the underlying inference provider returns an HTTP error. The SDK surfaces that as an ACP error whose `Display` output embeds the upstream status text. A classifier sits between the SDK error and the persisted prompt row and decides whether the failure is `inference_5xx`, `inference_4xx`, or generic `agent_request`.
 
+The classifier reads a status code (400 to 599) from the first of these that matches:
+
+- A status leading the message and followed by whitespace or a colon, the shape adapters that relay SDK errors verbatim produce (`403 status code (no body)`, `401: <body>`).
+- A status after a prefix word: `status:`, `status code`, `status`, `HTTP`, or an `HTTP/<version>` status line.
+- A canonical reason phrase (`Too Many Requests`, `Internal Server Error`, `Bad Gateway`, `Service Unavailable`, `Gateway Timeout`), taking a status right before the phrase and otherwise the phrase's own status.
+
 #### Sanitization Contract
 
 - The classifier returns `Classified { class, status_code: Option<u16>, reason_category: &'static str }`.

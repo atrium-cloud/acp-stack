@@ -17,6 +17,7 @@ use crate::runtime::agent::acp_bridge::{
     AgentSessionModelSelection, SessionEventSink, session_config_id_for_value,
     session_mode_selection_for_value, session_model_selection_for_value,
 };
+use crate::runtime::agent::inference_failure;
 use crate::runtime::agent::model_discovery::{
     advertised_values_for_category, effort_value_is_explicit_without_discovery,
     model_applies_from_disk_only,
@@ -33,7 +34,7 @@ use crate::cli::core::{OutputFormat, print_json};
 // CONSTANTS
 
 /// Version of the `agent test --format json` document; any field change bumps it.
-const AGENT_TEST_SCHEMA_VERSION: i64 = 2;
+const AGENT_TEST_SCHEMA_VERSION: i64 = 3;
 
 /// Upper bound on testflight attempts when cycling modes, so an agent advertising
 /// many modes cannot spin unbounded. Mode enums are small; this only caps the tail.
@@ -109,12 +110,43 @@ const MIN_REDACTED_SECRET_FRAGMENT_LEN: usize = 8;
 const FS_CHECK_SETTLE_TIMEOUT: Duration = Duration::from_secs(2);
 const FS_CHECK_SETTLE_INTERVAL: Duration = Duration::from_millis(100);
 
+/// The inference-failure classifier's vetted fields for a prompt the adapter rejected: the
+/// same pair a real prompt row persists as its failure detail, so no raw provider text rides
+/// along.
+#[derive(Debug, Clone, Copy)]
+struct PromptFailure {
+    status_code: Option<u16>,
+    reason_category: &'static str,
+}
+
+impl PromptFailure {
+    fn from_prompt_error(error: &StackError) -> Self {
+        match error {
+            StackError::InferenceRequestFailed {
+                status_code,
+                reason_category,
+            } => Self {
+                status_code: Some(*status_code),
+                reason_category: *reason_category,
+            },
+            // `prompt_session` has already collapsed every rejection the classifier could
+            // not place into a static message, so only the `unknown` bucket remains.
+            _ => Self {
+                status_code: None,
+                reason_category: inference_failure::reason::UNKNOWN,
+            },
+        }
+    }
+}
+
 /// A typed `agent test` failure carrying the machine-readable outcome `code`.
 #[derive(Debug)]
 pub(super) struct AgentTestFailure {
     stage: &'static str,
     reason: String,
     code: &'static str,
+    /// Set only for `prompt_failed`, the one code with an adapter rejection to classify.
+    prompt_failure: Option<PromptFailure>,
 }
 
 impl AgentTestFailure {
@@ -123,7 +155,13 @@ impl AgentTestFailure {
             stage,
             reason,
             code,
+            prompt_failure: None,
         }
+    }
+
+    fn with_prompt_failure(mut self, prompt_failure: PromptFailure) -> Self {
+        self.prompt_failure = Some(prompt_failure);
+        self
     }
 
     #[cfg(test)]
@@ -361,6 +399,7 @@ struct AgentTestOutcome {
     mode_used: Option<String>,
     /// How many mode attempts the run made, including the first.
     mode_attempts: usize,
+    prompt_failure: Option<PromptFailure>,
 }
 
 impl AgentTestOutcome {
@@ -385,6 +424,7 @@ impl AgentTestOutcome {
             cleanup: CleanupOutcome::nothing_to_clean(),
             mode_used: None,
             mode_attempts: 0,
+            prompt_failure: None,
         }
     }
 
@@ -417,6 +457,10 @@ impl AgentTestOutcome {
             },
             "mode_used": self.mode_used,
             "mode_attempts": self.mode_attempts,
+            "prompt_failure": self.prompt_failure.map(|failure| serde_json::json!({
+                "status_code": failure.status_code,
+                "reason_category": failure.reason_category,
+            })),
         })
     }
 }
@@ -517,6 +561,7 @@ fn run_agent_test_with(
         Some(failure) => {
             outcome.ok = false;
             outcome.code = failure.code;
+            outcome.prompt_failure = failure.prompt_failure;
             AgentTestRun {
                 outcome,
                 error: Some(failure.into()),
@@ -1298,7 +1343,11 @@ async fn run_agent_test_prompt(
                 result = &mut prompt_future => {
                     return result
                         .map(|response| response.stop_reason)
-                        .map_err(|err| agent_test_error("prompt completion", CODE_PROMPT_FAILED, err));
+                        .map_err(|err| {
+                            let prompt_failure = PromptFailure::from_prompt_error(&err);
+                            agent_test_error("prompt completion", CODE_PROMPT_FAILED, err)
+                                .with_prompt_failure(prompt_failure)
+                        });
                 }
                 _ = sink.wait_for_update_after(observed_updates) => {
                     observed_updates = sink.update_count();
