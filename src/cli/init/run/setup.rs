@@ -19,7 +19,7 @@ pub(super) struct InitBase {
     pub(super) prior_init_steps: Vec<crate::state::InitStepRecord>,
     pub(super) resumed: bool,
     pub(super) recorded_args: Option<RecordedInitArgs>,
-    pub(super) mutation: crate::fs_util::AgentConfigMutationFileLock,
+    pub(super) mutation: crate::fs_util::ExclusiveFileLock,
 }
 
 /// Preflight through run selection: validate flags, settle the agent, write or validate the config,

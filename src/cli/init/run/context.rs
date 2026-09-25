@@ -25,7 +25,7 @@ pub(super) struct InitSetup {
     /// this fact outlives staging.
     pub(super) agent_selected: bool,
     pub(super) skill_install_plan: Option<InitSkillInstallPlan>,
-    pub(super) mutation: crate::fs_util::AgentConfigMutationFileLock,
+    pub(super) mutation: crate::fs_util::ExclusiveFileLock,
     /// The serve process's shared store handle, hoisted to `acps init serve`
     /// start so bootstrap HTTP handlers and the wizard write through one
     /// handle. Absent for terminal/dev init, which opens its own below.
@@ -71,7 +71,7 @@ pub(super) struct InitFlow {
         Vec<crate::runtime::agent::agent_headless_config::ProvisionedAgentConfig>,
     pub(super) provisioned_edge_artifacts: Vec<crate::edge::GeneratedCloudflareArtifact>,
     /// Held, never read; released on drop, after the handover has rendered.
-    pub(super) _mutation: crate::fs_util::AgentConfigMutationFileLock,
+    pub(super) _mutation: crate::fs_util::ExclusiveFileLock,
 }
 
 impl InitFlow {

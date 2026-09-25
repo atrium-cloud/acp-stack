@@ -89,7 +89,7 @@ use crate::auth::{AuthVerifierSet, KeyKind};
 use crate::config::{AgentConfig, Config, IMPORT_REQUEST_SIZE_LIMIT, LocalSessionAuth};
 use crate::error::{Result, StackError};
 use crate::events::EventHub;
-use crate::fs_util::{AgentConfigMutationFileLock, acquire_agent_config_mutation_file_lock};
+use crate::fs_util::{ExclusiveFileLock, acquire_agent_config_mutation_file_lock};
 use crate::runtime::agent::model_catalog::AgentModelCatalogManager;
 use crate::runtime::agent::session_changes::SessionChangesHandle;
 use crate::runtime::agent::supervisor::AgentSupervisor;
@@ -129,11 +129,13 @@ pub struct AppState {
     pub auth_failure_blocker: Arc<crate::http_hardening::AuthFailureBlocker>,
     pub rate_limiter: Arc<crate::http_hardening::RateLimiter>,
     pub ws_registry: Arc<super::ws_registry::WsRegistry>,
+    /// Outcome of the startup Node.js ensure; `Unmanaged` unless `acps serve` runs one.
+    pub node_runtime: crate::runtime::node_runtime::NodeRuntimeState,
 }
 
 pub(crate) struct AgentConfigMutationGuard {
     _local: tokio::sync::OwnedMutexGuard<()>,
-    _process: AgentConfigMutationFileLock,
+    _process: ExclusiveFileLock,
 }
 
 #[derive(Clone)]
@@ -477,6 +479,7 @@ impl AppState {
             auth_failure_blocker,
             rate_limiter,
             ws_registry,
+            node_runtime: crate::runtime::node_runtime::NodeRuntimeState::default(),
         }
     }
 }

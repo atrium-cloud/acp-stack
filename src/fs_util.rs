@@ -11,18 +11,45 @@ use std::path::{Path, PathBuf};
 
 const AGENT_CONFIG_MUTATION_LOCK_FILE_NAME: &str = ".agent-config.lock";
 
-/// Process-wide advisory lock for read/modify/write of the Agent config. The lock file keeps a
-/// stable inode so atomic config replacements do not invalidate another `acps` process's lock.
-pub struct AgentConfigMutationFileLock {
+/// Cross-process advisory `flock`, released when dropped. The lock file keeps a stable inode, so
+/// atomic replacements of the files it guards do not invalidate another `acps` process's lock.
+pub struct ExclusiveFileLock {
     _file: File,
 }
 
-pub fn acquire_agent_config_mutation_file_lock(
-    config_path: &Path,
-) -> Result<AgentConfigMutationFileLock> {
+/// Process-wide lock for read/modify/write of the Agent config.
+pub fn acquire_agent_config_mutation_file_lock(config_path: &Path) -> Result<ExclusiveFileLock> {
     let parent = parent_dir(config_path)?;
     create_dir_owner_only(parent)?;
-    let lock_path = parent.join(AGENT_CONFIG_MUTATION_LOCK_FILE_NAME);
+    acquire_exclusive_lock_file(&parent.join(AGENT_CONFIG_MUTATION_LOCK_FILE_NAME))
+}
+
+/// Block until the exclusive lock on `lock_path` is held; the parent directory must exist.
+pub fn acquire_exclusive_lock_file(lock_path: &Path) -> Result<ExclusiveFileLock> {
+    let file = open_lock_file(lock_path)?;
+    match flock_exclusive(&file, false) {
+        Ok(()) => Ok(ExclusiveFileLock { _file: file }),
+        Err(source) => Err(StackError::FileCreate {
+            path: lock_path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+/// Take the exclusive lock on `lock_path` without waiting; `None` means another holder has it.
+pub fn try_acquire_exclusive_lock_file(lock_path: &Path) -> Result<Option<ExclusiveFileLock>> {
+    let file = open_lock_file(lock_path)?;
+    match flock_exclusive(&file, true) {
+        Ok(()) => Ok(Some(ExclusiveFileLock { _file: file })),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Err(source) => Err(StackError::FileCreate {
+            path: lock_path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn open_lock_file(lock_path: &Path) -> Result<File> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true).write(true).create(true);
     #[cfg(unix)]
@@ -33,13 +60,13 @@ pub fn acquire_agent_config_mutation_file_lock(
             .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
     }
     let file = options
-        .open(&lock_path)
+        .open(lock_path)
         .map_err(|source| StackError::FileCreate {
-            path: lock_path.clone(),
+            path: lock_path.to_path_buf(),
             source,
         })?;
     let metadata = file.metadata().map_err(|source| StackError::FileCreate {
-        path: lock_path.clone(),
+        path: lock_path.to_path_buf(),
         source,
     })?;
     if !metadata.is_file()
@@ -48,24 +75,85 @@ pub fn acquire_agent_config_mutation_file_lock(
         || !metadata_is_owner_only_file(&metadata)
     {
         return Err(StackError::FileCreate {
-            path: lock_path,
+            path: lock_path.to_path_buf(),
             source: std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
-                "Agent config mutation lock must be a current-user-owned, single-link regular file with mode 0600",
+                "lock file must be a current-user-owned, single-link regular file with mode 0600",
             ),
         });
     }
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd as _;
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn flock_exclusive(file: &File, non_blocking: bool) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+    let operation = if non_blocking {
+        libc::LOCK_EX | libc::LOCK_NB
+    } else {
+        libc::LOCK_EX
+    };
+    // SAFETY: flock only operates on the descriptor this function borrows for the call.
+    if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn flock_exclusive(_file: &File, _non_blocking: bool) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Point `link` at `target` by renaming a sibling temp symlink over it, so readers never observe a
+/// missing link. Replaces an existing symlink; the parent directory must exist.
+#[cfg(unix)]
+pub fn replace_symlink_atomically(target: &Path, link: &Path) -> Result<()> {
+    let parent = parent_dir(link)?;
+    let file_name = link
+        .file_name()
+        .ok_or_else(|| StackError::MissingParentDir {
+            path: link.to_path_buf(),
+        })?;
+    let mut temp_name = std::ffi::OsString::from(".");
+    temp_name.push(file_name);
+    temp_name.push(format!(".tmp-{}", std::process::id()));
+    let temp_link = parent.join(temp_name);
+    match std::fs::remove_file(&temp_link) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => {
             return Err(StackError::FileCreate {
-                path: lock_path,
-                source: std::io::Error::last_os_error(),
+                path: temp_link,
+                source,
             });
         }
     }
-    Ok(AgentConfigMutationFileLock { _file: file })
+    std::os::unix::fs::symlink(target, &temp_link).map_err(|source| StackError::FileCreate {
+        path: temp_link.clone(),
+        source,
+    })?;
+    if let Err(source) = std::fs::rename(&temp_link, link) {
+        if let Err(cleanup_error) = std::fs::remove_file(&temp_link) {
+            tracing::warn!(error = %cleanup_error, path = %temp_link.display(), "failed to remove temp symlink after a failed swap");
+        }
+        return Err(StackError::FileCreate {
+            path: link.to_path_buf(),
+            source,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn replace_symlink_atomically(_target: &Path, link: &Path) -> Result<()> {
+    Err(StackError::FileCreate {
+        path: link.to_path_buf(),
+        source: std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "runtime-managed symlinks require a Unix host",
+        ),
+    })
 }
 
 pub fn home_dir() -> Result<PathBuf> {

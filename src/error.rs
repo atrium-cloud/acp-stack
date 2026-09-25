@@ -11,6 +11,7 @@ mod dispatch;
 mod download;
 mod edge;
 mod extensions;
+mod node_runtime;
 mod permission;
 mod secrets;
 mod security;
@@ -381,6 +382,17 @@ pub enum StackError {
 
     #[error("archive read failed: {reason}")]
     ArchiveReadFailed { reason: String },
+
+    // === node runtime (managed Node.js) ===
+    #[error("Node.js archive `{archive}` sha256 mismatch: expected {expected}, got {actual}")]
+    NodeRuntimeChecksumMismatch {
+        archive: String,
+        expected: String,
+        actual: String,
+    },
+
+    #[error("managed Node.js runtime install failed: {reason}")]
+    NodeRuntimeInstallFailed { reason: String },
 
     // === config: generic shape validators ===
     #[error("{field} is not valid when {type_field} is {type_value}")]

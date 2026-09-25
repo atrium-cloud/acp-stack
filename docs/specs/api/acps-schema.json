@@ -4271,7 +4271,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Advertised capability names, currently `network-provider-workload-env`,\n`agent-test-json`, `managed-credential-base-url`, and\n`sandbox-mask-files`. The list grows over time; an absent or empty list\nmeans none are present."
+            "description": "Advertised capability names, currently `network-provider-workload-env`,\n`agent-test-json`, `managed-credential-base-url`, `sandbox-mask-files`,\nand `managed-node-runtime`. The list grows over time; an absent or empty\nlist means none are present."
           }
         },
         "required": [

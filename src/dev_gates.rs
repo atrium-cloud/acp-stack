@@ -9,9 +9,11 @@ pub const FIXTURE_NEW_SESSION_RESPONSE_ENV: &str = "ACP_STACK_AGENT_NEW_SESSION_
 pub const GITHUB_API_BASE_ENV: &str = "ACP_STACK_GITHUB_API_BASE";
 pub const PROVIDER_MODELS_BASE_ENV: &str = "ACP_STACK_PROVIDER_MODELS_BASE";
 pub const INSTALL_BINARY_DIR_ENV: &str = "ACP_STACK_INSTALL_BINARY_DIR";
+pub const NODE_DIST_BASE_ENV: &str = "ACP_STACK_NODE_DIST_BASE";
 pub const S3_ENDPOINT_OVERRIDE_ENV: &str = "ACP_STACK_S3_ENDPOINT_OVERRIDE";
 pub const TEST_INSECURE_HTTPS_ENV: &str = "ACP_STACK_TEST_INSECURE_HTTPS";
 pub const TEST_SKIP_AGENT_INSTALL_ENV: &str = "ACP_STACK_TEST_SKIP_AGENT_INSTALL";
+pub const TEST_SKIP_NODE_RUNTIME_ENV: &str = "ACP_STACK_TEST_SKIP_NODE_RUNTIME";
 /// A fixture build on a throwaway host (docker test image, CI runner) may use the real HOME and
 /// the real network; unset, `fs_util::home_dir` and `http_client` refuse both.
 pub const TEST_DISPOSABLE_HOST_ENV: &str = "ACP_STACK_TEST_DISPOSABLE_HOST";
@@ -109,6 +111,14 @@ mod tests {
         assert_eq!(fixture_path(FIXTURE_CONFIG_OPTIONS_ENV), None);
         assert_eq!(fixture_path(FIXTURE_AGENT_CAPABILITIES_ENV), None);
         assert!(!fixture_enabled(TEST_INSECURE_HTTPS_ENV));
+    }
+
+    #[test]
+    fn node_runtime_fixture_envs_are_ignored_without_feature() {
+        let _base = EnvGuard::set(NODE_DIST_BASE_ENV, "http://127.0.0.1:1");
+        let _skip = EnvGuard::set(TEST_SKIP_NODE_RUNTIME_ENV, "1");
+        assert_eq!(fixture_string(NODE_DIST_BASE_ENV), None);
+        assert!(!fixture_enabled(TEST_SKIP_NODE_RUNTIME_ENV));
     }
 
     struct EnvGuard {

@@ -72,6 +72,33 @@ fn assert_public_message_excludes(err: &StackError, needles: &[&str]) -> String 
 }
 
 #[test]
+fn node_runtime_errors_report_codes_and_sanitized_messages() {
+    let install = StackError::NodeRuntimeInstallFailed {
+        reason: format!("rename {CANARY_PATH} failed: permission denied"),
+    };
+    assert_eq!(install.error_code(), "node_runtime.install_failed");
+    assert_eq!(
+        install.http_status(),
+        http::StatusCode::INTERNAL_SERVER_ERROR
+    );
+    let message = assert_public_message_excludes(&install, &[CANARY_PATH, "permission denied"]);
+    assert_eq!(message, "managed Node.js runtime install failed");
+
+    let mismatch = StackError::NodeRuntimeChecksumMismatch {
+        archive: "node-v26.0.0-linux-x64.tar.gz".to_owned(),
+        expected: "a".repeat(64),
+        actual: "b".repeat(64),
+    };
+    assert_eq!(mismatch.error_code(), "node_runtime.checksum_mismatch");
+    assert_eq!(mismatch.http_status(), http::StatusCode::BAD_GATEWAY);
+    assert!(
+        mismatch
+            .public_message()
+            .contains("node-v26.0.0-linux-x64.tar.gz")
+    );
+}
+
+#[test]
 fn agent_test_failed_public_message_drops_reason_and_keeps_stage() {
     let err = StackError::AgentTestFailed {
         stage: "ACP initialize".to_owned(),
@@ -416,6 +443,7 @@ const DOMAIN_MODULES: &[(&str, &str)] = &[
     ("workspace_source", include_str!("workspace_source.rs")),
     ("download", include_str!("download.rs")),
     ("archive", include_str!("archive.rs")),
+    ("node_runtime", include_str!("node_runtime.rs")),
     ("serve", include_str!("serve.rs")),
     ("agent_install", include_str!("agent_install.rs")),
     ("agent_runtime", include_str!("agent_runtime.rs")),
