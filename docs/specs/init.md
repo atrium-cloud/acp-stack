@@ -77,7 +77,7 @@ The operator-facing sequence, in order:
         - Clear the namespace's credential endpoint first; see [extensions.md](extensions.md#type-managed-state).
 4. Environment configuration (new config only).
     a. Standard setup
-        - Install essential dependencies including `nodejs`, `python` 3.14, `git` (yes/no)
+        - Install essential dependencies including `python` 3.14 and `git` (yes/no); Node.js comes from the [managed runtime](runtime.md#managed-node-runtime)
         - Install `browser-use` (yes/no)
         - Add essential agent skills (yes/no) -(if yes)-> add Anthropic `docx`, `pptx`, `xlsx`, and `pdf`, plus OpenAI plugin skills `gh-address-comments`, `gh-fix-ci`, `github`, and `yeet`
         - Add data sources (now/later) -(if now)-> add a local path, HTTPS archive/download, or S3 bucket

@@ -125,12 +125,23 @@ fn docker_runtime_includes_registry_install_tools() {
         .lines()
         .find(|line| line.contains("apt-get install"))
         .expect("runtime apt install line");
-    for tool in ["bash", "curl", "npm"] {
+    for tool in ["bash", "curl"] {
         assert!(
             install_line.contains(tool),
             "Docker runtime must include {tool} for registry install paths"
         );
     }
+    // acps installs and keeps its own Node.js.
+    for package in ["nodejs", "npm"] {
+        assert!(
+            !install_line.split_whitespace().any(|word| word == package),
+            "Docker runtime must not install {package}"
+        );
+    }
+    assert!(
+        dockerfile.contains("chown -R acp:acp /workspace /home/acp/.config /home/acp/.local"),
+        "the runtime user must own ~/.local, where acps writes managed binaries and Node.js"
+    );
 }
 
 #[test]
@@ -183,12 +194,16 @@ fn docker_entrypoint_maps_provider_init_env_vars() {
 fn systemd_installer_includes_registry_install_tools() {
     let installer =
         std::fs::read_to_string("scripts/install-systemd.sh").expect("read systemd installer");
-    for tool in ["ca-certificates", "bash", "curl", "npm"] {
+    for tool in ["ca-certificates", "bash", "curl"] {
         assert!(
             installer.contains(tool),
             "systemd installer must include {tool} for registry install paths"
         );
     }
+    assert!(
+        installer.contains("readonly OS_DEP_PACKAGES=(ca-certificates bash curl)"),
+        "systemd installer must leave Node.js to acps"
+    );
     assert!(
         installer.contains("missing required OS tools"),
         "systemd installer must fail clearly when registry tools cannot be installed"
@@ -205,8 +220,6 @@ fn vm_dependency_profile_includes_agent_work_tools_without_build_toolchain() {
         "curl",
         "git",
         "openssh-client",
-        "nodejs",
-        "npm",
         "python3",
         "python3-venv",
         "https://astral.sh/uv/install.sh",
@@ -227,13 +240,20 @@ fn vm_dependency_profile_includes_agent_work_tools_without_build_toolchain() {
             "VM dependency profile must include {tool}"
         );
     }
-    for package in ["build-essential", "pkg-config", "python3-dev"] {
+    // Build toolchains stay out of the base profile, and acps installs its own Node.js.
+    for package in [
+        "build-essential",
+        "pkg-config",
+        "python3-dev",
+        "nodejs",
+        "npm",
+    ] {
         assert!(
             !script
                 .lines()
                 .skip_while(|line| !line.contains("BASE_APT_PACKAGES"))
                 .take_while(|line| !line.contains(")"))
-                .any(|line| line.contains(package)),
+                .any(|line| line.trim() == package),
             "base VM dependency profile must not include {package}"
         );
     }

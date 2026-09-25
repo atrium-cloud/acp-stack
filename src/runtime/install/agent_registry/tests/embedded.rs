@@ -219,8 +219,15 @@ fn embedded_registry_contains_only_curated_examples() {
         .shell
         .as_ref()
         .expect("pi adapter shell install");
-    assert!(pi_adapter_shell.script.contains("until node_ready"));
+    // Node comes from the runtime-managed install, never from a recipe.
+    assert!(!pi_adapter_shell.script.contains("node_ready"));
     assert!(!pi_adapter_shell.script.contains("nodejs.org"));
+    assert!(
+        pi_adapter_shell
+            .required_tools
+            .iter()
+            .any(|tool| tool == "node")
+    );
     assert!(
         pi_adapter_shell
             .script
@@ -229,7 +236,7 @@ fn embedded_registry_contains_only_curated_examples() {
     assert!(pi_adapter_shell.script.contains("cmp -s"));
     assert_eq!(pi_adapter_shell.creates, "pi-acp");
     assert!(pi_adapter.update.shell_rerun);
-    // The bundle carries no Pi, so the harness install stays and provides Node.
+    // The bundle carries no Pi, so the harness install stays.
     let pi_harness = pi.harness.as_ref().expect("pi harness");
     assert!(!pi_harness.install.is_provided_by_adapter());
     let pi_harness_shell = pi_harness
@@ -237,11 +244,8 @@ fn embedded_registry_contains_only_curated_examples() {
         .shell
         .as_ref()
         .expect("pi harness shell install");
-    assert!(
-        pi_harness_shell
-            .script
-            .contains("nodejs.org/dist/latest-v22.x/")
-    );
+    assert!(!pi_harness_shell.script.contains("nodejs.org"));
+    assert_eq!(pi_harness_shell.required_tools, ["curl", "node", "npm"]);
     assert!(
         pi_harness_shell
             .script
@@ -411,10 +415,10 @@ fn embedded_registry_contains_only_curated_examples() {
         .shell
         .as_ref()
         .expect("Hermes Agent adapter shell install");
-    assert!(
-        hermes_adapter_shell
-            .script
-            .contains("nodejs.org/dist/latest-v22.x/")
+    assert!(!hermes_adapter_shell.script.contains("nodejs.org"));
+    assert_eq!(
+        hermes_adapter_shell.required_tools,
+        ["curl", "unzip", "node"]
     );
     assert!(hermes_adapter_shell.script.contains(
         "https://github.com/atrium-cloud/hermes-acp/releases/latest/download/hermes-agent-acp.zip"

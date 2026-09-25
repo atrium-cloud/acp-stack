@@ -204,7 +204,8 @@ fi
 
 current_step="os_deps"
 
-readonly OS_DEP_PACKAGES=(ca-certificates bash curl npm)
+# Node.js is installed and kept by acps itself, so it is not an OS dependency.
+readonly OS_DEP_PACKAGES=(ca-certificates bash curl)
 
 package_installed() {
   local package="$1"
@@ -290,6 +291,8 @@ current_step="create_dirs"
 install -d -o "${user_name}" -g "${user_name}" -m 0755 "${workspace_root}"
 install -d -o "${user_name}" -g "${user_name}" -m 0755 "${workspace_root}/uploads"
 install -d -o "${user_name}" -g "${user_name}" -m 0700 "${home_dir}/.config/acp-stack"
+# `install -d` leaves created ancestors root-owned; acps writes ~/.local/bin and ~/.local/lib.
+install -d -o "${user_name}" -g "${user_name}" -m 0755 "${home_dir}/.local" "${home_dir}/.local/share"
 install -d -o "${user_name}" -g "${user_name}" -m 0700 "${home_dir}/.local/share/acp-stack"
 
 current_step="install_binaries"

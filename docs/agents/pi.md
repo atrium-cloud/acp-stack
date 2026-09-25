@@ -30,8 +30,8 @@ Provider credentials are injected through `[agent].env`. Provider ids and defaul
 
 The adapter and the harness install from separate sources.
 
-- Harness: the upstream `pi.dev` installer, with npm and GitHub Release fallbacks. The recipe installs Node 22 under `~/.local/share/acp-stack/node` when the host has none.
-- Adapter: a Node script from the latest `atrium-cloud/pi-acp` GitHub Release (`pi-acp.zip`); `acps agent update` re-runs the recipe.
+- Harness: the upstream `pi.dev` installer, with npm and GitHub Release fallbacks. The installer runs on the [managed Node.js runtime](../specs/runtime.md#managed-node-runtime).
+- Adapter: a Node script from the latest `atrium-cloud/pi-acp` GitHub Release (`pi-acp.zip`), run by the managed Node.js; `acps agent update` re-runs the recipe.
 
 ### Launch
 

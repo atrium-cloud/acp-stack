@@ -28,6 +28,9 @@ fn workspace_with(root: &Path) -> WorkspaceConfig {
     }
 }
 
+// Set process-wide by `git_materialization_ignores_inherited_repo_scope_env`.
+const REPO_SCOPE_GIT_VARS: [&str; 2] = ["GIT_DIR", "GIT_INDEX_FILE"];
+
 fn run_fixture_git(repo: &Path, args: &[&str]) {
     let mut command = Command::new("git");
     command.args(args).current_dir(repo);
@@ -38,6 +41,10 @@ fn run_fixture_git(repo: &Path, args: &[&str]) {
         if name.to_string_lossy().starts_with("GIT_") {
             command.env_remove(&name);
         }
+    }
+    // A concurrent test can set these after the scan above, so remove them by name too.
+    for name in REPO_SCOPE_GIT_VARS {
+        command.env_remove(name);
     }
     let output = command
         .output()
@@ -188,9 +195,10 @@ fn git_materialization_ignores_inherited_repo_scope_env() {
     // Bogus paths make any leak of the hook's GIT_DIR/GIT_INDEX_FILE fail loudly.
     // SAFETY: tests in this binary share env; other tests spawning git
     // scrub these vars, and we remove them before asserting.
+    let [git_dir, git_index_file] = REPO_SCOPE_GIT_VARS;
     unsafe {
-        std::env::set_var("GIT_DIR", "/nonexistent/repo-scope-git-dir");
-        std::env::set_var("GIT_INDEX_FILE", "/nonexistent/repo-scope-index");
+        std::env::set_var(git_dir, "/nonexistent/repo-scope-git-dir");
+        std::env::set_var(git_index_file, "/nonexistent/repo-scope-index");
     }
     let clone = run_git_clone(
         &upstream.path().display().to_string(),
@@ -201,8 +209,8 @@ fn git_materialization_ignores_inherited_repo_scope_env() {
     );
     let rev_parse = run_git_rev_parse(&dest, None);
     unsafe {
-        std::env::remove_var("GIT_DIR");
-        std::env::remove_var("GIT_INDEX_FILE");
+        std::env::remove_var(git_dir);
+        std::env::remove_var(git_index_file);
     }
     clone.expect("clone must ignore inherited GIT_DIR/GIT_INDEX_FILE");
     let head = rev_parse.expect("rev-parse must ignore inherited GIT_DIR/GIT_INDEX_FILE");

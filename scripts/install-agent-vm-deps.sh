@@ -14,14 +14,13 @@ browser_use_python_version="3.14"
 # Central package manifests for the Debian/Ubuntu VM image profile. The base
 # set intentionally excludes build toolchains; agent-specific installers and
 # explicit dependency declarations remain responsible for anything heavier.
+# Node.js is installed and kept by acps itself, so it is not an apt package.
 readonly BASE_APT_PACKAGES=(
   ca-certificates
   bash
   curl
   git
   openssh-client
-  nodejs
-  npm
   python3
   python3-venv
   tar

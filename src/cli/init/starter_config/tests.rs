@@ -856,16 +856,7 @@ fn standard_setup_profile_declares_base_dependencies_without_build_toolchain() {
             install.shell
         );
 
-    for command in [
-        "node",
-        "npm",
-        "python3",
-        "python3.14",
-        "uv",
-        "git",
-        "rg",
-        "jq",
-    ] {
+    for command in ["python3", "python3.14", "uv", "git", "rg", "jq"] {
         assert!(
             config
                 .dependencies
@@ -886,6 +877,22 @@ fn standard_setup_profile_declares_base_dependencies_without_build_toolchain() {
                 .any(|entry| entry.name == *package
                     && entry.feature.as_deref() == Some(STANDARD_AGENT_WORK_FEATURE)),
             "missing package dependency {package}"
+        );
+    }
+    // Node.js is runtime-managed, so Standard Setup neither installs nor expects a host copy.
+    for name in ["nodejs", "npm", "node"] {
+        assert!(
+            !config
+                .dependencies
+                .packages
+                .iter()
+                .chain(&config.dependencies.commands)
+                .any(|entry| entry.name == name),
+            "standard setup must not declare {name}"
+        );
+        assert!(
+            !install.shell.split_whitespace().any(|word| word == name),
+            "standard install shell must not install {name}"
         );
     }
     for package in BUILD_HEAVY_APT_PACKAGES {

@@ -53,7 +53,7 @@ This applies only to the managed lane. OpenCode Zen/Go, the providers `data/endp
 
 The adapter and the harness install from separate sources.
 
-- Adapter: a Node script from the latest `atrium-cloud/hermes-acp` GitHub Release (`hermes-agent-acp.zip`). The recipe installs Node 22 under `~/.local/share/acp-stack/node` when the host has none, and `acps agent update` re-runs it.
+- Adapter: a Node script from the latest `atrium-cloud/hermes-acp` GitHub Release (`hermes-agent-acp.zip`), run by the [managed Node.js runtime](../specs/runtime.md#managed-node-runtime); `acps agent update` re-runs the recipe.
 - Harness: the `hermes` install downloads the upstream installer (Nous-hosted) with a 15s cap, falling back to the official GitHub-hosted copy when the download fails or stalls.
 - The harness installer runs with `--skip-setup --skip-browser --skip-computer-use --non-interactive`, plus explicit `--dir ~/.hermes/hermes-agent --hermes-home ~/.hermes`. Root installs keep the managed `~/.local/bin/hermes` layout instead of the upstream FHS layout.
 - The base `hermes` binary is enough. The adapter resolves `hermes` on `PATH` and drives `hermes serve`.

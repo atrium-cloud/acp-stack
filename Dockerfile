@@ -20,7 +20,7 @@ FROM debian:bookworm-slim AS runtime
 RUN addgroup --system --gid 1000 acp \
     && adduser --system --uid 1000 --ingroup acp --home /home/acp --shell /usr/sbin/nologin acp \
     && apt-get update \
-    && apt-get install --no-install-recommends -y ca-certificates bash curl npm \
+    && apt-get install --no-install-recommends -y ca-certificates bash curl \
     && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /workspace \
@@ -28,7 +28,7 @@ RUN mkdir -p /workspace \
     /usr/share/doc/acp-stack \
     /home/acp/.config/acp-stack \
     /home/acp/.local/share/acp-stack \
-    && chown -R acp:acp /workspace /home/acp/.config /home/acp/.local/share
+    && chown -R acp:acp /workspace /home/acp/.config /home/acp/.local
 
 COPY --from=builder /app/target/release/acps /usr/local/bin/acps
 COPY LICENSE NOTICE TRADEMARKS.md /usr/share/doc/acp-stack/

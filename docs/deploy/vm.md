@@ -6,7 +6,7 @@ Use the VM dependency profile when the host image should be ready for common age
 sudo bash scripts/install-agent-vm-deps.sh
 ```
 
-The base profile installs common runtime tools for agent harnesses and workspace work: Node.js/npm, Python, uv, Git/SSH, archive tools, `jq`, `rg`, patch/diff tools, and process utilities. It does not install build toolchains or language headers.
+The base profile installs common runtime tools for agent harnesses and workspace work: Python, uv, Git/SSH, archive tools, `jq`, `rg`, patch/diff tools, and process utilities. It leaves out build toolchains and language headers. `acps` installs Node.js itself (see [runtime.md](../specs/runtime.md#managed-node-runtime)).
 
 ## Browser Profile
 

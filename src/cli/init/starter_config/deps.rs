@@ -15,15 +15,14 @@ pub(super) const BROWSER_USE_WRAPPER_PATH: &str = "/usr/local/share/acp-stack/br
 pub(super) const BROWSER_USE_LAUNCHER_PATH: &str = "/usr/local/bin/acp-stack-browser-use-mcp";
 
 // Package manifest for init's Standard Setup path, mirroring the VM base
-// profile: agent-work tools, no build toolchains or language headers.
+// profile: agent-work tools, no build toolchains or language headers. Node.js
+// is runtime-managed, never an apt package.
 pub(super) const STANDARD_AGENT_WORK_APT_PACKAGES: &[&str] = &[
     "ca-certificates",
     "bash",
     "curl",
     "git",
     "openssh-client",
-    "nodejs",
-    "npm",
     "python3",
     "python3-venv",
     "tar",
@@ -44,8 +43,6 @@ pub(super) const STANDARD_AGENT_WORK_COMMANDS: &[&str] = &[
     "curl",
     "git",
     "ssh",
-    "node",
-    "npm",
     "python3",
     "python3.14",
     "uv",
