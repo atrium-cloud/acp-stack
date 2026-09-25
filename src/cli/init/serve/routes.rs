@@ -164,11 +164,14 @@ async fn create_session_handler(
         Err(error) => return error.into_response(),
     };
     // Starter-only declarations against a kept config must fail as an HTTP 400,
-    // so a client can adapt the body and retry; the same check inside the init
-    // thread only ever surfaces as an errored session. The probe with
+    // so a client can adapt the body and retry; the same checks inside the init
+    // thread only ever surface as an errored session. The probe with
     // `creating_config = false` says whether the body carries any such
-    // declaration, so HOME is only resolved when one is present.
-    if let Err(error) = reject_starter_only_args_for_existing_config(&init_args, false) {
+    // declaration, so HOME is only resolved when one is present. The MCP check
+    // carries no resume exemption in the thread, so it has none here either.
+    let starter_only = reject_starter_only_args_for_existing_config(&init_args, false)
+        .and_then(|()| reject_starter_only_mcp_args_for_existing_config(&init_args));
+    if let Err(error) = starter_only {
         match config::default_config_path() {
             Ok(config_path) if config_path.exists() => return error.into_response(),
             Ok(_) => {}

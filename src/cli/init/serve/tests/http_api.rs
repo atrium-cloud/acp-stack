@@ -585,6 +585,116 @@ async fn start_route_exempts_resume_from_starter_only_rejection() {
     wait_for_status(&session, "errored");
 }
 
+/// One start body per MCP declaration kind, paired with the field its
+/// starter-only rejection names.
+#[cfg(feature = "test-fixtures")]
+fn mcp_declaration_bodies() -> Vec<(Value, &'static str)> {
+    vec![
+        (json!({ "mcp_preset": ["linear"] }), "--mcp-preset"),
+        (
+            json!({ "mcp_stdio": [{ "name": "files", "command": "mcp-files" }] }),
+            "--mcp-stdio",
+        ),
+        (
+            json!({ "mcp_http": [{ "name": "search", "url": "https://mcp.example.com/mcp" }] }),
+            "--mcp-http",
+        ),
+    ]
+}
+
+#[cfg(feature = "test-fixtures")]
+#[tokio::test]
+async fn start_route_rejects_mcp_declarations_against_existing_config() {
+    for (body, field) in mcp_declaration_bodies() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let home = write_models_test_home(tempdir.path(), MODELS_TEST_CONFIG_TOML);
+        let _guard = TestEnvGuard::set(&[("HOME", home.as_path())]);
+
+        let manager = HostedInitManager::new(test_shared_secret_store().0);
+        let (app, _store_dir) = app_with_manager(manager.clone());
+        let (status, response) = request_json(
+            app,
+            Method::POST,
+            "/v1/init/sessions",
+            Some(body.clone()),
+            Some(TEST_TOKEN),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {response}");
+        assert_eq!(response["error"]["code"], "request.invalid_param", "{body}");
+        assert_eq!(
+            response["error"]["message"],
+            format!(
+                "invalid parameter `{field}`: MCP init declarations apply only when creating a starter config"
+            ),
+            "{body}"
+        );
+        assert!(
+            manager.session_current().is_none(),
+            "{body}: a rejected start must not create a session"
+        );
+    }
+}
+
+/// The init thread's MCP check has no resume exemption, so the start route
+/// rejects a resumed MCP declaration too, unlike the other starter-only fields.
+#[cfg(feature = "test-fixtures")]
+#[tokio::test]
+async fn start_route_rejects_mcp_declarations_on_resume_against_existing_config() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let home = write_models_test_home(tempdir.path(), MODELS_TEST_CONFIG_TOML);
+    let _guard = TestEnvGuard::set(&[("HOME", home.as_path())]);
+
+    let manager = HostedInitManager::new(test_shared_secret_store().0);
+    let (app, _store_dir) = app_with_manager(manager.clone());
+    let (status, body) = request_json(
+        app,
+        Method::POST,
+        "/v1/init/sessions",
+        Some(json!({ "resume": true, "mcp_preset": ["linear"] })),
+        Some(TEST_TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert_eq!(body["error"]["code"], "request.invalid_param");
+    assert_eq!(
+        body["error"]["message"],
+        "invalid parameter `--mcp-preset`: MCP init declarations apply only when creating a starter config"
+    );
+    assert!(manager.session_current().is_none());
+}
+
+#[cfg(feature = "test-fixtures")]
+#[tokio::test]
+async fn start_route_accepts_mcp_declarations_without_a_config() {
+    for (body, _field) in mcp_declaration_bodies() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let home = tempdir.path().join("home");
+        std::fs::create_dir_all(&home).expect("home dir");
+        let _guard = TestEnvGuard::set(&[("HOME", home.as_path())]);
+
+        let manager = HostedInitManager::new(test_shared_secret_store().0);
+        let (app, _store_dir) = app_with_manager(manager.clone());
+        let (status, response) = request_json(
+            app,
+            Method::POST,
+            "/v1/init/sessions",
+            Some(body.clone()),
+            Some(TEST_TOKEN),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}: {response}");
+        let session = manager
+            .session_current()
+            .expect("an accepted start must reach start_session");
+        assert_eq!(session.id, response["data"]["session_id"], "{body}");
+        // Settle the run before HOME is restored: a fresh init with no agent in
+        // the body asks for one, and declining it fails the run.
+        answer_pending(&session, "agent", Value::Null);
+        wait_for_status(&session, "errored");
+    }
+}
+
 #[tokio::test]
 async fn startup_discovery_close_route_releases_the_phase() {
     let session = test_session("init_close_rest");
