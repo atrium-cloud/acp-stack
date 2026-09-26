@@ -6,7 +6,7 @@ use zeroize::Zeroizing;
 use crate::auth::{
     AuthVerifierEnsureOutcome, AuthVerifierSet, ensure_auth_verifier_pair, generate_api_key,
 };
-use crate::config::{Config, LegacyAuthConfig};
+use crate::config::LegacyAuthConfig;
 use crate::error::{Result, StackError};
 use crate::runtime::init_runner::{self, begin_run, finalize_run, find_resumable_run};
 use crate::secrets::SecretStore;
@@ -54,6 +54,8 @@ pub(super) fn resolve_init_run(args: &InitArgs, store: &StateStore) -> Result<In
         // Post-creation intents a bare `--resume` would otherwise drop. Custom-agent flags and
         // `--dep` declarations are deliberately absent: they land in on-disk config at creation,
         // so resume recovers them from disk.
+        "agent_version": args.agent_version,
+        "existing_agent": args.existing_agent.map(|choice| choice.as_config_value()),
         "agent_env_ref": args.agent_env_ref,
         "deps_apply": args.deps_apply,
         "deps_apply_yes": args.deps_apply_yes,
@@ -127,6 +129,8 @@ pub(super) struct RecordedInitArgs {
     pub(super) testflight: bool,
     #[serde(default)]
     pub(super) skip_testflight: bool,
+    pub(super) agent_version: Option<String>,
+    pub(super) existing_agent: Option<String>,
     #[serde(default)]
     pub(super) agent_env_ref: Vec<String>,
     #[serde(default)]
@@ -320,28 +324,6 @@ pub(super) fn perform_auth_init(
             })
         }
     }
-}
-
-pub(super) fn installer_postcondition_holds(
-    config: &Config,
-    workspace_root: &Path,
-    local_bin_dir: &Path,
-    home: &Path,
-) -> bool {
-    let (target, extra_path_dirs): (&str, Vec<&Path>) =
-        if let Some(install) = config.agent.install.as_ref() {
-            (install.creates.as_str(), Vec::new())
-        } else {
-            (config.agent.command.as_str(), vec![local_bin_dir])
-        };
-    crate::runtime::install::agent_installer::resolve_creates_for_init_resume(
-        target,
-        workspace_root,
-        &extra_path_dirs,
-        config.agent.expected_sha256.as_deref(),
-        home,
-    )
-    .is_some()
 }
 
 pub(super) fn workspace_postcondition_holds(workspace: &crate::config::WorkspaceConfig) -> bool {

@@ -87,6 +87,8 @@ pub(super) enum HostedPromptKind {
     DependencyScope,
     DepsApplyConfirm,
     AgentEnvRefName,
+    ExistingAgent,
+    AgentVersion,
 }
 
 impl HostedPromptKind {
@@ -155,6 +157,8 @@ impl HostedPromptKind {
             HostedPromptKind::DependencyScope => "dependency_scope",
             HostedPromptKind::DepsApplyConfirm => "deps_apply_confirm",
             HostedPromptKind::AgentEnvRefName => "agent_env_ref_name",
+            HostedPromptKind::ExistingAgent => "existing_agent",
+            HostedPromptKind::AgentVersion => "agent_version",
         }
     }
 
@@ -225,7 +229,9 @@ impl HostedPromptKind {
             | HostedPromptKind::DependencyInstallShell
             | HostedPromptKind::DependencyScope
             | HostedPromptKind::DepsApplyConfirm
-            | HostedPromptKind::AgentEnvRefName => None,
+            | HostedPromptKind::AgentEnvRefName
+            | HostedPromptKind::ExistingAgent
+            | HostedPromptKind::AgentVersion => None,
         }
     }
 }
@@ -296,6 +302,8 @@ pub(super) const ALL_HOSTED_PROMPT_KINDS: &[HostedPromptKind] = &[
     HostedPromptKind::DependencyScope,
     HostedPromptKind::DepsApplyConfirm,
     HostedPromptKind::AgentEnvRefName,
+    HostedPromptKind::ExistingAgent,
+    HostedPromptKind::AgentVersion,
 ];
 
 /// A pickable item: `id` is the stable wire identity a hosted client answers

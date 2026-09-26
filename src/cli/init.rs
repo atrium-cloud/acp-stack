@@ -60,8 +60,11 @@ use self::headless_snapshot::{
     headless_config_side_dirs, remove_new_files_in_dirs, restore_headless_snapshots,
 };
 use self::install::{
-    MAX_INSTALL_ATTEMPTS, install_configured_agent, local_bin_dir, operator_registry_override,
-    run_install_with_retry, should_install_agent,
+    MAX_INSTALL_ATTEMPTS, RecordedAgentInstall, agent_version_pin_blocker,
+    detect_existing_agent_binaries, ensure_agent_version_installable, install_configured_agent,
+    installer_postcondition_holds, local_bin_dir, operator_registry_override,
+    recorded_agent_install, run_install_with_retry, should_install_agent,
+    validate_agent_version_value, validate_existing_agent_args,
 };
 use self::model_mode::{
     CapabilityProbeOutcome, ModelModeAction, configure_model_and_mode_for_init,
@@ -83,8 +86,8 @@ use self::registry_apply::{
 };
 use self::resume::{
     FreshKeys, KeyPolicy, RecordedInitArgs, finalize_with_error,
-    init_complete_event_already_recorded, installer_postcondition_holds, perform_auth_init,
-    recorded_init_args, resolve_init_run, step_needs_resume, workspace_postcondition_holds,
+    init_complete_event_already_recorded, perform_auth_init, recorded_init_args, resolve_init_run,
+    step_needs_resume, workspace_postcondition_holds,
 };
 use self::skills::{
     install_init_skills, prompt_init_skills_if_needed, resolve_skill_install_plan,

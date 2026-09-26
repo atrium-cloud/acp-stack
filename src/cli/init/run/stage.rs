@@ -136,7 +136,18 @@ pub(super) fn stage_init_config(
         );
     }
     let agent_selected = selected_agent.is_some();
-    if agent_applied {
+    // Set after the registry re-apply, which clears any stored pin.
+    let pin_applied = match args.agent_version.as_deref() {
+        Some(version) => {
+            ensure_agent_version_installable(&config, &registry, version)
+                .or_else(|error| finalize_failure(&store, &init_run, error))?;
+            let changed = config.agent.harness_version.as_deref() != Some(version);
+            config.agent.harness_version = Some(version.to_owned());
+            changed
+        }
+        None => false,
+    };
+    if agent_applied || pin_applied {
         let rewrite = (|| -> Result<()> {
             let canonical = config.to_canonical_toml()?;
             config = config::load_config_from_str(&canonical)?;

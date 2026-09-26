@@ -169,6 +169,20 @@ pub struct InitArgs {
         ]
     )]
     pub(super) adapter_override_clear: bool,
+    /// Install this version of the agent CLI instead of its latest release: the
+    /// release tag for a GitHub install (e.g. v1.2.3), and for an npm install the
+    /// package version with one leading `v` dropped when a digit follows it. The
+    /// ACP adapter always installs its latest release.
+    #[arg(long = "agent-version", value_name = "VERSION")]
+    pub(super) agent_version: Option<String>,
+    /// What init does with an agent CLI that acp-stack did not install:
+    /// use-existing keeps it, replace-latest installs the latest release over it
+    /// and clears a configured pin, replace-version installs `--agent-version` or
+    /// the configured pin over it. Without it, `--agent-version` or a configured
+    /// pin means replace-version; otherwise init asks in a terminal and replaces
+    /// it with the latest release elsewhere.
+    #[arg(long = "existing-agent", value_enum)]
+    pub(super) existing_agent: Option<ExistingAgentArg>,
     /// Reference an existing secret as an environment variable for the agent
     /// process. Repeatable. The secret must already be in the store. Interactive
     /// optional setup can collect masked values. Applies only when creating a
@@ -486,6 +500,8 @@ impl Default for InitArgs {
             adapter_override_install_shell: None,
             adapter_override_install_creates: None,
             adapter_override_clear: false,
+            agent_version: None,
+            existing_agent: None,
             agent_env_ref: Vec::new(),
             dep: Vec::new(),
             dep_system: Vec::new(),
@@ -569,6 +585,33 @@ impl Default for InitArgs {
 pub(in crate::cli) enum InitMode {
     Operator,
     Dev,
+}
+
+/// What init does with an agent CLI on the host that acp-stack did not install.
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub(super) enum ExistingAgentArg {
+    UseExisting,
+    ReplaceLatest,
+    ReplaceVersion,
+}
+
+impl ExistingAgentArg {
+    pub(super) fn as_config_value(self) -> &'static str {
+        match self {
+            Self::UseExisting => "use-existing",
+            Self::ReplaceLatest => "replace-latest",
+            Self::ReplaceVersion => "replace-version",
+        }
+    }
+
+    pub(super) fn from_config_value(value: &str) -> Option<Self> {
+        match value {
+            "use-existing" => Some(Self::UseExisting),
+            "replace-latest" => Some(Self::ReplaceLatest),
+            "replace-version" => Some(Self::ReplaceVersion),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]

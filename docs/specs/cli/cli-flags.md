@@ -26,6 +26,7 @@ acps init \
    [--adapter-override-arg <arg>]... [--adapter-override-github <repo>] [--adapter-override-install-creates <path>] \
    | --adapter-override-clear] \
   [--agent-env-ref <name>]... \
+  [--agent-version <version>] [--existing-agent <use-existing|replace-latest|replace-version>] \
   [--dep <name=shell>]... [--dep-system <name=shell>]... [--deps-apply [--deps-apply-yes] [--deps-apply-async]] \
   [--stack-update <on|security|off> [--stack-update-frequency <freq>]] \
   [--agent-update <on|off> [--agent-update-frequency <freq>]] \
@@ -67,6 +68,18 @@ acps init \
 - `--adapter-override-clear`: removes the override.
 - The github-release adapter install variant has no flag form; it is declared in an imported config.
 - `--agent-env-ref <name>` (repeatable): adds secret-backed environment variables to `[agent].env`. New config only. The named secret must already resolve in the store. Interactive runs can collect masked values when Agent environment is selected.
+
+#### Agent CLI version and existing installs
+
+- `--agent-version <version>`: installs this version of the agent CLI instead of its latest release and writes it to `[agent].harness_version`. The ACP adapter still installs its latest release.
+    - A GitHub install fetches the value as its release tag verbatim (`v1.2.3`). An npm install uses it as the package version with one leading `v` dropped when a digit follows it (`v1.2.3` installs `1.2.3`).
+    - The value is letters, digits, `.`, `_`, `+`, and `-`, starting with a letter or digit.
+    - A CLI installed only by its vendor's script, bundled inside its adapter, or installed by `[agent.install]` fails with `agent.version_unsupported` before any step runs.
+- `--existing-agent <use-existing|replace-latest|replace-version>`: what init does with an agent CLI that acp-stack did not install.
+    - `use-existing` keeps it, after a spawn check, and records it as `kept`. `replace-latest` installs the latest release over it and clears `[agent].harness_version`. `replace-version` installs `--agent-version`, else the configured pin, over it.
+    - `replace-version` requires `--agent-version` in a non-interactive run; an interactive run uses the configured pin, else asks for the version. `use-existing` and `replace-latest` conflict with `--agent-version`.
+    - Without it, `--agent-version` or a configured `[agent].harness_version` means `replace-version`; otherwise an interactive run asks, and a non-interactive run replaces the CLI with its latest release.
+    - An ACP adapter acp-stack did not install is always replaced with its latest release.
 
 #### Dependencies
 

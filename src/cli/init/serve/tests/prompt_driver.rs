@@ -400,6 +400,26 @@ fn hosted_driver_never_streams_update_policy_prompts() {
 }
 
 #[test]
+fn hosted_driver_never_streams_existing_install_prompts() {
+    // Hosted clients declare `existing_agent`/`agent_version` in the start request instead.
+    for (kind, style, labels) in [
+        (
+            HostedPromptKind::ExistingAgent,
+            HostedPromptStyle::Select,
+            &["replace-latest", "replace-version", "use-existing"][..],
+        ),
+        (HostedPromptKind::AgentVersion, HostedPromptStyle::Text, &[]),
+    ] {
+        let request = hosted_test_request(kind, style, "prompt", labels);
+        assert!(
+            !should_handle_hosted_prompt(&request),
+            "kind `{}` must not be streamed to hosted clients",
+            kind.as_str()
+        );
+    }
+}
+
+#[test]
 fn hosted_prompt_allow_list_keys_off_kind_not_prompt_text() {
     // The same wording under a hostable kind streams, proving rewording a prompt cannot change hostability.
     for (_, style, text) in UPDATE_POLICY_PROMPTS {

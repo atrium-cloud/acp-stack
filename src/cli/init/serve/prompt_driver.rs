@@ -244,7 +244,10 @@ pub(super) fn should_handle_hosted_prompt(request: &HostedPromptRequest) -> bool
         | HostedPromptKind::DependencyInstallShell
         | HostedPromptKind::DependencyScope
         | HostedPromptKind::DepsApplyConfirm
-        | HostedPromptKind::AgentEnvRefName => false,
+        | HostedPromptKind::AgentEnvRefName
+        // Declared up front through `existing_agent` and `agent_version` instead.
+        | HostedPromptKind::ExistingAgent
+        | HostedPromptKind::AgentVersion => false,
     }
 }
 

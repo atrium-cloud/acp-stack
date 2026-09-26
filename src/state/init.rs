@@ -1,7 +1,7 @@
 //! `init_runs`/`init_steps` records backing the init orchestrator, which drives resume by
 //! replaying any `succeeded` step whose postcondition still verifies as `skipped`.
 
-use crate::error::Result;
+use crate::error::{Result, StackError};
 use rusqlite::{OptionalExtension, params};
 
 use super::core::StateStore;
@@ -133,6 +133,30 @@ impl StateStore {
             "#,
             params![status, finished_at, run_id],
         )?;
+        Ok(())
+    }
+
+    /// Merge `patch` into a run's recorded `args_json`, so an answer settled mid-run replays on
+    /// resume like the flag it stands for.
+    pub fn merge_init_run_args(
+        &self,
+        run_id: &str,
+        patch: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<()> {
+        let patch_json = serde_json::Value::Object(patch.clone()).to_string();
+        let updated = self.connection().execute(
+            r#"
+            UPDATE init_runs
+            SET args_json = json_patch(args_json, ?1)
+            WHERE id = ?2
+            "#,
+            params![patch_json, run_id],
+        )?;
+        if updated == 0 {
+            return Err(StackError::InitRunCorrupted {
+                reason: format!("no init run with id `{run_id}`"),
+            });
+        }
         Ok(())
     }
 
@@ -358,5 +382,52 @@ impl StateStore {
                 row_to_init_step,
             )
             .optional()?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merged_args_replace_recorded_keys_and_keep_the_rest() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state");
+        store.migrate().expect("migrate");
+        let run = store
+            .create_init_run(NewInitRun {
+                runtime_user: None,
+                agent_id: Some("codex"),
+                args_json: r#"{"agent":"codex","agent_version":null,"skills":["docx"]}"#,
+            })
+            .expect("run");
+
+        let mut patch = serde_json::Map::new();
+        patch.insert("existing_agent".to_owned(), "replace-version".into());
+        patch.insert("agent_version".to_owned(), "v1.2.3".into());
+        store
+            .merge_init_run_args(&run.id, &patch)
+            .expect("merge into the run");
+
+        let args_json = store
+            .lookup_init_run(&run.id)
+            .expect("lookup")
+            .expect("run row")
+            .args_json;
+        let args: serde_json::Value = serde_json::from_str(&args_json).expect("valid JSON");
+        assert_eq!(
+            args,
+            serde_json::json!({
+                "agent": "codex",
+                "agent_version": "v1.2.3",
+                "existing_agent": "replace-version",
+                "skills": ["docx"],
+            })
+        );
+
+        let error = store
+            .merge_init_run_args("irun_missing", &patch)
+            .expect_err("an unknown run has no args to merge into");
+        assert!(matches!(error, StackError::InitRunCorrupted { .. }));
     }
 }

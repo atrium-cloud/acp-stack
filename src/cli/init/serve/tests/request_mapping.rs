@@ -489,6 +489,76 @@ fn start_init_request_maps_update_policies_into_args() {
 }
 
 #[test]
+fn start_init_request_maps_the_existing_agent_choice_and_version() {
+    let args =
+        request_from_json(r#"{"existing_agent": "replace-version", "agent_version": "v1.2.3"}"#)
+            .into_init_args()
+            .expect("valid request");
+    assert_eq!(args.existing_agent, Some(ExistingAgentArg::ReplaceVersion));
+    assert_eq!(args.agent_version.as_deref(), Some("v1.2.3"));
+
+    let args = request_from_json(r#"{"existing_agent": "use-existing"}"#)
+        .into_init_args()
+        .expect("valid request");
+    assert_eq!(args.existing_agent, Some(ExistingAgentArg::UseExisting));
+    assert_eq!(args.agent_version, None);
+
+    // A version alone is valid: it implies replacing a foreign CLI with that version.
+    let args = request_from_json(r#"{"agent_version": "0.9.1"}"#)
+        .into_init_args()
+        .expect("valid request");
+    assert_eq!(args.existing_agent, None);
+    assert_eq!(args.agent_version.as_deref(), Some("0.9.1"));
+}
+
+#[test]
+fn start_init_request_rejects_existing_agent_choices_it_cannot_honor() {
+    for (body, field, reason) in [
+        (
+            r#"{"existing_agent": "replace-version"}"#,
+            "existing_agent",
+            "existing_agent replace-version requires agent_version",
+        ),
+        (
+            r#"{"existing_agent": "use-existing", "agent_version": "1.2.3"}"#,
+            "existing_agent",
+            "conflict with agent_version",
+        ),
+        (
+            r#"{"existing_agent": "replace-latest", "agent_version": "1.2.3"}"#,
+            "existing_agent",
+            "conflict with agent_version",
+        ),
+        (
+            r#"{"existing_agent": "keep"}"#,
+            "existing_agent",
+            "unknown value `keep`",
+        ),
+        (
+            r#"{"agent_version": "1.2.3; rm -rf /"}"#,
+            "agent_version",
+            "letters, digits",
+        ),
+        (
+            r#"{"agent_version": ""}"#,
+            "agent_version",
+            "letters, digits",
+        ),
+    ] {
+        let error = request_from_json(body)
+            .into_init_args()
+            .expect_err("the choice must be rejected at the boundary");
+        match &error {
+            StackError::InvalidParam {
+                field: reported, ..
+            } => assert_eq!(*reported, field, "{body}"),
+            other => panic!("{body}: expected InvalidParam, got {other:?}"),
+        }
+        assert!(error.to_string().contains(reason), "{body}: {error}");
+    }
+}
+
+#[test]
 fn start_init_request_rejects_frequency_without_policy() {
     // Mirrors clap's `requires`: a frequency with no policy is a 400 at the
     // boundary rather than a silently dropped field.

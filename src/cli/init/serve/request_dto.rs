@@ -131,6 +131,18 @@ pub(super) struct StartInitRequest {
     agent_update: Option<String>,
     /// Requires `agent_update`. Hour/day/week units, e.g. `12h`, `1d`.
     agent_update_frequency: Option<String>,
+    /// Agent CLI version to install instead of its latest release, mirroring
+    /// `--agent-version`: the release tag for a GitHub install, and for an npm
+    /// install the package version with one leading `v` dropped when a digit
+    /// follows it. The ACP adapter always installs its latest release.
+    agent_version: Option<String>,
+    /// What init does with an agent CLI acp-stack did not install, mirroring
+    /// `--existing-agent`. `replace-version` requires `agent_version`;
+    /// `use-existing` and `replace-latest` conflict with it. Absent replaces the
+    /// CLI with `agent_version` when given, else with the configured
+    /// `harness_version`, else with its latest release.
+    #[schemars(extend("enum" = ["use-existing", "replace-latest", "replace-version", null]))]
+    existing_agent: Option<String>,
     /// How an agent's `session/request_permission` is answered, mirroring
     /// `--acp-prompt-action`: `ask` records the request and waits for a
     /// decision, `approve` decides it on arrival for unattended operation.
@@ -475,7 +487,25 @@ impl StartInitRequest {
                 violated: self.agent_update_frequency.is_some() && self.agent_update.is_none(),
                 reason: "agent_update_frequency requires agent_update",
             },
+            // The hosted driver never asks for the version, so it must arrive with the choice.
+            WireGuard {
+                field: "existing_agent",
+                violated: self.existing_agent.as_deref() == Some("replace-version")
+                    && self.agent_version.is_none(),
+                reason: "existing_agent replace-version requires agent_version",
+            },
+            WireGuard {
+                field: "existing_agent",
+                violated: matches!(
+                    self.existing_agent.as_deref(),
+                    Some("use-existing" | "replace-latest")
+                ) && self.agent_version.is_some(),
+                reason: "existing_agent use-existing and replace-latest conflict with agent_version",
+            },
         ])?;
+        if let Some(version) = self.agent_version.as_deref() {
+            validate_agent_version_value("agent_version", version)?;
+        }
         self.validate_custom_agent_declaration()?;
         // Ordered after the custom-agent declaration so a request that names both still reports
         // the custom-agent conflict.
@@ -691,6 +721,21 @@ impl StartInitRequest {
         args.stack_update_frequency = self.stack_update_frequency;
         args.agent_update = self.agent_update;
         args.agent_update_frequency = self.agent_update_frequency;
+        args.agent_version = self.agent_version;
+        args.existing_agent = self
+            .existing_agent
+            .as_deref()
+            .map(|choice| {
+                ExistingAgentArg::from_config_value(choice).ok_or_else(|| {
+                    StackError::InvalidParam {
+                        field: "existing_agent",
+                        reason: format!(
+                            "unknown value `{choice}`; expected use-existing, replace-latest, or replace-version"
+                        ),
+                    }
+                })
+            })
+            .transpose()?;
         args.acp_prompt_action = self.acp_prompt_action;
         args.defer_provider_credentials = self.defer_provider_credentials.unwrap_or(false);
         args.prompt_extensions = self.extensions;

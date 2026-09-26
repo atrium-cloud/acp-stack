@@ -44,9 +44,10 @@ use super::state_signal::InitStateSignal;
 #[cfg(test)]
 use super::state_signal::{ApplicabilitySource, InitCategory, category_for_step_kind};
 use super::{
-    InitArgs, InitMcpHttpHeader, InitMcpHttpServer, InitMcpStdioServer, InitMode,
+    ExistingAgentArg, InitArgs, InitMcpHttpHeader, InitMcpHttpServer, InitMcpStdioServer, InitMode,
     InitNativeConfigUpload, reject_starter_only_args_for_existing_config,
     reject_starter_only_mcp_args_for_existing_config, run_hosted_init,
+    validate_agent_version_value,
 };
 
 mod frames;

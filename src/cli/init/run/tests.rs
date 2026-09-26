@@ -251,6 +251,95 @@ fn a_resume_that_inherits_a_skill_plan_leaves_the_skills_lane_alone() {
     );
 }
 
+/// Replay `recorded` under a resume passing `flags`, then validate the result the way a
+/// non-interactive resume does.
+fn resume_existing_agent_args(flags: &[&str], recorded: &RecordedInitArgs) -> Result<InitArgs> {
+    let mut argv = vec!["--resume"];
+    argv.extend_from_slice(flags);
+    let mut args = parse_init_args(&argv);
+    let run = crate::state::InitRunRecord {
+        id: "irun_existing_agent".to_owned(),
+        started_at: "2026-09-26T00:00:00.000000000Z".to_owned(),
+        finished_at: None,
+        status: crate::state::INIT_RUN_FAILED.to_owned(),
+        runtime_user: None,
+        agent_id: None,
+        args_json: "{}".to_owned(),
+    };
+    replay_recorded_args(&mut args, &run, true, Some(recorded))?;
+    validate_existing_agent_args(&args, false)?;
+    Ok(args)
+}
+
+#[test]
+fn a_resume_flag_replaces_the_recorded_version_and_choice_together() {
+    let args = resume_existing_agent_args(
+        &["--existing-agent", "use-existing"],
+        &RecordedInitArgs {
+            agent_version: Some("v1.0.0".to_owned()),
+            ..Default::default()
+        },
+    )
+    .expect("an explicit choice drops the recorded version");
+    assert_eq!(args.existing_agent, Some(ExistingAgentArg::UseExisting));
+    assert_eq!(args.agent_version, None);
+
+    let args = resume_existing_agent_args(
+        &["--agent-version", "v2.0.0"],
+        &RecordedInitArgs {
+            existing_agent: Some("use-existing".to_owned()),
+            ..Default::default()
+        },
+    )
+    .expect("an explicit version drops the recorded choice");
+    assert_eq!(args.existing_agent, None);
+    assert_eq!(args.agent_version.as_deref(), Some("v2.0.0"));
+
+    let args = resume_existing_agent_args(
+        &[],
+        &RecordedInitArgs {
+            existing_agent: Some("replace-version".to_owned()),
+            agent_version: Some("v1.0.0".to_owned()),
+            ..Default::default()
+        },
+    )
+    .expect("a bare resume replays both");
+    assert_eq!(args.existing_agent, Some(ExistingAgentArg::ReplaceVersion));
+    assert_eq!(args.agent_version.as_deref(), Some("v1.0.0"));
+}
+
+#[test]
+fn a_recorded_replace_version_without_its_version_needs_a_resume_that_can_ask() {
+    let error = resume_existing_agent_args(
+        &[],
+        &RecordedInitArgs {
+            existing_agent: Some("replace-version".to_owned()),
+            ..Default::default()
+        },
+    )
+    .expect_err("a non-interactive resume cannot ask for the version");
+    assert!(
+        error.to_string().contains("requires --agent-version"),
+        "{error}"
+    );
+}
+
+#[test]
+fn the_existing_agent_menu_offers_a_version_only_when_a_lane_can_pin_one() {
+    use ExistingAgentArg::*;
+    let choices = |version_pinnable| {
+        existing_agent_choice_items(version_pinnable)
+            .into_iter()
+            .map(|item| item.value)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        choices(true),
+        vec![ReplaceLatest, ReplaceVersion, UseExisting]
+    );
+    assert_eq!(choices(false), vec![ReplaceLatest, UseExisting]);
+}
+
 #[test]
 fn registry_derivation_reports_a_pending_native_config_as_applicable() {
     let registry = RegistryCatalog::load_embedded().expect("registry");

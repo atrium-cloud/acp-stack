@@ -43,6 +43,7 @@ pub(super) fn prepare_init_base(
     }
     validate_stack_update_args(args)?;
     validate_agent_update_args(args)?;
+    validate_existing_agent_args(args, prompts_enabled(args))?;
 
     let home = home_dir()?;
     let config_path = config::default_config_path()?;
@@ -145,6 +146,10 @@ pub(super) fn prepare_init_base(
             // MUST follow the registry apply: applied earlier, the agent-change clear wipes it.
             apply_adapter_override_action(&mut new_config, &resolve_adapter_override_action(args)?);
             apply_agent_launch_command(&mut new_config, entry);
+            // A pin no lane can install is refused before the starter config exists.
+            if let Some(version) = args.agent_version.as_deref() {
+                ensure_agent_version_installable(&new_config, &registry, version)?;
+            }
         } else if matches!(
             resolve_adapter_override_action(args)?,
             Some(AdapterOverrideAction::Set(_))
@@ -188,6 +193,10 @@ pub(super) fn prepare_init_base(
         None
     };
     replay_recorded_args(args, &init_run, resumed, recorded_args.as_ref())?;
+    if resumed {
+        // A recorded `replace-version` without its version holds only while the resume can ask.
+        validate_existing_agent_args(args, prompts_enabled(args))?;
+    }
     // Re-collect replayed `--agent-env-ref` names so they are re-verified against the now-open
     // store; interactive values from the original run cannot be replayed.
     if resumed {
@@ -219,7 +228,7 @@ pub(super) fn prepare_init_base(
 
 /// Fold a resumed run's recorded declarations back into `args` so a bare
 /// `--resume` still drives the run the original invocation asked for.
-fn replay_recorded_args(
+pub(super) fn replay_recorded_args(
     args: &mut InitArgs,
     init_run: &crate::state::InitRunRecord,
     resumed: bool,
@@ -305,6 +314,25 @@ fn replay_recorded_args(
         }
     }
     if resumed && let Some(recorded) = recorded_args {
+        // One intent: a resume naming either flag replaces both recorded values, so a recorded
+        // value never pairs with a flag it conflicts with.
+        if args.agent_version.is_none() && args.existing_agent.is_none() {
+            args.agent_version = recorded.agent_version.clone();
+            args.existing_agent = recorded
+                .existing_agent
+                .as_deref()
+                .map(|choice| {
+                    ExistingAgentArg::from_config_value(choice).ok_or_else(|| {
+                        StackError::InitRunCorrupted {
+                            reason: format!(
+                                "init run {} has invalid existing_agent `{choice}`",
+                                init_run.id
+                            ),
+                        }
+                    })
+                })
+                .transpose()?;
+        }
         if args.agent_env_ref.is_empty() {
             args.agent_env_ref = recorded.agent_env_ref.clone();
         }

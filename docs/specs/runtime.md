@@ -113,6 +113,7 @@ Pre-existing binaries follow the same gate:
 
 - One that fails the gate reads as absent, including on resumed `agent_install` steps, and is reinstalled.
 - One that fails its integrity pin is refused execution. It errors on the spot, or, on a resumed step, reads as absent so the reinstall can surface a still-mismatching pin in final verification.
+- One acp-stack did not install is found by resolving each binary the install lays down the way spawning resolves it (managed Node `bin`, then `~/.local/bin`, then `PATH`). `acps init` then keeps or replaces the agent CLI as `--existing-agent` chooses and always replaces the ACP adapter with its latest release (see [init.md](init.md)).
 
 ### Ownership
 

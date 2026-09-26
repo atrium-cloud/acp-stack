@@ -26,6 +26,7 @@ The non-interactive contract:
 - A first run that creates a new config requires `--agent <id>`, the `--custom-agent-*` flag set, or a complete imported config.
 - Provider, MCP, and agent env secret refs must resolve when used.
 - A non-interactive first run with no agent path fails before writing config.
+- An agent CLI acp-stack did not install is replaced with `--agent-version`, else with a configured `[agent].harness_version`, else with its latest release, unless `--existing-agent` says otherwise. `--existing-agent replace-version` requires `--agent-version` (see step 8).
 
 `acps init --handoff-json` is the platform automation handoff mode. It disables prompts, writes only one JSON object to stdout, and keeps the broader `acps init --format json` form rejected. Platform callers must provide the same required inputs as any other non-interactive init.
 
@@ -117,6 +118,15 @@ The operator-facing sequence, in order:
     - Init prepares `workspace.root` and `workspace.uploads` before installer subprocesses run so installers have a valid working directory.
     - Expected-hash checks run when configured.
     - Retry uses bounded exponential backoff, with each attempt recorded in installer history.
+    - `--agent-version <version>` installs that version of the agent CLI instead of its latest release and stores it as `[agent].harness_version`; the ACP adapter still installs its latest release. The value maps to a GitHub release tag verbatim and to an npm version with one leading `v` dropped when a digit follows it ([runtime.md](runtime.md#installer-behavior)). A CLI installed only by its vendor's script, bundled inside its adapter, or installed by `[agent.install]` refuses it with `agent.version_unsupported` before any step runs.
+    - Existing installs: before installing, init resolves each binary the agent lays down the way spawning does, and checks whether acp-stack installed it ([runtime.md](runtime.md#ownership)).
+        - An ACP adapter acp-stack did not install is replaced with its latest release, and the step output names its path.
+        - An agent CLI acp-stack did not install follows `--existing-agent`: `use-existing` keeps it, `replace-latest` installs the latest release over it and clears `[agent].harness_version`, and `replace-version` installs `--agent-version`, else the configured pin, over it.
+        - `use-existing` skips the CLI install, runs the spawn gate on the kept binary (a binary that cannot spawn fails the step), and records a `kept` installer row with its path, sha256, and version. Managed update, automatic or manual, then leaves the kept CLI in place.
+        - `replace-version` needs `--agent-version` in a non-interactive run; `use-existing` and `replace-latest` conflict with it.
+        - Without `--existing-agent`, `--agent-version` or a configured `[agent].harness_version` means `replace-version`. An interactive run otherwise asks, naming the CLI's path and `--version` output, with "Replace it with the latest release" first and "Replace it with a specific version" only for a CLI that can take a pin, and asks for the version when `replace-version` is chosen without one. A non-interactive run replaces the CLI with its latest release.
+        - A CLI kept on an earlier run is not acp-stack's own, so a later init without `use-existing` replaces it.
+    - A resumed run replays `--agent-version` and `--existing-agent`, including answers given at their prompts, as one pair that either flag on the resume replaces. A completed install step is skipped only when it installed the current `[agent].harness_version` and its binaries still match the recorded choice: acp-stack's own install, or, under `use-existing`, the kept CLI.
 9. Workspace materialization.
     - Clone code sources into `/workspace/usr/code/<repo>/`.
     - Place data sources under `/workspace/usr/data/<name>/`.
@@ -255,6 +265,7 @@ The hosted flow follows the same init steps as interactive `acps init`, but stre
 - Every streamed prompt carries a machine-readable `kind` and, for selections, stable option values, so a client routes and answers by id rather than by prompt text.
 - After credentials are available, the provisional `session/new` response drives the typed model/mode/effort prompts and generic `config_option` prompts. Explicit generic answers persist under `[agent.config_options]`; a skipped option keeps the agent's advertised current value.
 - Environment configuration (skills, dependencies, browser-use, data sources) and the acp-stack/agent auto-update policies (`stack_update`/`stack_update_frequency`, `agent_update`/`agent_update_frequency`) are declared up-front in the session-create request instead of being streamed. These wizard prompts remain outside the streamed set, and the request fields map onto the same init arguments the wizard would produce.
+- The existing-install choice is declared the same way: `existing_agent` and `agent_version` map to `--existing-agent` and `--agent-version`. The `existing_agent` and `agent_version` prompts never stream, so a hosted run without `existing_agent` replaces a foreign agent CLI with `agent_version` when given, else with the configured `[agent].harness_version`, else with its latest release.
 - Secret collection covers the refs those declarations name: MCP env/header refs (whole-value refs and refs named inside `${}` templates alike) and S3 data-source key refs missing from the store are requested as `password` inputs.
 - An unanswered ref skips without failing init and surfaces later through MCP health or workspace materialization.
 - Provider credential deferral follows the [`defer_provider_credentials` request contract](api/endpoints.md). While the credential is pending, prepared-config validation skips its unresolved provider refs.
