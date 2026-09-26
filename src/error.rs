@@ -564,6 +564,14 @@ pub enum StackError {
         source: std::io::Error,
     },
 
+    /// A version pin on an agent CLI whose install lanes cannot fetch a chosen release.
+    #[error("agent `{agent_id}` cannot install version `{version}` of its CLI: {reason}")]
+    AgentVersionUnsupported {
+        agent_id: String,
+        version: String,
+        reason: &'static str,
+    },
+
     #[error("requests to {domain} are rate limited; retry in {retry_after_secs}s")]
     DomainRateLimited {
         domain: String,

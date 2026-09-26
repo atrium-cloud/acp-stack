@@ -558,7 +558,7 @@ acps agent update set --frequency 3d
 
 - `--restart` runs the update offline while the daemon is live. It must not overlap a scheduled daemon auto-update window: both write the same install destination and have no cross-process lock.
 - A custom (non-registry) agent has nothing to update; the command reports a skip and exits 0. `update set` is rejected for a custom agent, which cannot be managed-updated. An agent CLI kept by `acps init --existing-agent use-existing` is left in place and reported as a skipped step.
-- A configured `harness_version` pin constrains the update target the same way it constrains install: the pinned GitHub Release tag is resolved instead of the latest release (harness step, github path only), and a pinned agent already at its pin reports up-to-date.
+- A configured `harness_version` pin constrains the update target the same way it constrains install: the pin is resolved instead of the latest release (harness step, as the GitHub Release tag on the github lane, else as the npm version with one leading `v` dropped when a digit follows it), and a pinned agent already at its pin reports up-to-date.
 - The same update runs in-daemon on demand via `POST /v1/agent/update` (see [api.md](../api/api.md)), which does hold the in-process update lock.
 
 ## `acps agent start`, `stop`, `restart`

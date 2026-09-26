@@ -89,6 +89,8 @@ Adding an override to an agent first installed as a native entry relabels its ex
 
 Pinned installs use catalog metadata when available. Floating installs use the catalog's preferred install path.
 
+A pin (`[agent].harness_version`, set by `acps init --agent-version`) applies to the agent CLI only; the ACP adapter always installs its latest release. The github lane fetches the pin verbatim as a release tag (`v1.2.3`, or `rust-v0.46.0` where the project tags that way). The npm lane installs the pin as the package version with one leading `v` dropped when a digit follows it, so `v1.2.3` and `1.2.3` both install `1.2.3`. A CLI with neither lane, one installed only by the vendor's script or bundled inside its adapter, refuses a pin with `agent.version_unsupported`.
+
 ### Path Fallback
 
 - Each install field walks its declared paths in priority order: shell → npm → github_release when floating; github → npm when pinned.

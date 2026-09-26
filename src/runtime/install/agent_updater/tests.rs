@@ -378,6 +378,52 @@ fn update_plan_reports_up_to_date_at_pin() {
 }
 
 #[test]
+fn update_plan_takes_the_npm_lane_for_a_pin_without_a_github_lane() {
+    let registry = npm_only_registry();
+    let entry = registry.lookup_required("fake").expect("entry");
+    let agent = agent_config("fake", Some("v1.2.3"));
+    let component = harness_update_component(entry, &agent);
+    let installed = installer_run_with_method(Some(INSTALLER_METHOD_NPM));
+
+    // A registry lookup would fail offline, so a plan here proves the pin skipped it.
+    let plan = choose_update_plan(entry, &component, Some(&installed)).expect("plan");
+
+    assert_eq!(plan.method, INSTALLER_METHOD_NPM);
+    assert_eq!(plan.latest.as_deref(), Some("1.2.3"));
+    assert!(plan.install.npm.is_some());
+    assert!(plan.install.github.is_none());
+}
+
+#[test]
+fn update_plan_reports_up_to_date_at_an_npm_pin() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let state = StateStore::open(tempdir.path().join("state.sqlite")).expect("state");
+    state.migrate().expect("migrate");
+    let registry = npm_only_registry();
+    let entry = registry.lookup_required("fake").expect("entry");
+    let agent = agent_config("fake", Some("v1.2.3"));
+    let component = harness_update_component(entry, &agent);
+    let mut installed = installer_run_with_method(Some(INSTALLER_METHOD_NPM));
+    installed.version = Some("1.2.3".to_owned());
+    let context = UpdateExecutionContext {
+        workspace_root: tempdir.path(),
+        dest_dir: tempdir.path(),
+        state: &state,
+        log_base: None,
+        force: false,
+        home: tempdir.path(),
+    };
+
+    let report =
+        update_component(&agent, entry, &component, Some(&installed), &context).expect("report");
+
+    assert_eq!(report.status, AgentUpdateStepStatus::UpToDate);
+    assert_eq!(report.method.as_deref(), Some(INSTALLER_METHOD_NPM));
+    assert_eq!(report.latest.as_deref(), Some("1.2.3"));
+    assert_eq!(report.installed.as_deref(), Some("1.2.3"));
+}
+
+#[test]
 fn update_skips_a_kept_agent_cli_even_when_forced() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let workspace = tempdir.path().join("workspace");
@@ -465,6 +511,27 @@ aarch64 = "arm64"
     assert_eq!(components[0].version_pin, Some("v9.9.9"));
     assert_eq!(components[1].step, "adapter");
     assert_eq!(components[1].version_pin, None);
+}
+
+fn npm_only_registry() -> RegistryCatalog {
+    RegistryCatalog::from_toml(
+        r#"
+[[agents]]
+id = "fake"
+name = "Fake"
+kind = "native"
+headless_compatible = true
+support_doc = "docs/agents/fake.md"
+
+[agents.harness]
+id = "fake-agent"
+
+[agents.harness.install.npm]
+package = "@example/fake-agent"
+creates = "fake-agent"
+"#,
+    )
+    .expect("registry")
 }
 
 fn append_install_row(state: &StateStore, status: &str, version: &str) {

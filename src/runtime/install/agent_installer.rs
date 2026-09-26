@@ -25,6 +25,7 @@ use crate::state::{
 pub(crate) use self::execute::install_one_with_fallback;
 pub use self::execute::install_resolved_capture;
 pub use self::step_logs::persist_step_logs_to_disk;
+pub(crate) use self::step_runners::npm_version_for_pin;
 
 use self::step_runners::{
     DEFAULT_INSTALLER_TIMEOUT, finalize_shell_step, run_install_step, run_shell_install,

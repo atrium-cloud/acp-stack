@@ -45,6 +45,7 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         SkillNotInstalled { .. } => "agent.skill_not_installed",
         SkillSourceNotConfigured { .. } => "agent.skill_source_not_configured",
         AgentInstallAllPathsFailed { .. } => "agent.install_all_paths_failed",
+        AgentVersionUnsupported { .. } => "agent.version_unsupported",
         AgentBinaryInspect { .. } => "agent.binary_inspect_failed",
         DomainRateLimited { .. } => "agent.domain_rate_limited",
         GithubReleaseFetch { .. } => "agent.github_release_fetch_failed",
@@ -145,6 +146,11 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
         AgentInstallAllPathsFailed { summary } => {
             format!("all install paths failed: {summary}")
         }
+        AgentVersionUnsupported {
+            agent_id,
+            version,
+            reason,
+        } => format!("agent `{agent_id}` cannot install version `{version}` of its CLI: {reason}"),
         // The path and I/O source name the operator's filesystem layout.
         AgentBinaryInspect { .. } => "failed to inspect an installed agent binary".to_owned(),
         DomainRateLimited {
@@ -207,6 +213,7 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         AgentNotConfigured => StatusCode::BAD_REQUEST,
         AgentPlaceholderConfigured => StatusCode::BAD_REQUEST,
         AgentUnsupported { .. } => StatusCode::BAD_REQUEST,
+        AgentVersionUnsupported { .. } => StatusCode::BAD_REQUEST,
         AgentCheckStale => StatusCode::CONFLICT,
         SkillInstallInvalidSource { .. }
         | SkillInstallInvalidName { .. }

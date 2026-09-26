@@ -353,7 +353,7 @@ The API withholds secret values from every response. Auth keys live outside the 
     - A starting, stopping, or already-updating agent is never touched: the route returns `200` with `skipped: true` and reason `agent is running`, including for a second update request arriving while one is in flight. Callers may retry safely.
     - A failed post-update restart is logged and left to the next session request, which starts the agent on demand (a target with `restart = "never"` needs a manual start instead); the update report still stands.
     - A non-registry (escape-hatch) agent likewise returns `200` with `skipped: true`. An agent CLI kept by `acps init --existing-agent use-existing` is left in place, `force` included: its step reports `skipped` with the kept version as `installed` and no `method`.
-    - A `harness_version` pin constrains the update target the same way it constrains install: the pinned GitHub Release tag is used instead of the latest release (harness component, github path only). A pinned agent already at its pin reports `up_to_date`.
+    - A `harness_version` pin constrains the update target the same way it constrains install: the pin is used instead of the latest release (harness component, as the GitHub Release tag on the github lane, else as the npm version with one leading `v` dropped when a digit follows it). A pinned agent already at its pin reports `up_to_date`.
     - Each run records `agent.update.started` plus a terminal `agent.update.finished`/`agent.update.skipped`/`agent.update.failed` lifecycle event, payload-tagged with `"trigger": "api"` to distinguish it from the timer's runs. These surface in `GET /v1/agent/status` `lifecycle_events`.
 
 ### `POST /v1/agent/start`

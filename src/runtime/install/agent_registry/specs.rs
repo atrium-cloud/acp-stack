@@ -4,6 +4,11 @@
 
 use super::*;
 
+/// `AgentVersionUnsupported` reasons for a pin no install lane can honor.
+pub const VERSION_PIN_BLOCKER_SCRIPT_ONLY: &str = "its CLI installs only through the vendor's install script, which always fetches the latest release";
+pub const VERSION_PIN_BLOCKER_PROVIDED_BY_ADAPTER: &str =
+    "its CLI ships inside its ACP adapter, which always installs the latest release";
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HarnessSpec {
@@ -183,6 +188,18 @@ impl InstallSet {
                     .map(|github| github.binary_name.as_str())
             })
             .or_else(|| self.shell.as_ref().map(|shell| shell.creates.as_str()))
+    }
+
+    /// Why no lane of this set can install a chosen version, or `None` when the
+    /// github or npm lane can.
+    pub fn version_pin_blocker(&self) -> Option<&'static str> {
+        if self.is_provided_by_adapter() {
+            Some(VERSION_PIN_BLOCKER_PROVIDED_BY_ADAPTER)
+        } else if self.github.is_none() && self.npm.is_none() {
+            Some(VERSION_PIN_BLOCKER_SCRIPT_ONLY)
+        } else {
+            None
+        }
     }
 
     fn has_install_paths(&self) -> bool {

@@ -11,8 +11,8 @@ use crate::error::{Result, StackError};
 use crate::runtime::install::agent_installer::{
     INSTALL_METHOD_APT, INSTALL_METHOD_NATIVE, InstallProgress, InstalledArtifact,
     ReconnectingInstallerSink, STEP_ADAPTER, STEP_HARNESS, STEP_INSTALL, begin_tracked_step,
-    finalize_tracked_step, install_one_with_fallback, persist_untracked_installer_row,
-    probe_binary_version, resolve_creates,
+    finalize_tracked_step, install_one_with_fallback, npm_version_for_pin,
+    persist_untracked_installer_row, probe_binary_version, resolve_creates,
 };
 use crate::runtime::install::agent_registry::{
     AdapterSpec, AptUpdate, HarnessSpec, InstallSet, RegistryEntry, RegistryKind,
@@ -480,17 +480,22 @@ fn choose_update_plan(
     component: &UpdateComponent<'_>,
     installed_row: Option<&InstallerRun>,
 ) -> Result<UpdatePlan> {
-    // A harness_version pin is a GitHub Release tag, which only the github
-    // path can satisfy, so it wins over the recorded install method.
-    if component.version_pin.is_some() && component.install.github.is_some() {
-        return github_plan(entry, component);
+    // A harness_version pin walks install's pinned lanes (github, then npm) and
+    // wins over the recorded install method.
+    if let Some(pin) = component.version_pin {
+        if component.install.github.is_some() {
+            return github_plan(entry, component);
+        }
+        if component.install.npm.is_some() {
+            return npm_plan(component, Some(pin));
+        }
     }
     match installed_row.and_then(|row| row.method.as_deref()) {
         Some(INSTALLER_METHOD_GITHUB) if component.install.github.is_some() => {
             return github_plan(entry, component);
         }
         Some(INSTALLER_METHOD_NPM) if component.install.npm.is_some() => {
-            return npm_plan(component);
+            return npm_plan(component, None);
         }
         Some(INSTALLER_METHOD_APT) => {
             if let Some(apt) = component.apt {
@@ -517,7 +522,7 @@ fn choose_update_plan(
         return Ok(apt_plan(apt));
     }
     if component.install.npm.is_some() {
-        return npm_plan(component);
+        return npm_plan(component, None);
     }
     if component.install.github.is_some() {
         return github_plan(entry, component);
@@ -581,9 +586,12 @@ fn native_plan_with_command(command: String) -> UpdatePlan {
     }
 }
 
-fn npm_plan(component: &UpdateComponent<'_>) -> Result<UpdatePlan> {
+fn npm_plan(component: &UpdateComponent<'_>, version_pin: Option<&str>) -> Result<UpdatePlan> {
     let npm = component.install.npm.as_ref().expect("checked by caller");
-    let latest = crate::runtime::install::npm_registry::latest_version(&npm.package)?;
+    let latest = match version_pin {
+        Some(pin) => npm_version_for_pin(pin).to_owned(),
+        None => crate::runtime::install::npm_registry::latest_version(&npm.package)?,
+    };
     Ok(UpdatePlan {
         method: INSTALLER_METHOD_NPM,
         latest: Some(latest),

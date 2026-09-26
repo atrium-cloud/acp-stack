@@ -141,6 +141,25 @@ async fn release_handler(
     axum::Json(body).into_response()
 }
 
+/// Serves a release only under its exact tag, as GitHub does.
+async fn release_by_tag_handler(
+    state: State<MockState>,
+    AxPath((owner, repo, tag)): AxPath<(String, String, String)>,
+) -> axum::response::Response {
+    let known_tag = match format!("{owner}/{repo}").as_str() {
+        HARNESS_REPO => HARNESS_TAG,
+        ADAPTER_REPO => ADAPTER_TAG,
+        BUNDLE_REPO => BUNDLE_TAG,
+        _ => return (StatusCode::NOT_FOUND, "unknown repo").into_response(),
+    };
+    if tag != known_tag {
+        return (StatusCode::NOT_FOUND, "unknown tag").into_response();
+    }
+    release_handler(state, AxPath((owner, repo)))
+        .await
+        .into_response()
+}
+
 async fn asset_handler(AxPath(filename): AxPath<String>) -> impl IntoResponse {
     let bytes = match filename.as_str() {
         HARNESS_ASSET => binary_bytes("harness"),
@@ -176,6 +195,10 @@ fn start_mock_github() -> MockGithub {
                 .route(
                     "/repos/{owner}/{repo}/releases/latest",
                     get(release_handler),
+                )
+                .route(
+                    "/repos/{owner}/{repo}/releases/tags/{tag}",
+                    get(release_by_tag_handler),
                 )
                 .route("/assets/{filename}", get(asset_handler))
                 .with_state(state);
@@ -377,6 +400,76 @@ fn install_resolved_two_step_flow_against_mocked_github_api() {
         adapter_mode != 0,
         "adapter binary should be executable, got mode {adapter_mode:o}",
     );
+}
+
+#[test]
+fn a_harness_version_pin_fetches_that_release_tag_verbatim() {
+    let mock = start_mock_github();
+    let dest_dir = tempfile::tempdir().expect("dest tempdir");
+
+    let _env = EnvGuard::new(
+        "ACP_STACK_GITHUB_API_BASE",
+        &format!("http://{}", mock.addr),
+    );
+    let mut agent = agent_config(ADAPTER_BIN);
+    agent.harness_version = Some(HARNESS_TAG.to_owned());
+    let result = install_resolved_capture(
+        &agent,
+        &adapter_kind_entry(),
+        &HarnessInstall::Install,
+        std::collections::HashMap::new(),
+        dest_dir.path(),
+        dest_dir.path(),
+        None,
+        dest_dir.path(),
+    );
+
+    result.outcome.expect("the pinned tag exists");
+    let harness_row = result
+        .rows
+        .iter()
+        .find(|row| row.step == "harness")
+        .expect("harness row");
+    assert_eq!(harness_row.status, "ran");
+    assert_eq!(harness_row.version.as_deref(), Some(HARNESS_TAG));
+    // The adapter never takes the pin.
+    let adapter_row = result
+        .rows
+        .iter()
+        .find(|row| row.step == "adapter")
+        .expect("adapter row");
+    assert_eq!(adapter_row.version.as_deref(), Some(ADAPTER_TAG));
+}
+
+#[test]
+fn a_harness_version_pin_is_not_rewritten_into_another_tag() {
+    let mock = start_mock_github();
+    let dest_dir = tempfile::tempdir().expect("dest tempdir");
+
+    let _env = EnvGuard::new(
+        "ACP_STACK_GITHUB_API_BASE",
+        &format!("http://{}", mock.addr),
+    );
+    let mut agent = agent_config(ADAPTER_BIN);
+    // The release is tagged `v0.4.2`; a bare `0.4.2` names a tag GitHub does not have.
+    agent.harness_version = Some(HARNESS_TAG.trim_start_matches('v').to_owned());
+    let result = install_resolved_capture(
+        &agent,
+        &adapter_kind_entry(),
+        &HarnessInstall::Install,
+        std::collections::HashMap::new(),
+        dest_dir.path(),
+        dest_dir.path(),
+        None,
+        dest_dir.path(),
+    );
+
+    assert!(
+        result.outcome.is_err(),
+        "a tag GitHub does not have must fail the install, got {:?}",
+        result.outcome
+    );
+    assert!(!dest_dir.path().join(HARNESS_BIN).exists());
 }
 
 #[test]

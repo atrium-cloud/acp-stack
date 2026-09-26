@@ -7,7 +7,9 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::error::{Result, StackError};
-use crate::runtime::install::agent_registry::{GithubInstall, InstallSet, github_repo_from_url};
+use crate::runtime::install::agent_registry::{
+    GithubInstall, InstallSet, VERSION_PIN_BLOCKER_SCRIPT_ONLY, github_repo_from_url,
+};
 use crate::runtime::install::github_release::{self, GithubReleaseInstall};
 use crate::runtime::process_runner::{
     CaptureOutcome, apply_non_interactive_env, forward_host_env, join_reader_bounded,
@@ -44,6 +46,7 @@ pub(super) fn select_install_path(
             return resolve_github_install(agent_id, field, github_url, github, Some(version));
         }
         if let Some(npm) = &install.npm {
+            let version = npm_version_for_pin(version);
             return Ok(ResolvedInstallSpec::Npm {
                 package: format!("{}@{version}", npm.package),
                 name: npm.package.clone(),
@@ -51,10 +54,12 @@ pub(super) fn select_install_path(
                 version: Some(version.to_owned()),
             });
         }
-        return Err(StackError::RegistryLoad {
-            reason: format!(
-                "agent `{agent_id}` {field} cannot honor pinned version `{version}` with shell-only install"
-            ),
+        return Err(StackError::AgentVersionUnsupported {
+            agent_id: agent_id.to_owned(),
+            version: version.to_owned(),
+            reason: install
+                .version_pin_blocker()
+                .unwrap_or(VERSION_PIN_BLOCKER_SCRIPT_ONLY),
         });
     }
 
@@ -83,6 +88,15 @@ pub(super) fn select_install_path(
     Err(StackError::RegistryLoad {
         reason: format!("agent `{agent_id}` {field} has no install paths"),
     })
+}
+
+/// A pin is a GitHub release tag, and tags conventionally carry a leading `v`
+/// that npm versions never do, so npm drops one when a digit follows it.
+pub(crate) fn npm_version_for_pin(version: &str) -> &str {
+    match version.strip_prefix('v') {
+        Some(rest) if rest.starts_with(|character: char| character.is_ascii_digit()) => rest,
+        _ => version,
+    }
 }
 
 pub(super) fn resolve_github_install(
