@@ -4,6 +4,7 @@ pub mod agent_registry;
 pub mod agent_updater;
 pub mod agent_version_check;
 pub mod github_release;
+pub mod install_ownership;
 pub mod npm_registry;
 pub mod skill_installer;
 pub mod skill_registry;

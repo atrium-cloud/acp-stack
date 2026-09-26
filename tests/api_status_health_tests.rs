@@ -777,6 +777,8 @@ async fn health_ready_marks_deps_failing_when_last_apply_failed() {
                 method: Some(INSTALLER_METHOD_SHELL),
                 log_dir: None,
                 apply_run_id: Some("dap_api_failed"),
+                path: None,
+                sha256: None,
             })
             .expect("seed failed deps_apply row");
     }

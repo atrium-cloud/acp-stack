@@ -15,10 +15,10 @@ use crate::runtime::process_runner::{
 };
 
 use super::{
-    INSTALL_METHOD_GITHUB, INSTALL_METHOD_NPM, INSTALL_METHOD_SHELL, InstallerOutcome,
-    InstallerResult, InstallerRowDraft, MAX_INSTALLER_STREAM_BYTES, ResolvedInstallSpec,
-    StepResult, current_timestamp, probe_binary_version, resolve_creates, sha256_of_file,
-    verify_binary_spawns, verify_executable_header, verify_expected_sha256,
+    INSTALL_METHOD_GITHUB, INSTALL_METHOD_NPM, INSTALL_METHOD_SHELL, InstalledArtifact,
+    InstallerOutcome, InstallerResult, InstallerRowDraft, MAX_INSTALLER_STREAM_BYTES,
+    ResolvedInstallSpec, StepResult, current_timestamp, probe_binary_version, resolve_creates,
+    sha256_of_file, verify_binary_spawns, verify_executable_header, verify_expected_sha256,
 };
 
 /// Whole-run budget for one install step when nothing declares its own.
@@ -291,6 +291,7 @@ pub(super) fn shell_step_with_creates(
                 version: version.clone(),
                 log_dir: None,
                 persisted_run_id: None,
+                artifact: None,
             };
             if !exit_ok {
                 return StepResult {
@@ -324,10 +325,11 @@ pub(super) fn shell_step_with_creates(
                         home,
                     )?;
                 }
-                Ok(path)
+                let artifact = InstalledArtifact::of(&path)?;
+                Ok((path, artifact))
             });
             match &outcome {
-                Ok(path) => {
+                Ok((path, artifact)) => {
                     // A pinned binary stays unexecuted until `final_verification`.
                     if row.version.is_none() && !creates_check.pin_declared {
                         row.version = probe_binary_version(
@@ -337,6 +339,7 @@ pub(super) fn shell_step_with_creates(
                             home,
                         );
                     }
+                    row.artifact = Some(artifact.clone());
                 }
                 Err(err) => {
                     row.status = "failed".to_owned();
@@ -362,6 +365,7 @@ pub(super) fn shell_step_with_creates(
                 version,
                 log_dir: None,
                 persisted_run_id: None,
+                artifact: None,
             },
         },
     }
@@ -393,7 +397,8 @@ pub(super) fn github_release_step(
                 verify_executable_header(&binary_path)
             } else {
                 verify_binary_spawns(&binary_path, workspace_root, &[dest_dir], home)
-            };
+            }
+            .and_then(|()| InstalledArtifact::of(&binary_path));
             let mut row = InstallerRowDraft {
                 started_at,
                 finished_at: Some(finished_at),
@@ -406,12 +411,19 @@ pub(super) fn github_release_step(
                 version: Some(outcome.release_tag),
                 log_dir: None,
                 persisted_run_id: None,
+                artifact: None,
             };
-            if let Err(err) = &gate {
-                row.status = "failed".to_owned();
-                row.stderr = append_stderr_detail(&row.stderr, err);
+            match &gate {
+                Ok(artifact) => row.artifact = Some(artifact.clone()),
+                Err(err) => {
+                    row.status = "failed".to_owned();
+                    row.stderr = append_stderr_detail(&row.stderr, err);
+                }
             }
-            StepResult { outcome: gate, row }
+            StepResult {
+                outcome: gate.map(|_| ()),
+                row,
+            }
         }
         Err(err) => {
             let stderr = err.to_string();
@@ -429,6 +441,7 @@ pub(super) fn github_release_step(
                     version: version_pin.map(str::to_owned),
                     log_dir: None,
                     persisted_run_id: None,
+                    artifact: None,
                 },
             }
         }
@@ -474,6 +487,7 @@ pub(super) fn finalize_shell_step(
                 version: None,
                 log_dir: None,
                 persisted_run_id: None,
+                artifact: None,
             };
             if !exit_ok {
                 return InstallerResult {
@@ -499,9 +513,17 @@ pub(super) fn finalize_shell_step(
                     sha256,
                 })
             })();
-            if let Err(err) = &outcome {
-                row.status = "failed".to_owned();
-                row.stderr = append_stderr_detail(&row.stderr, err);
+            match &outcome {
+                Ok(installed) => {
+                    row.artifact = Some(InstalledArtifact {
+                        path: installed.path().to_path_buf(),
+                        sha256: installed.sha256().to_owned(),
+                    });
+                }
+                Err(err) => {
+                    row.status = "failed".to_owned();
+                    row.stderr = append_stderr_detail(&row.stderr, err);
+                }
             }
             InstallerResult { outcome, row }
         }
@@ -519,6 +541,7 @@ pub(super) fn finalize_shell_step(
                 version: None,
                 log_dir: None,
                 persisted_run_id: None,
+                artifact: None,
             },
         },
     }
@@ -667,6 +690,7 @@ fn resolve_npm_package_version(
                     version: None,
                     log_dir: None,
                     persisted_run_id: None,
+                    artifact: None,
                 },
             }))
         }
@@ -684,6 +708,7 @@ fn resolve_npm_package_version(
                 version: None,
                 log_dir: None,
                 persisted_run_id: None,
+                artifact: None,
             },
         })),
     }
@@ -737,6 +762,7 @@ fn npm_version_failure_step(
             version: None,
             log_dir: None,
             persisted_run_id: None,
+            artifact: None,
         },
     }
 }
@@ -769,6 +795,7 @@ fn timed_out_row(
         version,
         log_dir: None,
         persisted_run_id: None,
+        artifact: None,
     }
 }
 

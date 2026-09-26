@@ -44,6 +44,7 @@ exit 9
     let result = install_resolved_capture(
         &agent_config("fallback-agent"),
         &entry,
+        &HarnessInstall::Install,
         HashMap::new(),
         tempdir.path(),
         tempdir.path(),
@@ -177,6 +178,7 @@ fn shell_install_records_no_version() {
     let result = install_resolved_capture(
         &agent_config("shell-agent"),
         &entry,
+        &HarnessInstall::Install,
         HashMap::new(),
         tempdir.path(),
         tempdir.path(),

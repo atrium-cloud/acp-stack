@@ -3,9 +3,11 @@
 use super::*;
 
 /// Run the resolved-registry installer WITHOUT holding the state store across steps, returning the rows to persist in order plus the final outcome.
+#[allow(clippy::too_many_arguments)]
 pub fn install_resolved_capture(
     agent: &AgentConfig,
     entry: &RegistryEntry,
+    harness_install: &HarnessInstall,
     _agent_env: HashMap<String, String>,
     workspace_root: &Path,
     dest_dir: &Path,
@@ -67,7 +69,25 @@ pub fn install_resolved_capture(
             }
         };
 
-        if harness.install.is_provided_by_adapter() {
+        // A harness its adapter bundles has no binary of its own to install or keep.
+        let kept_harness = match harness_install {
+            HarnessInstall::Keep(path) if !harness.install.is_provided_by_adapter() => Some(path),
+            HarnessInstall::Keep(_) | HarnessInstall::Install => None,
+        };
+        if harness.install.is_provided_by_adapter() || kept_harness.is_some() {
+            if let Some(path) = kept_harness {
+                // The entry's integrity pin names the adapter here, so it is checked on the
+                // adapter by `final_verification` and not on the harness.
+                let kept =
+                    keep_existing_harness(STEP_HARNESS, path, None, workspace_root, dest_dir, home);
+                rows.push(kept.row);
+                if let Err(err) = kept.outcome {
+                    return InstallerSequenceResult {
+                        outcome: Err(err),
+                        rows,
+                    };
+                }
+            }
             let adapter_chain = install_one_with_fallback(
                 &entry.id,
                 "adapter.install",
@@ -179,6 +199,28 @@ pub fn install_resolved_capture(
         return final_verification(agent, workspace_root, dest_dir, rows, home);
     }
 
+    if let HarnessInstall::Keep(path) = harness_install {
+        // A native agent's CLI is its ACP entry point, so the entry's integrity pin applies to it.
+        let kept = keep_existing_harness(
+            harness_step_label,
+            path,
+            agent.expected_sha256.as_deref(),
+            workspace_root,
+            dest_dir,
+            home,
+        );
+        rows.push(kept.row);
+        return InstallerSequenceResult {
+            outcome: kept
+                .outcome
+                .map(|artifact| InstallerOutcome::AlreadyPresent {
+                    path: artifact.path,
+                    sha256: artifact.sha256,
+                }),
+            rows,
+        };
+    }
+
     let chain = install_one_with_fallback(
         &entry.id,
         "harness.install",
@@ -202,6 +244,55 @@ pub fn install_resolved_capture(
     }
 
     final_verification(agent, workspace_root, dest_dir, rows, home)
+}
+
+struct KeptHarness {
+    row: InstallerRowDraft,
+    outcome: Result<InstalledArtifact>,
+}
+
+/// Gate a binary the operator chose to keep exactly as a fresh install is gated, the integrity
+/// pin before the spawn probe because the probe executes it, and record it `kept`.
+fn keep_existing_harness(
+    step_label: &'static str,
+    path: &Path,
+    expected_sha256: Option<&str>,
+    workspace_root: &Path,
+    dest_dir: &Path,
+    home: &Path,
+) -> KeptHarness {
+    let started_at = current_timestamp();
+    let outcome = (|| -> Result<InstalledArtifact> {
+        let artifact = InstalledArtifact::of(path)?;
+        verify_expected_sha256(expected_sha256, &artifact.sha256)?;
+        verify_binary_spawns(path, workspace_root, &[dest_dir], home)?;
+        Ok(artifact)
+    })();
+    let mut row = InstallerRowDraft {
+        started_at,
+        finished_at: Some(current_timestamp()),
+        status: INSTALLER_STATUS_KEPT.to_owned(),
+        stdout: format!("kept the existing binary at {}", path.display()),
+        stderr: String::new(),
+        exit_status: None,
+        step: step_label.to_owned(),
+        method: None,
+        version: None,
+        log_dir: None,
+        persisted_run_id: None,
+        artifact: None,
+    };
+    match &outcome {
+        Ok(artifact) => {
+            row.version = probe_binary_version(path, workspace_root, &[dest_dir], home);
+            row.artifact = Some(artifact.clone());
+        }
+        Err(err) => {
+            row.status = "failed".to_owned();
+            row.stderr = err.to_string();
+        }
+    }
+    KeptHarness { row, outcome }
 }
 
 /// Result of walking the `[shell, npm, github]` chain for one install field; `terminal_error` is `None` when any path succeeded.
@@ -373,6 +464,7 @@ pub(super) fn run_guarded_install_step(
                 version: None,
                 log_dir: None,
                 persisted_run_id: None,
+                artifact: None,
             };
             if let Some(progress) = progress {
                 finalize_tracked_step(progress, run_id, &mut row);

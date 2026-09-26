@@ -1566,6 +1566,26 @@
             ],
             "description": "Requires `agent_update`. Hour/day/week units, e.g. `12h`, `1d`."
           },
+          "agent_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Agent CLI version to install instead of its latest release, mirroring\n`--agent-version`: the release tag for a GitHub install, and for an npm\ninstall the package version with one leading `v` dropped when a digit\nfollows it. The ACP adapter always installs its latest release."
+          },
+          "existing_agent": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What init does with an agent CLI acp-stack did not install, mirroring\n`--existing-agent`. `replace-version` requires `agent_version`;\n`use-existing` and `replace-latest` conflict with it. Absent replaces the\nCLI with `agent_version` when given, else with the configured\n`harness_version`, else with its latest release.",
+            "enum": [
+              "use-existing",
+              "replace-latest",
+              "replace-version",
+              null
+            ]
+          },
           "acp_prompt_action": {
             "type": [
               "string",

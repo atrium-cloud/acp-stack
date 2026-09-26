@@ -13,8 +13,12 @@ use common::agent::{
     test_config,
 };
 
-use acp_stack::runtime::install::agent_updater::NON_REGISTRY_SKIP_REASON;
-use acp_stack::state::{NewPromptRecord, NewSessionRecord};
+use acp_stack::runtime::install::agent_updater::{
+    KEPT_HARNESS_SKIP_REASON, NON_REGISTRY_SKIP_REASON,
+};
+use acp_stack::state::{
+    INSTALLER_STATUS_KEPT, INSTALLER_STATUS_RAN, NewPromptRecord, NewSessionRecord,
+};
 
 const GITHUB_API_BASE_ENV: &str = "ACP_STACK_GITHUB_API_BASE";
 const PINNED_TAG: &str = "v1.2.3";
@@ -64,22 +68,39 @@ fn registry_config_dir(home: &std::path::Path) -> std::path::PathBuf {
 }
 
 async fn seed_installed_row(harness: &AgentHarness, step: &str, method: &str, version: &str) {
+    seed_row(harness, INSTALLER_STATUS_RAN, step, Some(method), version).await;
+}
+
+/// A CLI the operator kept carries no install method.
+async fn seed_kept_row(harness: &AgentHarness, step: &str, version: &str) {
+    seed_row(harness, INSTALLER_STATUS_KEPT, step, None, version).await;
+}
+
+async fn seed_row(
+    harness: &AgentHarness,
+    status: &str,
+    step: &str,
+    method: Option<&str>,
+    version: &str,
+) {
     let store = harness.state.lock().await;
     store
         .append_installer_run(acp_stack::state::InstallerRunInput {
             agent_id: "opencode",
             started_at: "2026-01-01T00:00:00Z",
             finished_at: Some("2026-01-01T00:00:01Z"),
-            status: "ran",
+            status,
             stdout: "",
             stderr: "",
             exit_status: Some(0),
             step,
             version: Some(version),
             operation: acp_stack::state::INSTALLER_OPERATION_INSTALL,
-            method: Some(method),
+            method,
             log_dir: None,
             apply_run_id: None,
+            path: None,
+            sha256: None,
         })
         .expect("seed installer row");
 }
@@ -248,6 +269,42 @@ async fn update_reports_up_to_date_at_pinned_version() {
         "pin must win over the mock's latest"
     );
     assert_eq!(steps[0]["installed"], "1.2.3");
+}
+
+#[tokio::test]
+async fn update_skips_a_kept_agent_cli() {
+    let tempdir = TempDir::new().expect("tempdir");
+    write_opencode_github_override(&registry_config_dir(tempdir.path()));
+
+    let harness =
+        AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
+    seed_installed_row(&harness, "install", "github", "0.1.0").await;
+    seed_kept_row(&harness, "install", "0.9.0").await;
+    // An unreachable upstream makes a regression that plans an install fail fast.
+    let _env = EnvVarGuard::set_many(vec![(
+        GITHUB_API_BASE_ENV,
+        std::ffi::OsString::from("http://127.0.0.1:1"),
+    )]);
+    let response = http()
+        .await
+        .post(format!("{}/v1/agent/update", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .json(&serde_json::json!({ "force": true }))
+        .send()
+        .await
+        .expect("send update");
+    let status = response.status();
+    let body: Value = response.json().await.expect("json");
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["data"]["updated"], false);
+    let steps = body["data"]["steps"].as_array().expect("steps");
+    assert_eq!(steps.len(), 1, "body: {body}");
+    assert_eq!(steps[0]["step"], "install");
+    assert_eq!(steps[0]["status"], "skipped");
+    assert_eq!(steps[0]["installed"], "0.9.0");
+    assert_eq!(steps[0]["message"], KEPT_HARNESS_SKIP_REASON);
+    assert!(steps[0].get("method").is_none(), "body: {body}");
 }
 
 #[cfg(unix)]
@@ -459,6 +516,41 @@ async fn update_status_reports_installed_latest_pin_and_policy() {
     assert_eq!(components[0]["step"], "install");
     assert_eq!(components[0]["status"], "stale");
     assert_eq!(components[0]["installed"], "0.1.0");
+    assert_eq!(components[0]["latest"], MOCK_LATEST_TAG);
+}
+
+#[tokio::test]
+async fn update_status_reports_a_kept_cli_over_an_older_install() {
+    let tempdir = TempDir::new().expect("tempdir");
+    write_opencode_github_override(&registry_config_dir(tempdir.path()));
+
+    let harness =
+        AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
+    seed_installed_row(&harness, "install", "github", "0.1.0").await;
+    seed_kept_row(&harness, "install", "0.9.0").await;
+    let mock_base = spawn_provider_models_server(serde_json::json!({
+        "tag_name": MOCK_LATEST_TAG,
+        "assets": [],
+    }));
+    let _env = EnvVarGuard::set_many(vec![(
+        GITHUB_API_BASE_ENV,
+        std::ffi::OsString::from(mock_base),
+    )]);
+    let response = http()
+        .await
+        .get(format!("{}/v1/agent/update/status", harness.base_url))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("send status");
+    let status = response.status();
+    let body: Value = response.json().await.expect("json");
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let components = body["data"]["components"].as_array().expect("components");
+    assert_eq!(components.len(), 1, "body: {body}");
+    assert_eq!(components[0]["step"], "install");
+    assert_eq!(components[0]["installed"], "0.9.0", "body: {body}");
     assert_eq!(components[0]["latest"], MOCK_LATEST_TAG);
 }
 

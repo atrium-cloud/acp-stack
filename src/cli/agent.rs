@@ -481,6 +481,8 @@ mod tests {
             method: None,
             log_dir: None,
             apply_run_id: None,
+            path: None,
+            sha256: None,
         }
     }
 

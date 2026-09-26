@@ -23,6 +23,7 @@ fn spawn_gate_fails_step_on_unrunnable_binary() {
     let result = install_resolved_capture(
         &agent_config("stub-agent"),
         &entry,
+        &HarnessInstall::Install,
         HashMap::new(),
         tempdir.path(),
         &dest_dir,
@@ -95,6 +96,7 @@ exit 99
     let result = install_resolved_capture(
         &agent_config("chain-agent"),
         &entry,
+        &HarnessInstall::Install,
         HashMap::new(),
         tempdir.path(),
         &dest_dir,
@@ -242,6 +244,7 @@ fn declared_pin_keeps_step_gate_from_executing_binary() {
     let result = install_resolved_capture(
         &agent,
         &entry,
+        &HarnessInstall::Install,
         HashMap::new(),
         tempdir.path(),
         &dest_dir,
@@ -279,6 +282,7 @@ fn declared_pin_step_gate_still_rejects_shebang_less_stub() {
     let result = install_resolved_capture(
         &agent,
         &entry,
+        &HarnessInstall::Install,
         HashMap::new(),
         tempdir.path(),
         &dest_dir,
@@ -379,6 +383,7 @@ fn shell_install_records_the_version_the_binary_reports() {
     let result = install_resolved_capture(
         &agent,
         &entry,
+        &HarnessInstall::Install,
         HashMap::new(),
         tempdir.path(),
         &dest_dir,

@@ -273,6 +273,8 @@ fn append_deps_run(
         method: Some(crate::state::INSTALLER_METHOD_SHELL),
         log_dir: None,
         apply_run_id: Some(apply_run_id),
+        path: None,
+        sha256: None,
     })?;
     Ok(())
 }
@@ -303,6 +305,8 @@ fn begin_deps_run(
         method: Some(crate::state::INSTALLER_METHOD_SHELL),
         log_dir: None,
         apply_run_id: Some(apply_run_id),
+        path: None,
+        sha256: None,
     })?;
     Ok(Some(run.id))
 }
@@ -334,6 +338,8 @@ fn finish_deps_run(
             exit_status,
             version: None,
             log_dir: None,
+            path: None,
+            sha256: None,
         },
     )?;
     Ok(())

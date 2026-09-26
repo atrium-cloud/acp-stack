@@ -105,6 +105,7 @@ fn install_step_home_is_the_threaded_home_not_the_process_env() {
     let result = install_resolved_capture(
         &agent_config("home-agent"),
         &entry,
+        &HarnessInstall::Install,
         HashMap::new(),
         tempdir.path(),
         tempdir.path(),
@@ -289,6 +290,7 @@ fn unsupported_registry_entry_fails_before_running_steps() {
     let result = install_resolved_capture(
         &agent_config("unsupported-agent"),
         &entry,
+        &HarnessInstall::Install,
         HashMap::new(),
         tempdir.path(),
         tempdir.path(),
@@ -323,6 +325,7 @@ fn final_verification_searches_managed_bin_dir() {
     let result = install_resolved_capture(
         &agent_config("managed-agent"),
         &entry,
+        &HarnessInstall::Install,
         HashMap::new(),
         tempdir.path(),
         &dest_dir,
@@ -358,6 +361,7 @@ fn registry_installs_do_not_receive_agent_runtime_secrets() {
     let result = install_resolved_capture(
         &agent_config("secret-check-agent"),
         &entry,
+        &HarnessInstall::Install,
         agent_env,
         tempdir.path(),
         tempdir.path(),
@@ -398,6 +402,7 @@ fn bootstrap_can_install_directly_into_managed_bin() {
     let result = install_resolved_capture(
         &agent_config("opencode"),
         &entry,
+        &HarnessInstall::Install,
         HashMap::new(),
         tempdir.path(),
         &dest_dir,

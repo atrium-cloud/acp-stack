@@ -24,8 +24,9 @@ pub use agent::{
     AgentCapabilitiesRecord, AgentFailureRecord, AgentLifecycleEvent, AgentStartedProcess,
     INSTALLER_METHOD_APT, INSTALLER_METHOD_GITHUB, INSTALLER_METHOD_NATIVE, INSTALLER_METHOD_NPM,
     INSTALLER_METHOD_SHELL, INSTALLER_OPERATION_INSTALL, INSTALLER_OPERATION_UPDATE,
-    INSTALLER_OUTPUT_CAP_BYTES, INSTALLER_STATUS_RUNNING, InstallerRun, InstallerRunFinish,
-    InstallerRunInput, default_installer_log_base,
+    INSTALLER_OUTPUT_CAP_BYTES, INSTALLER_STATUS_KEPT, INSTALLER_STATUS_RAN,
+    INSTALLER_STATUS_RUNNING, InstallerRun, InstallerRunFinish, InstallerRunInput,
+    default_installer_log_base,
 };
 pub use auth::{AuthFailure, AuthFailureFilter, AuthKeyRecord};
 pub use commands::{CommandOrigin, CommandRecord, CommandStatus, NewCommandRecord};

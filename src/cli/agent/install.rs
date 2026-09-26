@@ -10,7 +10,7 @@ use crate::fs_util::{
 use crate::runtime::agent::provider_keys::{
     resolve_agent_environment, resolve_agent_environment_without_secrets,
 };
-use crate::runtime::install::agent_installer::{install_resolved, run_installer};
+use crate::runtime::install::agent_installer::{HarnessInstall, install_resolved, run_installer};
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::runtime::workspace_sources::workspace_init::prepare_workspace_base_dirs;
 use crate::secrets::SecretStore;
@@ -173,6 +173,7 @@ pub(super) fn run_agent_install(args: AgentInstallArgs, output: OutputFormat) ->
         install_resolved(
             &config.agent,
             entry,
+            &HarnessInstall::Install,
             Default::default(),
             &workspace_root,
             &dest,

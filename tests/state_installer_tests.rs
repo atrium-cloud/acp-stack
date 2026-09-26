@@ -1,9 +1,9 @@
 use acp_stack::state::{
     INIT_RUN_FAILED, INIT_RUN_SUCCEEDED, INIT_STEP_FAILED, INIT_STEP_PENDING, INIT_STEP_RUNNING,
     INIT_STEP_SKIPPED, INIT_STEP_SUCCEEDED, INSTALLER_METHOD_GITHUB, INSTALLER_METHOD_SHELL,
-    INSTALLER_OPERATION_INSTALL, INSTALLER_STATUS_RUNNING, InstallerRunFinish, InstallerRunInput,
-    NewInitRun, NewInitStep, NewStackUpdateRun, STACK_UPDATE_OPERATION_CHECK,
-    STACK_UPDATE_STATUS_SUCCEEDED, StateStore,
+    INSTALLER_OPERATION_INSTALL, INSTALLER_STATUS_KEPT, INSTALLER_STATUS_RAN,
+    INSTALLER_STATUS_RUNNING, InstallerRunFinish, InstallerRunInput, NewInitRun, NewInitStep,
+    NewStackUpdateRun, STACK_UPDATE_OPERATION_CHECK, STACK_UPDATE_STATUS_SUCCEEDED, StateStore,
 };
 
 #[test]
@@ -28,6 +28,8 @@ fn installer_runs_round_trip_records_and_returns_version() {
             method: Some(INSTALLER_METHOD_GITHUB),
             log_dir: None,
             apply_run_id: None,
+            path: None,
+            sha256: None,
         })
         .expect("harness row should append");
     store
@@ -45,6 +47,8 @@ fn installer_runs_round_trip_records_and_returns_version() {
             method: None,
             log_dir: None,
             apply_run_id: None,
+            path: None,
+            sha256: None,
         })
         .expect("adapter row should append");
 
@@ -141,6 +145,8 @@ fn latest_successful_installer_runs_are_scoped_by_agent_id() {
             method: Some(INSTALLER_METHOD_GITHUB),
             log_dir: None,
             apply_run_id: None,
+            path: None,
+            sha256: None,
         })
         .expect("first agent row should append");
     store
@@ -158,6 +164,8 @@ fn latest_successful_installer_runs_are_scoped_by_agent_id() {
             method: Some(INSTALLER_METHOD_GITHUB),
             log_dir: None,
             apply_run_id: None,
+            path: None,
+            sha256: None,
         })
         .expect("second agent row should append");
 
@@ -191,6 +199,8 @@ fn installer_runs_round_trip_records_log_dir() {
             method: Some(INSTALLER_METHOD_GITHUB),
             log_dir: Some("/var/lib/acp-stack/installer-logs/test-agent/2026-05-22T10:00:00.000000000Z/harness"),
             apply_run_id: Some("dap_test"),
+            path: None,
+            sha256: None,
         })
         .expect("row with log_dir should append");
 
@@ -225,6 +235,8 @@ fn latest_successful_installer_runs_skips_failed_rows() {
             method: Some(INSTALLER_METHOD_GITHUB),
             log_dir: None,
             apply_run_id: None,
+            path: None,
+            sha256: None,
         })
         .expect("first ran row should append");
     store
@@ -242,6 +254,8 @@ fn latest_successful_installer_runs_skips_failed_rows() {
             method: Some(INSTALLER_METHOD_GITHUB),
             log_dir: None,
             apply_run_id: None,
+            path: None,
+            sha256: None,
         })
         .expect("second failed row should append");
 
@@ -251,6 +265,67 @@ fn latest_successful_installer_runs_skips_failed_rows() {
     assert_eq!(latest.len(), 1);
     assert_eq!(latest[0].status, "ran");
     assert_eq!(latest[0].version.as_deref(), Some("v1.0.0"));
+}
+
+#[test]
+fn latest_successful_installer_runs_take_the_newest_ran_or_kept_row() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state should open");
+    store.migrate().expect("migration should pass");
+    let append = |agent_id: &str, status: &str, step: &str, version: &str| {
+        store
+            .append_installer_run(InstallerRunInput {
+                agent_id,
+                started_at: "2026-05-21T00:00:00.000000000Z",
+                finished_at: Some("2026-05-21T00:00:01.000000000Z"),
+                status,
+                stdout: "",
+                stderr: "",
+                exit_status: Some(0),
+                step,
+                version: Some(version),
+                operation: INSTALLER_OPERATION_INSTALL,
+                method: (status == INSTALLER_STATUS_RAN).then_some(INSTALLER_METHOD_GITHUB),
+                log_dir: None,
+                apply_run_id: None,
+                path: None,
+                sha256: None,
+            })
+            .expect("row should append")
+    };
+    let latest_harness = || {
+        store
+            .latest_successful_installer_runs_for_agent("test-agent")
+            .expect("latest-by-step should query")
+            .into_iter()
+            .find(|row| row.step == "harness")
+            .expect("harness row")
+    };
+
+    append("test-agent", INSTALLER_STATUS_RAN, "harness", "0.1.0");
+    append("test-agent", INSTALLER_STATUS_RAN, "adapter", "0.2.0");
+    let kept = append("test-agent", INSTALLER_STATUS_KEPT, "harness", "0.9.0");
+    append("other-agent", INSTALLER_STATUS_KEPT, "harness", "5.0.0");
+
+    let latest = store
+        .latest_successful_installer_runs_for_agent("test-agent")
+        .expect("latest-by-step should query");
+    assert_eq!(latest.len(), 2);
+    let harness = latest_harness();
+    assert_eq!(
+        harness.id, kept.id,
+        "a newer kept row supersedes an older ran row"
+    );
+    assert_eq!(harness.status, INSTALLER_STATUS_KEPT);
+    assert_eq!(harness.version.as_deref(), Some("0.9.0"));
+    assert!(harness.method.is_none());
+
+    let reinstalled = append("test-agent", INSTALLER_STATUS_RAN, "harness", "1.0.0");
+    assert_eq!(
+        latest_harness().id,
+        reinstalled.id,
+        "a later install replaces the kept CLI"
+    );
 }
 
 #[test]
@@ -479,6 +554,8 @@ fn running_installer_input<'a>(
         method: Some(INSTALLER_METHOD_SHELL),
         log_dir: None,
         apply_run_id: None,
+        path: None,
+        sha256: None,
     }
 }
 
@@ -518,6 +595,8 @@ fn installer_run_running_row_is_visible_then_finalized_in_place() {
                 exit_status: Some(0),
                 version: Some("v1.2.3"),
                 log_dir: Some("/tmp/installer-logs/test-agent/step"),
+                path: Some("/home/test/.local/bin/test-agent"),
+                sha256: Some(ARTIFACT_SHA256),
             },
         )
         .expect("finish should update the running row");
@@ -545,10 +624,92 @@ fn installer_run_running_row_is_visible_then_finalized_in_place() {
         row.log_dir.as_deref(),
         Some("/tmp/installer-logs/test-agent/step")
     );
+    assert_eq!(
+        row.path.as_deref(),
+        Some("/home/test/.local/bin/test-agent")
+    );
+    assert_eq!(row.sha256.as_deref(), Some(ARTIFACT_SHA256));
     // Identity fields fixed at insert survive the update untouched.
     assert_eq!(row.agent_id.as_deref(), Some("test-agent"));
     assert_eq!(row.step, "harness");
     assert_eq!(row.operation, INSTALLER_OPERATION_INSTALL);
+}
+
+const ARTIFACT_SHA256: &str = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+
+#[test]
+fn installer_artifact_lookup_matches_ran_and_kept_rows_by_path_and_sha256() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state should open");
+    store.migrate().expect("migration should pass");
+    let append = |status: &str, step: &str, started_at: &str, path: Option<&str>| {
+        store
+            .append_installer_run(InstallerRunInput {
+                agent_id: "test-agent",
+                started_at,
+                finished_at: Some(started_at),
+                status,
+                stdout: "",
+                stderr: "",
+                exit_status: Some(0),
+                step,
+                version: None,
+                operation: INSTALLER_OPERATION_INSTALL,
+                method: None,
+                log_dir: None,
+                apply_run_id: None,
+                path,
+                sha256: path.map(|_| ARTIFACT_SHA256),
+            })
+            .expect("row should append")
+    };
+    let binary = "/home/test/.local/bin/test-agent";
+    append(
+        "failed",
+        "harness",
+        "2026-05-21T00:00:01.000000000Z",
+        Some(binary),
+    );
+    append(
+        "ran",
+        "adapter",
+        "2026-05-21T00:00:02.000000000Z",
+        Some(binary),
+    );
+    append("ran", "harness", "2026-05-21T00:00:03.000000000Z", None);
+
+    let lookup = |step: &str, path: &str, sha256: &str| {
+        store
+            .latest_installer_run_for_artifact("test-agent", step, path, sha256)
+            .expect("lookup")
+    };
+    assert!(
+        lookup("harness", binary, ARTIFACT_SHA256).is_none(),
+        "a failed row, another step's row, and a row without an artifact never match"
+    );
+
+    let ran = append(
+        "ran",
+        "harness",
+        "2026-05-21T00:00:04.000000000Z",
+        Some(binary),
+    );
+    assert_eq!(
+        lookup("harness", binary, ARTIFACT_SHA256).map(|row| row.id),
+        Some(ran.id)
+    );
+    assert!(lookup("harness", binary, "0000").is_none());
+    assert!(lookup("harness", "/usr/local/bin/test-agent", ARTIFACT_SHA256).is_none());
+
+    let kept = append(
+        "kept",
+        "harness",
+        "2026-05-21T00:00:05.000000000Z",
+        Some(binary),
+    );
+    let latest = lookup("harness", binary, ARTIFACT_SHA256).expect("kept row matches");
+    assert_eq!(latest.id, kept.id);
+    assert_eq!(latest.status, "kept");
 }
 
 #[test]
@@ -600,6 +761,8 @@ fn installer_run_concurrent_steps_track_independently() {
                 exit_status: Some(0),
                 version: None,
                 log_dir: None,
+                path: None,
+                sha256: None,
             },
         )
         .expect("finish harness");
@@ -627,6 +790,8 @@ fn finish_installer_run_rejects_unknown_and_completed_rows() {
         exit_status: Some(1),
         version: None,
         log_dir: None,
+        path: None,
+        sha256: None,
     };
     store
         .finish_installer_run("run-nonexistent", finish.clone())
@@ -678,6 +843,8 @@ fn finish_installer_run_truncates_oversize_streams() {
                 exit_status: Some(0),
                 version: None,
                 log_dir: None,
+                path: None,
+                sha256: None,
             },
         )
         .expect("finish");

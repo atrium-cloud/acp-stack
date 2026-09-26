@@ -124,6 +124,8 @@ mod tests {
                 method: Some(crate::state::INSTALLER_METHOD_SHELL),
                 log_dir: None,
                 apply_run_id: None,
+                path: None,
+                sha256: None,
             })
             .expect("seed deps_apply row");
     }
@@ -150,6 +152,8 @@ mod tests {
                 method: Some(crate::state::INSTALLER_METHOD_SHELL),
                 log_dir: None,
                 apply_run_id: Some(apply_run_id),
+                path: None,
+                sha256: None,
             })
             .expect("seed deps_apply row");
     }
@@ -329,6 +333,8 @@ mod tests {
                 method: Some(crate::state::INSTALLER_METHOD_SHELL),
                 log_dir: None,
                 apply_run_id: None,
+                path: None,
+                sha256: None,
             })
             .expect("seed colliding agent installer row");
         let deps = collect_deps(&store);

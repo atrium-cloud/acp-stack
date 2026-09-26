@@ -33,8 +33,34 @@ fn migrations_are_idempotent() {
 
     assert_eq!(
         store.schema_version().expect("schema version should load"),
-        27
+        28
     );
+}
+
+#[test]
+fn migration_028_adds_installer_run_artifact_columns() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+    drop(store);
+
+    let connection = Connection::open(&path).expect("sqlite should open for inspection");
+    let columns: Vec<(String, bool)> = connection
+        .prepare("PRAGMA table_info(installer_runs)")
+        .and_then(|mut statement| {
+            let rows = statement.query_map([], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, i64>(3)? == 1))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .expect("installer_runs columns should query");
+    for name in ["path", "sha256"] {
+        assert!(
+            columns.contains(&(name.to_owned(), false)),
+            "installer_runs.{name} must exist and be nullable, so earlier rows read as foreign: {columns:?}"
+        );
+    }
 }
 
 #[test]
@@ -130,7 +156,7 @@ fn rejects_state_database_from_newer_schema_version() {
     assert!(
         error
             .to_string()
-            .contains("state schema version 99 is newer than supported version 27")
+            .contains("state schema version 99 is newer than supported version 28")
     );
 }
 
@@ -773,7 +799,7 @@ fn migration_015_preserves_rows_inserted_at_schema_14() {
     store.migrate().expect("migration to latest should pass");
     assert_eq!(
         store.schema_version().expect("schema version should load"),
-        27
+        28
     );
     let inspection = Connection::open(&path).expect("sqlite inspection should open");
     let columns = inspection

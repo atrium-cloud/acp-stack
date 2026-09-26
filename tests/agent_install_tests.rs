@@ -9,7 +9,7 @@ use std::sync::{Mutex, mpsc};
 use std::thread;
 
 use acp_stack::config::AgentConfig;
-use acp_stack::runtime::install::agent_installer::install_resolved_capture;
+use acp_stack::runtime::install::agent_installer::{HarnessInstall, install_resolved_capture};
 use acp_stack::runtime::install::agent_registry::{
     AdapterSpec, ArchMap, ArchiveKind, GithubInstall, HarnessSpec, InstallSet, RegistryEntry,
     RegistryKind, RegistryStdioFraming, default_acp_args,
@@ -299,6 +299,7 @@ fn install_resolved_two_step_flow_against_mocked_github_api() {
     let result = install_resolved_capture(
         &agent_config(ADAPTER_BIN),
         &entry,
+        &HarnessInstall::Install,
         std::collections::HashMap::new(),
         dest_dir.path(),
         dest_dir.path(),
@@ -416,6 +417,7 @@ fn install_resolved_runs_adapter_step_for_native_entry_with_override() {
     let result = install_resolved_capture(
         &agent,
         &entry,
+        &HarnessInstall::Install,
         std::collections::HashMap::new(),
         dest_dir.path(),
         dest_dir.path(),
@@ -466,6 +468,7 @@ fn install_resolved_links_a_bundle_release_into_the_bin_dir() {
     let result = install_resolved_capture(
         &agent_config(ADAPTER_BIN),
         &entry,
+        &HarnessInstall::Install,
         std::collections::HashMap::new(),
         home.path(),
         home.path(),
@@ -523,6 +526,7 @@ fn install_resolved_replaces_a_bundle_link_instead_of_writing_through_it() {
     let result = install_resolved_capture(
         &agent_config(ADAPTER_BIN),
         &adapter_kind_entry(),
+        &HarnessInstall::Install,
         std::collections::HashMap::new(),
         home.path(),
         home.path(),
@@ -565,6 +569,7 @@ fn install_resolved_records_failure_when_release_endpoint_missing() {
     let result = install_resolved_capture(
         &agent_config(ADAPTER_BIN),
         &entry,
+        &HarnessInstall::Install,
         std::collections::HashMap::new(),
         dest_dir.path(),
         dest_dir.path(),

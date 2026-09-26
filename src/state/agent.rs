@@ -58,6 +58,10 @@ pub struct InstallerRun {
     pub log_dir: Option<String>,
     /// Groups rows written by one `acps deps apply` invocation.
     pub apply_run_id: Option<String>,
+    /// The binary a `ran` or `kept` step left in place, as the command resolver
+    /// found it; `None` for rows that produced no agent binary.
+    pub path: Option<String>,
+    pub sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +79,8 @@ pub struct InstallerRunInput<'a> {
     pub method: Option<&'a str>,
     pub log_dir: Option<&'a str>,
     pub apply_run_id: Option<&'a str>,
+    pub path: Option<&'a str>,
+    pub sha256: Option<&'a str>,
 }
 
 /// Final state written over a `running` installer row when its step finishes.
@@ -91,12 +97,19 @@ pub struct InstallerRunFinish<'a> {
     pub exit_status: Option<i32>,
     pub version: Option<&'a str>,
     pub log_dir: Option<&'a str>,
+    pub path: Option<&'a str>,
+    pub sha256: Option<&'a str>,
 }
 
 pub const INSTALLER_OPERATION_INSTALL: &str = "install";
 pub const INSTALLER_OPERATION_UPDATE: &str = "update";
 /// In-flight step marker; a row left `running` means the daemon died mid-step.
 pub const INSTALLER_STATUS_RUNNING: &str = "running";
+/// A step that installed its binary.
+pub const INSTALLER_STATUS_RAN: &str = "ran";
+/// An operator chose to keep a binary acp-stack did not install instead of
+/// replacing it; the row records that binary's path and sha256.
+pub const INSTALLER_STATUS_KEPT: &str = "kept";
 pub const INSTALLER_METHOD_SHELL: &str = "shell";
 pub const INSTALLER_METHOD_NPM: &str = "npm";
 pub const INSTALLER_METHOD_GITHUB: &str = "github";
@@ -142,6 +155,8 @@ fn row_to_installer_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<InstallerRu
         apply_run_id: row.get(11)?,
         operation: row.get(12)?,
         method: row.get(13)?,
+        path: row.get(14)?,
+        sha256: row.get(15)?,
     })
 }
 
@@ -372,13 +387,15 @@ impl StateStore {
             method: input.method.map(str::to_owned),
             log_dir: input.log_dir.map(str::to_owned),
             apply_run_id: input.apply_run_id.map(str::to_owned),
+            path: input.path.map(str::to_owned),
+            sha256: input.sha256.map(str::to_owned),
         };
 
         self.connection().execute(
             r#"
             INSERT INTO installer_runs
-                (id, agent_id, started_at, finished_at, status, stdout, stderr, exit_status, step, version, log_dir, apply_run_id, operation, method)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                (id, agent_id, started_at, finished_at, status, stdout, stderr, exit_status, step, version, log_dir, apply_run_id, operation, method, path, sha256)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
             "#,
             params![
                 run.id,
@@ -395,6 +412,8 @@ impl StateStore {
                 run.apply_run_id,
                 run.operation,
                 run.method,
+                run.path,
+                run.sha256,
             ],
         )?;
 
@@ -410,8 +429,9 @@ impl StateStore {
             r#"
             UPDATE installer_runs
             SET started_at = ?2, finished_at = ?3, status = ?4, stdout = ?5,
-                stderr = ?6, exit_status = ?7, version = ?8, log_dir = ?9
-            WHERE id = ?1 AND status = ?10
+                stderr = ?6, exit_status = ?7, version = ?8, log_dir = ?9,
+                path = ?10, sha256 = ?11
+            WHERE id = ?1 AND status = ?12
             "#,
             params![
                 id,
@@ -423,6 +443,8 @@ impl StateStore {
                 finish.exit_status,
                 finish.version,
                 finish.log_dir,
+                finish.path,
+                finish.sha256,
                 INSTALLER_STATUS_RUNNING,
             ],
         )?;
@@ -437,7 +459,7 @@ impl StateStore {
         if let Some(agent_id) = agent_id {
             let mut statement = self.connection().prepare(
                 r#"
-                SELECT id, agent_id, started_at, finished_at, status, stdout, stderr, exit_status, step, version, log_dir, apply_run_id, operation, method
+                SELECT id, agent_id, started_at, finished_at, status, stdout, stderr, exit_status, step, version, log_dir, apply_run_id, operation, method, path, sha256
                 FROM installer_runs
                 WHERE status = ?1 AND agent_id = ?2
                 ORDER BY started_at ASC, id ASC
@@ -451,7 +473,7 @@ impl StateStore {
         }
         let mut statement = self.connection().prepare(
             r#"
-            SELECT id, agent_id, started_at, finished_at, status, stdout, stderr, exit_status, step, version, log_dir, apply_run_id, operation, method
+            SELECT id, agent_id, started_at, finished_at, status, stdout, stderr, exit_status, step, version, log_dir, apply_run_id, operation, method, path, sha256
             FROM installer_runs
             WHERE status = ?1
             ORDER BY started_at ASC, id ASC
@@ -475,7 +497,7 @@ impl StateStore {
         if let Some(agent_id) = agent_id {
             let mut statement = self.connection().prepare(
                 r#"
-                SELECT id, agent_id, started_at, finished_at, status, stdout, stderr, exit_status, step, version, log_dir, apply_run_id, operation, method
+                SELECT id, agent_id, started_at, finished_at, status, stdout, stderr, exit_status, step, version, log_dir, apply_run_id, operation, method, path, sha256
                 FROM installer_runs
                 WHERE agent_id = ?1
                 ORDER BY started_at DESC, id DESC
@@ -487,7 +509,7 @@ impl StateStore {
         }
         let mut statement = self.connection().prepare(
             r#"
-            SELECT id, agent_id, started_at, finished_at, status, stdout, stderr, exit_status, step, version, log_dir, apply_run_id, operation, method
+            SELECT id, agent_id, started_at, finished_at, status, stdout, stderr, exit_status, step, version, log_dir, apply_run_id, operation, method, path, sha256
             FROM installer_runs
             ORDER BY started_at DESC, id DESC
             LIMIT ?1
@@ -505,7 +527,7 @@ impl StateStore {
     ) -> Result<Vec<InstallerRun>> {
         let mut statement = self.connection().prepare(
             r#"
-            SELECT id, agent_id, started_at, finished_at, status, stdout, stderr, exit_status, step, version, log_dir, apply_run_id, operation, method
+            SELECT id, agent_id, started_at, finished_at, status, stdout, stderr, exit_status, step, version, log_dir, apply_run_id, operation, method, path, sha256
             FROM installer_runs
             WHERE agent_id = ?1
               AND step = ?2
@@ -518,24 +540,61 @@ impl StateStore {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// The most recent successful installer row for each `step` of the given agent.
+    /// The most recent `ran` or `kept` installer row for each `step` of the given agent, so a CLI
+    /// the operator kept supersedes an older acp-stack install of the same step.
     pub fn latest_successful_installer_runs_for_agent(
         &self,
         agent_id: &str,
     ) -> Result<Vec<InstallerRun>> {
         let mut statement = self.connection().prepare(
             r#"
-                SELECT id, agent_id, started_at, finished_at, status, stdout, stderr, exit_status, step, version, log_dir, apply_run_id, operation, method
+                SELECT id, agent_id, started_at, finished_at, status, stdout, stderr, exit_status, step, version, log_dir, apply_run_id, operation, method, path, sha256
             FROM installer_runs
             WHERE id IN (
                 SELECT MAX(id) FROM installer_runs
-                WHERE status = 'ran' AND agent_id = ?1
+                WHERE status IN (?2, ?3) AND agent_id = ?1
                 GROUP BY step
             )
             ORDER BY step
             "#,
         )?;
-        let rows = statement.query_map(params![agent_id], row_to_installer_run)?;
+        let rows = statement.query_map(
+            params![agent_id, INSTALLER_STATUS_RAN, INSTALLER_STATUS_KEPT],
+            row_to_installer_run,
+        )?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The newest `ran` or `kept` row for one agent step that recorded exactly this
+    /// binary, so a resolved binary can be traced back to the step that put it there.
+    pub fn latest_installer_run_for_artifact(
+        &self,
+        agent_id: &str,
+        step: &str,
+        path: &str,
+        sha256: &str,
+    ) -> Result<Option<InstallerRun>> {
+        Ok(self
+            .connection()
+            .query_row(
+                r#"
+                SELECT id, agent_id, started_at, finished_at, status, stdout, stderr, exit_status, step, version, log_dir, apply_run_id, operation, method, path, sha256
+                FROM installer_runs
+                WHERE agent_id = ?1 AND step = ?2 AND path = ?3 AND sha256 = ?4
+                  AND status IN (?5, ?6)
+                ORDER BY started_at DESC, id DESC
+                LIMIT 1
+                "#,
+                params![
+                    agent_id,
+                    step,
+                    path,
+                    sha256,
+                    INSTALLER_STATUS_RAN,
+                    INSTALLER_STATUS_KEPT
+                ],
+                row_to_installer_run,
+            )
+            .optional()?)
     }
 }

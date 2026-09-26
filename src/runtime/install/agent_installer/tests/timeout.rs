@@ -52,6 +52,7 @@ fn timed_out_step_keeps_the_installer_output_it_captured() {
     let mut result = install_resolved_capture(
         &agent_config("timeout-agent"),
         &entry,
+        &HarnessInstall::Install,
         HashMap::new(),
         tempdir.path(),
         tempdir.path(),

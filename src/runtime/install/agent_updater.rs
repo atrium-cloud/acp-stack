@@ -9,10 +9,10 @@ use crate::config::{AgentConfig, Config};
 use crate::error::{Result, StackError};
 
 use crate::runtime::install::agent_installer::{
-    INSTALL_METHOD_APT, INSTALL_METHOD_NATIVE, InstallProgress, ReconnectingInstallerSink,
-    STEP_ADAPTER, STEP_HARNESS, STEP_INSTALL, begin_tracked_step, finalize_tracked_step,
-    install_one_with_fallback, persist_untracked_installer_row, probe_binary_version,
-    resolve_creates,
+    INSTALL_METHOD_APT, INSTALL_METHOD_NATIVE, InstallProgress, InstalledArtifact,
+    ReconnectingInstallerSink, STEP_ADAPTER, STEP_HARNESS, STEP_INSTALL, begin_tracked_step,
+    finalize_tracked_step, install_one_with_fallback, persist_untracked_installer_row,
+    probe_binary_version, resolve_creates,
 };
 use crate::runtime::install::agent_registry::{
     AdapterSpec, AptUpdate, HarnessSpec, InstallSet, RegistryEntry, RegistryKind,
@@ -25,8 +25,8 @@ use crate::runtime::process_runner::{
 };
 use crate::state::{
     INSTALLER_METHOD_APT, INSTALLER_METHOD_GITHUB, INSTALLER_METHOD_NATIVE, INSTALLER_METHOD_NPM,
-    INSTALLER_METHOD_SHELL, INSTALLER_OPERATION_UPDATE, INSTALLER_OUTPUT_CAP_BYTES, InstallerRun,
-    StateStore,
+    INSTALLER_METHOD_SHELL, INSTALLER_OPERATION_UPDATE, INSTALLER_OUTPUT_CAP_BYTES,
+    INSTALLER_STATUS_KEPT, InstallerRun, StateStore,
 };
 
 const UPDATE_COMMAND_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -46,6 +46,11 @@ pub const NON_REGISTRY_SKIP_REASON: &str =
 /// step. Shell recipes carry no comparable version; the operator opts into
 /// re-run updates with `[agent.adapter_override.update] shell_rerun = true`.
 pub const ADAPTER_OVERRIDE_SHELL_SKIP_REASON: &str = "operator adapter override installs via shell; managed update does not re-run operator shell recipes unless update.shell_rerun is set";
+
+/// Skip reason recorded for an agent CLI step whose newest successful row is
+/// `kept`. The operator chose that binary over an acp-stack install, so it is
+/// unmanaged and update never installs over it.
+pub const KEPT_HARNESS_SKIP_REASON: &str = "agent CLI was kept by the operator (acps init --existing-agent use-existing); managed update does not replace a kept CLI";
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AgentUpdateOptions {
@@ -188,6 +193,18 @@ pub fn update_agent_for_config(
     };
     let mut steps = Vec::new();
     for component in update_components(entry, &config.agent)? {
+        let installed_row = installed_rows.iter().find(|row| row.step == component.step);
+        if let Some(kept) = installed_row.filter(|row| row.status == INSTALLER_STATUS_KEPT) {
+            steps.push(AgentUpdateStepReport {
+                step: component.step.to_owned(),
+                status: AgentUpdateStepStatus::Skipped,
+                method: None,
+                installed: kept.version.clone(),
+                latest: None,
+                message: Some(KEPT_HARNESS_SKIP_REASON.to_owned()),
+            });
+            continue;
+        }
         // Without this skip the plan chooser falls through to the native probe
         // and records a failed adapter step every cycle.
         if component.step == STEP_ADAPTER
@@ -200,10 +217,7 @@ pub fn update_agent_for_config(
                 step: component.step.to_owned(),
                 status: AgentUpdateStepStatus::Skipped,
                 method: Some(INSTALLER_METHOD_SHELL.to_owned()),
-                installed: installed_rows
-                    .iter()
-                    .find(|row| row.step == component.step)
-                    .and_then(|row| row.version.clone()),
+                installed: installed_row.and_then(|row| row.version.clone()),
                 latest: None,
                 message: Some(ADAPTER_OVERRIDE_SHELL_SKIP_REASON.to_owned()),
             });
@@ -213,7 +227,7 @@ pub fn update_agent_for_config(
             &config.agent,
             entry,
             &component,
-            installed_rows.iter().find(|row| row.step == component.step),
+            installed_row,
             &context,
         )?);
     }
@@ -614,24 +628,9 @@ fn github_plan(entry: &RegistryEntry, component: &UpdateComponent<'_>) -> Result
 fn native_probe_target(component: &UpdateComponent<'_>) -> String {
     component
         .install
-        .npm
-        .as_ref()
-        .map(|npm| npm.creates.clone())
-        .or_else(|| {
-            component
-                .install
-                .github
-                .as_ref()
-                .map(|github| github.binary_name.clone())
-        })
-        .or_else(|| {
-            component
-                .install
-                .shell
-                .as_ref()
-                .map(|shell| shell.creates.clone())
-        })
-        .unwrap_or_else(|| component.command_id.to_owned())
+        .created_binary_name()
+        .unwrap_or(component.command_id)
+        .to_owned()
 }
 
 /// Run one apt/native update step with step-boundary progress: a `running`
@@ -722,6 +721,16 @@ fn run_native_update_step(
     );
     if row.status == "ran" {
         row.version = probe_binary_version(&path, workspace_root, &[dest_dir], home);
+        match InstalledArtifact::of(&path) {
+            Ok(artifact) => row.artifact = Some(artifact),
+            // The update itself ran; an unreadable result only costs the ownership
+            // record, so the next install treats the binary as one it did not put there.
+            Err(error) => tracing::warn!(
+                %error,
+                path = %path.display(),
+                "native update could not hash the updated binary; recording no artifact"
+            ),
+        }
     }
     row
 }
@@ -918,6 +927,7 @@ fn run_command_step_with_started_at(
             version: None,
             log_dir: None,
             persisted_run_id: None,
+            artifact: None,
         },
         CaptureOutcome::TimedOut {
             mut child,
@@ -943,6 +953,7 @@ fn run_command_step_with_started_at(
                 version: None,
                 log_dir: None,
                 persisted_run_id: None,
+                artifact: None,
             }
         }
         CaptureOutcome::WaitFailed {
@@ -972,6 +983,7 @@ fn command_error_row(
         version: None,
         log_dir: None,
         persisted_run_id: None,
+        artifact: None,
     }
 }
 

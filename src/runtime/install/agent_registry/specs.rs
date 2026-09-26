@@ -170,6 +170,21 @@ impl InstallSet {
         self.provided_by == Some(InstallProvidedBy::Adapter)
     }
 
+    /// The binary name the install lanes leave on PATH. The lanes of one set
+    /// agree in practice, so any of them names it; npm and github come first
+    /// because a shell recipe's `creates` may be a path rather than a name.
+    pub fn created_binary_name(&self) -> Option<&str> {
+        self.npm
+            .as_ref()
+            .map(|npm| npm.creates.as_str())
+            .or_else(|| {
+                self.github
+                    .as_ref()
+                    .map(|github| github.binary_name.as_str())
+            })
+            .or_else(|| self.shell.as_ref().map(|shell| shell.creates.as_str()))
+    }
+
     fn has_install_paths(&self) -> bool {
         self.shell.is_some() || self.npm.is_some() || self.github.is_some()
     }

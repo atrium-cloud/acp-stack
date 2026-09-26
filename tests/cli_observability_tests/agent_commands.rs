@@ -1,6 +1,6 @@
 use acp_stack::state::{
-    INSTALLER_METHOD_GITHUB, INSTALLER_METHOD_NPM, INSTALLER_OPERATION_INSTALL, InstallerRunInput,
-    StateStore, default_state_path,
+    INSTALLER_METHOD_GITHUB, INSTALLER_METHOD_NPM, INSTALLER_OPERATION_INSTALL,
+    INSTALLER_STATUS_KEPT, INSTALLER_STATUS_RAN, InstallerRunInput, StateStore, default_state_path,
 };
 use predicates::prelude::PredicateBooleanExt as _;
 use serde_json::Value;
@@ -44,6 +44,8 @@ fn agent_status_surfaces_installed_versions_from_state() {
             method: Some(INSTALLER_METHOD_NPM),
             log_dir: None,
             apply_run_id: None,
+            path: None,
+            sha256: None,
         })
         .expect("install row should append");
     store
@@ -61,6 +63,8 @@ fn agent_status_surfaces_installed_versions_from_state() {
             method: Some(INSTALLER_METHOD_GITHUB),
             log_dir: None,
             apply_run_id: None,
+            path: None,
+            sha256: None,
         })
         .expect("harness row should append");
     store
@@ -78,6 +82,8 @@ fn agent_status_surfaces_installed_versions_from_state() {
             method: Some(INSTALLER_METHOD_GITHUB),
             log_dir: None,
             apply_run_id: None,
+            path: None,
+            sha256: None,
         })
         .expect("adapter row should append");
     drop(store);
@@ -92,6 +98,52 @@ fn agent_status_surfaces_installed_versions_from_state() {
             "adapter version: version unknown",
         ))
         .stdout(predicates::str::contains("ACP version: 1"));
+}
+
+#[test]
+fn agent_status_reports_a_kept_cli_over_an_older_install() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
+
+    let state_path = default_state_path(tempdir.path());
+    fs::create_dir_all(state_path.parent().expect("state parent dir"))
+        .expect("state dir should be created");
+    let store = StateStore::open(&state_path).expect("state should open");
+    store.migrate().expect("migration should pass");
+    for (status, method, version) in [
+        (INSTALLER_STATUS_RAN, Some(INSTALLER_METHOD_NPM), "1.0.0"),
+        (INSTALLER_STATUS_KEPT, None, "1.15.10"),
+    ] {
+        store
+            .append_installer_run(InstallerRunInput {
+                agent_id: "opencode",
+                started_at: "2026-05-21T00:00:00.000000000Z",
+                finished_at: Some("2026-05-21T00:00:01.000000000Z"),
+                status,
+                stdout: "",
+                stderr: "",
+                exit_status: Some(0),
+                step: "install",
+                version: Some(version),
+                operation: INSTALLER_OPERATION_INSTALL,
+                method,
+                log_dir: None,
+                apply_run_id: None,
+                path: None,
+                sha256: None,
+            })
+            .expect("install row should append");
+    }
+    drop(store);
+
+    acps_command(tempdir.path())
+        .args(["agent", "status"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent version: 1.15.10"))
+        .stdout(predicates::str::contains("agent version: 1.0.0").not());
 }
 
 #[test]

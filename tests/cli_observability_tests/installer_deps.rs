@@ -73,6 +73,8 @@ fn agent_check_reports_missing_adapter_step() {
             method: None,
             log_dir: None,
             apply_run_id: None,
+            path: None,
+            sha256: None,
         })
         .expect("seed harness row");
     drop(store);
@@ -134,6 +136,8 @@ fn installer_history_renders_rows_with_filter() {
             method: Some(INSTALLER_METHOD_GITHUB),
             log_dir: None,
             apply_run_id: None,
+            path: None,
+            sha256: None,
         })
         .expect("seed harness row");
     store
@@ -151,6 +155,8 @@ fn installer_history_renders_rows_with_filter() {
             method: Some(INSTALLER_METHOD_GITHUB),
             log_dir: None,
             apply_run_id: None,
+            path: None,
+            sha256: None,
         })
         .expect("seed adapter row");
     drop(store);
@@ -205,6 +211,8 @@ fn installer_history_format_json_renders_runs() {
             method: Some(INSTALLER_METHOD_GITHUB),
             log_dir: Some("/tmp/installer-logs/opencode/harness"),
             apply_run_id: None,
+            path: None,
+            sha256: None,
         })
         .expect("seed row");
     drop(store);
@@ -254,6 +262,8 @@ fn installer_history_renders_log_dir_continuation_line() {
             method: Some(INSTALLER_METHOD_GITHUB),
             log_dir: Some("/tmp/installer-logs/opencode/2026-05-22T01:00:00.000000000Z/harness"),
             apply_run_id: None,
+            path: None,
+            sha256: None,
         })
         .expect("seed row with log_dir");
     drop(store);

@@ -2,15 +2,15 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
 use super::{
-    AgentUpdateOptions, AgentUpdateReport, AgentUpdateStepStatus, UpdateComponent,
-    UpdateExecutionContext, UpdatePlanKind, choose_update_plan, help_output_contains_command,
-    update_agent_for_config, update_component, update_components,
+    AgentUpdateOptions, AgentUpdateReport, AgentUpdateStepStatus, KEPT_HARNESS_SKIP_REASON,
+    UpdateComponent, UpdateExecutionContext, UpdatePlanKind, choose_update_plan,
+    help_output_contains_command, update_agent_for_config, update_component, update_components,
 };
 use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry};
 use crate::state::{
     INSTALLER_METHOD_APT, INSTALLER_METHOD_GITHUB, INSTALLER_METHOD_NATIVE, INSTALLER_METHOD_NPM,
-    INSTALLER_METHOD_SHELL, INSTALLER_OPERATION_INSTALL, INSTALLER_OPERATION_UPDATE, InstallerRun,
-    StateStore,
+    INSTALLER_METHOD_SHELL, INSTALLER_OPERATION_INSTALL, INSTALLER_OPERATION_UPDATE,
+    INSTALLER_STATUS_KEPT, INSTALLER_STATUS_RAN, InstallerRun, InstallerRunInput, StateStore,
 };
 
 #[cfg(unix)]
@@ -378,6 +378,51 @@ fn update_plan_reports_up_to_date_at_pin() {
 }
 
 #[test]
+fn update_skips_a_kept_agent_cli_even_when_forced() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let workspace = tempdir.path().join("workspace");
+    let dest = tempdir.path().join("bin");
+    fs::create_dir_all(&workspace).expect("workspace");
+    fs::create_dir_all(&dest).expect("dest");
+    let config = fake_config(&workspace);
+    let registry = native_shell_registry();
+    let entry = registry.lookup_required("fake").expect("entry");
+    let state = StateStore::open(tempdir.path().join("state.sqlite")).expect("state");
+    state.migrate().expect("migrate");
+    // An older acp-stack install of the same step must not resurface once the CLI is kept.
+    append_install_row(&state, INSTALLER_STATUS_RAN, "1.0.0");
+    append_install_row(&state, INSTALLER_STATUS_KEPT, "9.9.9");
+
+    let report = update_agent_for_config(
+        &config,
+        entry,
+        &state,
+        &workspace,
+        &dest,
+        None,
+        AgentUpdateOptions {
+            force: true,
+            agent_running: false,
+        },
+        tempdir.path(),
+    )
+    .expect("update");
+
+    assert!(!report.updated, "{report:?}");
+    assert_eq!(report.steps.len(), 1, "{report:?}");
+    let step = &report.steps[0];
+    assert_eq!(step.step, "install");
+    assert_eq!(step.status, AgentUpdateStepStatus::Skipped);
+    assert_eq!(step.method, None);
+    assert_eq!(step.installed.as_deref(), Some("9.9.9"));
+    assert_eq!(step.message.as_deref(), Some(KEPT_HARNESS_SKIP_REASON));
+    let rows = state
+        .query_installer_runs_filtered(Some("fake"), 10)
+        .expect("history");
+    assert_eq!(rows.len(), 2, "a skipped kept CLI writes no update row");
+}
+
+#[test]
 fn update_components_pin_applies_to_harness_not_adapter() {
     let catalog = RegistryCatalog::from_toml(
         r#"
@@ -420,6 +465,28 @@ aarch64 = "arm64"
     assert_eq!(components[0].version_pin, Some("v9.9.9"));
     assert_eq!(components[1].step, "adapter");
     assert_eq!(components[1].version_pin, None);
+}
+
+fn append_install_row(state: &StateStore, status: &str, version: &str) {
+    state
+        .append_installer_run(InstallerRunInput {
+            agent_id: "fake",
+            started_at: "2026-01-01T00:00:00Z",
+            finished_at: Some("2026-01-01T00:00:01Z"),
+            status,
+            stdout: "",
+            stderr: "",
+            exit_status: Some(0),
+            step: "install",
+            version: Some(version),
+            operation: INSTALLER_OPERATION_INSTALL,
+            method: (status == INSTALLER_STATUS_RAN).then_some(INSTALLER_METHOD_SHELL),
+            log_dir: None,
+            apply_run_id: None,
+            path: None,
+            sha256: None,
+        })
+        .expect("installer row");
 }
 
 fn registry_with_github_and_npm() -> RegistryCatalog {
@@ -859,5 +926,7 @@ fn installer_run_with_method(method: Option<&str>) -> InstallerRun {
         method: method.map(str::to_owned),
         log_dir: None,
         apply_run_id: None,
+        path: None,
+        sha256: None,
     }
 }

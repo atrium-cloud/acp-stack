@@ -266,6 +266,14 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         sqlite: include_str!("../../migrations/027_prompt_agent_message_ids.sqlite.sql"),
         postgres: include_str!("../../migrations/027_prompt_agent_message_ids.postgres.sql"),
     },
+    Migration {
+        id: 28,
+        name: "installer_runs_artifact",
+        sqlite_file: "028_installer_runs_artifact.sqlite.sql",
+        postgres_file: "028_installer_runs_artifact.postgres.sql",
+        sqlite: include_str!("../../migrations/028_installer_runs_artifact.sqlite.sql"),
+        postgres: include_str!("../../migrations/028_installer_runs_artifact.postgres.sql"),
+    },
 ];
 
 /// Read-only accessor for the migration registry, including Postgres SQL.

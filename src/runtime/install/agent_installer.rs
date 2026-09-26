@@ -18,8 +18,8 @@ use crate::runtime::install::agent_registry::{
     ArchiveKind, InstallSet, RegistryEntry, RegistryKind,
 };
 use crate::state::{
-    INSTALLER_OPERATION_INSTALL, INSTALLER_OUTPUT_CAP_BYTES, INSTALLER_STATUS_RUNNING,
-    InstallerRunFinish, InstallerRunInput, StateStore,
+    INSTALLER_OPERATION_INSTALL, INSTALLER_OUTPUT_CAP_BYTES, INSTALLER_STATUS_KEPT,
+    INSTALLER_STATUS_RUNNING, InstallerRunFinish, InstallerRunInput, StateStore,
 };
 
 pub(crate) use self::execute::install_one_with_fallback;
@@ -42,6 +42,15 @@ pub(crate) use crate::state::{
     INSTALLER_METHOD_NATIVE as INSTALL_METHOD_NATIVE, INSTALLER_METHOD_NPM as INSTALL_METHOD_NPM,
     INSTALLER_METHOD_SHELL as INSTALL_METHOD_SHELL,
 };
+
+/// What an install run does with the agent CLI (the harness). The adapter always installs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HarnessInstall {
+    /// Walk the harness install lanes, honoring a `harness_version` pin.
+    Install,
+    /// Leave the binary an operator chose to keep at this path, gate it, and record it `kept`.
+    Keep(PathBuf),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallerOutcome {
@@ -92,6 +101,30 @@ pub struct InstallerRowDraft {
     /// `installer_runs` id when the progress sink already finalized this step's
     /// row in place; `None` rows still need the end-of-run append.
     pub persisted_run_id: Option<String>,
+    /// The binary the step left in place, set on success so a later install can
+    /// recognize it as one acp-stack put there.
+    pub artifact: Option<InstalledArtifact>,
+}
+
+/// A step's resolved binary: the path the command resolver returns for it and
+/// the sha256 of the file that path reaches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledArtifact {
+    pub path: PathBuf,
+    pub sha256: String,
+}
+
+impl InstalledArtifact {
+    pub(crate) fn of(path: &Path) -> Result<Self> {
+        Ok(Self {
+            path: path.to_path_buf(),
+            sha256: sha256_of_file(path)?,
+        })
+    }
+
+    fn path_str(artifact: Option<&Self>) -> Option<String> {
+        artifact.map(|artifact| artifact.path.display().to_string())
+    }
 }
 
 impl InstallerRowDraft {
@@ -108,6 +141,7 @@ impl InstallerRowDraft {
             version: None,
             log_dir: None,
             persisted_run_id: None,
+            artifact: None,
         }
     }
 
@@ -124,6 +158,7 @@ impl InstallerRowDraft {
             version: None,
             log_dir: None,
             persisted_run_id: None,
+            artifact: None,
         }
     }
 }
@@ -212,6 +247,8 @@ pub(crate) fn begin_tracked_step(
             method,
             log_dir: None,
             apply_run_id: None,
+            path: None,
+            sha256: None,
         })?;
         inserted_id = Some(run.id);
         Ok(())
@@ -239,6 +276,7 @@ pub(crate) fn finalize_tracked_step(
     };
     let result = (|| -> Result<()> {
         persist_step_logs_to_disk(row, progress.agent_id, progress.log_base)?;
+        let artifact_path = InstalledArtifact::path_str(row.artifact.as_ref());
         progress.sink.with_store(&mut |store| {
             store.finish_installer_run(
                 &run_id,
@@ -251,6 +289,11 @@ pub(crate) fn finalize_tracked_step(
                     exit_status: row.exit_status,
                     version: row.version.as_deref(),
                     log_dir: row.log_dir.as_deref(),
+                    path: artifact_path.as_deref(),
+                    sha256: row
+                        .artifact
+                        .as_ref()
+                        .map(|artifact| artifact.sha256.as_str()),
                 },
             )
         })
@@ -273,6 +316,8 @@ pub(crate) fn finalize_tracked_step(
                         exit_status: row.exit_status,
                         version: row.version.as_deref(),
                         log_dir: row.log_dir.as_deref(),
+                        path: None,
+                        sha256: None,
                     },
                 )
             });
@@ -296,6 +341,7 @@ pub fn persist_untracked_installer_row(
         return Ok(());
     }
     persist_step_logs_to_disk(row, agent_id, log_base)?;
+    let artifact_path = InstalledArtifact::path_str(row.artifact.as_ref());
     state.append_installer_run(InstallerRunInput {
         agent_id,
         started_at: &row.started_at,
@@ -310,6 +356,11 @@ pub fn persist_untracked_installer_row(
         method: row.method.as_deref(),
         log_dir: row.log_dir.as_deref(),
         apply_run_id: None,
+        path: artifact_path.as_deref(),
+        sha256: row
+            .artifact
+            .as_ref()
+            .map(|artifact| artifact.sha256.as_str()),
     })?;
     Ok(())
 }
@@ -465,6 +516,7 @@ pub fn run_installer_capture(
 pub fn install_resolved(
     agent: &AgentConfig,
     entry: &RegistryEntry,
+    harness: &HarnessInstall,
     agent_env: HashMap<String, String>,
     workspace_root: &Path,
     dest_dir: &Path,
@@ -482,6 +534,7 @@ pub fn install_resolved(
     let mut result = install_resolved_capture(
         agent,
         entry,
+        harness,
         agent_env,
         workspace_root,
         dest_dir,
@@ -796,7 +849,10 @@ pub(crate) fn resolve_creates(
 }
 
 pub(super) fn sha256_of_file(path: &Path) -> Result<String> {
-    let bytes = std::fs::read(path).map_err(|source| StackError::AgentSpawnFailed { source })?;
+    let bytes = std::fs::read(path).map_err(|source| StackError::AgentBinaryInspect {
+        path: path.to_path_buf(),
+        source,
+    })?;
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
     Ok(format!("{:x}", hasher.finalize()))

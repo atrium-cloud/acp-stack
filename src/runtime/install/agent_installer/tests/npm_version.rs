@@ -103,6 +103,7 @@ exit 99
     let result = install_resolved_capture(
         &agent_config("agent"),
         &entry,
+        &HarnessInstall::Install,
         HashMap::new(),
         tempdir.path(),
         &dest_dir,
@@ -159,6 +160,7 @@ exit 99
     let result = install_resolved_capture(
         &agent_config("agent"),
         &entry,
+        &HarnessInstall::Install,
         HashMap::new(),
         tempdir.path(),
         &dest_dir,
@@ -205,6 +207,7 @@ exit 99
     let result = install_resolved_capture(
         &agent_config("agent"),
         &entry,
+        &HarnessInstall::Install,
         HashMap::new(),
         tempdir.path(),
         &dest_dir,
@@ -255,6 +258,7 @@ exit 99
     let result = install_resolved_capture(
         &agent_config("agent"),
         &entry,
+        &HarnessInstall::Install,
         HashMap::new(),
         tempdir.path(),
         &dest_dir,
@@ -305,6 +309,7 @@ exit 99
     let result = install_resolved_capture(
         &agent_config("agent"),
         &entry,
+        &HarnessInstall::Install,
         HashMap::new(),
         tempdir.path(),
         &dest_dir,

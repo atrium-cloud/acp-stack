@@ -55,7 +55,9 @@ Schema: `migrations/002_auth_failures_schema.sqlite.sql` (and the `.postgres.sql
 `installer_runs` is the audit table for agent install/update steps and `deps_apply` actions.
 
 - One row per executed step attempt. Fallback-chain attempts are separate rows.
-- Terminal `status` values: `ran`, `failed`, `timeout`, `error`, `skipped`, `config_error`, plus (deps apply only) `installed` and `privilege_required`.
+- Terminal `status` values: `ran`, `failed`, `timeout`, `error`, `skipped`, `config_error`, `kept`, plus (deps apply only) `installed` and `privilege_required`.
+- `kept` records an agent CLI that `acps init --existing-agent use-existing` left in place instead of installing one. The row carries the kept binary's path, sha256, and probed `--version`, and no `method`.
+- `path` and `sha256` (`migrations/028_installer_runs_artifact.sqlite.sql`) name the binary a `ran` or `kept` agent step left in place, as the command resolver finds it. They are NULL on every other row, on apt update rows, and on rows written before the migration. See [runtime.md](runtime.md#ownership) for how init reads them.
 
 ### Running-Row Lifecycle
 

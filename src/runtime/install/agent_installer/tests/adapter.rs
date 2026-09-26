@@ -28,6 +28,7 @@ fn adapter_entry_installs_harness_then_adapter_and_verifies_adapter_command() {
     let result = install_resolved_capture(
         &agent_config("adapter-agent"),
         &entry,
+        &HarnessInstall::Install,
         HashMap::new(),
         tempdir.path(),
         &dest_dir,
@@ -83,6 +84,7 @@ fn adapter_entry_runs_harness_and_adapter_install_steps_concurrently() {
     let result = install_resolved_capture(
         &agent_config("adapter-agent"),
         &entry,
+        &HarnessInstall::Install,
         HashMap::new(),
         tempdir.path(),
         &dest_dir,
@@ -133,6 +135,7 @@ fn adapter_entry_skips_harness_step_when_harness_is_provided_by_adapter() {
     let result = install_resolved_capture(
         &agent_config("adapter-agent"),
         &entry,
+        &HarnessInstall::Install,
         HashMap::new(),
         tempdir.path(),
         &dest_dir,
@@ -171,6 +174,7 @@ fn adapter_entry_runs_adapter_even_when_harness_fails() {
     let result = install_resolved_capture(
         &agent_config("adapter-agent"),
         &entry,
+        &HarnessInstall::Install,
         HashMap::new(),
         tempdir.path(),
         &dest_dir,

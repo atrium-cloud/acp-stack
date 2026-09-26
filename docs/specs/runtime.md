@@ -112,6 +112,13 @@ Pre-existing binaries follow the same gate:
 - One that fails the gate reads as absent, including on resumed `agent_install` steps, and is reinstalled.
 - One that fails its integrity pin is refused execution. It errors on the spot, or, on a resumed step, reads as absent so the reinstall can surface a still-mismatching pin in final verification.
 
+### Ownership
+
+- Every successful step records the binary it left in `installer_runs.path` and `installer_runs.sha256`: init, `acps agent install`, `POST /v1/agent/install`, and updates. An apt update records neither.
+- A resolved binary is acp-stack's when it links into `~/.local/lib/acp-stack/bundles/`, or when a `ran` row for the same agent and step recorded that path and sha256.
+- A binary the operator chose to keep is recorded on a `kept` row with its path, sha256, and probed version. Version reports read the newest `ran` or `kept` row per step, and managed update skips a step whose newest such row is `kept`.
+- Installs recorded before these columns existed carry neither, so their binaries read as not acp-stack's and a later init replaces them with the configured `[agent].harness_version`, else with the latest release.
+
 ### Install Environment
 
 Install steps run with a scrubbed environment:

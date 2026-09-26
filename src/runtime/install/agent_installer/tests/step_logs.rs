@@ -17,6 +17,7 @@ fn persist_step_logs_writes_files_and_sets_log_dir() {
         version: Some("v1.0.0".into()),
         log_dir: None,
         persisted_run_id: None,
+        artifact: None,
     };
     persist_step_logs_to_disk(&mut row, "test-agent", Some(tempdir.path()))
         .expect("logs should persist");
@@ -44,6 +45,7 @@ fn persist_step_logs_skips_when_streams_empty() {
         version: None,
         log_dir: None,
         persisted_run_id: None,
+        artifact: None,
     };
     persist_step_logs_to_disk(&mut row, "test-agent", Some(tempdir.path()))
         .expect("empty streams should be a no-op");
@@ -67,6 +69,7 @@ fn persist_step_logs_is_a_no_op_when_log_base_is_none() {
         version: None,
         log_dir: None,
         persisted_run_id: None,
+        artifact: None,
     };
     persist_step_logs_to_disk(&mut row, "test-agent", None)
         .expect("missing log base should be a no-op");

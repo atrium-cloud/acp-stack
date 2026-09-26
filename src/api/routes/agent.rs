@@ -28,8 +28,8 @@ use crate::runtime::agent::switch::{
     adapter_from_registry_entry, plan_agent_switch,
 };
 use crate::runtime::install::agent_installer::{
-    InstallProgress, InstallerSequenceResult, SharedInstallerSink, install_resolved_capture,
-    persist_untracked_installer_row, run_installer_capture,
+    HarnessInstall, InstallProgress, InstallerSequenceResult, SharedInstallerSink,
+    install_resolved_capture, persist_untracked_installer_row, run_installer_capture,
 };
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::runtime::install::skill_installer::{
@@ -241,6 +241,7 @@ async fn install_agent_for_config(
             install_resolved_capture(
                 &agent,
                 &entry,
+                &HarnessInstall::Install,
                 Default::default(),
                 &workspace_root,
                 &local_bin,

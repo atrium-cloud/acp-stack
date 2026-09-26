@@ -7,7 +7,9 @@ use crate::error::{Result, StackError};
 use crate::runtime::agent::provider_keys::{
     resolve_agent_environment, resolve_agent_environment_without_secrets,
 };
-use crate::runtime::install::agent_installer::{InstallerOutcome, install_resolved, run_installer};
+use crate::runtime::install::agent_installer::{
+    HarnessInstall, InstallerOutcome, install_resolved, run_installer,
+};
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::secrets::SecretStore;
 use crate::state::StateStore;
@@ -72,6 +74,7 @@ pub(super) fn install_configured_agent(
     install_resolved(
         &config.agent,
         entry,
+        &HarnessInstall::Install,
         Default::default(),
         &workspace_root,
         &local_bin_dir(home),

@@ -250,15 +250,20 @@ fn print_update_report(report: &crate::runtime::install::agent_updater::AgentUpd
         return;
     }
     for step in &report.steps {
-        let method = step.method.as_deref().unwrap_or("unknown");
+        // A kept agent CLI has no install method to name.
+        let via = step
+            .method
+            .as_deref()
+            .map(|method| format!(" via {method}"))
+            .unwrap_or_default();
         match (&step.installed, &step.latest) {
             (Some(installed), Some(latest)) => {
                 println!(
-                    "{}: {:?} via {} (installed {}, latest {})",
-                    step.step, step.status, method, installed, latest
+                    "{}: {:?}{} (installed {}, latest {})",
+                    step.step, step.status, via, installed, latest
                 );
             }
-            _ => println!("{}: {:?} via {}", step.step, step.status, method),
+            _ => println!("{}: {:?}{}", step.step, step.status, via),
         }
         if let Some(message) = step.message.as_deref() {
             println!("  {message}");

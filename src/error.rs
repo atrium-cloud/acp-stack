@@ -557,6 +557,13 @@ pub enum StackError {
     #[error("all install paths failed: {summary}")]
     AgentInstallAllPathsFailed { summary: String },
 
+    #[error("failed to inspect agent binary `{path}`: {source}")]
+    AgentBinaryInspect {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("requests to {domain} are rate limited; retry in {retry_after_secs}s")]
     DomainRateLimited {
         domain: String,

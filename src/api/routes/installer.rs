@@ -146,6 +146,8 @@ mod tests {
                 method: Some(INSTALLER_METHOD_SHELL),
                 log_dir: None,
                 apply_run_id: None,
+                path: None,
+                sha256: None,
             })
             .expect("running row");
 

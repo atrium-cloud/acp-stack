@@ -31,6 +31,7 @@ fn an_install_step_sees_a_resolved_python_interpreter() {
     let result = install_resolved_capture(
         &agent_config("python-env-agent"),
         &entry,
+        &HarnessInstall::Install,
         HashMap::new(),
         tempdir.path(),
         tempdir.path(),
