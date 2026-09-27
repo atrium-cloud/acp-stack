@@ -1,9 +1,10 @@
 //! Prompt/session input parsing and path resolution helpers.
 
 use super::*;
+use agent_client_protocol::schema::v1::Usage;
 
 pub(super) enum Outcome {
-    Settled(Result<PromptResponse>),
+    Settled(Result<Box<PromptResponse>>),
     Cancelled,
 }
 
@@ -23,6 +24,9 @@ pub(super) struct TerminalOutcome {
 /// Companion session-scoped event emitted alongside the terminal status write.
 pub(super) struct TerminalSessionEvent {
     pub(super) level: &'static str,
+    /// `acp` for counts the agent reported: the session status view reads any
+    /// other source as user activity.
+    pub(super) source: &'static str,
     pub(super) kind: &'static str,
     pub(super) message: &'static str,
     pub(super) payload_json: String,
@@ -49,7 +53,10 @@ pub(super) fn build_terminal_outcome_with_prompt_id(
                 error_message: None,
                 failure_class: None,
                 failure_detail_json: None,
-                session_event: None,
+                session_event: response
+                    .usage
+                    .as_ref()
+                    .map(|usage| usage_reported_event(usage, prompt_id_for_event)),
             }
         }
         Outcome::Settled(Err(err)) => {
@@ -90,6 +97,7 @@ pub(super) fn build_terminal_outcome_with_prompt_id(
                         failure_detail_json: Some(detail),
                         session_event: Some(TerminalSessionEvent {
                             level: "warn",
+                            source: EVENT_SOURCE_SYSTEM,
                             kind: EVENT_KIND_PROMPT_INFERENCE_FAILED,
                             message: "inference endpoint failure",
                             payload_json: payload,
@@ -115,6 +123,7 @@ pub(super) fn build_terminal_outcome_with_prompt_id(
                             failure_detail_json: None,
                             session_event: Some(TerminalSessionEvent {
                                 level: "error",
+                                source: EVENT_SOURCE_SYSTEM,
                                 kind: EVENT_KIND_PROMPT_ERRORED,
                                 message: "prompt failed",
                                 payload_json: payload,
@@ -136,6 +145,7 @@ pub(super) fn build_terminal_outcome_with_prompt_id(
                         failure_detail_json: None,
                         session_event: Some(TerminalSessionEvent {
                             level: "error",
+                            source: EVENT_SOURCE_SYSTEM,
                             kind: EVENT_KIND_PROMPT_ERRORED,
                             message: "prompt failed",
                             payload_json: payload,
@@ -153,6 +163,33 @@ pub(super) fn build_terminal_outcome_with_prompt_id(
             failure_detail_json: None,
             session_event: None,
         },
+    }
+}
+
+/// Flat snake_case scalars, the shape the external log mirror keeps; optional
+/// counts stay absent when the agent omitted them.
+fn usage_reported_event(usage: &Usage, prompt_id: Option<&str>) -> TerminalSessionEvent {
+    let mut payload = json!({
+        "prompt_id": prompt_id,
+        "total_tokens": usage.total_tokens,
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+    });
+    for (key, count) in [
+        ("thought_tokens", usage.thought_tokens),
+        ("cached_read_tokens", usage.cached_read_tokens),
+        ("cached_write_tokens", usage.cached_write_tokens),
+    ] {
+        if let Some(count) = count {
+            payload[key] = json!(count);
+        }
+    }
+    TerminalSessionEvent {
+        level: "info",
+        source: EVENT_SOURCE_ACP,
+        kind: EVENT_KIND_PROMPT_USAGE_REPORTED,
+        message: "agent turn usage reported",
+        payload_json: payload.to_string(),
     }
 }
 

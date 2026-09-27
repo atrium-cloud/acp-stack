@@ -92,6 +92,10 @@ pub(crate) struct AcpArgs {
     /// an adapter that never implemented the acp-stack extension behaves.
     #[arg(long)]
     pub(crate) no_echo_prompt_message_id: bool,
+    /// Attach this ACP `Usage` JSON to every `PromptResponse`, the way an
+    /// adapter that reports end-turn token usage settles its turns.
+    #[arg(long, value_parser = parse_prompt_usage)]
+    pub(crate) prompt_usage: Option<Usage>,
     /// Reject `session/prompt` with `invalidParams` for any session this process
     /// has not opened through `session/new`, `session/load`, `session/resume`, or
     /// `session/fork`, the way a restarted adapter rejects a session id it has
@@ -257,4 +261,8 @@ pub(crate) struct AcpArgs {
     pub(crate) expect_config_option: Vec<String>,
     #[arg(long)]
     pub(crate) write_pid: Option<PathBuf>,
+}
+
+fn parse_prompt_usage(raw: &str) -> Result<Usage, String> {
+    serde_json::from_str(raw).map_err(|err| format!("invalid ACP Usage JSON: {err}"))
 }

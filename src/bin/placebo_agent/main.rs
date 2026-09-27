@@ -19,7 +19,7 @@ use agent_client_protocol::schema::v1::{
     SessionListCapabilities, SessionMode, SessionModeState, SessionNotification,
     SessionResumeCapabilities, SessionUpdate, SetSessionConfigOptionRequest,
     SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse, StopReason,
-    TerminalId, TerminalOutputRequest, TextContent, ToolCallUpdate, ToolCallUpdateFields,
+    TerminalId, TerminalOutputRequest, TextContent, ToolCallUpdate, ToolCallUpdateFields, Usage,
     WaitForTerminalExitRequest, WriteTextFileRequest,
 };
 use agent_client_protocol::schema::v1::{PermissionOption, PermissionOptionKind};

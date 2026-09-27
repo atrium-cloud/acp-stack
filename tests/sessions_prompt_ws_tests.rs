@@ -712,6 +712,150 @@ async fn stalled_prompt_suppresses_late_terminal_failure_event() {
     );
 }
 
+const PROMPT_USAGE_JSON: &str = r#"{"totalTokens":1500,"inputTokens":200,"outputTokens":300,"cachedReadTokens":900,"cachedWriteTokens":100}"#;
+
+/// Submit a prompt and wait for it to settle, returning its id and final status.
+async fn submit_and_settle(harness: &Harness, session_id: &str, text: &str) -> (String, String) {
+    let submit: Value = http()
+        .post(format!(
+            "{}/v1/sessions/{}/prompt",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .json(&json!({ "prompt": text }))
+        .send()
+        .await
+        .expect("submit")
+        .json()
+        .await
+        .expect("submit json");
+    let prompt_id = submit["data"]["prompt_id"]
+        .as_str()
+        .expect("prompt id")
+        .to_owned();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(std::time::Instant::now() < deadline, "prompt never settled");
+        let state = harness.state.lock().await;
+        let status = state
+            .get_prompt(&prompt_id)
+            .expect("prompt lookup")
+            .map(|record| record.status);
+        drop(state);
+        if let Some(status) = status
+            && !matches!(status.as_str(), "pending" | "running")
+        {
+            return (prompt_id, status);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn prompt_usage_is_recorded_after_the_turn() {
+    let harness = Harness::spawn_with(|config| {
+        config
+            .agent
+            .args
+            .extend(["--prompt-usage".into(), PROMPT_USAGE_JSON.into()]);
+    })
+    .await;
+    let session_id = create_session(&harness).await;
+
+    let (prompt_id, status) = submit_and_settle(&harness, &session_id, "count my tokens").await;
+    assert_eq!(status, "completed");
+
+    let state = harness.state.lock().await;
+    let events = state
+        .query_session_events(&session_id, None, 100)
+        .expect("session events");
+    drop(state);
+    let usage_positions: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event.kind == "prompt.usage_reported")
+        .map(|(position, _)| position)
+        .collect();
+    assert_eq!(usage_positions.len(), 1, "events = {events:?}");
+    let last_agent_update = events
+        .iter()
+        .rposition(|event| event.kind == "session.update" && event.source == "acp")
+        .expect("agent streamed the turn");
+    assert!(
+        usage_positions[0] > last_agent_update,
+        "usage must follow the turn's last chunk: {events:?}"
+    );
+    let usage_event = &events[usage_positions[0]];
+    assert_eq!(usage_event.source, "acp");
+    let payload: Value = serde_json::from_str(&usage_event.payload_json).expect("payload json");
+    assert_eq!(
+        payload,
+        json!({
+            "prompt_id": prompt_id,
+            "total_tokens": 1500,
+            "input_tokens": 200,
+            "output_tokens": 300,
+            "cached_read_tokens": 900,
+            "cached_write_tokens": 100,
+        })
+    );
+}
+
+/// The usage row lands after the turn's last write, so its source decides who
+/// the status view says acted last.
+#[tokio::test]
+async fn prompt_usage_leaves_the_agent_as_last_actor() {
+    let harness = Harness::spawn_with(|config| {
+        config
+            .agent
+            .args
+            .extend(["--prompt-usage".into(), PROMPT_USAGE_JSON.into()]);
+    })
+    .await;
+    let session_id = create_session(&harness).await;
+
+    let (_, status) = submit_and_settle(&harness, &session_id, "who spoke last").await;
+    assert_eq!(status, "completed");
+
+    let body: Value = http()
+        .get(format!("{}/v1/sessions/-/status", harness.base_url))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("status")
+        .json()
+        .await
+        .expect("status json");
+    let session = body["data"]["sessions"]
+        .as_array()
+        .expect("sessions array")
+        .iter()
+        .find(|session| session["id"] == session_id.as_str())
+        .expect("session in status");
+    assert_eq!(session["last_activity_from"], "agent", "{session}");
+}
+
+#[tokio::test]
+async fn prompt_without_usage_records_no_usage_event() {
+    let harness = Harness::spawn().await;
+    let session_id = create_session(&harness).await;
+
+    let (_, status) = submit_and_settle(&harness, &session_id, "no usage here").await;
+    assert_eq!(status, "completed");
+
+    let state = harness.state.lock().await;
+    let events = state
+        .query_session_events(&session_id, None, 100)
+        .expect("session events");
+    drop(state);
+    assert!(
+        events
+            .iter()
+            .all(|event| event.kind != "prompt.usage_reported"),
+        "events = {events:?}"
+    );
+}
+
 #[tokio::test]
 async fn operator_disconnect_records_supplied_reason() {
     let harness = Harness::spawn().await;

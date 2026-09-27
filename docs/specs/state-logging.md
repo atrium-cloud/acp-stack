@@ -116,15 +116,18 @@ Common sources are `system`, `api`, `acp`, `command`, `permission`, `cli`, and `
 
 ### Prompt Lifecycle Event Kinds
 
-Session-scoped events that mirror terminal prompt transitions:
+Session-scoped events written when a prompt reaches a terminal status:
 
 | Kind                      | Level | Source   | Payload                                                                                | Emit site                                           |
 | ------------------------- | ----- | -------- | --------------------------------------------------------------------------------------- | --------------------------------------------------- |
 | `prompt.inference_failed` | warn  | `system` | `{ "prompt_id", "status_code": <u16>, "reason_category": "<label>", "cause": "<text>" }` | Supervisor, on `StackError::InferenceRequestFailed` |
 | `prompt.stalled`          | warn  | `system` | `{ "prompt_id", "threshold_secs": <u64>, "cause": "<text>" }`                            | Stale-prompt sweeper, after flipping the row        |
 | `prompt.errored`          | error | `system` | `{ "prompt_id", "error_code": "<code>", "cause": "<text>" }`                             | Supervisor, on any other terminal error             |
+| `prompt.usage_reported`   | info  | `acp`    | `{ "prompt_id", "total_tokens", "input_tokens", "output_tokens", "thought_tokens"?, "cached_read_tokens"?, "cached_write_tokens"? }` | Supervisor, when the agent's `PromptResponse` carries `usage` |
 
 `cause` carries the same text the prompt row's `error_message` holds, so a transcript distinguishes a rate limit from a crashed subprocess without a second read. It is the error's public message, which the scrub keeps free of local paths, I/O text, and subprocess output. On a stall it is the sweeper's stall reason.
+
+`prompt.usage_reported` carries ACP's unstable end-turn `PromptResponse.usage` counts as the agent reported them, for completed and cancelled turns alike. Whether the counts cover the turn or the whole session follows the adapter. Optional counts are present only when the agent sent them.
 
 ### Session Lifecycle Event Kinds
 
@@ -220,7 +223,7 @@ A fork child starts with the part of its parent's durable record that the fork h
 The child receives:
 
 - Events: the parent's conversation rows older than the fork point (all of them when the fork holds every prompt), in their original `(created_at, id)` order. The child's own `session.forked` row follows them.
-- Conversation rows: `session.update` from both sources, `prompt.inference_failed`, `prompt.stalled`, `prompt.errored`, `session.cancel_requested`, `terminal.finished`, and the session-scoped ACP permission decisions (`permission.approved`, `permission.denied`, `permission.cancelled`, `permission.expired`). Every other session-scoped kind stays with the parent:
+- Conversation rows: `session.update` from both sources, `prompt.inference_failed`, `prompt.stalled`, `prompt.errored`, `prompt.usage_reported`, `session.cancel_requested`, `terminal.finished`, and the session-scoped ACP permission decisions (`permission.approved`, `permission.denied`, `permission.cancelled`, `permission.expired`). Every other session-scoped kind stays with the parent:
     - `session.created`, `session.loaded`, `session.resumed`, `session.available`, and `session.closed` track the parent session's own lifecycle.
     - `session.forked` and `session.fork.created_child` mark the parent's own place in fork lineage. The child writes its own `session.forked`.
     - `session.capability_ignored`, `mcp.session_attached`, and `mcp.session_skipped` record what the parent's create or attach provisioned. The fork writes the child's own `mcp.session_skipped` when it skips servers.
@@ -298,6 +301,7 @@ The `security_category` filter clusters the flat `security.*` kinds into operato
 
 - Usage fields stay `null` when the configured agent does not report them.
 - Standard ACP `usage_update` notifications provide context-window snapshots; `context_window_used_max` is the largest reported usage in the requested metrics window.
+- `tokens_input` and `tokens_output` sum `usage.reported` rows. End-turn counts live on the `prompt.usage_reported` events.
 - Cumulative cost remains in the durable usage event rather than being aggregated across sessions or currencies.
 - The shape is additive: existing keys remain stable as new dimensions are added.
 

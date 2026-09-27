@@ -91,11 +91,12 @@ use crate::runtime::mediation::permissions::PermissionService;
 use crate::secrets::SecretStore;
 use crate::state::{
     EVENT_KIND_MCP_SESSION_SKIPPED, EVENT_KIND_PROMPT_ERRORED, EVENT_KIND_PROMPT_INFERENCE_FAILED,
-    EVENT_KIND_SESSION_AVAILABLE, EVENT_KIND_SESSION_CANCEL_REQUESTED,
-    EVENT_KIND_SESSION_CAPABILITY_IGNORED, EVENT_KIND_SESSION_UPDATE, EVENT_SOURCE_SYSTEM,
-    FailureClass, ListedSessionRecord, NewPromptRecord, NewSessionRecord, PromptRecord,
-    PromptStatus, SESSION_STATUS_ACTIVE, SESSION_STATUS_CLOSED, SessionRecord, StateStore,
-    next_prompt_id, next_prompt_message_id, next_session_id,
+    EVENT_KIND_PROMPT_USAGE_REPORTED, EVENT_KIND_SESSION_AVAILABLE,
+    EVENT_KIND_SESSION_CANCEL_REQUESTED, EVENT_KIND_SESSION_CAPABILITY_IGNORED,
+    EVENT_KIND_SESSION_UPDATE, EVENT_SOURCE_ACP, EVENT_SOURCE_SYSTEM, FailureClass,
+    ListedSessionRecord, NewPromptRecord, NewSessionRecord, PromptRecord, PromptStatus,
+    SESSION_STATUS_ACTIVE, SESSION_STATUS_CLOSED, SessionRecord, StateStore, next_prompt_id,
+    next_prompt_message_id, next_session_id,
 };
 
 use self::bridge::*;
@@ -954,5 +955,96 @@ mod tests {
             terminal.session_event.expect("errored event").kind,
             EVENT_KIND_PROMPT_ERRORED
         );
+    }
+
+    fn settled_with_usage(stop_reason: StopReason, usage: serde_json::Value) -> TerminalOutcome {
+        let usage = serde_json::from_value(usage).expect("usage json");
+        build_terminal_outcome_with_prompt_id(
+            Outcome::Settled(Ok(Box::new(
+                PromptResponse::new(stop_reason).usage(Some(usage)),
+            ))),
+            Some("prm_usage"),
+        )
+    }
+
+    #[test]
+    fn usage_event_carries_every_reported_count() {
+        let terminal = settled_with_usage(
+            StopReason::EndTurn,
+            json!({
+                "totalTokens": 1500,
+                "inputTokens": 200,
+                "outputTokens": 300,
+                "thoughtTokens": 40,
+                "cachedReadTokens": 900,
+                "cachedWriteTokens": 100,
+            }),
+        );
+
+        assert_eq!(terminal.status, PromptStatus::Completed);
+        let event = terminal.session_event.expect("usage event");
+        assert_eq!(event.kind, EVENT_KIND_PROMPT_USAGE_REPORTED);
+        assert_eq!(event.level, "info");
+        assert_eq!(event.source, EVENT_SOURCE_ACP);
+        let payload: serde_json::Value =
+            serde_json::from_str(&event.payload_json).expect("payload is json");
+        assert_eq!(
+            payload,
+            json!({
+                "prompt_id": "prm_usage",
+                "total_tokens": 1500,
+                "input_tokens": 200,
+                "output_tokens": 300,
+                "thought_tokens": 40,
+                "cached_read_tokens": 900,
+                "cached_write_tokens": 100,
+            })
+        );
+    }
+
+    #[test]
+    fn usage_event_omits_counts_the_agent_left_out() {
+        let terminal = settled_with_usage(
+            StopReason::EndTurn,
+            json!({ "totalTokens": 500, "inputTokens": 200, "outputTokens": 300 }),
+        );
+
+        let event = terminal.session_event.expect("usage event");
+        let payload: serde_json::Value =
+            serde_json::from_str(&event.payload_json).expect("payload is json");
+        assert_eq!(
+            payload,
+            json!({
+                "prompt_id": "prm_usage",
+                "total_tokens": 500,
+                "input_tokens": 200,
+                "output_tokens": 300,
+            })
+        );
+    }
+
+    #[test]
+    fn cancelled_turn_keeps_its_usage() {
+        let terminal = settled_with_usage(
+            StopReason::Cancelled,
+            json!({ "totalTokens": 50, "inputTokens": 20, "outputTokens": 30 }),
+        );
+
+        assert_eq!(terminal.status, PromptStatus::Cancelled);
+        assert_eq!(
+            terminal.session_event.expect("usage event").kind,
+            EVENT_KIND_PROMPT_USAGE_REPORTED
+        );
+    }
+
+    #[test]
+    fn settled_turn_without_usage_writes_no_event() {
+        let terminal = build_terminal_outcome_with_prompt_id(
+            Outcome::Settled(Ok(Box::new(PromptResponse::new(StopReason::EndTurn)))),
+            Some("prm_no_usage"),
+        );
+
+        assert_eq!(terminal.status, PromptStatus::Completed);
+        assert!(terminal.session_event.is_none());
     }
 }

@@ -1335,6 +1335,7 @@ const CONVERSATION_KINDS: &[&str] = &[
     "prompt.inference_failed",
     "prompt.stalled",
     "prompt.errored",
+    "prompt.usage_reported",
     "session.cancel_requested",
     "terminal.finished",
     "permission.approved",
@@ -1481,6 +1482,23 @@ fn complete_turn(store: &StateStore, turn: &SeededTurn) {
         .expect("prompt completed");
 }
 
+/// The usage row the supervisor writes after a turn's response carried usage.
+fn report_turn_usage(store: &StateStore, session_id: &str, turn: &SeededTurn) {
+    let payload = serde_json::json!({
+        "prompt_id": turn.prompt_id,
+        "total_tokens": 50,
+        "input_tokens": 20,
+        "output_tokens": 30,
+    });
+    append_session_event(
+        store,
+        session_id,
+        "prompt.usage_reported",
+        EVENT_SOURCE_ACP,
+        &payload.to_string(),
+    );
+}
+
 /// Fail a turn on an upstream 503, with the row and event the supervisor writes.
 fn fail_turn_on_inference(store: &StateStore, session_id: &str, turn: &SeededTurn) {
     store
@@ -1551,6 +1569,7 @@ fn seed_fork_parent(store: &StateStore) -> [SeededTurn; 3] {
         r#"{"command":"ls"}"#,
     );
     complete_turn(store, &first);
+    report_turn_usage(store, FORK_PARENT, &first);
     append_session_event(
         store,
         FORK_PARENT,
@@ -1569,6 +1588,7 @@ fn seed_fork_parent(store: &StateStore) -> [SeededTurn; 3] {
     fail_turn_on_inference(store, FORK_PARENT, &second);
     let third = seed_turn(store, FORK_PARENT, "third turn");
     complete_turn(store, &third);
+    report_turn_usage(store, FORK_PARENT, &third);
     [first, second, third]
 }
 
@@ -1616,11 +1636,12 @@ fn a_fork_child_carries_the_parent_conversation_before_the_first_prompt_it_does_
         child_log.iter().map(event_projection).collect::<Vec<_>>(),
         expected
     );
-    // The held turns' permission, terminal, and failure rows all came along.
+    // The held turns' permission, terminal, failure, and usage rows all came along.
     for kind in [
         "permission.approved",
         "terminal.finished",
         "prompt.inference_failed",
+        "prompt.usage_reported",
     ] {
         assert!(
             child_log.iter().any(|event| event.kind == kind),

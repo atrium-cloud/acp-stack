@@ -37,6 +37,8 @@ pub const EVENT_KIND_PROMPT_INFERENCE_FAILED: &str = "prompt.inference_failed";
 pub const EVENT_KIND_PROMPT_STALLED: &str = "prompt.stalled";
 /// The prompt reached terminal `errored` for a non-inference reason.
 pub const EVENT_KIND_PROMPT_ERRORED: &str = "prompt.errored";
+/// The agent's `PromptResponse` for a settled turn carried token usage.
+pub const EVENT_KIND_PROMPT_USAGE_REPORTED: &str = "prompt.usage_reported";
 /// MCP servers were dropped because the agent does not advertise their transport.
 pub const EVENT_KIND_MCP_SESSION_SKIPPED: &str = "mcp.session_skipped";
 /// A configured mode or model was ignored because the agent lacks the capability.

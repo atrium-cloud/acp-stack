@@ -8,13 +8,16 @@ use super::*;
 
 /// Session-scoped event kinds that make up a conversation. A fork child
 /// inherits these rows; every other session-scoped kind records the parent's
-/// own lifecycle or accounting and stays with the parent, so a lifecycle
-/// transition or a usage report is never counted on two sessions.
+/// own lifecycle or derived accounting and stays with the parent, so a
+/// lifecycle transition or a usage report lifted from an inherited
+/// `session.update` is never counted on two sessions.
 const FORK_INHERITED_EVENT_KINDS: &[&str] = &[
     EVENT_KIND_SESSION_UPDATE,
     EVENT_KIND_PROMPT_INFERENCE_FAILED,
     EVENT_KIND_PROMPT_STALLED,
     EVENT_KIND_PROMPT_ERRORED,
+    // Held turns keep their token usage; no inherited row rebuilds it.
+    EVENT_KIND_PROMPT_USAGE_REPORTED,
     EVENT_KIND_SESSION_CANCEL_REQUESTED,
     EVENT_KIND_TERMINAL_FINISHED,
     // The session-scoped decisions on a turn's ACP permission requests.

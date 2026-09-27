@@ -1,6 +1,6 @@
 use acp_stack::state::{
-    EVENT_KIND_PROMPT_INFERENCE_FAILED, EVENT_SOURCE_SYSTEM, FailureClass, NewPromptRecord,
-    NewSessionRecord, PromptStatus,
+    EVENT_KIND_PROMPT_INFERENCE_FAILED, EVENT_KIND_PROMPT_USAGE_REPORTED, EVENT_SOURCE_SYSTEM,
+    FailureClass, NewPromptRecord, NewSessionRecord, PromptStatus,
 };
 
 use crate::common::state::fresh_state;
@@ -160,6 +160,17 @@ fn metrics_summary_exposes_usage_and_websocket_metrics() {
             "acp",
             "",
             r#"{"context_window_used":4096,"context_window_max":16384,"cost_amount":1.25,"cost_currency":"USD"}"#,
+        )
+        .unwrap();
+    // Adapters disagree on whether end-turn usage is per turn or cumulative, so
+    // those rows stay out of the token sums.
+    store
+        .append_event_with_source(
+            "info",
+            EVENT_KIND_PROMPT_USAGE_REPORTED,
+            "acp",
+            "",
+            r#"{"prompt_id":"prm_usage","total_tokens":1500,"input_tokens":1000,"output_tokens":500}"#,
         )
         .unwrap();
     store

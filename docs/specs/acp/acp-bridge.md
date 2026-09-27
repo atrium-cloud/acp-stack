@@ -194,6 +194,8 @@ Two derived events are lifted out of the verbatim `session.update` stream when t
 - `usage.reported`: standard ACP context-window/cost snapshots plus recognized legacy token usage.
 - `tool.execute`: a `tool_call`/`tool_call_update` block whose kind is `execute`, meaning a shell run the agent performs through its own built-in tools rather than client terminals. The command line is extracted from `rawInput.command` when present.
 
+A turn's `PromptResponse.usage` (ACP's unstable end-turn token usage) is recorded as a `prompt.usage_reported` session event once the turn settles. See Prompt Lifecycle Event Kinds in `docs/specs/state-logging.md`.
+
 Other projections off the same stream:
 
 - Standard `session_info_update` notifications patch the local session title and preserve agent timestamps and metadata in the session record.

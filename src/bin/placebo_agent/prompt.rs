@@ -127,7 +127,7 @@ pub(crate) async fn handle_prompt(
     // client's `session/cancel` is processed while the turn is still open.
     // An inline await (as `--prompt-stall-after-update` does) would park the
     // loop instead and the notification would never be read.
-    let echo_message_id = !args.no_echo_prompt_message_id;
+    let fields = ResponseFields::from_args(&args);
     if args.prompt_await_permission {
         let rounds = args.prompt_await_permission_rounds;
         let permission_connection = connection.clone();
@@ -166,7 +166,7 @@ pub(crate) async fn handle_prompt(
                 RequestPermissionOutcome::Cancelled => StopReason::Cancelled,
                 _ => StopReason::EndTurn,
             };
-            respond_to_prompt(request, responder, stop_reason, echo_message_id)
+            respond_to_prompt(request, responder, stop_reason, fields)
         });
     }
     if args.prompt_never_settle {
@@ -195,7 +195,7 @@ pub(crate) async fn handle_prompt(
                 tokio::time::sleep(CANCEL_WAIT_POLL_INTERVAL).await;
             }
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-            respond_to_prompt(request, responder, StopReason::Cancelled, echo_message_id)
+            respond_to_prompt(request, responder, StopReason::Cancelled, fields)
         });
     }
     if args.prompt_stall_after_update {
@@ -270,9 +270,9 @@ async fn finish_prompt(
     // by the next turn to complete and removed, so it settles this turn as cancelled
     // without leaking onto the one after. The off-loop settle fixture uses the epoch
     // count instead; the two modes never run in the same process.
-    let (stop_reason, echo_message_id) = {
+    let (stop_reason, fields) = {
         let mut state = state.lock().await;
-        let echo_message_id = !state.args.no_echo_prompt_message_id;
+        let fields = ResponseFields::from_args(&state.args);
         let stop_reason = if state
             .cancelled_sessions
             .remove(request.session_id.0.as_ref())
@@ -281,21 +281,36 @@ async fn finish_prompt(
         } else {
             StopReason::EndTurn
         };
-        (stop_reason, echo_message_id)
+        (stop_reason, fields)
     };
-    respond_to_prompt(request, responder, stop_reason, echo_message_id)
+    respond_to_prompt(request, responder, stop_reason, fields)
+}
+
+/// The optional parts of a `PromptResponse`, fixed per process by the CLI flags.
+struct ResponseFields {
+    echo_message_id: bool,
+    usage: Option<Usage>,
+}
+
+impl ResponseFields {
+    fn from_args(args: &AcpArgs) -> Self {
+        Self {
+            echo_message_id: !args.no_echo_prompt_message_id,
+            usage: args.prompt_usage.clone(),
+        }
+    }
 }
 
 fn respond_to_prompt(
     request: PromptRequest,
     responder: Responder<PromptResponse>,
     stop_reason: StopReason,
-    echo_message_id: bool,
+    fields: ResponseFields,
 ) -> agent_client_protocol::Result<()> {
     // Echo the local message-id extension: acp-stack treats `_meta.acpStack.messageId` on the
     // response as the acknowledgment of the one it stamped on `session/prompt`.
-    let mut response = PromptResponse::new(stop_reason);
-    if !echo_message_id {
+    let mut response = PromptResponse::new(stop_reason).usage(fields.usage);
+    if !fields.echo_message_id {
         return responder.respond(response);
     }
     if let Some(message_id) = request

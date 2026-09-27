@@ -28,6 +28,10 @@ const EVENTS_PAYLOAD_KEEP: &[&str] = &[
     "exit_code",
     "input_tokens",
     "output_tokens",
+    "total_tokens",
+    "thought_tokens",
+    "cached_read_tokens",
+    "cached_write_tokens",
     "context_window_used",
     "context_window_max",
     "cost_amount",
@@ -35,6 +39,7 @@ const EVENTS_PAYLOAD_KEEP: &[&str] = &[
     "agent_id",
     "command_id",
     "request_id",
+    "prompt_id",
     "bind",
     "client_label",
     "reason_code",
@@ -286,6 +291,36 @@ mod tests {
         assert_eq!(payload.get("cost_amount"), Some(&json!(1.25)));
         assert_eq!(payload.get("cost_currency"), Some(&json!("USD")));
         assert!(payload.get("untrusted_detail").is_none());
+    }
+
+    #[test]
+    fn events_payload_preserves_end_turn_usage_counts() {
+        let mut row = obj(json!({
+            "id": "evt_turn_usage",
+            "kind": "prompt.usage_reported",
+            "payload_json": {
+                "prompt_id": "prm_1",
+                "total_tokens": 1540,
+                "input_tokens": 200,
+                "output_tokens": 300,
+                "thought_tokens": 40,
+                "cached_read_tokens": 900,
+                "cached_write_tokens": 100
+            }
+        }));
+        redact_row("events", &mut row).expect("redact events");
+        let payload = row.get("payload_json").and_then(Value::as_object).unwrap();
+        assert_eq!(payload.get("prompt_id"), Some(&json!("prm_1")));
+        for (key, count) in [
+            ("total_tokens", 1540),
+            ("input_tokens", 200),
+            ("output_tokens", 300),
+            ("thought_tokens", 40),
+            ("cached_read_tokens", 900),
+            ("cached_write_tokens", 100),
+        ] {
+            assert_eq!(payload.get(key), Some(&json!(count)), "{key}");
+        }
     }
 
     #[test]

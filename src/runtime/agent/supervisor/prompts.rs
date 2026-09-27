@@ -132,7 +132,7 @@ impl AgentSupervisor {
 
             let bridge_call = bridge.prompt_session(acp_request);
             let outcome = tokio::select! {
-                result = bridge_call => Outcome::Settled(result),
+                result = bridge_call => Outcome::Settled(result.map(Box::new)),
                 _ = cancel_inner.cancelled() => Outcome::Cancelled,
             };
             if let Outcome::Settled(Ok(response)) = &outcome {
@@ -221,7 +221,7 @@ impl AgentSupervisor {
                         &session_id_owned,
                         event.level,
                         event.kind,
-                        EVENT_SOURCE_SYSTEM,
+                        event.source,
                         event.message,
                         &event.payload_json,
                     )

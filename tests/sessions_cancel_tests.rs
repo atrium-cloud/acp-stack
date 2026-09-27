@@ -59,6 +59,36 @@ async fn cancel_waits_for_a_delayed_agent_acknowledgement() {
 }
 
 #[tokio::test]
+async fn cancelled_turn_records_the_agents_usage() {
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.extend([
+            "--prompt-settle-cancel-after-ms".to_owned(),
+            "100".to_owned(),
+            "--prompt-usage".to_owned(),
+            r#"{"totalTokens":50,"inputTokens":20,"outputTokens":30}"#.to_owned(),
+        ]);
+    })
+    .await;
+    let session_id = create_session(&harness).await;
+    let prompt_id = submit_prompt(&harness, &session_id, "cancel after spending").await;
+    await_agent_entered_the_turn(&harness, &session_id).await;
+
+    let cancel = cancel_session(&harness, &session_id).await;
+    assert_eq!(cancel.status(), StatusCode::OK);
+
+    let usage = session_events(&harness, &session_id)
+        .await
+        .into_iter()
+        .find(|event| event["kind"] == "prompt.usage_reported")
+        .expect("usage event on the cancelled turn");
+    let payload: Value =
+        serde_json::from_str(usage["payload_json"].as_str().expect("payload_json"))
+            .expect("payload json");
+    assert_eq!(payload["prompt_id"], prompt_id.as_str(), "{payload}");
+    assert_eq!(payload["total_tokens"], 50, "{payload}");
+}
+
+#[tokio::test]
 async fn cancel_fails_when_the_agent_never_settles_the_turn() {
     let harness = Harness::spawn_with(|config| {
         config.agent.args.push("--prompt-never-settle".to_owned());
