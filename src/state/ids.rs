@@ -3,6 +3,7 @@
 //! process start, so the PID is what disambiguates concurrent `acps`
 //! invocations landing in the same nanosecond.
 
+use base64::Engine as _;
 use chrono::{SecondsFormat, Utc};
 use rand::RngExt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -100,6 +101,14 @@ pub fn next_prompt_message_id() -> String {
         bytes[14],
         bytes[15],
     )
+}
+
+/// A random 16-byte token, base64url without padding, naming one opening of
+/// the state database.
+pub(super) fn next_feed_epoch() -> String {
+    let mut bytes = [0u8; 16];
+    rand::rng().fill(&mut bytes);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
 pub fn next_command_id() -> String {

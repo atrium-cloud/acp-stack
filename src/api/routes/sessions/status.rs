@@ -35,6 +35,9 @@ pub(crate) struct SessionsStatusResponse {
     active_count: usize,
     truncated: bool,
     sessions: Vec<SessionStatusSessionResponse>,
+    /// The change-feed epoch the rows' `change_seq` values belong to, as on
+    /// `GET /v1/sessions/-/changes`.
+    feed_epoch: String,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -56,6 +59,11 @@ pub(crate) struct SessionStatusSessionResponse {
     prompt: Option<SessionStatusPromptResponse>,
     permission: Option<SessionStatusPermissionResponse>,
     prompt_stream_started_at: Option<String>,
+    /// Position of the session's latest change in
+    /// `GET /v1/sessions/-/changes`.
+    change_seq: u64,
+    /// `seq` of the session's newest event, `0` when it has none.
+    event_seq: u64,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -125,6 +133,8 @@ impl SessionStatusSessionResponse {
             prompt,
             permission,
             prompt_stream_started_at: record.prompt_stream_started_at,
+            change_seq: record.change_seq,
+            event_seq: record.event_seq,
         })
     }
 }
@@ -194,6 +204,7 @@ pub(crate) async fn sessions_status_handler(
         Some(&target.target_id),
         query_limit,
     )?;
+    let feed_epoch = store.feed_epoch().to_owned();
     drop(store);
     let truncated = rows.len() > limit as usize;
     if truncated {
@@ -217,6 +228,7 @@ pub(crate) async fn sessions_status_handler(
         active_count,
         truncated,
         sessions,
+        feed_epoch,
     }))
 }
 

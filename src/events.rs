@@ -16,6 +16,10 @@ pub struct LiveEvent {
     pub topic: String,
     #[serde(rename = "createdAt")]
     pub created_at: String,
+    /// The event's position in its session's log; present on frames that
+    /// carry a session-scoped `events` row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
     pub payload: Value,
 }
 
@@ -63,6 +67,7 @@ impl EventHub {
             id: event.id.clone(),
             topic: format!("sessions.{session_id}"),
             created_at: event.created_at.clone(),
+            seq: event.seq,
             payload: json!({
                 "kind": event.kind,
                 "source": event.source,
@@ -78,6 +83,7 @@ impl EventHub {
             id: event.id.clone(),
             topic: "workspace".to_owned(),
             created_at: event.created_at.clone(),
+            seq: None,
             payload: json!({
                 "kind": event.kind,
                 "data": data,
@@ -93,6 +99,7 @@ impl EventHub {
             id: event.id.clone(),
             topic: format!("commands.{command_id}"),
             created_at: event.created_at.clone(),
+            seq: None,
             payload: json!({
                 "kind": event.kind,
                 "data": data,
@@ -108,6 +115,7 @@ impl EventHub {
             id: id.to_owned(),
             topic: "agent.lifecycle".to_owned(),
             created_at: created_at.to_owned(),
+            seq: None,
             payload: json!({
                 "kind": kind,
                 "data": data,
@@ -123,6 +131,7 @@ impl EventHub {
             id: id.to_owned(),
             topic: "status".to_owned(),
             created_at: created_at.to_owned(),
+            seq: None,
             payload: json!({
                 "kind": kind,
                 "data": data,
@@ -138,6 +147,7 @@ impl EventHub {
             id: id.to_owned(),
             topic: "permissions".to_owned(),
             created_at: created_at.to_owned(),
+            seq: None,
             payload: json!({
                 "kind": kind,
                 "data": data,
@@ -175,6 +185,7 @@ impl EventHub {
             id: event.id.clone(),
             topic: "logs".to_owned(),
             created_at: event.created_at.clone(),
+            seq: event.seq,
             payload: json!({
                 "kind": event.kind,
                 "data": Value::Object(data_object),
@@ -197,6 +208,7 @@ mod tests {
             payload_json: "{}".to_owned(),
             source: "system".to_owned(),
             session_id: None,
+            seq: None,
         }
     }
 

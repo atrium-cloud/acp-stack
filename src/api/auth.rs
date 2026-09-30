@@ -373,6 +373,7 @@ fn should_skip_api_request_log(path: &str) -> bool {
     path == "/v1/ws"
         || path == "/v1/health/live"
         || path == "/v1/health/ready"
+        || path == "/v1/sessions/-/changes"
         || path.starts_with("/v1/status")
 }
 

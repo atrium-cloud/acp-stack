@@ -2,6 +2,16 @@
 
 use super::*;
 
+/// Stamp the session that owns `prompt_id` with the next `change_seq`.
+fn bump_prompt_session_change(conn: &rusqlite::Connection, prompt_id: &str) -> Result<()> {
+    let session_id: String = conn.query_row(
+        "SELECT session_id FROM prompts WHERE id = ?1",
+        params![prompt_id],
+        |row| row.get(0),
+    )?;
+    bump_session_change(conn, &session_id)
+}
+
 impl StateStore {
     pub fn insert_prompt(&self, record: NewPromptRecord) -> Result<PromptRecord> {
         self.insert_prompt_with_message_id(record, None)
@@ -46,7 +56,7 @@ impl StateStore {
                     row.message_id,
                 ],
             )?;
-            Ok(())
+            bump_session_change(conn, &row.session_id)
         })?;
         Ok(row)
     }
@@ -108,7 +118,7 @@ impl StateStore {
                     id: prompt_id.to_owned(),
                 });
             }
-            Ok(())
+            bump_prompt_session_change(conn, prompt_id)
         })
     }
 
@@ -136,7 +146,7 @@ impl StateStore {
                     id: prompt_id.to_owned(),
                 });
             }
-            Ok(())
+            bump_prompt_session_change(conn, prompt_id)
         })
     }
 
@@ -252,16 +262,16 @@ impl StateStore {
             Ok(true)
         };
 
-        if !self.external_logging_enabled() {
-            return update(self.connection());
-        }
         let tx = rusqlite::Transaction::new_unchecked(
             self.connection(),
             rusqlite::TransactionBehavior::Immediate,
         )?;
         let updated = update(&tx)?;
         if updated {
-            sink_outbox::enqueue(&tx, "prompts", id, &now)?;
+            bump_prompt_session_change(&tx, id)?;
+            if self.external_logging_enabled() {
+                sink_outbox::enqueue(&tx, "prompts", id, &now)?;
+            }
         }
         tx.commit()?;
         Ok(updated)
@@ -271,8 +281,14 @@ impl StateStore {
     /// startup so prompts orphaned by a crash still settle for pollers.
     pub fn reconcile_orphaned_prompts(&self, reason: &str) -> Result<usize> {
         let now = current_timestamp();
-        if !self.external_logging_enabled() {
-            let affected = self.connection().execute(
+        // One transaction covers the UPDATE, the change-feed stamps, and the
+        // outbox enqueue, so the settled rows reach every reader together.
+        let tx = rusqlite::Transaction::new_unchecked(
+            self.connection(),
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let settled: Vec<(String, String)> = {
+            let mut statement = tx.prepare(
                 r#"
                 UPDATE prompts
                 SET status = 'errored',
@@ -281,40 +297,22 @@ impl StateStore {
                     error_message = ?2,
                     failure_class = 'agent_process'
                 WHERE status IN ('pending', 'running')
+                RETURNING id, session_id
                 "#,
-                params![now, reason],
             )?;
-            return Ok(affected);
-        }
-        // Collect affected ids first so the outbox enqueue is transactional
-        // with the UPDATE.
-        let tx = rusqlite::Transaction::new_unchecked(
-            self.connection(),
-            rusqlite::TransactionBehavior::Immediate,
-        )?;
-        let ids: Vec<String> = {
-            let mut statement =
-                tx.prepare("SELECT id FROM prompts WHERE status IN ('pending', 'running')")?;
-            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            let rows = statement.query_map(params![now, reason], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
-        let affected = tx.execute(
-            r#"
-            UPDATE prompts
-            SET status = 'errored',
-                updated_at = ?1,
-                error_code = 'agent.daemon_restart',
-                error_message = ?2,
-                failure_class = 'agent_process'
-            WHERE status IN ('pending', 'running')
-            "#,
-            params![now, reason],
-        )?;
-        for id in &ids {
-            sink_outbox::enqueue(&tx, "prompts", id, &now)?;
+        for (id, session_id) in &settled {
+            bump_session_change(&tx, session_id)?;
+            if self.external_logging_enabled() {
+                sink_outbox::enqueue(&tx, "prompts", id, &now)?;
+            }
         }
         tx.commit()?;
-        Ok(affected)
+        Ok(settled.len())
     }
 
     /// Mark every `pending`/`running` prompt older than `now - threshold` as
@@ -341,27 +339,9 @@ impl StateStore {
             })?;
         let cutoff_string = cutoff.to_rfc3339_opts(SecondsFormat::Nanos, true);
 
-        if !self.external_logging_enabled() {
-            let mut statement = self.connection().prepare(
-                r#"
-                UPDATE prompts
-                SET status = 'stalled',
-                    updated_at = ?1,
-                    error_code = 'prompt.stalled',
-                    error_message = ?2,
-                    failure_class = 'stalled'
-                WHERE status IN ('pending', 'running')
-                  AND updated_at < ?3
-                RETURNING id, session_id
-                "#,
-            )?;
-            let rows = statement.query_map(params![now_string, reason, cutoff_string], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?;
-            return Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?);
-        }
-        // The UPDATE ... RETURNING and the per-prompt outbox enqueue must share
-        // one IMMEDIATE transaction so the terminal status reaches the sink atomically.
+        // The UPDATE ... RETURNING, the change-feed stamps, and the per-prompt
+        // outbox enqueue share one IMMEDIATE transaction so the terminal status
+        // reaches every reader atomically.
         let tx = rusqlite::Transaction::new_unchecked(
             self.connection(),
             rusqlite::TransactionBehavior::Immediate,
@@ -385,8 +365,11 @@ impl StateStore {
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
-        for (id, _session_id) in &pairs {
-            sink_outbox::enqueue(&tx, "prompts", id, &now_string)?;
+        for (id, session_id) in &pairs {
+            bump_session_change(&tx, session_id)?;
+            if self.external_logging_enabled() {
+                sink_outbox::enqueue(&tx, "prompts", id, &now_string)?;
+            }
         }
         tx.commit()?;
         Ok(pairs)

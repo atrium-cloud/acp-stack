@@ -72,25 +72,31 @@ pub(crate) async fn sessions_delete_handler(
         });
     }
     let target = state.existing_session_target(&stored_target_id).await?;
+    // The supervisor settles the session's pending permissions after the agent
+    // confirms and before the local wipe.
     let deleted = target
         .supervisor
-        .delete_session(&id, &state.state)
+        .delete_session(
+            &id,
+            &state.state,
+            &state.permissions,
+            SESSION_DELETED_PERMISSION_REASON,
+        )
         .await?
         .is_some();
-    cancel_pending_acp_permissions_for_session(&state, &id, SESSION_DELETED_PERMISSION_REASON)
-        .await;
     Ok(ApiSuccess::new(SessionsDeleteResponse {
         session_id: id,
         deleted,
     }))
 }
 
-/// When a session closes or is deleted, any in-flight ACP-source permission
-/// rows for that session must be settled. Otherwise the operator UI shows
-/// stale "pending" rows that won't resolve until the per-request timer fires
-/// (default 5 minutes). The ACP-side prompt-turn is already dead; the durable
-/// row should reflect that immediately. Cancel settles its own inside the
-/// supervisor, where the answer is what lets the agent end its turn.
+/// When a session closes, any in-flight ACP-source permission rows for that
+/// session must be settled. Otherwise the operator UI shows stale "pending"
+/// rows that won't resolve until the per-request timer fires (default 5
+/// minutes). The ACP-side prompt-turn is already dead; the durable row should
+/// reflect that immediately. Cancel and delete settle theirs inside the
+/// supervisor: cancel because the answer lets the agent end its turn, delete
+/// because the decision events must land before the session log is wiped.
 async fn cancel_pending_acp_permissions_for_session(
     state: &AppState,
     session_id: &str,

@@ -5,20 +5,31 @@ use chrono::{SecondsFormat, Utc};
 use rusqlite::{OptionalExtension, params};
 
 use super::core::StateStore;
-use super::events::{EVENT_SOURCE_ACP, EVENT_SOURCE_SYSTEM, Event, row_to_event};
+use super::events::{EVENT_COLUMNS, EVENT_SOURCE_ACP, EVENT_SOURCE_SYSTEM, Event, row_to_event};
 use super::ids::{current_timestamp, next_event_id, next_prompt_id};
 use super::records::{LogOrder, SessionFilter};
-use super::rows::validate_json_payload;
+use super::rows::{sequence_column, sequence_param, validate_json_payload};
 use super::sink_outbox;
 
+mod changes;
 mod events;
 mod fork;
 mod prompts;
 mod queries;
 
+pub use changes::{SessionChangeRecord, SessionChangesPage};
+pub use events::SessionEventCursor;
+
+pub(super) use changes::bump_session_change;
+use changes::{clear_session_tombstone, insert_session_tombstone, next_change_seq};
+
 pub const SESSION_STATUS_ACTIVE: &str = "active";
 pub const SESSION_STATUS_AVAILABLE: &str = "available";
 pub const SESSION_STATUS_CLOSED: &str = "closed";
+/// How long a deleted session's tombstone stays in the change feed. A feed
+/// reader further behind than this no longer sees the deletion.
+pub const SESSION_TOMBSTONE_RETENTION: std::time::Duration =
+    std::time::Duration::from_secs(30 * 24 * 60 * 60);
 /// Operator-facing activity threshold used by the compact session status view.
 pub const DEFAULT_SESSION_ACTIVITY_THRESHOLD: &str = "15m";
 /// Default rolling window for the multi-session turn status view.
@@ -73,7 +84,17 @@ pub struct SessionRecord {
     pub cwd: String,
     pub title: Option<String>,
     pub metadata_json: String,
+    /// Position of the session's latest change in the change feed.
+    pub change_seq: u64,
+    /// `seq` of the session's newest event, `0` when it has none.
+    pub event_seq: u64,
 }
+
+/// Column list every `row_to_session` query selects from `sessions`, in
+/// mapper order.
+const SESSION_COLUMNS: &str = "id, target_id, agent_session_id, created_at, updated_at, status, \
+     agent_id, cwd, title, metadata_json, change_seq, \
+     (SELECT COALESCE(MAX(e.seq), 0) FROM events e WHERE e.session_id = sessions.id)";
 
 /// Metadata key holding the latest agent-advertised slash-command list.
 pub const SESSION_METADATA_AVAILABLE_COMMANDS: &str = "available_commands";
@@ -131,6 +152,8 @@ pub struct SessionStatusRecord {
     pub latest_prompt: Option<SessionStatusPromptRecord>,
     pub pending_permission: Option<SessionStatusPermissionRecord>,
     pub prompt_stream_started_at: Option<String>,
+    pub change_seq: u64,
+    pub event_seq: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -357,6 +380,8 @@ pub(super) fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessio
         cwd: row.get(7)?,
         title: row.get(8)?,
         metadata_json: row.get(9)?,
+        change_seq: sequence_column(row, 10)?,
+        event_seq: sequence_column(row, 11)?,
     })
 }
 

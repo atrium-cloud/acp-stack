@@ -727,6 +727,11 @@ pub enum StackError {
     #[error("session `{id}` is closed")]
     SessionClosed { id: String },
 
+    /// The id names a session `POST /v1/sessions/{id}/delete` removed; its
+    /// tombstone outlives the rows until the retention window prunes it.
+    #[error("session `{id}` was deleted")]
+    SessionDeleted { id: String },
+
     /// The running adapter never opened this session and advertises neither
     /// `session/resume` nor `session/load`, so there is no way to re-attach it
     /// before dispatching a session-scoped request.

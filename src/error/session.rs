@@ -9,6 +9,7 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
     Some(match err {
         SessionNotFound { .. } => "session.not_found",
         SessionClosed { .. } => "session.closed",
+        SessionDeleted { .. } => "session.deleted",
         SessionReattachUnsupported { .. } => "session.reattach_unsupported",
         SessionEventCursorUnknown { .. } => "session.event_cursor_unknown",
         PromptInFlight { .. } => "session.prompt_in_flight",
@@ -27,6 +28,7 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
     Some(match err {
         SessionNotFound { id } => format!("session `{id}` was not found"),
         SessionClosed { id } => format!("session `{id}` is closed"),
+        SessionDeleted { id } => format!("session `{id}` was deleted"),
         SessionReattachUnsupported { id } => format!(
             "session `{id}` cannot be re-attached: the agent advertises neither `session/resume` nor `session/load`"
         ),
@@ -68,6 +70,7 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
             StatusCode::CONFLICT
         }
         SessionTargetRenameConflict { .. } => StatusCode::CONFLICT,
+        SessionDeleted { .. } => StatusCode::GONE,
         SessionReattachUnsupported { .. } => StatusCode::NOT_IMPLEMENTED,
         PromptBodyEmpty | PromptBodyInvalid(_) | PromptUnsupportedModality { .. } => {
             StatusCode::BAD_REQUEST

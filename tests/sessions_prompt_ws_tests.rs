@@ -475,7 +475,7 @@ async fn append_session_event_fans_out_to_session_and_logs_topics() {
     }
 
     // Direct state write so the assertion targets the publish site, not the bridge plumbing.
-    {
+    let appended = {
         let store = harness.state.lock().await;
         store
             .append_session_event_with_source(
@@ -486,8 +486,9 @@ async fn append_session_event_fans_out_to_session_and_logs_topics() {
                 "ACP session update",
                 r#"{"seq":42}"#,
             )
-            .expect("event inserted");
-    }
+            .expect("event inserted")
+    };
+    let appended_seq = appended.seq.expect("session event carries seq");
 
     let session_event = recv_matching_event(
         &mut session_ws,
@@ -499,11 +500,13 @@ async fn append_session_event_fans_out_to_session_and_logs_topics() {
     let session_payload: Value =
         serde_json::from_value(session_event["payload"]["data"].clone()).expect("session data");
     assert_eq!(session_payload["seq"], 42);
+    assert_eq!(session_event["seq"], appended_seq);
 
     let logs_event = recv_matching_event(&mut logs_ws, "logs", "session.update")
         .await
         .expect("session.update on logs topic");
     assert_eq!(logs_event["payload"]["data"]["kind"], "session.update");
+    assert_eq!(logs_event["seq"], appended_seq);
 }
 
 /// The raw upstream message, including the URL and secret-looking token below, must never reach the persisted `error_message`, `failure_detail_json`, or event payload.

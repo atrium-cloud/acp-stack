@@ -110,9 +110,41 @@ Events carry:
 - kind
 - message
 - optional session, command, and permission ids
+- `seq`, on session-scoped rows
 - structured payload JSON
 
 Common sources are `system`, `api`, `acp`, `command`, `permission`, `cli`, and `local`.
+
+### Session Event Sequence
+
+Schema: `migrations/029_session_log_sequences.sqlite.sql` (and the `.postgres.sql` twin).
+
+- `seq` is a session-scoped event's position in its session's log, contiguous from 1. Unscoped rows hold `NULL`.
+- The runtime assigns it inside the transaction that inserts the row, one past the session's highest `seq`, so log order is commit order. The unique `(session_id, seq)` index keeps two writers from taking the same position.
+- Positions are stored, so a restart or a checkpoint restore reads back the same numbering.
+- The migration numbers the rows that predate it per session in `(created_at, id)` order.
+- `GET /v1/sessions/{id}/events` pages by `seq`, and the WebSocket frames for session-scoped rows carry it (see [endpoints.md](api/endpoints.md)).
+
+### Session Change Feed
+
+`sessions.change_seq` is the position of a session's latest change in one process-wide sequence. `GET /v1/sessions/-/changes` pages sessions by it (see [endpoints.md](api/endpoints.md)).
+
+- The single-row `session_change_counter` table holds the last value issued. Every write that touches a session increments it and stamps the session in the same transaction, so feed order is commit order across processes.
+- The counter keeps climbing past a deleted session's value, so each value it issues is higher than every value before it. A write rolled back gives its value back, and a checkpoint restore rolls the counter back with the rest of the database.
+- Writes that advance it: session inserts and forks, event appends, prompt inserts and prompt row updates, status, cwd, title, metadata, available-commands, and config-option updates, target renames, the startup and idle demotions, raising and settling an ACP permission request for the session, and delete.
+- A session-list sync advances a row when it changes a stored value. The sync layers the listed metadata keys over the stored metadata, and a listing without `updatedAt` keeps the stored `updated_at`. An event logged for a session id with no row leaves the counter where it is.
+- `updated_at` keeps its own meaning: demotions advance `change_seq` and leave `updated_at` alone.
+- The counter row also holds `pruned_through`, the highest `change_seq` of a pruned tombstone.
+- The feed's `feed_epoch`, a random 16-byte base64url token, is minted per process start and lives only in the process, so a feed reader re-reads from `0` after any restart or restore. A stored token would come back unchanged with a checkpoint restore; the per-process token changes on the restart that serves the restored database.
+- The migration numbers existing sessions in `(updated_at, id)` order and starts the counter at their count.
+
+### Session Tombstones
+
+`POST /v1/sessions/{id}/delete` removes the session's row, prompts, and events and writes a `session_tombstones` row in the same transaction: the session id, `deleted_at`, and the `change_seq` issued for the deletion.
+
+- The change feed lists each tombstone as `deleted: true`, and the per-session routes answer its id with `410 session.deleted`.
+- The state sweeper prunes tombstones 30 days after `deleted_at` (`SESSION_TOMBSTONE_RETENTION` in `src/state/sessions.rs`) and raises `pruned_through` in the same transaction. A pruned id answers `404 session.not_found`.
+- Inserting a session row under a tombstoned id clears the tombstone, so each id is either live or deleted.
 
 ### Prompt Lifecycle Event Kinds
 
@@ -158,7 +190,7 @@ Conversation content lands under the single kind `session.update`, whose payload
 
 Prompt admission covers both `POST /v1/sessions/{id}/prompt` and `POST /v1/sessions/{id}/commands/run`, so a slash command is logged as the `/name args` text it was sent as.
 
-The user-prompt row is written under the same state guard as the `prompts` insert and before the ACP request is dispatched. Admission first waits for the previous turn's remaining `session/update` rows to become durable, so a transcript replayed in `(created_at, id)` order opens on the user's turn, continues into that turn's agent output, and holds the next user's turn after it. One event is written per prompt content block, all sharing the prompt's message id. The insert and the appends are separate writes: a failed append is logged and the submission proceeds, and a crash between them leaves a durable prompt row with zero or partial chunks.
+The user-prompt row is written under the same state guard as the `prompts` insert and before the ACP request is dispatched. Admission first waits for the previous turn's remaining `session/update` rows to become durable, so a transcript replayed in `seq` order opens on the user's turn, continues into that turn's agent output, and holds the next user's turn after it. One event is written per prompt content block, all sharing the prompt's message id. The insert and the appends are separate writes: a failed append is logged and the submission proceeds, and a crash between them leaves a durable prompt row with zero or partial chunks.
 
 The payload is an ACP `session/update` notification whose `sessionId` is the agent's session id:
 
@@ -222,7 +254,7 @@ A fork child starts with the part of its parent's durable record that the fork h
 
 The child receives:
 
-- Events: the parent's conversation rows older than the fork point (all of them when the fork holds every prompt), in their original `(created_at, id)` order. The child's own `session.forked` row follows them.
+- Events: the parent's conversation rows older than the fork point (all of them when the fork holds every prompt), in the parent's log order. They take the child's `seq` values 1 through n, and the child's own `session.forked` row follows them at n + 1.
 - Conversation rows: `session.update` from both sources, `prompt.inference_failed`, `prompt.stalled`, `prompt.errored`, `prompt.usage_reported`, `session.cancel_requested`, `terminal.finished`, and the session-scoped ACP permission decisions (`permission.approved`, `permission.denied`, `permission.cancelled`, `permission.expired`). Every other session-scoped kind stays with the parent:
     - `session.created`, `session.loaded`, `session.resumed`, `session.available`, and `session.closed` track the parent session's own lifecycle.
     - `session.forked` and `session.fork.created_child` mark the parent's own place in fork lineage. The child writes its own `session.forked`.
@@ -231,7 +263,7 @@ The child receives:
     - `usage.reported` and `tool.execute` are derived from `session.update` payloads the child already carries verbatim, so each usage report and shell run counts once, on the session that produced it.
 - Prompts: a copy of each held prompt row, with the parent's message id, acknowledgement, `agent_message_id` anchor, status, and timestamps. A breakpoint fork of the child resolves an inherited message id exactly as it does on the parent. Copies take fresh prompt ids minted in the parent's submission order, so they sort before every prompt later sent to the child.
 
-Copies are verbatim in every column but the row id and `session_id`:
+Copies are verbatim in every column but the row id, `session_id`, and an event's `seq`:
 
 - A carried payload still names the agent session and the prompt row that recorded it, in `sessionId`, `_meta.acpStack.promptId`, and `prompt_id`. The turn's message id is the identity the child's prompt row shares with its carried chunks.
 - Inherited rows keep their original `created_at`, so a session's inherited rows are exactly its rows older than the session's own `created_at`. The `turns` and `prompt_failures` metrics use this comparison to count a turn once, on the session that ran it, and the session status view uses it to start a new fork at `idle`.

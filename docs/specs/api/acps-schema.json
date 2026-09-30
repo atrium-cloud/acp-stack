@@ -963,6 +963,25 @@
         ],
         "description": "`Bool` first so JSON `true` never deserializes as the string `\"true\"`."
       },
+      "SessionsChangeFeedParams": {
+        "type": "object",
+        "properties": {
+          "after": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "Change position to read after; `0` reads from the start.",
+            "default": 0
+          },
+          "limit": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "description": "Clamped to 1 through 1000, not rejected.",
+            "default": 100
+          }
+        }
+      },
       "SessionsCreateBody": {
         "type": "object",
         "properties": {
@@ -997,6 +1016,17 @@
               "string",
               "null"
             ],
+            "description": "Event id to page after. Mutually exclusive with `after_seq`.",
+            "default": null
+          },
+          "after_seq": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0,
+            "description": "Log position to page after; `0` reads from the start. Mutually\nexclusive with `after`.",
             "default": null
           },
           "target_id": {
@@ -4434,6 +4464,15 @@
           "source": {
             "type": "string",
             "description": "Conventionally `system`, `api`, `acp`, `command`, `permission`, `cli`,\nor `local`. Open set: nothing enforces the named constants."
+          },
+          "seq": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0,
+            "description": "Position in the owning session's log, contiguous from 1. `null` on\nrows without a session scope."
           }
         },
         "required": [
@@ -4443,7 +4482,8 @@
           "kind",
           "message",
           "payload_json",
-          "source"
+          "source",
+          "seq"
         ]
       },
       "LogsSecurityResponse": {
@@ -6282,6 +6322,18 @@
           "metadata_json": {
             "type": "string"
           },
+          "change_seq": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "Position of the session's latest change in\n`GET /v1/sessions/-/changes`."
+          },
+          "event_seq": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "`seq` of the session's newest event, `0` when it has none."
+          },
           "ignored": {
             "type": "array",
             "items": {
@@ -6300,7 +6352,9 @@
           "agent_id",
           "cwd",
           "title",
-          "metadata_json"
+          "metadata_json",
+          "change_seq",
+          "event_seq"
         ]
       },
       "IgnoredFeature": {
@@ -6395,6 +6449,61 @@
           "session_id"
         ]
       },
+      "SessionsChangeFeedResponse": {
+        "type": "object",
+        "properties": {
+          "changes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/SessionChangeResponse"
+            },
+            "description": "Ascending by `change_seq`, one entry per session: its latest change."
+          },
+          "head": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "The last `change_seq` issued. A page shorter than `limit` holds every\nchange through `head`."
+          },
+          "pruned_through": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "The highest `change_seq` of a pruned deletion tombstone. A cursor\nbelow it may have missed a deletion, so the reader re-reads from `0`."
+          },
+          "feed_epoch": {
+            "type": "string",
+            "description": "Minted each time the runtime process starts. A reader holding a\ncursor from another epoch re-reads from `0`."
+          }
+        },
+        "required": [
+          "changes",
+          "head",
+          "pruned_through",
+          "feed_epoch"
+        ]
+      },
+      "SessionChangeResponse": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "change_seq": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "deleted": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "session_id",
+          "change_seq",
+          "deleted"
+        ]
+      },
       "SessionsDeleteResponse": {
         "type": "object",
         "properties": {
@@ -6435,11 +6544,16 @@
           },
           "agent_sync": {
             "$ref": "#/$defs/response/SessionsAgentSyncResponse"
+          },
+          "feed_epoch": {
+            "type": "string",
+            "description": "The change-feed epoch the sessions' `change_seq` values belong to, as\non `GET /v1/sessions/-/changes`."
           }
         },
         "required": [
           "sessions",
-          "agent_sync"
+          "agent_sync",
+          "feed_epoch"
         ]
       },
       "SessionsAgentSyncResponse": {
@@ -6510,6 +6624,10 @@
             "items": {
               "$ref": "#/$defs/response/SessionStatusSessionResponse"
             }
+          },
+          "feed_epoch": {
+            "type": "string",
+            "description": "The change-feed epoch the rows' `change_seq` values belong to, as on\n`GET /v1/sessions/-/changes`."
           }
         },
         "required": [
@@ -6521,7 +6639,8 @@
           "session_count",
           "active_count",
           "truncated",
-          "sessions"
+          "sessions",
+          "feed_epoch"
         ]
       },
       "SessionStatusSessionResponse": {
@@ -6600,6 +6719,18 @@
               "string",
               "null"
             ]
+          },
+          "change_seq": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "Position of the session's latest change in\n`GET /v1/sessions/-/changes`."
+          },
+          "event_seq": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "`seq` of the session's newest event, `0` when it has none."
           }
         },
         "required": [
@@ -6614,7 +6745,9 @@
           "recent",
           "prompt",
           "permission",
-          "prompt_stream_started_at"
+          "prompt_stream_started_at",
+          "change_seq",
+          "event_seq"
         ]
       },
       "SessionStatusPromptResponse": {

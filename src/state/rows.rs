@@ -19,6 +19,19 @@ pub(super) fn validate_json_payload(connection: &Connection, payload_json: &str)
     Err(StackError::InvalidEventPayload)
 }
 
+/// Read a sequence column (event `seq`, session `change_seq`) as the `u64`
+/// the wire carries. SQLite stores them as signed integers and every writer
+/// counts up from 0, so a negative value is corrupt state.
+pub(super) fn sequence_column(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
+    let value: i64 = row.get(index)?;
+    u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
+}
+
+/// Bind a sequence value as the signed integer SQLite stores.
+pub(super) fn sequence_param(value: u64) -> rusqlite::Result<i64> {
+    i64::try_from(value).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+}
+
 pub(super) fn collect_events(
     rows: impl Iterator<Item = rusqlite::Result<Event>>,
 ) -> rusqlite::Result<Vec<Event>> {

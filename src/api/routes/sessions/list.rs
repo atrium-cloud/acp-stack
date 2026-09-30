@@ -4,6 +4,9 @@ use super::*;
 pub(crate) struct SessionsListResponse {
     sessions: Vec<SessionResponse>,
     agent_sync: SessionsAgentSyncResponse,
+    /// The change-feed epoch the sessions' `change_seq` values belong to, as
+    /// on `GET /v1/sessions/-/changes`.
+    feed_epoch: String,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -69,10 +72,73 @@ pub(crate) async fn sessions_list_handler(
         target_id: Some(&target.target_id),
         ..Default::default()
     })?;
+    let feed_epoch = store.feed_epoch().to_owned();
     drop(store);
     Ok(ApiSuccess::new(SessionsListResponse {
         sessions: sessions.into_iter().map(SessionResponse::from).collect(),
         agent_sync: agent_sync.into(),
+        feed_epoch,
+    }))
+}
+
+/// Smallest change-feed page. An empty page reads as "holds every change
+/// through `head`", so a zero limit would hand a reader a cursor past changes
+/// it never saw.
+const MIN_CHANGE_FEED_LIMIT: u32 = 1;
+
+#[derive(Deserialize, Default, schemars::JsonSchema)]
+pub(crate) struct SessionsChangeFeedParams {
+    /// Change position to read after; `0` reads from the start.
+    #[serde(default)]
+    after: u64,
+    /// Clamped to 1 through 1000, not rejected.
+    #[serde(default = "default_logs_limit")]
+    limit: u32,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub(crate) struct SessionsChangeFeedResponse {
+    /// Ascending by `change_seq`, one entry per session: its latest change.
+    changes: Vec<SessionChangeResponse>,
+    /// The last `change_seq` issued. A page shorter than `limit` holds every
+    /// change through `head`.
+    head: u64,
+    /// The highest `change_seq` of a pruned deletion tombstone. A cursor
+    /// below it may have missed a deletion, so the reader re-reads from `0`.
+    pruned_through: u64,
+    /// Minted each time the runtime process starts. A reader holding a
+    /// cursor from another epoch re-reads from `0`.
+    feed_epoch: String,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub(crate) struct SessionChangeResponse {
+    session_id: String,
+    change_seq: u64,
+    deleted: bool,
+}
+
+pub(crate) async fn sessions_change_feed_handler(
+    Query(params): Query<SessionsChangeFeedParams>,
+    State(state): State<AppState>,
+) -> std::result::Result<ApiSuccess<SessionsChangeFeedResponse>, StackError> {
+    let limit = params.limit.clamp(MIN_CHANGE_FEED_LIMIT, MAX_LOGS_LIMIT);
+    let store = state.state.lock().await;
+    let page = store.query_session_changes(params.after, limit)?;
+    drop(store);
+    Ok(ApiSuccess::new(SessionsChangeFeedResponse {
+        changes: page
+            .changes
+            .into_iter()
+            .map(|change| SessionChangeResponse {
+                session_id: change.session_id,
+                change_seq: change.change_seq,
+                deleted: change.deleted,
+            })
+            .collect(),
+        head: page.head,
+        pruned_through: page.pruned_through,
+        feed_epoch: page.feed_epoch,
     }))
 }
 

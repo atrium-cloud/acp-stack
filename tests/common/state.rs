@@ -92,6 +92,7 @@ pub fn fake_event_at(
         payload_json: payload_json.to_owned(),
         source: source.to_owned(),
         session_id: None,
+        seq: None,
     }
 }
 
@@ -111,5 +112,6 @@ pub fn fake_session_event(
         payload_json: payload_json.to_owned(),
         source: source.to_owned(),
         session_id: session_id.map(str::to_owned),
+        seq: None,
     }
 }

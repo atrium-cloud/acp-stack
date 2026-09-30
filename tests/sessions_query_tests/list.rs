@@ -1,7 +1,140 @@
 use crate::common::sessions::{Harness, create_session, http, session_bearer};
 use acp_stack::state::NewSessionRecord;
 use reqwest::StatusCode;
-use serde_json::Value;
+use serde_json::{Value, json};
+
+#[tokio::test]
+async fn session_change_feed_pages_ascending_after_the_cursor_and_matches_the_list() {
+    let harness = Harness::spawn_with(|config| {
+        // Without `session/list` the list route leaves the seeded rows alone.
+        config.agent.args.push("--no-cap-list-session".into());
+    })
+    .await;
+    let baseline: Value = http()
+        .get(format!("{}/v1/sessions/-/changes", harness.base_url))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("baseline feed")
+        .json()
+        .await
+        .expect("baseline feed json");
+    let start = baseline["data"]["head"].as_u64().expect("head");
+    {
+        let store = harness.state.lock().await;
+        for id in ["sess_feed_route_a", "sess_feed_route_b"] {
+            store
+                .insert_session(NewSessionRecord {
+                    id: id.to_owned(),
+                    agent_id: "placebo".to_owned(),
+                    cwd: "/tmp/feed".to_owned(),
+                    title: None,
+                    metadata_json: "{}".to_owned(),
+                })
+                .expect("session inserted");
+        }
+        for _ in 0..2 {
+            store
+                .append_session_event("sess_feed_route_a", "info", "session.update", "", "{}")
+                .expect("event appended");
+        }
+    }
+    let feed = |query: String| {
+        let url = format!("{}/v1/sessions/-/changes{query}", harness.base_url);
+        async move {
+            let response = http()
+                .get(url)
+                .header("Authorization", session_bearer())
+                .send()
+                .await
+                .expect("feed request");
+            assert_eq!(response.status(), StatusCode::OK);
+            response.json::<Value>().await.expect("feed json")
+        }
+    };
+
+    let page = feed(format!("?after={start}")).await;
+    assert_eq!(
+        page["data"]["changes"],
+        json!([
+            { "session_id": "sess_feed_route_b", "change_seq": start + 2, "deleted": false },
+            { "session_id": "sess_feed_route_a", "change_seq": start + 4, "deleted": false },
+        ])
+    );
+    assert_eq!(page["data"]["head"], start + 4);
+    assert_eq!(page["data"]["pruned_through"], 0);
+    let epoch = page["data"]["feed_epoch"]
+        .as_str()
+        .expect("feed_epoch")
+        .to_owned();
+    assert_eq!(epoch.len(), 22, "base64url of 16 bytes: {epoch}");
+    assert_eq!(
+        baseline["data"]["feed_epoch"], epoch,
+        "one process keeps one epoch"
+    );
+    let after_b = feed(format!("?after={}", start + 2)).await;
+    assert_eq!(
+        after_b["data"]["changes"],
+        json!([{ "session_id": "sess_feed_route_a", "change_seq": start + 4, "deleted": false }])
+    );
+    let first = feed(format!("?after={start}&limit=1")).await;
+    assert_eq!(
+        first["data"]["changes"].as_array().expect("changes").len(),
+        1
+    );
+    let clamped = feed("?limit=5000".to_owned()).await;
+    assert_eq!(clamped["data"]["head"], start + 4);
+    // A zero limit still returns the next change rather than an empty page.
+    let floored = feed(format!("?after={start}&limit=0")).await;
+    assert_eq!(
+        floored["data"]["changes"],
+        json!([{ "session_id": "sess_feed_route_b", "change_seq": start + 2, "deleted": false }])
+    );
+
+    let list: Value = http()
+        .get(format!("{}/v1/sessions", harness.base_url))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("list")
+        .json()
+        .await
+        .expect("list json");
+    let listed = |id: &str| -> (u64, u64) {
+        let session = list["data"]["sessions"]
+            .as_array()
+            .expect("sessions array")
+            .iter()
+            .find(|session| session["id"] == id)
+            .unwrap_or_else(|| panic!("{id} listed"));
+        (
+            session["change_seq"].as_u64().expect("change_seq"),
+            session["event_seq"].as_u64().expect("event_seq"),
+        )
+    };
+    assert_eq!(listed("sess_feed_route_a"), (start + 4, 2));
+    assert_eq!(listed("sess_feed_route_b"), (start + 2, 0));
+    assert_eq!(list["data"]["feed_epoch"], epoch);
+
+    let status: Value = http()
+        .get(format!("{}/v1/sessions/-/status", harness.base_url))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("status")
+        .json()
+        .await
+        .expect("status json");
+    let row = status["data"]["sessions"]
+        .as_array()
+        .expect("status sessions")
+        .iter()
+        .find(|session| session["id"] == "sess_feed_route_a")
+        .expect("session in the status window");
+    assert_eq!(row["change_seq"], start + 4);
+    assert_eq!(row["event_seq"], 2);
+    assert_eq!(status["data"]["feed_epoch"], epoch);
+}
 
 #[tokio::test]
 async fn sessions_list_syncs_agent_discovered_sessions() {

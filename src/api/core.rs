@@ -61,12 +61,13 @@ use super::routes::security::{
     security_check_handler, security_history_handler, security_history_show_handler,
 };
 use super::routes::sessions::{
-    sessions_cancel_handler, sessions_changes_handler, sessions_close_handler,
-    sessions_commands_handler, sessions_commands_run_handler, sessions_config_options_handler,
-    sessions_config_options_set_handler, sessions_create_handler, sessions_delete_handler,
-    sessions_events_handler, sessions_fork_handler, sessions_get_handler, sessions_list_handler,
-    sessions_load_handler, sessions_prompt_handler, sessions_prompt_status_handler,
-    sessions_resume_handler, sessions_snapshot_handler, sessions_status_handler,
+    sessions_cancel_handler, sessions_change_feed_handler, sessions_changes_handler,
+    sessions_close_handler, sessions_commands_handler, sessions_commands_run_handler,
+    sessions_config_options_handler, sessions_config_options_set_handler, sessions_create_handler,
+    sessions_delete_handler, sessions_events_handler, sessions_fork_handler, sessions_get_handler,
+    sessions_list_handler, sessions_load_handler, sessions_prompt_handler,
+    sessions_prompt_status_handler, sessions_resume_handler, sessions_snapshot_handler,
+    sessions_status_handler,
 };
 use super::routes::skills::{
     skills_add_handler, skills_catalog_handler, skills_list_handler, skills_remove_handler,
@@ -600,6 +601,7 @@ pub fn build_router(state: AppState) -> Router {
             get(sessions_list_handler).post(sessions_create_handler),
         )
         .route("/v1/sessions/-/status", get(sessions_status_handler))
+        .route("/v1/sessions/-/changes", get(sessions_change_feed_handler))
         .route(
             "/v1/sessions/{id}",
             get(sessions_get_handler).delete(sessions_close_handler),

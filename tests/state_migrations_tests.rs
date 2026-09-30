@@ -33,7 +33,7 @@ fn migrations_are_idempotent() {
 
     assert_eq!(
         store.schema_version().expect("schema version should load"),
-        28
+        29
     );
 }
 
@@ -61,6 +61,148 @@ fn migration_028_adds_installer_run_artifact_columns() {
             "installer_runs.{name} must exist and be nullable, so earlier rows read as foreign: {columns:?}"
         );
     }
+}
+
+/// A state database as schema 28 left it, before the session log sequences.
+fn open_state_at_schema_28(path: &std::path::Path) -> Connection {
+    let connection = Connection::open(path).expect("sqlite should open");
+    let migrations = [
+        include_str!("../migrations/001_init.sqlite.sql"),
+        include_str!("../migrations/002_auth_failures_schema.sqlite.sql"),
+        include_str!("../migrations/003_agent_capabilities.sqlite.sql"),
+        include_str!("../migrations/004_sessions.sqlite.sql"),
+        include_str!("../migrations/005_commands_schema.sqlite.sql"),
+        include_str!("../migrations/006_permissions.sqlite.sql"),
+        include_str!("../migrations/007_events_source.sqlite.sql"),
+        include_str!("../migrations/008_sink_outbox.sqlite.sql"),
+        include_str!("../migrations/009_installer_runs_step.sqlite.sql"),
+        include_str!("../migrations/010_installer_runs_version.sqlite.sql"),
+        include_str!("../migrations/011_installer_runs_log_dir.sqlite.sql"),
+        include_str!("../migrations/012_init_runs.sqlite.sql"),
+        include_str!("../migrations/013_installer_runs_apply_run_id.sqlite.sql"),
+        include_str!("../migrations/014_security_runs.sqlite.sql"),
+        include_str!("../migrations/015_prompts_lifecycle_extension.sqlite.sql"),
+        include_str!("../migrations/016_command_output_reconnect.sqlite.sql"),
+        include_str!("../migrations/017_prompt_message_ids.sqlite.sql"),
+        include_str!("../migrations/018_installer_runs_operation_method.sqlite.sql"),
+        include_str!("../migrations/019_stack_update_runs.sqlite.sql"),
+        include_str!("../migrations/020_prompt_status_indexes.sqlite.sql"),
+        include_str!("../migrations/021_auth_keys.sqlite.sql"),
+        include_str!("../migrations/022_array_sessions.sqlite.sql"),
+        include_str!("../migrations/023_commands_origin.sqlite.sql"),
+        include_str!("../migrations/024_terminal_status_spelling.sqlite.sql"),
+        include_str!("../migrations/025_deps_apply_runs.sqlite.sql"),
+        include_str!("../migrations/026_commands_terminal_id.sqlite.sql"),
+        include_str!("../migrations/027_prompt_agent_message_ids.sqlite.sql"),
+        include_str!("../migrations/028_installer_runs_artifact.sqlite.sql"),
+    ];
+    connection
+        .execute(
+            r#"
+            CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TEXT NOT NULL
+            )
+            "#,
+            [],
+        )
+        .expect("schema_migrations should create");
+    for (index, migration) in migrations.into_iter().enumerate() {
+        connection
+            .execute_batch(migration)
+            .expect("legacy migration should apply");
+        connection
+            .execute(
+                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, '2026-09-01T00:00:00Z')",
+                params![index as i64 + 1, format!("m{}", index + 1)],
+            )
+            .expect("schema_migrations row should insert");
+    }
+    connection
+}
+
+#[test]
+fn migration_029_numbers_session_logs_and_the_change_feed_from_existing_rows() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let connection = open_state_at_schema_28(&path);
+    // Rows go in out of log order, and two share a timestamp, so the backfill
+    // has to sort rather than follow rowid.
+    connection
+        .execute_batch(
+            r#"
+            INSERT INTO sessions (id, created_at, updated_at, status, agent_id, cwd, title, metadata_json, target_id, agent_session_id)
+            VALUES
+                ('sess_a', '2026-09-01T00:00:00.000000000Z', '2026-09-01T00:05:00.000000000Z', 'available', 'fake', '/tmp/a', NULL, '{}', 'fake', 'agent_a'),
+                ('sess_b', '2026-09-01T00:00:00.000000000Z', '2026-09-01T00:01:00.000000000Z', 'closed', 'fake', '/tmp/b', NULL, '{}', 'fake', 'agent_b');
+            INSERT INTO events (id, created_at, level, kind, message, payload_json, source, session_id)
+            VALUES
+                ('evt_a_3', '2026-09-01T00:03:00.000000000Z', 'info', 'session.update', '', '{}', 'acp', 'sess_a'),
+                ('evt_a_1', '2026-09-01T00:01:00.000000000Z', 'info', 'session.created', '', '{}', 'system', 'sess_a'),
+                ('evt_a_2b', '2026-09-01T00:02:00.000000000Z', 'info', 'session.update', '', '{}', 'acp', 'sess_a'),
+                ('evt_a_2a', '2026-09-01T00:02:00.000000000Z', 'info', 'session.update', '', '{}', 'system', 'sess_a'),
+                ('evt_b_1', '2026-09-01T00:00:30.000000000Z', 'info', 'session.created', '', '{}', 'system', 'sess_b'),
+                ('evt_unscoped', '2026-09-01T00:00:10.000000000Z', 'info', 'server.started', '', '{}', 'system', NULL);
+            "#,
+        )
+        .expect("legacy rows should seed");
+    drop(connection);
+
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    let log = |session_id: &str| -> Vec<(String, Option<u64>)> {
+        store
+            .query_session_events(session_id, None, 100)
+            .expect("session events")
+            .into_iter()
+            .map(|event| (event.id, event.seq))
+            .collect()
+    };
+    assert_eq!(
+        log("sess_a"),
+        vec![
+            ("evt_a_1".to_owned(), Some(1)),
+            ("evt_a_2a".to_owned(), Some(2)),
+            ("evt_a_2b".to_owned(), Some(3)),
+            ("evt_a_3".to_owned(), Some(4)),
+        ]
+    );
+    assert_eq!(log("sess_b"), vec![("evt_b_1".to_owned(), Some(1))]);
+    let unscoped = store
+        .query_events(acp_stack::state::EventFilter {
+            limit: 10,
+            kind: Some("server.started"),
+            ..acp_stack::state::EventFilter::default()
+        })
+        .expect("unscoped events");
+    assert_eq!(unscoped.len(), 1);
+    assert_eq!(unscoped[0].seq, None);
+
+    // The change feed numbers existing sessions by `updated_at`, and the
+    // counter resumes after the last number handed out.
+    let before = store.query_session_changes(0, 10).expect("change feed");
+    assert_eq!(before.head, 2);
+    assert_eq!(
+        before
+            .changes
+            .iter()
+            .map(|change| (change.session_id.as_str(), change.change_seq))
+            .collect::<Vec<_>>(),
+        vec![("sess_b", 1), ("sess_a", 2)]
+    );
+
+    let appended = store
+        .append_session_event("sess_a", "info", "session.loaded", "", "{}")
+        .expect("append after the backfill");
+    assert_eq!(appended.seq, Some(5));
+    let session = store
+        .get_session("sess_a")
+        .expect("session lookup")
+        .expect("session exists");
+    assert_eq!((session.change_seq, session.event_seq), (3, 5));
+    assert_eq!(store.query_session_changes(0, 10).expect("feed").head, 3);
 }
 
 #[test]
@@ -156,7 +298,7 @@ fn rejects_state_database_from_newer_schema_version() {
     assert!(
         error
             .to_string()
-            .contains("state schema version 99 is newer than supported version 28")
+            .contains("state schema version 99 is newer than supported version 29")
     );
 }
 
@@ -799,7 +941,7 @@ fn migration_015_preserves_rows_inserted_at_schema_14() {
     store.migrate().expect("migration to latest should pass");
     assert_eq!(
         store.schema_version().expect("schema version should load"),
-        28
+        29
     );
     let inspection = Connection::open(&path).expect("sqlite inspection should open");
     let columns = inspection

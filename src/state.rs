@@ -79,8 +79,9 @@ pub use sessions::{
     SESSION_ACTIVITY_ACTOR_AGENT, SESSION_ACTIVITY_ACTOR_USER, SESSION_METADATA_AVAILABLE_COMMANDS,
     SESSION_METADATA_AVAILABLE_COMMANDS_UPDATED_AT, SESSION_METADATA_CONFIG_OPTIONS,
     SESSION_METADATA_CONFIG_OPTIONS_UPDATED_AT, SESSION_STATUS_ACTIVE, SESSION_STATUS_AVAILABLE,
-    SESSION_STATUS_CLOSED, SessionActivityRecord, SessionAvailableCommand, SessionRecord,
-    SessionStatusPermissionRecord, SessionStatusPromptRecord, SessionStatusRecord,
+    SESSION_STATUS_CLOSED, SESSION_TOMBSTONE_RETENTION, SessionActivityRecord,
+    SessionAvailableCommand, SessionChangeRecord, SessionChangesPage, SessionEventCursor,
+    SessionRecord, SessionStatusPermissionRecord, SessionStatusPromptRecord, SessionStatusRecord,
     SessionUpdateBounds,
 };
 pub use stack_update::{

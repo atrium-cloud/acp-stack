@@ -429,6 +429,133 @@ async fn sessions_events_separates_a_head_cursor_from_an_unknown_one() {
 }
 
 #[tokio::test]
+async fn sessions_events_page_by_seq_and_every_event_surface_carries_it() {
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.push("--no-cap-list-session".into());
+    })
+    .await;
+    let session_id = "sess_events_seq".to_owned();
+    {
+        let store = harness.state.lock().await;
+        store
+            .insert_session(NewSessionRecord {
+                id: session_id.clone(),
+                agent_id: "placebo".to_owned(),
+                cwd: "/tmp/seq".to_owned(),
+                title: None,
+                metadata_json: "{}".to_owned(),
+            })
+            .expect("session inserted");
+        for index in 0..4 {
+            store
+                .append_session_event_with_source(
+                    &session_id,
+                    "info",
+                    "session.update",
+                    acp_stack::state::EVENT_SOURCE_ACP,
+                    "ACP session update",
+                    &format!(r#"{{"index":{index}}}"#),
+                )
+                .expect("event inserted");
+        }
+    }
+    let get = |query: String| {
+        let url = format!(
+            "{}/v1/sessions/{}/events{query}",
+            harness.base_url, session_id
+        );
+        async move {
+            http()
+                .get(url)
+                .header("Authorization", session_bearer())
+                .send()
+                .await
+                .expect("events request")
+        }
+    };
+    let seqs = |body: &Value| -> Vec<u64> {
+        body["data"]["events"]
+            .as_array()
+            .expect("events array")
+            .iter()
+            .map(|event| event["seq"].as_u64().expect("seq present"))
+            .collect()
+    };
+
+    let all: Value = get(String::new()).await.json().await.expect("events json");
+    assert_eq!(seqs(&all), vec![1, 2, 3, 4]);
+    let by_seq: Value = get("?after_seq=2".to_owned())
+        .await
+        .json()
+        .await
+        .expect("after_seq json");
+    assert_eq!(seqs(&by_seq), vec![3, 4]);
+    let second_id = all["data"]["events"][1]["id"].as_str().expect("event id");
+    let by_id: Value = get(format!("?after={second_id}"))
+        .await
+        .json()
+        .await
+        .expect("after json");
+    assert_eq!(by_id["data"]["events"], by_seq["data"]["events"]);
+    let from_start: Value = get("?after_seq=0&limit=1".to_owned())
+        .await
+        .json()
+        .await
+        .expect("from start json");
+    assert_eq!(seqs(&from_start), vec![1]);
+    let at_head: Value = get("?after_seq=4".to_owned())
+        .await
+        .json()
+        .await
+        .expect("head json");
+    assert_eq!(at_head["data"]["events"], json!([]));
+
+    let past_head = get("?after_seq=5".to_owned()).await;
+    assert_eq!(past_head.status(), StatusCode::NOT_FOUND);
+    let past_head_body: Value = past_head.json().await.expect("past head json");
+    assert_eq!(
+        past_head_body["error"]["code"],
+        "session.event_cursor_unknown"
+    );
+    let both = get(format!("?after={second_id}&after_seq=2")).await;
+    assert_eq!(both.status(), StatusCode::BAD_REQUEST);
+
+    let snapshot: Value = http()
+        .get(format!(
+            "{}/v1/sessions/{}/snapshot",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("snapshot")
+        .json()
+        .await
+        .expect("snapshot json");
+    let recent: Vec<u64> = snapshot["data"]["recent_events"]
+        .as_array()
+        .expect("recent_events array")
+        .iter()
+        .map(|event| event["seq"].as_u64().expect("seq present"))
+        .collect();
+    assert_eq!(recent, vec![4, 3, 2, 1]);
+
+    let logs: Value = http()
+        .get(format!(
+            "{}/v1/logs/events?session_id={}&order=asc",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("logs")
+        .json()
+        .await
+        .expect("logs json");
+    assert_eq!(seqs(&logs), vec![1, 2, 3, 4]);
+}
+
+#[tokio::test]
 async fn sessions_snapshot_caps_recent_events_at_50() {
     let harness = Harness::spawn_with(|config| {
         config.agent.args.push("--no-cap-list-session".into());

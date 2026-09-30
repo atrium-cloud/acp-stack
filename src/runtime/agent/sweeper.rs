@@ -1,7 +1,8 @@
 //! Background state sweeper. Guarantees every `prompts` row reaches a
 //! terminal status (flips in-flight prompts to `Stalled` when no ACP
-//! `session/update` has touched the row within the configured threshold)
-//! and demotes idle `active` sessions to `available`.
+//! `session/update` has touched the row within the configured threshold),
+//! demotes idle `active` sessions to `available`, and prunes deleted-session
+//! tombstones past their retention window.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,7 +12,8 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::state::{
-    EVENT_KIND_PROMPT_STALLED, EVENT_KIND_SESSION_AVAILABLE, EVENT_SOURCE_SYSTEM, StateStore,
+    EVENT_KIND_PROMPT_STALLED, EVENT_KIND_SESSION_AVAILABLE, EVENT_SOURCE_SYSTEM,
+    SESSION_TOMBSTONE_RETENTION, StateStore,
 };
 
 /// `error_message` written onto every `Stalled` prompt by the sweeper.
@@ -43,6 +45,7 @@ impl StateSweeper {
                 }
                 sweep_stalled_prompts(&state, threshold).await;
                 sweep_idle_sessions(&state, session_idle_threshold).await;
+                sweep_session_tombstones(&state).await;
             }
         });
         Self {
@@ -150,6 +153,18 @@ async fn sweep_idle_sessions(state: &Arc<TokioMutex<StateStore>>, idle_threshold
                 "state sweeper: failed to append session.available event"
             );
         }
+    }
+}
+
+async fn sweep_session_tombstones(state: &Arc<TokioMutex<StateStore>>) {
+    let guard = state.lock().await;
+    match guard.prune_session_tombstones(SESSION_TOMBSTONE_RETENTION) {
+        Ok(0) => {}
+        Ok(pruned) => tracing::info!(pruned, "state sweeper: pruned expired session tombstones"),
+        Err(err) => tracing::warn!(
+            error = %err,
+            "state sweeper: prune_session_tombstones failed"
+        ),
     }
 }
 

@@ -15,17 +15,7 @@ impl StateStore {
         let record = self
             .get_session(id)?
             .ok_or_else(|| StackError::SessionNotFound { id: id.to_owned() })?;
-        let mut metadata = serde_json::from_str::<serde_json::Value>(&record.metadata_json)
-            .map_err(|err| StackError::StateInvalidJson {
-                field: "sessions.metadata_json",
-                reason: err.to_string(),
-            })?
-            .as_object()
-            .cloned()
-            .ok_or_else(|| StackError::StateInvalidJson {
-                field: "sessions.metadata_json",
-                reason: "expected a JSON object".to_owned(),
-            })?;
+        let mut metadata = metadata_object(&record.metadata_json)?;
 
         if let Some(agent_updated_at) = agent_updated_at {
             metadata.insert(
@@ -59,7 +49,7 @@ impl StateStore {
             if affected == 0 {
                 return Err(StackError::SessionNotFound { id: id.to_owned() });
             }
-            Ok(())
+            bump_session_change(conn, id)
         })
     }
 
@@ -74,17 +64,7 @@ impl StateStore {
         let record = self
             .get_session(id)?
             .ok_or_else(|| StackError::SessionNotFound { id: id.to_owned() })?;
-        let mut metadata = serde_json::from_str::<serde_json::Value>(&record.metadata_json)
-            .map_err(|err| StackError::StateInvalidJson {
-                field: "sessions.metadata_json",
-                reason: err.to_string(),
-            })?
-            .as_object()
-            .cloned()
-            .ok_or_else(|| StackError::StateInvalidJson {
-                field: "sessions.metadata_json",
-                reason: "expected a JSON object".to_owned(),
-            })?;
+        let mut metadata = metadata_object(&record.metadata_json)?;
 
         let commands_value =
             serde_json::to_value(commands).map_err(|err| StackError::StateInvalidJson {
@@ -118,7 +98,7 @@ impl StateStore {
             if affected == 0 {
                 return Err(StackError::SessionNotFound { id: id.to_owned() });
             }
-            Ok(())
+            bump_session_change(conn, id)
         })?;
         Ok(true)
     }
@@ -133,17 +113,7 @@ impl StateStore {
         let record = self
             .get_session(id)?
             .ok_or_else(|| StackError::SessionNotFound { id: id.to_owned() })?;
-        let mut metadata = serde_json::from_str::<serde_json::Value>(&record.metadata_json)
-            .map_err(|err| StackError::StateInvalidJson {
-                field: "sessions.metadata_json",
-                reason: err.to_string(),
-            })?
-            .as_object()
-            .cloned()
-            .ok_or_else(|| StackError::StateInvalidJson {
-                field: "sessions.metadata_json",
-                reason: "expected a JSON object".to_owned(),
-            })?;
+        let mut metadata = metadata_object(&record.metadata_json)?;
 
         if metadata.get(SESSION_METADATA_CONFIG_OPTIONS) == Some(&options_value) {
             return Ok(false);
@@ -168,16 +138,13 @@ impl StateStore {
             if affected == 0 {
                 return Err(StackError::SessionNotFound { id: id.to_owned() });
             }
-            Ok(())
+            bump_session_change(conn, id)
         })?;
         Ok(true)
     }
 
     pub fn query_sessions(&self, filter: SessionFilter<'_>) -> Result<Vec<SessionRecord>> {
-        let mut sql = String::from(
-            "SELECT id, target_id, agent_session_id, created_at, updated_at, status, agent_id, cwd, title, metadata_json \
-             FROM sessions WHERE 1=1",
-        );
+        let mut sql = format!("SELECT {SESSION_COLUMNS} FROM sessions WHERE 1=1");
         let mut bindings: Vec<rusqlite::types::Value> = Vec::new();
         if let Some(since) = filter.since {
             sql.push_str(" AND updated_at >= ?");
@@ -221,11 +188,7 @@ impl StateStore {
         Ok(self
             .connection()
             .query_row(
-                r#"
-                SELECT id, target_id, agent_session_id, created_at, updated_at, status, agent_id, cwd, title, metadata_json
-                FROM sessions
-                WHERE id = ?1
-                "#,
+                &format!("SELECT {SESSION_COLUMNS} FROM sessions WHERE id = ?1"),
                 params![id],
                 row_to_session,
             )
@@ -240,11 +203,10 @@ impl StateStore {
         Ok(self
             .connection()
             .query_row(
-                r#"
-                SELECT id, target_id, agent_session_id, created_at, updated_at, status, agent_id, cwd, title, metadata_json
-                FROM sessions
-                WHERE target_id = ?1 AND agent_session_id = ?2
-                "#,
+                &format!(
+                    "SELECT {SESSION_COLUMNS} FROM sessions \
+                     WHERE target_id = ?1 AND agent_session_id = ?2"
+                ),
                 params![target_id, agent_session_id],
                 row_to_session,
             )
@@ -529,7 +491,13 @@ impl StateStore {
                          AND e.source = ?4
                          AND lp.id IS NOT NULL
                          AND e.created_at >= lp.created_at
-                   ) AS prompt_stream_started_at
+                   ) AS prompt_stream_started_at,
+                   s.change_seq,
+                   (
+                       SELECT COALESCE(MAX(e.seq), 0)
+                       FROM events e
+                       WHERE e.session_id = s.id
+                   ) AS event_seq
             FROM sessions s
             JOIN window_sessions r ON r.session_id = s.id
             LEFT JOIN latest_prompts lp ON lp.session_id = s.id
@@ -588,6 +556,8 @@ impl StateStore {
                     latest_prompt,
                     pending_permission,
                     prompt_stream_started_at: row.get(23)?,
+                    change_seq: sequence_column(row, 24)?,
+                    event_seq: sequence_column(row, 25)?,
                 })
             },
         )?;
@@ -685,10 +655,13 @@ impl StateStore {
         record: NewSessionRecord,
     ) -> Result<SessionRecord> {
         validate_json_payload(self.connection(), &record.metadata_json)?;
-        let row = new_active_session_row(target_id, agent_session_id, record);
-        self.persist_with_outbox("sessions", &row.id, &row.created_at, |conn| {
-            insert_session_row(conn, &row)
-        })?;
+        let mut row = new_active_session_row(target_id, agent_session_id, record);
+        row.change_seq =
+            self.persist_with_outbox("sessions", &row.id, &row.created_at, |conn| {
+                let change_seq = next_change_seq(conn)?;
+                insert_session_row(conn, &row, change_seq)?;
+                Ok(change_seq)
+            })?;
         Ok(row)
     }
 
@@ -719,14 +692,40 @@ impl StateStore {
             let existing =
                 self.get_session_by_target_agent_session_id(target_id, &record.agent_session_id)?;
             validate_json_payload(self.connection(), &record.metadata_json)?;
-            let updated_at = record
+            let listed_updated_at = record
                 .updated_at
                 .as_deref()
                 .map(normalize_listed_session_timestamp)
-                .transpose()?
-                .unwrap_or_else(current_timestamp);
+                .transpose()?;
             match existing {
                 Some(existing) => {
+                    // A listing without `updated_at` reports no activity, so
+                    // the stored timestamp stands.
+                    let updated_at =
+                        listed_updated_at.unwrap_or_else(|| existing.updated_at.clone());
+                    let status = if existing.status == SESSION_STATUS_ACTIVE
+                        || existing.status == SESSION_STATUS_CLOSED
+                    {
+                        existing.status.as_str()
+                    } else {
+                        SESSION_STATUS_AVAILABLE
+                    };
+                    // The listing's keys layer over what the runtime stored
+                    // for the session (config options, commands, fork lineage).
+                    let existing_metadata = metadata_object(&existing.metadata_json)?;
+                    let mut metadata = existing_metadata.clone();
+                    metadata.extend(metadata_object(&record.metadata_json)?);
+                    // A list sync rewrites every listed row; only a row whose
+                    // stored values move is a change for the feed.
+                    let changed = existing.updated_at != updated_at
+                        || existing.status != status
+                        || existing.agent_id != record.agent_id
+                        || existing.cwd != record.cwd
+                        || existing.title != record.title
+                        || metadata != existing_metadata
+                        || existing.target_id != target_id
+                        || existing.agent_session_id != record.agent_session_id;
+                    let metadata_json = serde_json::Value::Object(metadata).to_string();
                     self.persist_with_outbox("sessions", &existing.id, &updated_at, |conn| {
                         conn.execute(
                             r#"
@@ -752,25 +751,29 @@ impl StateStore {
                                 record.agent_id,
                                 record.cwd,
                                 record.title,
-                                record.metadata_json,
+                                metadata_json,
                                 target_id,
                                 record.agent_session_id,
                                 existing.id,
                             ],
                         )?;
+                        if changed {
+                            bump_session_change(conn, &existing.id)?;
+                        }
                         Ok(())
                     })?;
                     counts.updated += 1;
                 }
                 None => {
                     let created_at = current_timestamp();
+                    let updated_at = listed_updated_at.unwrap_or_else(|| created_at.clone());
                     let id = record.id;
                     self.persist_with_outbox("sessions", &id, &updated_at, |conn| {
                         conn.execute(
                             r#"
                             INSERT INTO sessions
-                                (id, target_id, agent_session_id, created_at, updated_at, status, agent_id, cwd, title, metadata_json)
-                            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                                (id, target_id, agent_session_id, created_at, updated_at, status, agent_id, cwd, title, metadata_json, change_seq)
+                            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                             "#,
                             params![
                                 id,
@@ -783,9 +786,10 @@ impl StateStore {
                                 record.cwd,
                                 record.title,
                                 record.metadata_json,
+                                sequence_param(next_change_seq(conn)?)?,
                             ],
                         )?;
-                        Ok(())
+                        clear_session_tombstone(conn, &id)
                     })?;
                     counts.upserted += 1;
                 }
@@ -844,13 +848,17 @@ impl StateStore {
                 "#,
                 params![new_target_id, updated_at, old_target_id],
             )?;
+            for id in &ids {
+                bump_session_change(conn, id)?;
+            }
             Ok(ids)
         })?;
         Ok(ids.len())
     }
 
-    /// Hard-delete the session row with its prompts and events, returning
-    /// `None` for an unknown id (repeat deletes succeed silently per ACP
+    /// Hard-delete the session row with its prompts and events, leaving a
+    /// tombstone that reports the deletion on the change feed. Returns `None`
+    /// for an unknown id (repeat deletes succeed silently per ACP
     /// `session/delete`). Permission rows stay: they are the durable security
     /// log, not session history.
     pub fn delete_session(&self, id: &str) -> Result<Option<SessionRecord>> {
@@ -862,7 +870,7 @@ impl StateStore {
             conn.execute("DELETE FROM prompts WHERE session_id = ?1", params![id])?;
             conn.execute("DELETE FROM events WHERE session_id = ?1", params![id])?;
             conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
-            Ok(())
+            insert_session_tombstone(conn, id, &now)
         })?;
         Ok(Some(record))
     }
@@ -881,7 +889,7 @@ impl StateStore {
             if affected == 0 {
                 return Err(StackError::SessionNotFound { id: id.to_owned() });
             }
-            Ok(())
+            bump_session_change(conn, id)
         })
     }
 
@@ -899,7 +907,7 @@ impl StateStore {
             if affected == 0 {
                 return Err(StackError::SessionNotFound { id: id.to_owned() });
             }
-            Ok(())
+            bump_session_change(conn, id)
         })
     }
 
@@ -921,12 +929,18 @@ impl StateStore {
         "#;
         let now = current_timestamp();
         self.persist_many_with_outbox("sessions", &now, |conn| {
-            let mut statement = conn.prepare(SQL)?;
-            let rows = statement.query_map(
-                params![SESSION_STATUS_AVAILABLE, SESSION_STATUS_ACTIVE, target_id],
-                |row| row.get::<_, String>(0),
-            )?;
-            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+            let ids = {
+                let mut statement = conn.prepare(SQL)?;
+                let rows = statement.query_map(
+                    params![SESSION_STATUS_AVAILABLE, SESSION_STATUS_ACTIVE, target_id],
+                    |row| row.get::<_, String>(0),
+                )?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            for id in &ids {
+                bump_session_change(conn, id)?;
+            }
+            Ok(ids)
         })
     }
 
@@ -976,16 +990,22 @@ impl StateStore {
             })?;
         let cutoff_string = cutoff.to_rfc3339_opts(SecondsFormat::Nanos, true);
         self.persist_many_with_outbox("sessions", &now_string, |conn| {
-            let mut statement = conn.prepare(SQL)?;
-            let rows = statement.query_map(
-                params![
-                    SESSION_STATUS_AVAILABLE,
-                    SESSION_STATUS_ACTIVE,
-                    cutoff_string
-                ],
-                |row| row.get::<_, String>(0),
-            )?;
-            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+            let ids = {
+                let mut statement = conn.prepare(SQL)?;
+                let rows = statement.query_map(
+                    params![
+                        SESSION_STATUS_AVAILABLE,
+                        SESSION_STATUS_ACTIVE,
+                        cutoff_string
+                    ],
+                    |row| row.get::<_, String>(0),
+                )?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            for id in &ids {
+                bump_session_change(conn, id)?;
+            }
+            Ok(ids)
         })
     }
 }
@@ -1008,15 +1028,23 @@ pub(super) fn new_active_session_row(
         cwd: record.cwd,
         title: record.title,
         metadata_json: record.metadata_json,
+        change_seq: 0,
+        event_seq: 0,
     }
 }
 
-pub(super) fn insert_session_row(conn: &rusqlite::Connection, row: &SessionRecord) -> Result<()> {
+/// Insert `row` stamped with `change_seq`, a value the caller issued in the
+/// same transaction.
+pub(super) fn insert_session_row(
+    conn: &rusqlite::Connection,
+    row: &SessionRecord,
+    change_seq: u64,
+) -> Result<()> {
     conn.execute(
         r#"
         INSERT INTO sessions
-            (id, target_id, agent_session_id, created_at, updated_at, status, agent_id, cwd, title, metadata_json)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            (id, target_id, agent_session_id, created_at, updated_at, status, agent_id, cwd, title, metadata_json, change_seq)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
         "#,
         params![
             row.id,
@@ -1029,9 +1057,25 @@ pub(super) fn insert_session_row(conn: &rusqlite::Connection, row: &SessionRecor
             row.cwd,
             row.title,
             row.metadata_json,
+            sequence_param(change_seq)?,
         ],
     )?;
-    Ok(())
+    clear_session_tombstone(conn, &row.id)
+}
+
+/// The JSON object a `sessions.metadata_json` value holds.
+fn metadata_object(metadata_json: &str) -> Result<serde_json::Map<String, serde_json::Value>> {
+    serde_json::from_str::<serde_json::Value>(metadata_json)
+        .map_err(|err| StackError::StateInvalidJson {
+            field: "sessions.metadata_json",
+            reason: err.to_string(),
+        })?
+        .as_object()
+        .cloned()
+        .ok_or_else(|| StackError::StateInvalidJson {
+            field: "sessions.metadata_json",
+            reason: "expected a JSON object".to_owned(),
+        })
 }
 
 fn normalize_listed_session_timestamp(raw: &str) -> Result<String> {

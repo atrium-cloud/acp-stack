@@ -103,6 +103,9 @@ pub(crate) struct LogEventJson {
     /// Conventionally `system`, `api`, `acp`, `command`, `permission`, `cli`,
     /// or `local`. Open set: nothing enforces the named constants.
     source: String,
+    /// Position in the owning session's log, contiguous from 1. `null` on
+    /// rows without a session scope.
+    seq: Option<u64>,
 }
 
 impl From<crate::state::Event> for LogEventJson {
@@ -115,6 +118,7 @@ impl From<crate::state::Event> for LogEventJson {
             message: e.message,
             payload_json: e.payload_json,
             source: e.source,
+            seq: e.seq,
         }
     }
 }

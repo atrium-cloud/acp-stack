@@ -703,10 +703,15 @@ Session creation proceeds when a configured `agent.mode`, model, `agent.effort`,
 
 - Tier: `session`
 - Request: filters accept `limit`, time bounds, and range values. Duration suffixes such as `30m`, `12h`, `60d`, `8w`, `6mo`, and `1y` are interpreted relative to request time.
-- Response: `{ sessions, agent_sync }`.
+- Response: `{ sessions, agent_sync, feed_epoch }`.
+    - Each session carries `change_seq`, its position in the change feed, and `event_seq`, the `seq` of its newest event (`0` when it has none). The session object every `/v1/sessions` route returns carries both.
+    - `feed_epoch` names the change-feed epoch the `change_seq` values belong to (see `GET /v1/sessions/-/changes`).
     - `agent_sync` is `{ attempted, status, upserted, updated }`, reporting the optional ACP session-list sync.
     - `status` is `synced`, `unsupported`, or `not_running`. The latter two mean the durable list may be stale.
-- Notes: lists durable sessions, optionally after ACP session-list sync.
+- Notes:
+    - Lists durable sessions, optionally after ACP session-list sync.
+    - A sync layers the listed metadata keys over the session's stored metadata, so stored config options, commands, and fork lineage stay. A listing without `updatedAt` leaves `updated_at` as stored.
+    - A sync advances a row's `change_seq` when it changes a stored value.
 
 ### `GET /v1/sessions/-/status`
 
@@ -716,13 +721,30 @@ Session creation proceeds when a configured `agent.mode`, model, `agent.effort`,
     - `done` means the latest prompt completed with `stop_reason = "end_turn"`.
     - `available` rows derive their `state` from activity like `active` rows do; the durable `status` field on the same row tells them apart.
     - A fork child's state starts from its own prompts: a new fork reports `idle` until it is first prompted.
+    - Each row carries `change_seq` and `event_seq`, and the response carries `feed_epoch`, as on `GET /v1/sessions`.
 - Notes: also exposed on the local Unix socket without bearer auth.
+
+### `GET /v1/sessions/-/changes`
+
+- Tier: `session`
+- Request: `after=<change_seq>` (default `0`, the start of the feed) and `limit` (default 100, clamped to 1 through 1000). The floor of 1 keeps a page from coming back empty while changes remain, since a client stores `head` after a short page.
+- Response: `{ changes, head, pruned_through, feed_epoch }`.
+    - `changes` lists `{ session_id, change_seq, deleted }`, ascending by `change_seq`, for each session whose latest change is after `after`. A session appears once, at its latest change.
+    - `deleted: true` marks a session removed by `POST /v1/sessions/{id}/delete`.
+    - `head` is the last `change_seq` issued. `pruned_through` is the highest `change_seq` of a deletion tombstone pruned after its retention window. Both are read in the same snapshot as `changes`.
+    - `feed_epoch` is a random 16-byte token, base64url, minted per process start, so a reader re-reads from `0` after any restart or restore.
+- Notes:
+    - A client keeps the highest `change_seq` it processed and passes it as the next `after`, together with the `feed_epoch` it was read under. A page shorter than `limit` holds every change through `head`, so the client can store `head` as its cursor.
+    - Any write to a session advances its `change_seq`: event appends, prompt inserts and status changes, status and cwd changes, title and metadata updates, available-commands and config-option snapshots, load, resume, close, delete, and raising or settling an ACP permission request.
+    - The client re-reads the feed from `0` when the page's `feed_epoch` differs from its stored one, when `head` is below its cursor, or when its cursor is below `pruned_through`. On that full read, a session the client holds that the feed omits was deleted.
+    - A checkpoint restore rolls the counter back with the database, so later writes reuse the rolled-back values. The runtime restarts to serve the restored database, and the restart's new `feed_epoch` sends every client back to `0`.
 
 ### `GET /v1/sessions/{id}`
 
 - Tier: `session`
 - Request: none.
 - Response: one session.
+- Errors: `410 session.deleted` is returned for a session `POST /v1/sessions/{id}/delete` removed. Every per-session route except the delete route answers a deleted id the same way.
 
 ### `POST /v1/sessions/{id}/load`
 
@@ -747,7 +769,7 @@ Session creation proceeds when a configured `agent.mode`, model, `agent.effort`,
 - Notes: forks a session through ACP. Without `message_id` the fork carries the parent's settled history: the turns settled when the fork is dispatched. A turn still in flight at that moment, and one submitted while the fork request is outstanding, stay with the parent.
 - Breakpoint semantics: a fork with `message_id` ends just before the named prompt. The named prompt, its turn, and everything after it stay out of the fork, which leaves the fork ready to receive an edited version of that prompt. acp-stack requires this cut of every adapter it forks at a message id.
 - Child history: the child's durable record opens with the part of the parent's conversation the fork holds, written with the child row in one transaction.
-    - `GET /v1/sessions/{id}/events` on the child replays the parent's conversation rows up to the fork point in their original `(created_at, id)` order, followed by the child's own `session.forked` row. The parent's lifecycle rows stay with the parent.
+    - `GET /v1/sessions/{id}/events` on the child replays the parent's conversation rows up to the fork point in the parent's log order, numbered from `seq` 1 in the child's log, followed by the child's own `session.forked` row. The parent's lifecycle rows stay with the parent.
     - The child's prompt rows include the parent's prompts up to the fork point, with their message ids and acknowledgement, so the child can itself be forked at an inherited `message_id`.
     - See [Fork Inheritance](../state-logging.md#fork-inheritance) for which rows are carried and how they are keyed.
 - `message_id` is always an acp-stack prompt message id from the parent session, acknowledged by the agent. When the parent is itself a fork, its inherited prompts qualify too. acp-stack translates it into the fork point the running adapter reads:
@@ -859,6 +881,8 @@ The `agent.inference_*` codes carry a sanitized public message of the form `"inf
 - Errors: `501 agent.unsupported_capability` is returned when the agent does not advertise `sessionCapabilities.delete`. The local row is kept.
 - Notes:
     - Forwards ACP `session/delete` and hard-deletes local history.
+    - The deletion leaves a tombstone: `GET /v1/sessions/-/changes` reports it with `deleted: true`, and the other per-session routes answer the id with `410 session.deleted`.
+    - Tombstones are pruned 30 days after the deletion. The id then answers `404 session.not_found`, and the feed's `pruned_through` tells a reader further behind than that to re-read from `0`.
     - Idempotent: an unknown or already-deleted id returns success with `deleted: false` and never dials the agent.
 
 ### `GET /v1/sessions/{id}/prompts/{prompt_id}`
@@ -875,11 +899,17 @@ The `agent.inference_*` codes carry a sanitized public message of the form `"inf
 ### `GET /v1/sessions/{id}/events`
 
 - Tier: `session`
-- Request: `after=<event_id>` paginates forward on `(created_at, id)` ascending.
-- Response: durable session events.
+- Request: pages forward in log order from one of two cursors.
+    - `after=<event_id>` resumes after the named event.
+    - `after_seq=<seq>` resumes after a log position; `0` reads from the start.
+    - Passing both returns `400 request.invalid_param`.
+- Response: durable session events in `seq` order. Each event carries `seq`, its position in the session's log, contiguous from 1.
 - Errors:
-    - `404 session.event_cursor_unknown` is returned when `after` names an event this session does not have. A cursor stops resolving when the state database is rolled back to a checkpoint that predates the event, so the client re-reads `GET /v1/sessions/{id}/snapshot` for a fresh cursor.
+    - `404 session.event_cursor_unknown` is returned when `after` names an event this session does not have, or `after_seq` is past the session's newest event. A cursor stops resolving when the state database is rolled back to a checkpoint that predates it, so the client re-reads `GET /v1/sessions/{id}/snapshot` for a fresh cursor.
 - Notes:
+    - Both cursors are stored values, so a cursor pages the same across process restarts.
+    - `seq` is assigned in the transaction that writes the event, so paging by either cursor sees every event in commit order.
+    - The event id form also detects a rollback the log has since grown past: a `seq` position is reused by the next event written after the rollback, while the rolled-back event id stays unknown.
     - Used for forward catch-up after a snapshot read (`after=last_event_id`).
     - A cursor at the head returns an empty list, which means the client holds every event.
 
@@ -901,10 +931,10 @@ The `agent.inference_*` codes carry a sanitized public message of the form `"inf
 - Tier: `session`
 - Request: none.
 - Response: the reconnect-bootstrap helper. Carries:
-    - `session` is the full session row (id, status, agent id, cwd, title, metadata). The durable `status` is `active`, `available`, or `closed`, distinct from the derived `state` of the status route.
+    - `session` is the full session row (id, status, agent id, cwd, title, metadata, `change_seq`, `event_seq`). The durable `status` is `active`, `available`, or `closed`, distinct from the derived `state` of the status route. `session.event_seq` is the tail cursor for `GET /v1/sessions/{id}/events?after_seq=`.
     - `in_flight_prompts` holds prompts currently in `pending` or `running`, capped at 25 (`SNAPSHOT_IN_FLIGHT_PROMPTS_CAP`). Empty when the session is idle. Each entry is the same shape returned by `GET /v1/sessions/{id}/prompts/{prompt_id}`.
     - `last_event_id` is the id of the newest persisted session event, or `null` when the session has no events. Acts as a tail cursor for forward catch-up via `GET /v1/sessions/{id}/events?after=last_event_id`.
-    - `recent_events` holds the latest session events, newest-first, capped at 50. The cap is enforced by `SNAPSHOT_RECENT_EVENTS_LIMIT` in `src/api/routes/sessions/events.rs` and is sized to cover one prompt-turn's worth of updates without bloating the response.
+    - `recent_events` holds the latest session events, newest-first by `seq`, capped at 50. The cap is enforced by `SNAPSHOT_RECENT_EVENTS_LIMIT` in `src/api/routes/sessions/events.rs` and is sized to cover one prompt-turn's worth of updates without bloating the response.
     - `available_commands` is the agent's last advertised slash-command list, same entry shape as `GET /v1/sessions/{id}/commands`. Empty when nothing has been advertised; may be stale until the agent re-advertises.
 - Notes:
     - Reconnect flow: `GET snapshot` once to recover state, subscribe to `sessions.{id}` over WebSocket, then `GET events?after=last_event_id` to catch up on events that landed between the snapshot read and the WebSocket subscribe.
@@ -1208,7 +1238,7 @@ A `running` row is reconciled to `failed` with `error.code = "deps.apply_abandon
 
 - Tier: `session`
 - Request: the shared log filters plus `level`, `kind`, `source`, `session_id`, `command_id`, `permission_id`, and `category`.
-- Response: durable event rows.
+- Response: durable event rows. A session-scoped row carries its `seq` in the session's log; other rows carry `seq: null`.
 
 ### `GET /v1/logs/commands`
 
@@ -1285,8 +1315,9 @@ Log query filters are per-route, not one shared set. All log routes accept:
 - Response: the WebSocket event stream.
 - Notes:
     - Topics are `logs`, `workspace`, `permissions`, `status`, `commands.{id}`, `sessions.{id}`, and `agent.lifecycle`. Frames on `sessions.{id}` carry `payload.kind`, `payload.source`, and `payload.data`, where `source` is the durable event's source column.
+    - A frame for a session-scoped event, on `sessions.{id}` or `logs`, carries the event's `seq` beside its `id`.
     - The stream is live delivery, and the durable event log is its replay surface.
-    - A subscriber that falls more than 1024 events behind the server's shared event channel is closed with code `1013` (Try Again Later) and reason `lagged`, and its `ws.client_disconnected` event records `reason: "lagged"`. The client reconnects and reads what it missed from the durable log after its last-seen event id.
+    - A subscriber that falls more than 1024 events behind the server's shared event channel is closed with code `1013` (Try Again Later) and reason `lagged`, and its `ws.client_disconnected` event records `reason: "lagged"`. The client reconnects and reads what it missed from the durable log after its last-seen event id or `seq`.
 
 ### `GET /v1/ws/connections`
 

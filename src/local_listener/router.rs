@@ -30,12 +30,12 @@ use crate::api::routes::permissions::{
 use crate::api::routes::providers::{models_handler, providers_handler};
 use crate::api::routes::security::security_check_handler;
 use crate::api::routes::sessions::{
-    sessions_cancel_handler, sessions_changes_handler, sessions_close_handler,
-    sessions_commands_handler, sessions_commands_run_handler, sessions_config_options_handler,
-    sessions_config_options_set_handler, sessions_create_handler, sessions_events_handler,
-    sessions_fork_handler, sessions_get_handler, sessions_list_handler, sessions_load_handler,
-    sessions_prompt_handler, sessions_prompt_status_handler, sessions_resume_handler,
-    sessions_snapshot_handler, sessions_status_handler,
+    sessions_cancel_handler, sessions_change_feed_handler, sessions_changes_handler,
+    sessions_close_handler, sessions_commands_handler, sessions_commands_run_handler,
+    sessions_config_options_handler, sessions_config_options_set_handler, sessions_create_handler,
+    sessions_events_handler, sessions_fork_handler, sessions_get_handler, sessions_list_handler,
+    sessions_load_handler, sessions_prompt_handler, sessions_prompt_status_handler,
+    sessions_resume_handler, sessions_snapshot_handler, sessions_status_handler,
 };
 use crate::api::routes::skills::{
     skills_catalog_handler, skills_list_handler, skills_source_get_handler,
@@ -96,6 +96,7 @@ pub fn build_local_router(state: AppState) -> Router {
             get(sessions_list_handler).post(sessions_create_handler),
         )
         .route("/v1/sessions/-/status", get(sessions_status_handler))
+        .route("/v1/sessions/-/changes", get(sessions_change_feed_handler))
         .route(
             "/v1/sessions/{id}",
             get(sessions_get_handler).delete(sessions_close_handler),
@@ -310,6 +311,7 @@ mod tests {
             (Method::POST, "/v1/deps/check"),
             (Method::POST, "/v1/sessions"),
             (Method::POST, "/v1/sessions/session_1/prompt"),
+            (Method::GET, "/v1/sessions/-/changes"),
             (Method::POST, "/v1/auth/session-key/regenerate"),
             (Method::GET, "/v1/secrets"),
             (Method::POST, "/v1/config/import"),
@@ -343,6 +345,7 @@ mod tests {
             // An unresolvable source fails fast (400) before any GitHub fetch.
             (Method::GET, "/v1/agent/skills/source?source=nonsense"),
             (Method::POST, "/v1/sessions"),
+            (Method::GET, "/v1/sessions/-/changes"),
         ] {
             let status = status_for(app.clone(), method.clone(), uri).await;
             assert!(

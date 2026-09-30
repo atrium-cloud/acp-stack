@@ -7,6 +7,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use super::ids::next_feed_epoch;
 use super::sink_outbox;
 
 /// Busy-timeout applied to every state connection so a contended writer waits
@@ -21,6 +22,10 @@ pub struct StateStore {
     /// When true, every persist call site enqueues into `sink_outbox` in the
     /// same transaction as the source write.
     external_logging_enabled: bool,
+    /// Change-feed epoch, minted per open rather than stored: a checkpoint
+    /// restore brings back every stored value, so only a value from outside
+    /// the database tells a feed reader its cursor may name reissued values.
+    feed_epoch: String,
 }
 
 pub fn default_state_path(home: &Path) -> PathBuf {
@@ -43,6 +48,7 @@ impl StateStore {
             path,
             event_hub: None,
             external_logging_enabled: false,
+            feed_epoch: next_feed_epoch(),
         })
     }
 
@@ -69,6 +75,12 @@ impl StateStore {
         &self.connection
     }
 
+    /// The change-feed epoch every session-feed reader compares its cursor's
+    /// epoch against.
+    pub fn feed_epoch(&self) -> &str {
+        &self.feed_epoch
+    }
+
     /// Integration-test hook for concurrent SQLite tests that need a
     /// non-default busy timeout.
     pub fn set_busy_timeout_for_test(&self, timeout: Duration) -> Result<()> {
@@ -80,8 +92,11 @@ impl StateStore {
         self.event_hub.as_ref()
     }
 
-    /// Write one row to `source_table`, atomically enqueueing an outbox row
-    /// when external logging is enabled.
+    /// Write one row to `source_table` in one IMMEDIATE transaction, together
+    /// with an outbox row when external logging is enabled. The transaction is
+    /// unconditional because `inner` may read a sequence and write it back
+    /// (event `seq`, session `change_seq`), which is only correct under the
+    /// write lock.
     pub(super) fn persist_with_outbox<F, R>(
         &self,
         source_table: &str,
@@ -92,12 +107,11 @@ impl StateStore {
     where
         F: FnOnce(&Connection) -> Result<R>,
     {
-        if !self.external_logging_enabled {
-            return inner(&self.connection);
-        }
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let value = inner(&tx)?;
-        sink_outbox::enqueue(&tx, source_table, source_id, created_at)?;
+        if self.external_logging_enabled {
+            sink_outbox::enqueue(&tx, source_table, source_id, created_at)?;
+        }
         tx.commit()?;
         Ok(value)
     }
@@ -113,13 +127,12 @@ impl StateStore {
     where
         F: FnOnce(&Connection) -> Result<Vec<String>>,
     {
-        if !self.external_logging_enabled {
-            return inner(&self.connection);
-        }
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let ids = inner(&tx)?;
-        for id in &ids {
-            sink_outbox::enqueue(&tx, source_table, id, created_at)?;
+        if self.external_logging_enabled {
+            for id in &ids {
+                sink_outbox::enqueue(&tx, source_table, id, created_at)?;
+            }
         }
         tx.commit()?;
         Ok(ids)

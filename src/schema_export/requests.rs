@@ -45,6 +45,7 @@ pub(super) enum AcpsRequestTypes {
     SessionConfigOptionSetBody(
         crate::api::routes::sessions::config_options::SessionConfigOptionSetBody,
     ),
+    SessionsChangeFeedParams(crate::api::routes::sessions::list::SessionsChangeFeedParams),
     SessionsCreateBody(crate::api::routes::sessions::lifecycle::SessionsCreateBody),
     SessionsEventsParams(crate::api::routes::sessions::events::SessionsEventsParams),
     SessionsForkBody(crate::api::routes::sessions::lifecycle::SessionsForkBody),

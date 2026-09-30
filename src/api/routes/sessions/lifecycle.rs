@@ -24,7 +24,7 @@ pub(crate) async fn sessions_create_handler(
     // The live cache, not `state.config.agent`: without it a post-restart session would
     // receive the stale config and silently downgrade to the prior model.
     let agent_for_session = target.live_agent_config.lock().await.clone();
-    let outcome = target
+    let mut outcome = target
         .supervisor
         .create_session(
             &target.target_id,
@@ -35,7 +35,7 @@ pub(crate) async fn sessions_create_handler(
             &state.state,
         )
         .await?;
-    persist_mcp_attached(&state, &outcome.record.id, &outcome.attached_mcp).await;
+    persist_mcp_attached(&state, &mut outcome).await;
     Ok(ApiSuccess::new(SessionResponse::from(outcome)))
 }
 
@@ -45,9 +45,8 @@ pub(crate) async fn sessions_get_handler(
     Query(params): Query<SessionsTargetParams>,
 ) -> std::result::Result<ApiSuccess<SessionResponse>, StackError> {
     let store = state.state.lock().await;
-    let record = store.get_session(&id)?;
+    let record = store.require_live_session(&id)?;
     drop(store);
-    let record = record.ok_or(StackError::SessionNotFound { id })?;
     if let Some(asserted) = params.target_id.as_deref()
         && asserted != record.target_id
     {
@@ -85,7 +84,7 @@ pub(crate) async fn sessions_load_handler(
         .map(|raw| resolve_session_cwd(Some(raw), &state.config.workspace.root))
         .transpose()?;
     let mcp_servers = open_mcp_servers(&state.runtime_paths.home, &state.config)?;
-    let outcome = target
+    let mut outcome = target
         .supervisor
         .load_session(
             &id,
@@ -95,7 +94,7 @@ pub(crate) async fn sessions_load_handler(
             &state.state,
         )
         .await?;
-    persist_mcp_attached(&state, &outcome.record.id, &outcome.attached_mcp).await;
+    persist_mcp_attached(&state, &mut outcome).await;
     Ok(ApiSuccess::new(SessionResponse::from(outcome)))
 }
 
@@ -112,7 +111,7 @@ pub(crate) async fn sessions_resume_handler(
         .map(|raw| resolve_session_cwd(Some(raw), &state.config.workspace.root))
         .transpose()?;
     let mcp_servers = open_mcp_servers(&state.runtime_paths.home, &state.config)?;
-    let outcome = target
+    let mut outcome = target
         .supervisor
         .resume_session(
             &id,
@@ -122,7 +121,7 @@ pub(crate) async fn sessions_resume_handler(
             &state.state,
         )
         .await?;
-    persist_mcp_attached(&state, &outcome.record.id, &outcome.attached_mcp).await;
+    persist_mcp_attached(&state, &mut outcome).await;
     Ok(ApiSuccess::new(SessionResponse::from(outcome)))
 }
 
@@ -149,7 +148,7 @@ pub(crate) async fn sessions_fork_handler(
         .map(|raw| resolve_session_cwd(Some(raw), &state.config.workspace.root))
         .transpose()?;
     let mcp_servers = open_mcp_servers(&state.runtime_paths.home, &state.config)?;
-    let outcome = target
+    let mut outcome = target
         .supervisor
         .fork_session(
             &id,
@@ -160,22 +159,28 @@ pub(crate) async fn sessions_fork_handler(
             &state.state,
         )
         .await?;
-    persist_mcp_attached(&state, &outcome.record.id, &outcome.attached_mcp).await;
+    persist_mcp_attached(&state, &mut outcome).await;
     Ok(ApiSuccess::new(SessionResponse::from(outcome)))
 }
 
-async fn persist_mcp_attached(state: &AppState, session_id: &str, names: &[String]) {
-    if names.is_empty() {
+/// Record the attached MCP servers, then refresh the outcome's session row so
+/// the response carries the change and event positions that append advanced.
+async fn persist_mcp_attached(
+    state: &AppState,
+    outcome: &mut crate::runtime::agent::supervisor::SessionAttachOutcome,
+) {
+    if outcome.attached_mcp.is_empty() {
         return;
     }
+    let session_id = outcome.record.id.clone();
     let payload = serde_json::json!({
         "session_id": session_id,
-        "server_names": names,
+        "server_names": outcome.attached_mcp,
     });
     let payload_text = payload.to_string();
     let store = state.state.lock().await;
     if let Err(err) = store.append_session_event_with_source(
-        session_id,
+        &session_id,
         "info",
         "mcp.session_attached",
         crate::state::EVENT_SOURCE_API,
@@ -183,5 +188,20 @@ async fn persist_mcp_attached(state: &AppState, session_id: &str, names: &[Strin
         &payload_text,
     ) {
         tracing::warn!(error = %err, session_id, "failed to record mcp.session_attached event");
+        return;
+    }
+    match store.get_session(&session_id) {
+        Ok(Some(record)) => outcome.record = record,
+        Ok(None) => {
+            tracing::warn!(
+                session_id,
+                "session row vanished after mcp.session_attached"
+            );
+        }
+        Err(err) => tracing::warn!(
+            error = %err,
+            session_id,
+            "failed to re-read the session after mcp.session_attached"
+        ),
     }
 }

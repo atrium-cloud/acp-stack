@@ -7,7 +7,7 @@ use rusqlite::{OptionalExtension, params};
 use super::core::StateStore;
 use super::ids::{current_timestamp, next_event_id};
 use super::records::LogFilter;
-use super::rows::{collect_events, push_event_predicates, validate_json_payload};
+use super::rows::{collect_events, push_event_predicates, sequence_column, validate_json_payload};
 
 /// Stable event-source labels for the `events.source` column.
 pub const EVENT_SOURCE_SYSTEM: &str = "system";
@@ -31,7 +31,14 @@ pub struct Event {
     pub source: String,
     /// Session scope; `None` for rows written through the unscoped append paths.
     pub session_id: Option<String>,
+    /// Position in the session's log, contiguous from 1; `None` exactly when
+    /// `session_id` is.
+    pub seq: Option<u64>,
 }
+
+/// Column list every `row_to_event` query selects, in mapper order.
+pub(super) const EVENT_COLUMNS: &str =
+    "id, created_at, level, kind, message, payload_json, source, session_id, seq";
 
 pub(super) fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
     Ok(Event {
@@ -43,6 +50,10 @@ pub(super) fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
         payload_json: row.get(5)?,
         source: row.get(6)?,
         session_id: row.get(7)?,
+        seq: match row.get::<_, Option<i64>>(8)? {
+            Some(_) => Some(sequence_column(row, 8)?),
+            None => None,
+        },
     })
 }
 
@@ -76,6 +87,7 @@ impl StateStore {
             payload_json: payload_json.to_owned(),
             source: source.to_owned(),
             session_id: None,
+            seq: None,
         };
 
         self.persist_with_outbox("events", &event.id, &event.created_at, |conn| {
@@ -107,9 +119,7 @@ impl StateStore {
     /// Unified `events`-table query; `after_id` compares against `(created_at, id)`
     /// so events sharing a `created_at` still advance past the cursor.
     pub fn query_events(&self, filter: LogFilter<'_>) -> Result<Vec<Event>> {
-        let mut sql = String::from(
-            "SELECT id, created_at, level, kind, message, payload_json, source, session_id FROM events WHERE 1=1",
-        );
+        let mut sql = format!("SELECT {EVENT_COLUMNS} FROM events WHERE 1=1");
         let mut bindings: Vec<rusqlite::types::Value> = Vec::new();
         push_event_predicates(&mut sql, &mut bindings, &filter);
         let direction = filter.order.sql_keyword();
@@ -125,9 +135,9 @@ impl StateStore {
 
     /// Scope a `LogFilter` to permission events.
     pub fn query_permission_events(&self, mut filter: LogFilter<'_>) -> Result<Vec<Event>> {
-        let mut sql = String::from(
-            "SELECT id, created_at, level, kind, message, payload_json, source, session_id FROM events \
-             WHERE (kind LIKE 'permission.%' OR kind LIKE 'permissions.%')",
+        let mut sql = format!(
+            "SELECT {EVENT_COLUMNS} FROM events \
+             WHERE (kind LIKE 'permission.%' OR kind LIKE 'permissions.%')"
         );
         let mut bindings: Vec<rusqlite::types::Value> = Vec::new();
         filter.kind_prefix = filter.kind_prefix.or(Some("permission."));
@@ -155,9 +165,9 @@ impl StateStore {
 
     /// Scope a `LogFilter` to security events.
     pub fn query_security_events(&self, filter: LogFilter<'_>) -> Result<Vec<Event>> {
-        let mut sql = String::from(
-            "SELECT id, created_at, level, kind, message, payload_json, source, session_id FROM events \
-             WHERE kind LIKE 'security.%'",
+        let mut sql = format!(
+            "SELECT {EVENT_COLUMNS} FROM events \
+             WHERE kind LIKE 'security.%'"
         );
         let mut bindings: Vec<rusqlite::types::Value> = Vec::new();
         push_event_predicates(&mut sql, &mut bindings, &filter);

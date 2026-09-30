@@ -30,6 +30,8 @@ const MIGRATED_TABLES: &[(&str, i64)] = &[
     ("stack_update_runs", 19),
     ("auth_keys", 21),
     ("deps_apply_runs", 25),
+    ("session_change_counter", 29),
+    ("session_tombstones", 29),
 ];
 
 const MANIFEST_TOML: &str = include_str!("../../migrations/manifest.toml");
@@ -273,6 +275,14 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         postgres_file: "028_installer_runs_artifact.postgres.sql",
         sqlite: include_str!("../../migrations/028_installer_runs_artifact.sqlite.sql"),
         postgres: include_str!("../../migrations/028_installer_runs_artifact.postgres.sql"),
+    },
+    Migration {
+        id: 29,
+        name: "session_log_sequences",
+        sqlite_file: "029_session_log_sequences.sqlite.sql",
+        postgres_file: "029_session_log_sequences.postgres.sql",
+        sqlite: include_str!("../../migrations/029_session_log_sequences.sqlite.sql"),
+        postgres: include_str!("../../migrations/029_session_log_sequences.postgres.sql"),
     },
 ];
 

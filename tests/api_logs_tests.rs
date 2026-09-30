@@ -281,15 +281,20 @@ async fn api_request_middleware_records_event_with_status_and_duration() {
 #[tokio::test]
 async fn api_request_middleware_skips_status_routes() {
     let harness = ServerHarness::spawn().await;
-    // The skip list must keep `api.request` rows out of SQLite for this path so
-    // polling clients cannot bloat the table.
-    for _ in 0..3 {
-        let _ = reqwest::Client::new()
-            .get(format!("{}/v1/status", harness.base_url))
-            .header("Authorization", format!("Bearer {SESSION_KEY}"))
-            .send()
-            .await
-            .expect("send");
+    // The skip list must keep `api.request` rows out of SQLite for these paths
+    // so polling clients cannot bloat the table.
+    for path in ["/v1/status", "/v1/sessions/-/changes"] {
+        for _ in 0..3 {
+            let response = reqwest::Client::new()
+                .get(format!("{}{path}", harness.base_url))
+                .header("Authorization", format!("Bearer {SESSION_KEY}"))
+                .send()
+                .await
+                .expect("send");
+            if path == "/v1/sessions/-/changes" {
+                assert!(response.status().is_success(), "{path}");
+            }
+        }
     }
     let guard = harness.state.lock().await;
     let rows = guard
@@ -299,12 +304,13 @@ async fn api_request_middleware_skips_status_routes() {
             ..acp_stack::state::LogFilter::default()
         })
         .expect("query");
-    assert!(
-        rows.iter()
-            .all(|r| !r.payload_json.contains("\"/v1/status\"")
-                && !r.payload_json.contains("\\\"/v1/status\\\"")),
-        "no api.request rows should be recorded for /v1/status",
-    );
+    for path in ["/v1/status", "/v1/sessions/-/changes"] {
+        assert!(
+            rows.iter()
+                .all(|r| !r.payload_json.contains(&format!("\"{path}\""))),
+            "no api.request rows should be recorded for {path}: {rows:?}",
+        );
+    }
 }
 
 #[tokio::test]

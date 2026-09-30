@@ -76,6 +76,7 @@ pub(super) enum AcpsResponseTypes {
     SessionResponse(crate::api::routes::sessions::SessionResponse),
     SessionSnapshotResponse(crate::api::routes::sessions::events::SessionSnapshotResponse),
     SessionsCancelResponse(crate::api::routes::sessions::teardown::SessionsCancelResponse),
+    SessionsChangeFeedResponse(crate::api::routes::sessions::list::SessionsChangeFeedResponse),
     SessionsDeleteResponse(crate::api::routes::sessions::teardown::SessionsDeleteResponse),
     SessionsEventsResponse(crate::api::routes::sessions::events::SessionsEventsResponse),
     SessionsListResponse(crate::api::routes::sessions::list::SessionsListResponse),

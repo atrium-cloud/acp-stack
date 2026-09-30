@@ -356,12 +356,13 @@ impl StateStore {
         after_id: Option<&str>,
         order: super::records::LogOrder,
     ) -> Result<Vec<Event>> {
-        let mut sql = String::from(
-            "SELECT id, created_at, level, kind, message, payload_json, source, session_id \
+        let mut sql = format!(
+            "SELECT {} \
              FROM events \
              WHERE source = ? \
                AND kind IN ('command.stdout', 'command.stderr') \
                AND json_extract(payload_json, '$.command_id') = ?",
+            super::events::EVENT_COLUMNS
         );
         let mut bindings: Vec<rusqlite::types::Value> = vec![
             rusqlite::types::Value::Text(EVENT_SOURCE_COMMAND.to_owned()),

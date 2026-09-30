@@ -315,8 +315,16 @@ impl AgentSupervisor {
                 tracing::warn!(%error, session = %inserted.id, "config-option snapshot serialize failed");
             }
         }
+        // Re-read so the response carries the change and event positions the
+        // writes above advanced.
+        let record =
+            guard
+                .get_session(&inserted.id)?
+                .ok_or_else(|| StackError::SessionNotFound {
+                    id: inserted.id.clone(),
+                })?;
         Ok(SessionAttachOutcome {
-            record: inserted,
+            record,
             attached_mcp: accepted_names,
             ignored,
         })
@@ -603,8 +611,14 @@ impl AgentSupervisor {
             &payload,
         )?;
         append_mcp_skipped_event(&guard, &inserted.id, &skipped)?;
+        let record =
+            guard
+                .get_session(&inserted.id)?
+                .ok_or_else(|| StackError::SessionNotFound {
+                    id: inserted.id.clone(),
+                })?;
         Ok(SessionAttachOutcome {
-            record: inserted,
+            record,
             attached_mcp: accepted_names,
             ignored: Vec::new(),
         })
@@ -654,6 +668,8 @@ impl AgentSupervisor {
         &self,
         session_id: &str,
         state: &Arc<TokioMutex<StateStore>>,
+        permissions: &PermissionService,
+        permission_reason: &str,
     ) -> Result<Option<SessionRecord>> {
         let agent_session_id = {
             let guard = state.lock().await;
@@ -667,6 +683,18 @@ impl AgentSupervisor {
             .delete_session(AcpSessionId::new(agent_session_id))
             .await?;
         self.cancel_prompts_for_session(session_id).await;
+        // Settled before the wipe, so the decision events land in the log the
+        // delete removes instead of opening a new one under the deleted id.
+        if let Err(error) = permissions
+            .cancel_pending_for_session(session_id, permission_reason)
+            .await
+        {
+            tracing::warn!(
+                %error,
+                session_id,
+                "failed to cancel pending ACP permissions before session delete"
+            );
+        }
         let guard = state.lock().await;
         guard.delete_session(session_id)
     }

@@ -340,6 +340,7 @@ async fn upload_group(
             id: format!("sink_{table}_hydration_{now}"),
             topic: "sink".to_owned(),
             created_at: now.clone(),
+            seq: None,
             payload: serde_json::json!({
                 "kind": "sink.delivery.hydration_failed",
                 "data": {
@@ -391,6 +392,7 @@ async fn upload_group(
                 id: format!("sink_{table}_{now}"),
                 topic: "sink".to_owned(),
                 created_at: now.clone(),
+                seq: None,
                 payload: serde_json::json!({
                     "kind": "sink.delivery.batch_sent",
                     "data": {
@@ -423,6 +425,7 @@ async fn upload_group(
                 id: format!("sink_{table}_{now}"),
                 topic: "sink".to_owned(),
                 created_at: now.clone(),
+                seq: None,
                 payload: serde_json::json!({
                     "kind": "sink.delivery.batch_failed",
                     "data": {

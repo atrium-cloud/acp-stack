@@ -2,7 +2,7 @@ use acp_stack::state::{
     EVENT_SOURCE_ACP, EVENT_SOURCE_SYSTEM, ListedSessionRecord, NewPermissionRequest,
     NewPromptRecord, NewSessionRecord, PromptRecord, PromptStatus, SESSION_ACTIVITY_ACTOR_AGENT,
     SESSION_ACTIVITY_ACTOR_USER, SESSION_STATUS_ACTIVE, SESSION_STATUS_AVAILABLE,
-    SESSION_STATUS_CLOSED, SessionAvailableCommand, StateStore,
+    SESSION_STATUS_CLOSED, SessionAvailableCommand, SessionEventCursor, StateStore,
 };
 
 mod common;
@@ -1863,6 +1863,145 @@ fn metrics_count_an_inherited_turn_on_the_session_that_ran_it() {
     );
 }
 
+fn log_seqs(store: &StateStore, session_id: &str) -> Vec<u64> {
+    session_log(store, session_id)
+        .into_iter()
+        .map(|event| event.seq.expect("a session event carries its seq"))
+        .collect()
+}
+
+#[test]
+fn each_session_log_numbers_its_events_contiguously_across_a_fork() {
+    let (_dir, store) = fresh_state("fork_seq.sqlite");
+    let [_, second, _] = seed_fork_parent(&store);
+    let parent_seqs = log_seqs(&store, FORK_PARENT);
+    assert_eq!(
+        parent_seqs,
+        (1..=parent_seqs.len() as u64).collect::<Vec<_>>()
+    );
+
+    fork_child(&store, FORK_CHILD, FORK_PARENT, Some(&second.prompt_id));
+
+    let child_seqs = log_seqs(&store, FORK_CHILD);
+    assert!(child_seqs.len() > 1, "the fork holds two turns");
+    assert_eq!(
+        child_seqs,
+        (1..=child_seqs.len() as u64).collect::<Vec<_>>()
+    );
+    // The copies follow the parent's log order.
+    let parent_log = session_log(&store, FORK_PARENT);
+    let parent_positions: Vec<usize> = session_log(&store, FORK_CHILD)
+        .iter()
+        .map(|copy| {
+            parent_log
+                .iter()
+                .position(|original| event_projection(original) == event_projection(copy))
+                .expect("every copy has its original")
+        })
+        .collect();
+    assert!(
+        parent_positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "copies out of the parent's order: {parent_positions:?}"
+    );
+    assert_eq!(
+        log_seqs(&store, FORK_PARENT),
+        parent_seqs,
+        "the parent log is unchanged"
+    );
+
+    let child_next = store
+        .append_session_event(FORK_CHILD, "info", "session.forked", "", "{}")
+        .expect("child append");
+    assert_eq!(child_next.seq, Some(child_seqs.len() as u64 + 1));
+    let parent_next = store
+        .append_session_event(FORK_PARENT, "info", "session.fork.created_child", "", "{}")
+        .expect("parent append");
+    assert_eq!(parent_next.seq, Some(parent_seqs.len() as u64 + 1));
+}
+
+#[test]
+fn session_event_cursors_page_the_same_after_the_database_reopens() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let session_id = "sess_reopen";
+    let (cursor_event, before_by_id, before_by_seq) = {
+        let store = StateStore::open(&path).expect("state should open");
+        store.migrate().expect("migration should pass");
+        insert_fork_session(&store, session_id);
+        let events: Vec<_> = (0..5)
+            .map(|index| {
+                store
+                    .append_session_event(
+                        session_id,
+                        "info",
+                        "session.update",
+                        "",
+                        &format!(r#"{{"index":{index}}}"#),
+                    )
+                    .expect("event appended")
+            })
+            .collect();
+        let cursor_event = events[1].clone();
+        assert_eq!(cursor_event.seq, Some(2));
+        let by_id = store
+            .query_session_events(
+                session_id,
+                Some(&SessionEventCursor::EventId(cursor_event.id.clone())),
+                100,
+            )
+            .expect("page after id");
+        let by_seq = store
+            .query_session_events(session_id, Some(&SessionEventCursor::Seq(2)), 100)
+            .expect("page after seq");
+        (cursor_event, by_id, by_seq)
+    };
+    assert_eq!(before_by_id.len(), 3);
+    assert_eq!(before_by_id, before_by_seq);
+
+    let store = StateStore::open(&path).expect("state should reopen");
+    store.migrate().expect("migration should be a no-op");
+    assert_eq!(
+        store
+            .query_session_events(
+                session_id,
+                Some(&SessionEventCursor::EventId(cursor_event.id.clone())),
+                100,
+            )
+            .expect("page after id"),
+        before_by_id
+    );
+    assert_eq!(
+        store
+            .query_session_events(session_id, Some(&SessionEventCursor::Seq(2)), 100)
+            .expect("page after seq"),
+        before_by_seq
+    );
+    assert!(
+        store
+            .query_session_events(session_id, Some(&SessionEventCursor::Seq(5)), 100)
+            .expect("head page")
+            .is_empty()
+    );
+    assert!(matches!(
+        store.query_session_events(session_id, Some(&SessionEventCursor::Seq(6)), 100),
+        Err(acp_stack::error::StackError::SessionEventCursorUnknown { .. })
+    ));
+
+    let next = store
+        .append_session_event(session_id, "info", "session.update", "", "{}")
+        .expect("append after reopen");
+    assert_eq!(next.seq, Some(6));
+    assert_eq!(
+        store
+            .query_session_events(session_id, Some(&SessionEventCursor::Seq(5)), 100)
+            .expect("page after the old head")
+            .into_iter()
+            .map(|event| event.id)
+            .collect::<Vec<_>>(),
+        vec![next.id]
+    );
+}
+
 #[test]
 fn a_fork_child_and_its_inherited_rows_are_queued_for_the_mirror() {
     let (_dir, mut store) = fresh_state("fork_outbox.sqlite");
@@ -1891,4 +2030,484 @@ fn a_fork_child_and_its_inherited_rows_are_queued_for_the_mirror() {
     queued.sort();
     expected.sort();
     assert_eq!(queued, expected);
+}
+
+fn feed(store: &StateStore, after: u64, limit: u32) -> (Vec<(String, u64, bool)>, u64) {
+    let page = store
+        .query_session_changes(after, limit)
+        .expect("change feed");
+    (
+        page.changes
+            .into_iter()
+            .map(|change| (change.session_id, change.change_seq, change.deleted))
+            .collect(),
+        page.head,
+    )
+}
+
+fn change_seq_of(store: &StateStore, session_id: &str) -> u64 {
+    store
+        .get_session(session_id)
+        .expect("session lookup")
+        .expect("session exists")
+        .change_seq
+}
+
+#[test]
+fn the_change_feed_lists_each_session_at_its_latest_change_after_the_cursor() {
+    let (_dir, store) = fresh_state("change_feed.sqlite");
+    for id in ["sess_feed_a", "sess_feed_b", "sess_feed_c"] {
+        insert_fork_session(&store, id);
+    }
+    let (created, head) = feed(&store, 0, 100);
+    assert_eq!(
+        created,
+        vec![
+            ("sess_feed_a".to_owned(), 1, false),
+            ("sess_feed_b".to_owned(), 2, false),
+            ("sess_feed_c".to_owned(), 3, false),
+        ]
+    );
+    assert_eq!(head, 3);
+
+    // Each kind of write moves its session to the head of the feed.
+    store
+        .append_session_event("sess_feed_a", "info", "session.update", "", "{}")
+        .expect("event appended");
+    assert_eq!(change_seq_of(&store, "sess_feed_a"), 4);
+    store
+        .update_session_status("sess_feed_b", SESSION_STATUS_AVAILABLE)
+        .expect("status updated");
+    assert_eq!(change_seq_of(&store, "sess_feed_b"), 5);
+    store
+        .insert_prompt(NewPromptRecord {
+            id: "prm_feed".to_owned(),
+            session_id: "sess_feed_a".to_owned(),
+            prompt_json: "[]".to_owned(),
+        })
+        .expect("prompt inserted");
+    assert_eq!(change_seq_of(&store, "sess_feed_a"), 6);
+    store
+        .update_prompt_status(
+            "prm_feed",
+            PromptStatus::Running,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("prompt running");
+    assert_eq!(change_seq_of(&store, "sess_feed_a"), 7);
+    store
+        .update_session_info("sess_feed_c", Some(Some("renamed")), None, None)
+        .expect("title updated");
+    assert_eq!(change_seq_of(&store, "sess_feed_c"), 8);
+
+    let (all, head) = feed(&store, 0, 100);
+    assert_eq!(
+        all,
+        vec![
+            ("sess_feed_b".to_owned(), 5, false),
+            ("sess_feed_a".to_owned(), 7, false),
+            ("sess_feed_c".to_owned(), 8, false),
+        ]
+    );
+    assert_eq!(head, 8);
+    // `after` is exclusive, and `limit` cuts the ascending page.
+    assert_eq!(feed(&store, 5, 100).0, all[1..].to_vec());
+    assert_eq!(feed(&store, 0, 2).0, all[..2].to_vec());
+    assert_eq!(feed(&store, 8, 100), (Vec::new(), 8));
+
+    // An event logged for a session with no row issues no position.
+    store
+        .append_session_event("sess_feed_unknown", "info", "session.update", "", "{}")
+        .expect("orphan event appended");
+    assert_eq!(feed(&store, 0, 100).1, 8);
+}
+
+#[test]
+fn a_session_list_sync_moves_the_feed_only_for_rows_it_changes() {
+    let (_dir, store) = fresh_state("change_feed_sync.sqlite");
+    let listed = |title: &str| ListedSessionRecord {
+        id: "sess_listed".to_owned(),
+        agent_session_id: "agent_listed".to_owned(),
+        agent_id: "fake".to_owned(),
+        cwd: "/tmp/listed".to_owned(),
+        title: Some(title.to_owned()),
+        updated_at: Some("2026-09-01T00:00:00Z".to_owned()),
+        metadata_json: "{}".to_owned(),
+    };
+    store
+        .upsert_listed_sessions_for_target("fake", vec![listed("first")])
+        .expect("listed session inserted");
+    let inserted = change_seq_of(&store, "sess_listed");
+
+    store
+        .upsert_listed_sessions_for_target("fake", vec![listed("first")])
+        .expect("identical listing");
+    assert_eq!(change_seq_of(&store, "sess_listed"), inserted);
+
+    store
+        .upsert_listed_sessions_for_target("fake", vec![listed("second")])
+        .expect("retitled listing");
+    assert_eq!(change_seq_of(&store, "sess_listed"), inserted + 1);
+}
+
+#[test]
+fn a_deleted_session_stays_in_the_feed_as_a_tombstone_until_retention_prunes_it() {
+    let (dir, store) = fresh_state("change_feed_tombstone.sqlite");
+    insert_fork_session(&store, "sess_gone");
+    insert_fork_session(&store, "sess_kept");
+    store
+        .append_session_event("sess_gone", "info", "session.update", "", "{}")
+        .expect("event appended");
+    let (_, before) = feed(&store, 0, 100);
+
+    store
+        .delete_session("sess_gone")
+        .expect("delete succeeds")
+        .expect("record returned");
+    assert_eq!(
+        feed(&store, before, 100),
+        (vec![("sess_gone".to_owned(), before + 1, true)], before + 1)
+    );
+    assert!(matches!(
+        store.require_live_session("sess_gone"),
+        Err(acp_stack::error::StackError::SessionDeleted { .. })
+    ));
+    assert!(matches!(
+        store.require_live_session("sess_never"),
+        Err(acp_stack::error::StackError::SessionNotFound { .. })
+    ));
+    assert_eq!(
+        store
+            .require_live_session("sess_kept")
+            .expect("live session")
+            .id,
+        "sess_kept"
+    );
+    assert!(
+        store
+            .delete_session("sess_gone")
+            .expect("repeat delete")
+            .is_none()
+    );
+    assert_eq!(
+        feed(&store, 0, 100).1,
+        before + 1,
+        "a repeat delete issues nothing"
+    );
+
+    assert_eq!(
+        store
+            .prune_session_tombstones(acp_stack::state::SESSION_TOMBSTONE_RETENTION)
+            .expect("prune"),
+        0,
+        "a fresh tombstone is inside the retention window"
+    );
+    let page = store.query_session_changes(0, 100).expect("feed");
+    assert_eq!(page.pruned_through, 0);
+    rusqlite::Connection::open(dir.path().join("change_feed_tombstone.sqlite"))
+        .expect("open sqlite directly")
+        .execute(
+            "UPDATE session_tombstones SET deleted_at = '2020-01-01T00:00:00.000000000Z'",
+            [],
+        )
+        .expect("backdate the tombstone");
+    assert_eq!(
+        store
+            .prune_session_tombstones(acp_stack::state::SESSION_TOMBSTONE_RETENTION)
+            .expect("prune"),
+        1
+    );
+    // A cursor below the pruned deletion's position may have missed it.
+    let page = store.query_session_changes(0, 100).expect("feed");
+    assert_eq!(page.pruned_through, before + 1);
+    assert_eq!(page.head, before + 1);
+    assert!(
+        feed(&store, 0, 100)
+            .0
+            .iter()
+            .all(|(id, _, _)| id != "sess_gone")
+    );
+    assert!(matches!(
+        store.require_live_session("sess_gone"),
+        Err(acp_stack::error::StackError::SessionNotFound { .. })
+    ));
+}
+
+#[test]
+fn permission_forks_prompt_sweeps_and_reinserts_move_the_change_feed() {
+    let (_dir, store) = fresh_state("change_feed_writers.sqlite");
+    insert_fork_session(&store, "sess_writers");
+    let head = |store: &StateStore| feed(store, 0, 100).1;
+
+    // Raising and settling an ACP request moves its session; a command
+    // request names no session.
+    let before = head(&store);
+    let request = store
+        .append_permission_request(NewPermissionRequest {
+            source: "acp",
+            requester: None,
+            subject_id: Some("sess_writers"),
+            detail_json: "{}",
+            expires_at: None,
+        })
+        .expect("acp request");
+    assert_eq!(change_seq_of(&store, "sess_writers"), before + 1);
+    store
+        .decide_permission(
+            &request.id,
+            acp_stack::state::PermissionStatus::Approved,
+            Some("operator"),
+            None,
+        )
+        .expect("decision");
+    assert_eq!(change_seq_of(&store, "sess_writers"), before + 2);
+    store
+        .append_permission_request(NewPermissionRequest {
+            source: "command",
+            requester: None,
+            subject_id: Some("cmd_1"),
+            detail_json: "{}",
+            expires_at: None,
+        })
+        .expect("command request");
+    assert_eq!(head(&store), before + 2);
+    // A request answered on arrival moves its session in the same write.
+    store
+        .append_approved_permission_request(
+            NewPermissionRequest {
+                source: "acp",
+                requester: None,
+                subject_id: Some("sess_writers"),
+                detail_json: "{}",
+                expires_at: None,
+            },
+            Some("policy"),
+            None,
+        )
+        .expect("approved on arrival");
+    assert_eq!(change_seq_of(&store, "sess_writers"), before + 3);
+
+    // The startup and stall sweeps move the sessions whose prompts they settle.
+    for prompt_id in ["prm_writers_restart", "prm_writers_done"] {
+        store
+            .insert_prompt(NewPromptRecord {
+                id: prompt_id.to_owned(),
+                session_id: "sess_writers".to_owned(),
+                prompt_json: "[]".to_owned(),
+            })
+            .expect("prompt inserted");
+    }
+    store
+        .update_prompt_status(
+            "prm_writers_done",
+            PromptStatus::Completed,
+            Some("end_turn"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("prompt completed");
+    let before = head(&store);
+    assert_eq!(
+        store
+            .reconcile_orphaned_prompts("runtime restart")
+            .expect("reconcile"),
+        1
+    );
+    assert_eq!(change_seq_of(&store, "sess_writers"), before + 1);
+    store
+        .insert_prompt(NewPromptRecord {
+            id: "prm_writers_stalled".to_owned(),
+            session_id: "sess_writers".to_owned(),
+            prompt_json: "[]".to_owned(),
+        })
+        .expect("prompt inserted");
+    // The sweep compares `updated_at < now`, which a coarse clock can tie.
+    std::thread::sleep(TURN_GAP);
+    let before = head(&store);
+    let stalled = store
+        .mark_stalled_prompts(std::time::Duration::ZERO, "stalled in test")
+        .expect("stall sweep");
+    assert_eq!(stalled.len(), 1);
+    assert_eq!(change_seq_of(&store, "sess_writers"), before + 1);
+
+    // A fork child enters the feed at the head, holding its copied events.
+    append_session_event(
+        &store,
+        "sess_writers",
+        "session.update",
+        EVENT_SOURCE_ACP,
+        "{}",
+    );
+    fork_child(
+        &store,
+        "sess_writers_child",
+        "sess_writers",
+        Some("prm_writers_stalled"),
+    );
+    let child = store
+        .get_session("sess_writers_child")
+        .expect("child lookup")
+        .expect("child exists");
+    assert_eq!(child.change_seq, head(&store));
+    assert_eq!(child.event_seq, 1);
+
+    // A row inserted under a deleted id replaces its tombstone.
+    store
+        .delete_session("sess_writers_child")
+        .expect("delete")
+        .expect("deleted");
+    insert_fork_session(&store, "sess_writers_child");
+    assert_eq!(
+        store
+            .require_live_session("sess_writers_child")
+            .expect("live again")
+            .change_seq,
+        head(&store)
+    );
+    let child_entries: Vec<_> = feed(&store, 0, 100)
+        .0
+        .into_iter()
+        .filter(|(id, _, _)| id == "sess_writers_child")
+        .collect();
+    assert_eq!(
+        child_entries,
+        vec![("sess_writers_child".to_owned(), head(&store), false)]
+    );
+
+    // A listing without `updated_at` changes nothing the agent reported.
+    let listed = ListedSessionRecord {
+        id: "sess_listed_undated".to_owned(),
+        agent_session_id: "agent_undated".to_owned(),
+        agent_id: "fake".to_owned(),
+        cwd: "/tmp/undated".to_owned(),
+        title: None,
+        updated_at: None,
+        metadata_json: "{}".to_owned(),
+    };
+    store
+        .upsert_listed_sessions_for_target("fake", vec![listed.clone()])
+        .expect("listed");
+    let stored = store
+        .get_session("sess_listed_undated")
+        .expect("listed lookup")
+        .expect("listed exists");
+    let before = head(&store);
+    std::thread::sleep(TURN_GAP);
+    store
+        .upsert_listed_sessions_for_target("fake", vec![listed])
+        .expect("relisted");
+    assert_eq!(head(&store), before);
+    let relisted = store
+        .get_session("sess_listed_undated")
+        .expect("listed lookup")
+        .expect("listed exists");
+    assert_eq!(relisted.updated_at, stored.updated_at);
+    assert_eq!(relisted.change_seq, stored.change_seq);
+}
+
+#[test]
+fn a_session_list_sync_layers_its_metadata_over_what_the_runtime_stored() {
+    let (_dir, store) = fresh_state("change_feed_metadata.sqlite");
+    store
+        .insert_session_for_target(
+            "fake",
+            "agent_local".to_owned(),
+            NewSessionRecord {
+                id: "sess_local".to_owned(),
+                agent_id: "fake".to_owned(),
+                cwd: "/tmp/local".to_owned(),
+                title: None,
+                metadata_json: r#"{"fork":{"parent_session_id":"sess_parent"}}"#.to_owned(),
+            },
+        )
+        .expect("local session inserted");
+    store
+        .replace_session_config_options(
+            "sess_local",
+            serde_json::json!([{ "id": "model", "current_value": "fast" }]),
+        )
+        .expect("config options stored");
+    let listed = ListedSessionRecord {
+        id: "sess_ignored".to_owned(),
+        agent_session_id: "agent_local".to_owned(),
+        agent_id: "fake".to_owned(),
+        cwd: "/tmp/local".to_owned(),
+        title: None,
+        updated_at: Some("2026-09-01T00:00:00Z".to_owned()),
+        metadata_json: r#"{"source":"agent_list","agent_meta":{"origin":"agent"}}"#.to_owned(),
+    };
+    store
+        .upsert_listed_sessions_for_target("fake", vec![listed.clone()])
+        .expect("listing");
+
+    let metadata: serde_json::Value = serde_json::from_str(
+        &store
+            .get_session("sess_local")
+            .expect("lookup")
+            .expect("session exists")
+            .metadata_json,
+    )
+    .expect("metadata json");
+    assert_eq!(metadata["fork"]["parent_session_id"], "sess_parent");
+    assert_eq!(metadata["config_options"][0]["current_value"], "fast");
+    assert_eq!(metadata["source"], "agent_list");
+    assert_eq!(metadata["agent_meta"]["origin"], "agent");
+
+    // The same listing again leaves the merged row, and the feed, where they are.
+    let settled = change_seq_of(&store, "sess_local");
+    store
+        .upsert_listed_sessions_for_target("fake", vec![listed])
+        .expect("same listing");
+    assert_eq!(change_seq_of(&store, "sess_local"), settled);
+}
+
+#[test]
+fn the_change_feed_counter_continues_after_the_database_reopens() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let (before, first_epoch) = {
+        let store = StateStore::open(&path).expect("state should open");
+        store.migrate().expect("migration should pass");
+        insert_fork_session(&store, "sess_reopen_a");
+        insert_fork_session(&store, "sess_reopen_b");
+        store
+            .append_session_event("sess_reopen_a", "info", "session.update", "", "{}")
+            .expect("event appended");
+        let epoch = store
+            .query_session_changes(0, 100)
+            .expect("feed")
+            .feed_epoch;
+        assert_eq!(epoch.len(), 22, "base64url of 16 bytes: {epoch}");
+        assert_eq!(store.feed_epoch(), epoch, "one opening keeps one epoch");
+        (feed(&store, 0, 100), epoch)
+    };
+    assert_eq!(before.1, 3);
+
+    // Positions are stored and carry across the reopen; the epoch is minted
+    // per opening, so the reopen names a new one.
+    let store = StateStore::open(&path).expect("state should reopen");
+    store.migrate().expect("migration should be a no-op");
+    assert_eq!(feed(&store, 0, 100), before);
+    assert_ne!(
+        store
+            .query_session_changes(0, 100)
+            .expect("feed")
+            .feed_epoch,
+        first_epoch,
+        "a new opening mints a new epoch"
+    );
+    assert_eq!(feed(&store, 2, 100).0, before.0[1..].to_vec());
+    store
+        .update_session_status("sess_reopen_b", SESSION_STATUS_CLOSED)
+        .expect("status updated");
+    assert_eq!(
+        feed(&store, 3, 100),
+        (vec![("sess_reopen_b".to_owned(), 4, false)], 4)
+    );
 }

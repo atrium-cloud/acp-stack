@@ -5,10 +5,29 @@ pub(crate) struct SessionsEventsParams {
     /// Values above 1000 are silently clamped to 1000, not rejected.
     #[serde(default = "default_logs_limit")]
     limit: u32,
+    /// Event id to page after. Mutually exclusive with `after_seq`.
     #[serde(default)]
     after: Option<String>,
+    /// Log position to page after; `0` reads from the start. Mutually
+    /// exclusive with `after`.
+    #[serde(default)]
+    after_seq: Option<u64>,
     #[serde(default, alias = "target")]
     target_id: Option<String>,
+}
+
+impl SessionsEventsParams {
+    fn cursor(&self) -> Result<Option<SessionEventCursor>> {
+        match (&self.after, self.after_seq) {
+            (Some(_), Some(_)) => Err(StackError::InvalidParam {
+                field: "after",
+                reason: "pass either `after` or `after_seq`, not both".to_owned(),
+            }),
+            (Some(event_id), None) => Ok(Some(SessionEventCursor::EventId(event_id.clone()))),
+            (None, Some(seq)) => Ok(Some(SessionEventCursor::Seq(seq))),
+            (None, None) => Ok(None),
+        }
+    }
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -22,26 +41,21 @@ pub(crate) async fn sessions_events_handler(
     Query(params): Query<SessionsEventsParams>,
 ) -> std::result::Result<ApiSuccess<SessionsEventsResponse>, StackError> {
     let limit = params.limit.min(MAX_LOGS_LIMIT);
+    let cursor = params.cursor()?;
     let store = state.state.lock().await;
-    let exists = store.get_session(&id)?.is_some();
-    if !exists {
-        return Err(StackError::SessionNotFound { id });
+    let record = store.require_live_session(&id)?;
+    if let Some(asserted) = params.target_id.as_deref()
+        && asserted != record.target_id
+    {
+        return Err(StackError::InvalidParam {
+            field: "target",
+            reason: format!(
+                "session `{}` belongs to target `{}`, not `{asserted}`",
+                record.id, record.target_id
+            ),
+        });
     }
-    if let Some(asserted) = params.target_id.as_deref() {
-        let record = store
-            .get_session(&id)?
-            .ok_or_else(|| StackError::SessionNotFound { id: id.clone() })?;
-        if asserted != record.target_id {
-            return Err(StackError::InvalidParam {
-                field: "target",
-                reason: format!(
-                    "session `{}` belongs to target `{}`, not `{asserted}`",
-                    record.id, record.target_id
-                ),
-            });
-        }
-    }
-    let events = store.query_session_events(&id, params.after.as_deref(), limit)?;
+    let events = store.query_session_events(&id, cursor.as_ref(), limit)?;
     drop(store);
     Ok(ApiSuccess::new(SessionsEventsResponse {
         events: events.into_iter().map(LogEventJson::from).collect(),
@@ -88,9 +102,7 @@ pub(crate) async fn sessions_snapshot_handler(
     Query(params): Query<SessionsTargetParams>,
 ) -> std::result::Result<ApiSuccess<SessionSnapshotResponse>, StackError> {
     let store = state.state.lock().await;
-    let session = store
-        .get_session(&id)?
-        .ok_or_else(|| StackError::SessionNotFound { id: id.clone() })?;
+    let session = store.require_live_session(&id)?;
     if let Some(asserted) = params.target_id.as_deref()
         && asserted != session.target_id
     {

@@ -700,6 +700,7 @@ fn parse_logs_frame(text: &str) -> Result<Option<Event>> {
         .get("session_id")
         .and_then(Value::as_str)
         .map(str::to_owned);
+    let seq = parsed.get("seq").and_then(Value::as_u64);
     // `payload` is legitimately Null when the source event had an empty payload.
     let payload_value = data.get("payload").cloned().unwrap_or(Value::Null);
     let payload_json =
@@ -715,6 +716,7 @@ fn parse_logs_frame(text: &str) -> Result<Option<Event>> {
         payload_json,
         source,
         session_id,
+        seq,
     }))
 }
 

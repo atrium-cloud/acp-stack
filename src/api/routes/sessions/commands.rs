@@ -44,9 +44,7 @@ pub(crate) async fn sessions_commands_handler(
     Query(params): Query<SessionsTargetParams>,
 ) -> std::result::Result<ApiSuccess<SessionCommandsResponse>, StackError> {
     let store = state.state.lock().await;
-    let session = store
-        .get_session(&id)?
-        .ok_or_else(|| StackError::SessionNotFound { id: id.clone() })?;
+    let session = store.require_live_session(&id)?;
     drop(store);
     if let Some(asserted) = params.target_id.as_deref()
         && asserted != session.target_id
@@ -94,9 +92,7 @@ pub(crate) async fn sessions_commands_run_handler(
     }
     let session = {
         let store = state.state.lock().await;
-        store
-            .get_session(&id)?
-            .ok_or_else(|| StackError::SessionNotFound { id: id.clone() })?
+        store.require_live_session(&id)?
     };
     if let Some(asserted) = params.target_id.as_deref()
         && asserted != session.target_id

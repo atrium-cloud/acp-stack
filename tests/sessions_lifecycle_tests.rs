@@ -12,7 +12,7 @@ use acp_stack::config::{
     McpStdioServer,
 };
 use acp_stack::secrets::SecretStore;
-use acp_stack::state::{NewPromptRecord, NewSessionRecord};
+use acp_stack::state::{NewPermissionRequest, NewPromptRecord, NewSessionRecord};
 use common::sessions::{Harness, admin_bearer, create_session, http, session_bearer};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -518,13 +518,60 @@ async fn delete_session_removes_the_row_and_repeats_silently() {
     assert_eq!(delete_body["data"]["session_id"], session_id.as_str());
     assert_eq!(delete_body["data"]["deleted"], true);
 
-    let get = client
-        .get(format!("{}/v1/sessions/{}", harness.base_url, session_id))
+    // Every per-session route answers a tombstoned id with 410.
+    for path in ["", "/events", "/snapshot", "/commands", "/config-options"] {
+        let response = client
+            .get(format!(
+                "{}/v1/sessions/{}{path}",
+                harness.base_url, session_id
+            ))
+            .header("Authorization", session_bearer())
+            .send()
+            .await
+            .expect("get");
+        assert_eq!(response.status(), StatusCode::GONE, "GET {path}");
+        let body: Value = response.json().await.expect("gone json");
+        assert_eq!(body["error"]["code"], "session.deleted", "GET {path}");
+    }
+    let prompt = client
+        .post(format!(
+            "{}/v1/sessions/{}/prompt",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .json(&json!({ "prompt": "hello" }))
+        .send()
+        .await
+        .expect("prompt");
+    assert_eq!(prompt.status(), StatusCode::GONE);
+    let never = client
+        .get(format!(
+            "{}/v1/sessions/sess_never_existed",
+            harness.base_url
+        ))
         .header("Authorization", session_bearer())
         .send()
         .await
-        .expect("get");
-    assert_eq!(get.status(), StatusCode::NOT_FOUND);
+        .expect("get unknown");
+    assert_eq!(never.status(), StatusCode::NOT_FOUND);
+
+    let feed: Value = client
+        .get(format!("{}/v1/sessions/-/changes", harness.base_url))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("feed")
+        .json()
+        .await
+        .expect("feed json");
+    let tombstone = feed["data"]["changes"]
+        .as_array()
+        .expect("changes")
+        .iter()
+        .find(|change| change["session_id"] == session_id.as_str())
+        .expect("the deletion is on the feed");
+    assert_eq!(tombstone["deleted"], true);
+    assert_eq!(tombstone["change_seq"], feed["data"]["head"]);
 
     // Repeats and unknown ids succeed silently per ACP session/delete.
     let repeat = client
@@ -549,6 +596,7 @@ async fn delete_session_reports_unsupported_capability_and_keeps_the_row() {
     .await;
     let client = http();
     let session_id = create_session(&harness).await;
+    let permission_id = append_pending_acp_permission(&harness, &session_id).await;
 
     let delete = client
         .post(format!(
@@ -570,6 +618,62 @@ async fn delete_session_reports_unsupported_capability_and_keeps_the_row() {
         .await
         .expect("get");
     assert_eq!(get.status(), StatusCode::OK);
+    // A delete the agent refused leaves the session's turn, and its pending
+    // permission, untouched.
+    let store = harness.state.lock().await;
+    let permission = store
+        .get_permission_request(&permission_id)
+        .expect("permission lookup")
+        .expect("permission exists");
+    assert_eq!(permission.status, "pending");
+}
+
+async fn append_pending_acp_permission(harness: &Harness, session_id: &str) -> String {
+    let store = harness.state.lock().await;
+    store
+        .append_permission_request(NewPermissionRequest {
+            source: "acp",
+            requester: None,
+            subject_id: Some(session_id),
+            detail_json: "{}",
+            expires_at: None,
+        })
+        .expect("pending permission")
+        .id
+}
+
+#[tokio::test]
+async fn deleting_a_session_settles_its_pending_permission_without_leaving_events() {
+    let harness = Harness::spawn().await;
+    let session_id = create_session(&harness).await;
+    let permission_id = append_pending_acp_permission(&harness, &session_id).await;
+
+    let delete = http()
+        .post(format!(
+            "{}/v1/sessions/{}/delete",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("delete");
+    assert_eq!(delete.status(), StatusCode::OK);
+
+    let store = harness.state.lock().await;
+    let permission = store
+        .get_permission_request(&permission_id)
+        .expect("permission lookup")
+        .expect("the permission row outlives the session");
+    assert_eq!(permission.status, "cancelled");
+    // The cancellation's decision event landed in the log the delete removed.
+    let events = store
+        .query_events(acp_stack::state::EventFilter {
+            limit: 100,
+            session_id: Some(&session_id),
+            ..acp_stack::state::EventFilter::default()
+        })
+        .expect("session events");
+    assert!(events.is_empty(), "{events:?}");
 }
 
 #[tokio::test]
@@ -1673,7 +1777,20 @@ async fn attached_mcp_event_lists_servers_for_an_mcp_capable_agent() {
     )
     .await;
 
-    let session_id = create_session(&harness).await;
+    let created: Value = http()
+        .post(format!("{}/v1/sessions", harness.base_url))
+        .header("Authorization", session_bearer())
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("create")
+        .json()
+        .await
+        .expect("create json");
+    let session_id = created["data"]["id"]
+        .as_str()
+        .expect("session id")
+        .to_owned();
 
     let events = {
         let store = harness.state.lock().await;
@@ -1686,6 +1803,12 @@ async fn attached_mcp_event_lists_servers_for_an_mcp_capable_agent() {
         .filter(|event| event.kind == "mcp.session_attached")
         .collect();
     assert_eq!(attached.len(), 1, "{events:?}");
+    // The create response already counts the attached row it follows.
+    assert!(
+        created["data"]["event_seq"].as_u64().expect("event_seq")
+            >= attached[0].seq.expect("attached seq"),
+        "{created}"
+    );
     let payload: Value =
         serde_json::from_str(&attached[0].payload_json).expect("attached payload json");
     assert_eq!(

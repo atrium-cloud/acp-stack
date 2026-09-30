@@ -3,6 +3,7 @@
 
 use rusqlite::{Transaction, TransactionBehavior};
 
+use super::events::next_session_event_seq;
 use super::queries::{insert_session_row, new_active_session_row};
 use super::*;
 
@@ -66,10 +67,11 @@ impl StateStore {
     ///   id minted in submission order, so inherited prompts sort before every
     ///   prompt later sent to the child;
     /// - a copy of each parent conversation event older than the parent's next
-    ///   prompt (all of them when there is none), in `(created_at, id)` order.
+    ///   prompt (all of them when there is none), in the parent's log order.
     ///
-    /// Copies keep every column but the row id and the session id, so a
-    /// carried payload still names the prompt row that recorded its turn.
+    /// Copies keep every column but the row id, the session id, and `seq`, so
+    /// a carried payload still names the prompt row that recorded its turn.
+    /// Copies take the child's own seqs, contiguous from 1 in log order.
     pub fn insert_forked_session(
         &self,
         target_id: &str,
@@ -79,10 +81,11 @@ impl StateStore {
         held_through_prompt_id: Option<&str>,
     ) -> Result<SessionRecord> {
         validate_json_payload(self.connection(), &record.metadata_json)?;
-        let row = new_active_session_row(target_id, agent_session_id, record);
+        let mut row = new_active_session_row(target_id, agent_session_id, record);
         let transaction =
             Transaction::new_unchecked(self.connection(), TransactionBehavior::Immediate)?;
-        insert_session_row(&transaction, &row)?;
+        row.change_seq = next_change_seq(&transaction)?;
+        insert_session_row(&transaction, &row, row.change_seq)?;
         let mut copied: Vec<(&'static str, String, String)> = Vec::new();
 
         let held_prompts: Vec<(String, String)> = match held_through_prompt_id {
@@ -148,7 +151,7 @@ impl StateStore {
                 SELECT id, created_at, kind
                 FROM events
                 WHERE session_id = ?1 AND (?2 IS NULL OR created_at < ?2)
-                ORDER BY created_at ASC, id ASC
+                ORDER BY seq ASC
                 "#,
             )?;
             let rows = statement.query_map(params![parent_session_id, cut], |row| {
@@ -160,12 +163,13 @@ impl StateStore {
             let mut copy_event = transaction.prepare(
                 r#"
                 INSERT INTO events
-                    (id, created_at, level, kind, message, payload_json, source, session_id)
-                SELECT ?1, created_at, level, kind, message, payload_json, source, ?2
+                    (id, created_at, level, kind, message, payload_json, source, session_id, seq)
+                SELECT ?1, created_at, level, kind, message, payload_json, source, ?2, ?3
                 FROM events
-                WHERE id = ?3
+                WHERE id = ?4
                 "#,
             )?;
+            let mut child_seq = next_session_event_seq(&transaction, &row.id)?;
             for (parent_event_id, created_at, kind) in parent_events {
                 if !FORK_INHERITED_EVENT_KINDS.contains(&kind.as_str()) {
                     continue;
@@ -173,7 +177,14 @@ impl StateStore {
                 // Minted in log order, so copies that share a timestamp keep
                 // the order their originals had.
                 let event_id = next_event_id();
-                copy_event.execute(params![event_id, row.id, parent_event_id])?;
+                copy_event.execute(params![
+                    event_id,
+                    row.id,
+                    sequence_param(child_seq)?,
+                    parent_event_id
+                ])?;
+                row.event_seq = child_seq;
+                child_seq += 1;
                 copied.push(("events", event_id, created_at));
             }
         }

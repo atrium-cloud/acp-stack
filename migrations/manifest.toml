@@ -165,3 +165,9 @@ id = 28
 name = "installer_runs_artifact"
 sqlite_file = "028_installer_runs_artifact.sqlite.sql"
 postgres_file = "028_installer_runs_artifact.postgres.sql"
+
+[[migration]]
+id = 29
+name = "session_log_sequences"
+sqlite_file = "029_session_log_sequences.sqlite.sql"
+postgres_file = "029_session_log_sequences.postgres.sql"

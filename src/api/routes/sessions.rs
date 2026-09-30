@@ -17,8 +17,8 @@ use crate::state::{
     DEFAULT_SESSION_ACTIVITY_THRESHOLD, DEFAULT_SESSION_STATUS_WINDOW,
     MAX_SESSION_STATUS_WINDOW_SECS, MIN_SESSION_STATUS_WINDOW_SECS, PromptRecord,
     SESSION_METADATA_AVAILABLE_COMMANDS, SESSION_METADATA_AVAILABLE_COMMANDS_UPDATED_AT,
-    SESSION_STATUS_ACTIVE, SESSION_STATUS_CLOSED, SessionAvailableCommand, SessionRecord,
-    SessionStatusRecord, SessionUpdateBounds,
+    SESSION_STATUS_ACTIVE, SESSION_STATUS_CLOSED, SessionAvailableCommand, SessionEventCursor,
+    SessionRecord, SessionStatusRecord, SessionUpdateBounds,
 };
 
 pub(crate) mod commands;
@@ -43,7 +43,7 @@ pub(crate) use lifecycle::{
     sessions_create_handler, sessions_fork_handler, sessions_get_handler, sessions_load_handler,
     sessions_resume_handler,
 };
-pub(crate) use list::sessions_list_handler;
+pub(crate) use list::{sessions_change_feed_handler, sessions_list_handler};
 pub(crate) use prompts::{sessions_prompt_handler, sessions_prompt_status_handler};
 pub(crate) use status::sessions_status_handler;
 pub(crate) use teardown::{
@@ -63,6 +63,11 @@ pub(crate) struct SessionResponse {
     cwd: String,
     title: Option<String>,
     metadata_json: String,
+    /// Position of the session's latest change in
+    /// `GET /v1/sessions/-/changes`.
+    change_seq: u64,
+    /// `seq` of the session's newest event, `0` when it has none.
+    event_seq: u64,
     /// Configured features (mode, model) the agent's advertised capabilities
     /// could not honor; the session proceeded on agent defaults. Omitted when
     /// nothing was ignored, so list/read responses are unchanged.
@@ -83,6 +88,8 @@ impl From<SessionRecord> for SessionResponse {
             cwd: record.cwd,
             title: record.title,
             metadata_json: record.metadata_json,
+            change_seq: record.change_seq,
+            event_seq: record.event_seq,
             ignored: Vec::new(),
         }
     }
@@ -202,12 +209,7 @@ async fn resolved_stored_target_id(
 ) -> Result<String> {
     let stored_target_id = {
         let store = state.state.lock().await;
-        let record = store
-            .get_session(session_id)?
-            .ok_or_else(|| StackError::SessionNotFound {
-                id: session_id.to_owned(),
-            })?;
-        record.target_id
+        store.require_live_session(session_id)?.target_id
     };
     if let Some(asserted) = asserted_target_id
         && asserted != stored_target_id

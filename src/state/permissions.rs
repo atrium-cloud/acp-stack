@@ -6,6 +6,28 @@ use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use super::core::StateStore;
 use super::ids::{current_timestamp, next_permission_decision_id, next_permission_request_id};
 use super::rows::validate_json_payload;
+use super::sessions::bump_session_change;
+
+/// `permission_requests.source` of a request an ACP agent raised; its
+/// `subject_id` is the local session id.
+const PERMISSION_SOURCE_ACP: &str = "acp";
+
+/// A pending ACP request puts its session in `permission_required`, so
+/// raising or settling one is a change the session feed reports, even though
+/// `permission.created` is logged without a session scope.
+fn bump_acp_permission_session(conn: &rusqlite::Connection, request_id: &str) -> Result<()> {
+    let session_id: Option<Option<String>> = conn
+        .query_row(
+            "SELECT subject_id FROM permission_requests WHERE id = ?1 AND source = ?2",
+            params![request_id, PERMISSION_SOURCE_ACP],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match session_id.flatten() {
+        Some(session_id) => bump_session_change(conn, &session_id),
+        None => Ok(()),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PermissionRequestRecord {
@@ -143,7 +165,7 @@ impl StateStore {
                         record.expires_at,
                     ],
                 )?;
-                Ok(())
+                bump_acp_permission_session(conn, &record.id)
             },
         )?;
         Ok(record)
@@ -217,6 +239,7 @@ impl StateStore {
                 decision.reason,
             ],
         )?;
+        bump_acp_permission_session(&transaction, &record.id)?;
         if self.external_logging_enabled() {
             super::sink_outbox::enqueue(&transaction, "permission_requests", &record.id, &now)?;
             super::sink_outbox::enqueue(
@@ -269,7 +292,7 @@ impl StateStore {
             if affected == 0 {
                 return Err(StackError::PermissionNotFound { id: id.to_owned() });
             }
-            Ok(())
+            bump_acp_permission_session(conn, id)
         })?;
         Ok(current_status)
     }
@@ -312,6 +335,7 @@ impl StateStore {
         if affected == 0 {
             return Err(StackError::PermissionNotFound { id: id.to_owned() });
         }
+        bump_acp_permission_session(&transaction, id)?;
         let decision = PermissionDecisionRecord {
             id: next_permission_decision_id(),
             request_id: id.to_owned(),
@@ -472,6 +496,7 @@ impl StateStore {
                 "UPDATE permission_requests SET status = 'cancelled', updated_at = ?1 WHERE id = ?2",
                 params![now, id],
             )?;
+            bump_acp_permission_session(&transaction, id)?;
             let decision_id = next_permission_decision_id();
             transaction.execute(
                 r#"
