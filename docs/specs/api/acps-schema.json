@@ -9192,10 +9192,16 @@
       },
       "PromptsConfig": {
         "type": "object",
-        "description": "Configuration for the stale-prompt sweeper background task. When no\nACP `session/update` notification has touched a `pending`/`running`\nprompt row for `stale_threshold`, the sweeper flips it to terminal\n`Stalled` so polling clients always see the row settle. The sweep\nruns every `sweep_interval` from `acps serve`.",
+        "description": "Configuration for the stale-prompt sweeper background task. When no\nACP `session/update` notification has touched a `pending`/`running`\nprompt row for `stale_threshold`, the sweeper flips it to terminal\n`Stalled` so polling clients always see the row settle. While the turn\nhas a tool call open, `tool_call_stale_threshold` applies instead; unset,\nit is the longer of 1h and `stale_threshold`. The sweep runs every\n`sweep_interval` from `acps serve`.",
         "properties": {
           "stale_threshold": {
             "type": "string"
+          },
+          "tool_call_stale_threshold": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "sweep_interval": {
             "type": "string"

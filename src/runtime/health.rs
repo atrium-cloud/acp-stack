@@ -13,11 +13,12 @@ use crate::api::AppState;
 use crate::config::{McpConfig, McpServerConfig};
 use crate::error::Result;
 use crate::ownership;
+use crate::runtime::agent::sweeper::prompt_stale_thresholds;
 use crate::runtime::dependencies::deps::resolve_command_path;
 use crate::runtime::dependencies::deps_apply::{DEPS_APPLY_AGENT_ID, DEPS_APPLY_STEP};
 use crate::runtime::node_runtime::{self, NodeRuntimeOutcome, NodeRuntimeStatus};
 use crate::secrets::SecretStore;
-use crate::state::{AgentStartedProcess, InstallerRun, StateStore};
+use crate::state::{AgentStartedProcess, InstallerRun, PromptStaleThresholds, StateStore};
 
 use self::deps::collect_deps;
 use self::mcp::{collect_mcp, mcp_secret_store_paths};
@@ -130,14 +131,17 @@ pub struct SinkHealth {
     pub probe_error: Option<String>,
 }
 
-/// Stuck-prompt signal: rows still `pending`/`running` whose `updated_at` is
-/// older than the `[prompts]` staleness threshold.
+/// Stuck-prompt signal: rows still `pending`/`running` that the next
+/// stale-prompt sweep would flip under the `[prompts]` thresholds.
 #[derive(Debug, Clone, Serialize)]
 pub struct PromptsHealth {
     pub stuck_count: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oldest_stuck_age_secs: Option<i64>,
+    /// `stale_threshold`, applied while the turn has no open tool call.
     pub threshold_secs: i64,
+    /// `tool_call_stale_threshold`, applied while the turn has an open tool call.
+    pub tool_call_threshold_secs: i64,
     /// Set when the prompts probe query itself errored, promoting the
     /// subsystem to `failing` regardless of the count.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -206,7 +210,7 @@ impl HealthReport {
                 .is_some_and(|sb| sb.enabled);
             sink = collect_sink(&store, supabase_enabled);
             deps = collect_deps(&store);
-            prompts = collect_prompts(&store, state.config.prompts.effective_stale_threshold());
+            prompts = collect_prompts(&store, prompt_stale_thresholds(&state.config.prompts));
             agent_process_probe = collect_agent_process_probe(&store);
         }
         let workspace = collect_workspace(&state.config.workspace.root);
@@ -452,15 +456,18 @@ fn collect_sink(store: &StateStore, enabled: bool) -> SinkHealth {
     }
 }
 
-fn collect_prompts(store: &StateStore, threshold: std::time::Duration) -> PromptsHealth {
-    let threshold_secs = i64::try_from(threshold.as_secs()).unwrap_or(i64::MAX);
-    let (count, oldest_at) = match store.count_stuck_prompts(threshold) {
+fn collect_prompts(store: &StateStore, thresholds: PromptStaleThresholds) -> PromptsHealth {
+    let threshold_secs = i64::try_from(thresholds.quiet.as_secs()).unwrap_or(i64::MAX);
+    let tool_call_threshold_secs =
+        i64::try_from(thresholds.open_tool_call.as_secs()).unwrap_or(i64::MAX);
+    let (count, oldest_at) = match store.count_stuck_prompts(thresholds) {
         Ok(pair) => pair,
         Err(err) => {
             return PromptsHealth {
                 stuck_count: 0,
                 oldest_stuck_age_secs: None,
                 threshold_secs,
+                tool_call_threshold_secs,
                 probe_error: Some(err.to_string()),
             };
         }
@@ -470,6 +477,7 @@ fn collect_prompts(store: &StateStore, threshold: std::time::Duration) -> Prompt
         stuck_count: count,
         oldest_stuck_age_secs,
         threshold_secs,
+        tool_call_threshold_secs,
         probe_error: None,
     }
 }

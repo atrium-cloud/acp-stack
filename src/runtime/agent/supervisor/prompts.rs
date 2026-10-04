@@ -187,52 +187,57 @@ impl AgentSupervisor {
 
             // The session-event emit must follow the row write so subscribers
             // observe consistent SQL state.
+            let replaces_stall = outcome.replaces_stall();
             let terminal = build_terminal_outcome_with_prompt_id(outcome, Some(&prompt_id_owned));
 
             {
                 let guard = state_clone.lock().await;
-                let status_updated = match guard.update_prompt_status(
+                let settle = match guard.settle_prompt(
                     &prompt_id_owned,
-                    terminal.status,
-                    terminal.stop_reason.as_deref(),
-                    terminal.error_code.as_deref(),
-                    terminal.error_message.as_deref(),
-                    terminal.failure_class,
-                    terminal.failure_detail_json.as_deref(),
+                    &terminal.settlement(),
+                    replaces_stall,
                 ) {
-                    Ok(updated) => updated,
+                    Ok(settle) => settle,
                     Err(err) => {
                         tracing::warn!(
                             error = %err,
                             prompt_id = %prompt_id_owned,
                             "failed to record terminal prompt status"
                         );
-                        false
+                        return;
                     }
                 };
-                if !status_updated {
-                    tracing::warn!(
-                        prompt_id = %prompt_id_owned,
-                        terminal_status = %terminal.status.as_str(),
-                        "skipping terminal prompt event because prompt row was already terminal"
-                    );
-                } else if let Some(event) = terminal.session_event.as_ref()
-                    && let Err(err) = guard.append_session_event_with_source(
+                let stall_resolved = match settle {
+                    PromptSettle::Applied => None,
+                    PromptSettle::ReplacedStall => {
+                        Some(terminal.stall_resolved_event(&prompt_id_owned))
+                    }
+                    PromptSettle::AlreadyTerminal => {
+                        tracing::warn!(
+                            prompt_id = %prompt_id_owned,
+                            terminal_status = %terminal.status.as_str(),
+                            "skipping terminal prompt event because prompt row was already terminal"
+                        );
+                        return;
+                    }
+                };
+                for event in stall_resolved.iter().chain(terminal.session_event.as_ref()) {
+                    if let Err(err) = guard.append_session_event_with_source(
                         &session_id_owned,
                         event.level,
                         event.kind,
                         event.source,
                         event.message,
                         &event.payload_json,
-                    )
-                {
-                    tracing::warn!(
-                        error = %err,
-                        prompt_id = %prompt_id_owned,
-                        session_id = %session_id_owned,
-                        event_kind = event.kind,
-                        "failed to record terminal prompt session event"
-                    );
+                    ) {
+                        tracing::warn!(
+                            error = %err,
+                            prompt_id = %prompt_id_owned,
+                            session_id = %session_id_owned,
+                            event_kind = event.kind,
+                            "failed to record terminal prompt session event"
+                        );
+                    }
                 }
             }
         });

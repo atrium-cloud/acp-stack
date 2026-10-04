@@ -631,7 +631,7 @@ async fn prompt_inference_5xx_persists_taxonomy_and_emits_event() {
 }
 
 #[tokio::test]
-async fn stalled_prompt_suppresses_late_terminal_failure_event() {
+async fn late_agent_failure_replaces_stalled_prompt() {
     const DELAY_MS: u64 = 1000;
     let injected_message = "upstream returned 503 Service Unavailable";
     let harness = Harness::spawn_with(|config| {
@@ -683,10 +683,13 @@ async fn stalled_prompt_suppresses_late_terminal_failure_event() {
     {
         let state = harness.state.lock().await;
         let stalled = state
-            .mark_stalled_prompts(Duration::from_secs(0), "test forced stall")
+            .mark_stalled_prompts(
+                common::state::uniform_stale_thresholds(Duration::ZERO),
+                "test forced stall",
+            )
             .expect("mark stalled");
         assert!(
-            stalled.iter().any(|(id, _)| id == &prompt_id),
+            stalled.iter().any(|prompt| prompt.prompt_id == prompt_id),
             "forced stall should include submitted prompt, got {stalled:?}"
         );
     }
@@ -698,21 +701,32 @@ async fn stalled_prompt_suppresses_late_terminal_failure_event() {
         .get_prompt(&prompt_id)
         .expect("prompt lookup")
         .expect("prompt exists");
-    assert_eq!(prompt.status, "stalled");
+    assert_eq!(prompt.status, "errored");
     assert_eq!(
         prompt.failure_class.as_deref(),
-        Some(acp_stack::state::FailureClass::Stalled.as_str())
+        Some(acp_stack::state::FailureClass::Inference5xx.as_str())
     );
     let events = state
         .query_session_events(&session_id, None, 100)
         .expect("session events");
     drop(state);
+    // The direct sweep call writes no `prompt.stalled` row; the sweeper task does.
+    let kinds: Vec<&str> = events.iter().map(|event| event.kind.as_str()).collect();
+    let resolved_at = kinds
+        .iter()
+        .position(|kind| *kind == "prompt.stall_resolved");
+    let failed_at = kinds
+        .iter()
+        .position(|kind| *kind == "prompt.inference_failed");
     assert!(
-        events
-            .iter()
-            .all(|event| event.kind != "prompt.inference_failed" && event.kind != "prompt.errored"),
-        "late terminal failure event should be suppressed after stalled transition, got {events:?}"
+        matches!((resolved_at, failed_at), (Some(resolved), Some(failed)) if resolved < failed),
+        "the stall resolution must precede the agent's failure event, got {kinds:?}"
     );
+    let resolved: Value =
+        serde_json::from_str(&events[resolved_at.expect("resolution event")].payload_json)
+            .expect("resolution payload");
+    assert_eq!(resolved["prompt_id"], prompt_id.as_str());
+    assert_eq!(resolved["status"], "errored");
 }
 
 const PROMPT_USAGE_JSON: &str = r#"{"totalTokens":1500,"inputTokens":200,"outputTokens":300,"cachedReadTokens":900,"cachedWriteTokens":100}"#;

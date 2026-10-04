@@ -7,7 +7,7 @@ use crate::fs_util::{
     set_owner_only_dir, set_owner_only_file,
 };
 use crate::runtime::agent::supervisor::ServerLifecycle;
-use crate::runtime::agent::sweeper::StateSweeper;
+use crate::runtime::agent::sweeper::{StateSweeper, prompt_stale_thresholds};
 use crate::runtime::install::agent_auto_update::AgentAutoUpdater;
 use crate::runtime::logging::supabase_mirror::SUPABASE_DEFAULT_DB_URL_REF;
 use crate::runtime::logging::supabase_sink::{SupabaseSink, SupabaseSinkCredential};
@@ -382,7 +382,7 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
         // Held in scope so the sweeper shuts down before `acps serve` returns.
         let state_sweeper = StateSweeper::spawn(
             state_handle.clone(),
-            app_state.config.prompts.effective_stale_threshold(),
+            prompt_stale_thresholds(&app_state.config.prompts),
             app_state.config.prompts.effective_sweep_interval(),
             app_state.config.sessions.effective_idle_threshold(),
         );

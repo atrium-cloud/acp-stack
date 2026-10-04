@@ -1334,6 +1334,7 @@ const CONVERSATION_KINDS: &[&str] = &[
     "session.update",
     "prompt.inference_failed",
     "prompt.stalled",
+    "prompt.stall_resolved",
     "prompt.errored",
     "prompt.usage_reported",
     "session.cancel_requested",
@@ -2331,7 +2332,10 @@ fn permission_forks_prompt_sweeps_and_reinserts_move_the_change_feed() {
     std::thread::sleep(TURN_GAP);
     let before = head(&store);
     let stalled = store
-        .mark_stalled_prompts(std::time::Duration::ZERO, "stalled in test")
+        .mark_stalled_prompts(
+            common::state::uniform_stale_thresholds(std::time::Duration::ZERO),
+            "stalled in test",
+        )
         .expect("stall sweep");
     assert_eq!(stalled.len(), 1);
     assert_eq!(change_seq_of(&store, "sess_writers"), before + 1);

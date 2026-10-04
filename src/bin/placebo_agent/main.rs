@@ -19,8 +19,8 @@ use agent_client_protocol::schema::v1::{
     SessionListCapabilities, SessionMode, SessionModeState, SessionNotification,
     SessionResumeCapabilities, SessionUpdate, SetSessionConfigOptionRequest,
     SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse, StopReason,
-    TerminalId, TerminalOutputRequest, TextContent, ToolCallUpdate, ToolCallUpdateFields, Usage,
-    WaitForTerminalExitRequest, WriteTextFileRequest,
+    TerminalId, TerminalOutputRequest, TextContent, ToolCall, ToolCallStatus, ToolCallUpdate,
+    ToolCallUpdateFields, ToolKind, Usage, WaitForTerminalExitRequest, WriteTextFileRequest,
 };
 use agent_client_protocol::schema::v1::{PermissionOption, PermissionOptionKind};
 use agent_client_protocol::{Agent, Client, ConnectionTo, Dispatch, Error, Handled, Responder};
@@ -59,6 +59,12 @@ const STALL_SLEEP: Duration = Duration::from_secs(3600);
 /// Cadence for the off-loop wait on a `session/cancel` notification, which
 /// `handle_cancel` records under the same lock this poll reads.
 const CANCEL_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(20);
+const TOOL_CALL_ID: &str = "tool_placebo_execute";
+const TOOL_CALL_TITLE: &str = "placebo shell command";
+/// Long enough for the transport to deliver the `tool_call` notification
+/// before `--prompt-tool-call-then-exit` takes the process down.
+const TOOL_CALL_EXIT_DELAY: Duration = Duration::from_millis(200);
+const TOOL_CALL_EXIT_STATUS: i32 = 1;
 
 #[tokio::main]
 async fn main() {

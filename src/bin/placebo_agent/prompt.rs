@@ -177,6 +177,30 @@ pub(crate) async fn handle_prompt(
             }
         });
     }
+    if args.prompt_tool_call_then_exit {
+        connection.send_notification(execute_tool_call_started(&request.session_id))?;
+        return connection.spawn(async move {
+            let _responder_held_open = responder;
+            tokio::time::sleep(TOOL_CALL_EXIT_DELAY).await;
+            std::process::exit(TOOL_CALL_EXIT_STATUS);
+        });
+    }
+    if let Some(hold_ms) = args.prompt_tool_call_hold_ms {
+        connection.send_notification(execute_tool_call_started(&request.session_id))?;
+        let state_for_task = Arc::clone(&state);
+        let tool_connection = connection.clone();
+        return connection.spawn(async move {
+            tokio::time::sleep(Duration::from_millis(hold_ms)).await;
+            tool_connection.send_notification(SessionNotification::new(
+                request.session_id.clone(),
+                SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                    TOOL_CALL_ID,
+                    ToolCallUpdateFields::new().status(ToolCallStatus::Completed),
+                )),
+            ))?;
+            finish_prompt(state_for_task, request, responder).await
+        });
+    }
     if let Some(delay_ms) = args.prompt_settle_cancel_after_ms {
         let state_for_task = Arc::clone(&state);
         return connection.spawn(async move {
@@ -259,6 +283,17 @@ pub(crate) async fn handle_prompt(
         });
     }
     finish_prompt(state, request, responder).await
+}
+
+fn execute_tool_call_started(session_id: &SessionId) -> SessionNotification {
+    SessionNotification::new(
+        session_id.clone(),
+        SessionUpdate::ToolCall(
+            ToolCall::new(TOOL_CALL_ID, TOOL_CALL_TITLE)
+                .kind(ToolKind::Execute)
+                .status(ToolCallStatus::InProgress),
+        ),
+    )
 }
 
 async fn finish_prompt(

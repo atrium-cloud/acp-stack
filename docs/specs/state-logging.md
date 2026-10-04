@@ -77,7 +77,7 @@ Message identity columns: `migrations/017_prompt_message_ids.sqlite.sql` and `mi
 - `failure_class` is the internal taxonomy bucket. NULL for non-terminal rows and for terminal rows the taxonomy does not cover.
 - `failure_detail_json` is a class-specific JSON envelope. NULL when no structured detail is captured.
 
-`prompts.status` accepts six values: `pending`, `running`, `completed`, `errored`, `cancelled`, `stalled`. `stalled` is terminal and is written only by the stale-prompt sweeper (see `docs/specs/runtime.md`). The index `prompts_status_updated_at_idx` backs the sweeper's stuck-prompt query.
+`prompts.status` accepts six values: `pending`, `running`, `completed`, `errored`, `cancelled`, `stalled`. `stalled` is terminal and is written only by the stale-prompt sweeper (see `docs/specs/runtime.md`). The agent's own result for the turn replaces it when it arrives later, rewriting `stop_reason`, `error_code`, `error_message`, `failure_class`, and `failure_detail_json`. The index `prompts_status_updated_at_idx` backs the sweeper's stuck-prompt query.
 
 ### Failure Class Taxonomy
 
@@ -154,6 +154,7 @@ Session-scoped events written when a prompt reaches a terminal status:
 | ------------------------- | ----- | -------- | --------------------------------------------------------------------------------------- | --------------------------------------------------- |
 | `prompt.inference_failed` | warn  | `system` | `{ "prompt_id", "status_code": <u16>, "reason_category": "<label>", "cause": "<text>" }` | Supervisor, on `StackError::InferenceRequestFailed` |
 | `prompt.stalled`          | warn  | `system` | `{ "prompt_id", "threshold_secs": <u64>, "cause": "<text>" }`                            | Stale-prompt sweeper, after flipping the row        |
+| `prompt.stall_resolved`   | info  | `system` | `{ "prompt_id", "status": "<status>", "stop_reason": "<reason>" \| null, "error_code": "<code>" \| null }` | Supervisor, when the agent's result replaces `stalled`, before that result's own event |
 | `prompt.errored`          | error | `system` | `{ "prompt_id", "error_code": "<code>", "cause": "<text>" }`                             | Supervisor, on any other terminal error             |
 | `prompt.usage_reported`   | info  | `acp`    | `{ "prompt_id", "total_tokens", "input_tokens", "output_tokens", "thought_tokens"?, "cached_read_tokens"?, "cached_write_tokens"? }` | Supervisor, when the agent's `PromptResponse` carries `usage` |
 
@@ -255,7 +256,7 @@ A fork child starts with the part of its parent's durable record that the fork h
 The child receives:
 
 - Events: the parent's conversation rows older than the fork point (all of them when the fork holds every prompt), in the parent's log order. They take the child's `seq` values 1 through n, and the child's own `session.forked` row follows them at n + 1.
-- Conversation rows: `session.update` from both sources, `prompt.inference_failed`, `prompt.stalled`, `prompt.errored`, `prompt.usage_reported`, `session.cancel_requested`, `terminal.finished`, and the session-scoped ACP permission decisions (`permission.approved`, `permission.denied`, `permission.cancelled`, `permission.expired`). Every other session-scoped kind stays with the parent:
+- Conversation rows: `session.update` from both sources, `prompt.inference_failed`, `prompt.stalled`, `prompt.stall_resolved`, `prompt.errored`, `prompt.usage_reported`, `session.cancel_requested`, `terminal.finished`, and the session-scoped ACP permission decisions (`permission.approved`, `permission.denied`, `permission.cancelled`, `permission.expired`). Every other session-scoped kind stays with the parent:
     - `session.created`, `session.loaded`, `session.resumed`, `session.available`, and `session.closed` track the parent session's own lifecycle.
     - `session.forked` and `session.fork.created_child` mark the parent's own place in fork lineage. The child writes its own `session.forked`.
     - `session.capability_ignored`, `mcp.session_attached`, and `mcp.session_skipped` record what the parent's create or attach provisioned. The fork writes the child's own `mcp.session_skipped` when it skips servers.

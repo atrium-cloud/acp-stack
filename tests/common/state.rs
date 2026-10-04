@@ -1,12 +1,23 @@
 //! Shared fixtures for the `state_*_tests` binaries: tempdir-backed stores, row seeders, and
 //! in-memory `Event` builders.
 
-use acp_stack::state::{Event, NewPromptRecord, NewSessionRecord, PromptStatus, StateStore};
+use acp_stack::state::{
+    Event, NewPromptRecord, NewSessionRecord, PromptStaleThresholds, PromptStatus, StateStore,
+};
 use rusqlite::Connection;
 use rusqlite::params;
 
 pub const STALE_THRESHOLD_SECS: u64 = 60;
 pub const STALE_REASON: &str = "test stall reason";
+
+/// Stale thresholds with no longer window for open tool calls, for tests where
+/// tool calls play no part.
+pub fn uniform_stale_thresholds(threshold: std::time::Duration) -> PromptStaleThresholds {
+    PromptStaleThresholds {
+        quiet: threshold,
+        open_tool_call: threshold,
+    }
+}
 
 pub fn fresh_state(name: &str) -> (tempfile::TempDir, StateStore) {
     let tempdir = tempfile::tempdir().expect("tempdir");

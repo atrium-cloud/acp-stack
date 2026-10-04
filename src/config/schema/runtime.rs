@@ -152,16 +152,23 @@ impl Default for CommandsConfig {
 /// larger threshold.
 pub const DEFAULT_PROMPTS_STALE_THRESHOLD: &str = "5m";
 pub const DEFAULT_PROMPTS_SWEEP_INTERVAL: &str = "30s";
+/// ACP sends nothing while a tool runs, so a build or test suite is silent
+/// for as long as it takes; this bounds that silence instead.
+pub const DEFAULT_PROMPTS_TOOL_CALL_STALE_THRESHOLD: &str = "1h";
 
 /// Configuration for the stale-prompt sweeper background task. When no
 /// ACP `session/update` notification has touched a `pending`/`running`
 /// prompt row for `stale_threshold`, the sweeper flips it to terminal
-/// `Stalled` so polling clients always see the row settle. The sweep
-/// runs every `sweep_interval` from `acps serve`.
+/// `Stalled` so polling clients always see the row settle. While the turn
+/// has a tool call open, `tool_call_stale_threshold` applies instead; unset,
+/// it is the longer of 1h and `stale_threshold`. The sweep runs every
+/// `sweep_interval` from `acps serve`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PromptsConfig {
     pub stale_threshold: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_stale_threshold: Option<String>,
     pub sweep_interval: String,
 }
 
@@ -169,6 +176,7 @@ impl Default for PromptsConfig {
     fn default() -> Self {
         Self {
             stale_threshold: DEFAULT_PROMPTS_STALE_THRESHOLD.to_owned(),
+            tool_call_stale_threshold: None,
             sweep_interval: DEFAULT_PROMPTS_SWEEP_INTERVAL.to_owned(),
         }
     }
@@ -186,6 +194,22 @@ impl PromptsConfig {
                     DEFAULT_PROMPTS_STALE_THRESHOLD,
                 )
                 .unwrap_or(std::time::Duration::from_secs(300))
+            })
+    }
+
+    /// Parsed `tool_call_stale_threshold`. Unset (or unparsable, see
+    /// `effective_stale_threshold`), it is the default but never shorter than
+    /// `stale_threshold`, so raising only `stale_threshold` keeps a config valid.
+    pub fn effective_tool_call_stale_threshold(&self) -> std::time::Duration {
+        self.tool_call_stale_threshold
+            .as_deref()
+            .and_then(crate::config::validate::primitives::parse_duration_string)
+            .unwrap_or_else(|| {
+                crate::config::validate::primitives::parse_duration_string(
+                    DEFAULT_PROMPTS_TOOL_CALL_STALE_THRESHOLD,
+                )
+                .unwrap_or(std::time::Duration::from_secs(3_600))
+                .max(self.effective_stale_threshold())
             })
     }
 

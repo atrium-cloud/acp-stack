@@ -91,12 +91,13 @@ use crate::runtime::mediation::permissions::PermissionService;
 use crate::secrets::SecretStore;
 use crate::state::{
     EVENT_KIND_MCP_SESSION_SKIPPED, EVENT_KIND_PROMPT_ERRORED, EVENT_KIND_PROMPT_INFERENCE_FAILED,
-    EVENT_KIND_PROMPT_USAGE_REPORTED, EVENT_KIND_SESSION_AVAILABLE,
-    EVENT_KIND_SESSION_CANCEL_REQUESTED, EVENT_KIND_SESSION_CAPABILITY_IGNORED,
-    EVENT_KIND_SESSION_UPDATE, EVENT_SOURCE_ACP, EVENT_SOURCE_SYSTEM, FailureClass,
-    ListedSessionRecord, NewPromptRecord, NewSessionRecord, PromptRecord, PromptStatus,
-    SESSION_STATUS_ACTIVE, SESSION_STATUS_CLOSED, SessionRecord, StateStore, next_prompt_id,
-    next_prompt_message_id, next_session_id,
+    EVENT_KIND_PROMPT_STALL_RESOLVED, EVENT_KIND_PROMPT_USAGE_REPORTED,
+    EVENT_KIND_SESSION_AVAILABLE, EVENT_KIND_SESSION_CANCEL_REQUESTED,
+    EVENT_KIND_SESSION_CAPABILITY_IGNORED, EVENT_KIND_SESSION_UPDATE, EVENT_SOURCE_ACP,
+    EVENT_SOURCE_SYSTEM, FailureClass, ListedSessionRecord, NewPromptRecord, NewSessionRecord,
+    PromptRecord, PromptSettle, PromptSettlement, PromptStatus, SESSION_STATUS_ACTIVE,
+    SESSION_STATUS_CLOSED, SessionRecord, StateStore, next_prompt_id, next_prompt_message_id,
+    next_session_id,
 };
 
 use self::bridge::*;
@@ -796,6 +797,34 @@ mod tests {
         let event = terminal.session_event.expect("errored event");
         assert_eq!(event.kind, EVENT_KIND_PROMPT_ERRORED);
         assert!(event.payload_json.contains("prm_process"));
+    }
+
+    #[test]
+    fn only_a_settled_acp_call_replaces_a_stall() {
+        assert!(Outcome::Settled(Err(StackError::AgentNotRunning)).replaces_stall());
+        assert!(!Outcome::Cancelled.replaces_stall());
+    }
+
+    #[test]
+    fn stall_resolved_event_carries_the_replacing_outcome() {
+        let terminal = build_terminal_outcome_with_prompt_id(
+            Outcome::Settled(Err(StackError::AgentNotRunning)),
+            Some("prm_resolved"),
+        );
+
+        let event = terminal.stall_resolved_event("prm_resolved");
+
+        assert_eq!(event.kind, EVENT_KIND_PROMPT_STALL_RESOLVED);
+        assert_eq!(event.source, EVENT_SOURCE_SYSTEM);
+        let payload: serde_json::Value =
+            serde_json::from_str(&event.payload_json).expect("payload is json");
+        assert_eq!(payload["prompt_id"], "prm_resolved");
+        assert_eq!(payload["status"], "errored");
+        assert_eq!(payload["stop_reason"], serde_json::Value::Null);
+        assert_eq!(
+            payload["error_code"],
+            StackError::AgentNotRunning.error_code()
+        );
     }
 
     #[test]

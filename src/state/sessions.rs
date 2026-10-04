@@ -46,6 +46,8 @@ pub const SESSION_ACTIVITY_ACTOR_USER: &str = "user";
 pub const EVENT_KIND_PROMPT_INFERENCE_FAILED: &str = "prompt.inference_failed";
 /// The prompt was forced to `stalled` past the inactivity threshold.
 pub const EVENT_KIND_PROMPT_STALLED: &str = "prompt.stalled";
+/// The agent's own result for a turn replaced the sweeper's `stalled` verdict.
+pub const EVENT_KIND_PROMPT_STALL_RESOLVED: &str = "prompt.stall_resolved";
 /// The prompt reached terminal `errored` for a non-inference reason.
 pub const EVENT_KIND_PROMPT_ERRORED: &str = "prompt.errored";
 /// The agent's `PromptResponse` for a settled turn carried token usage.
@@ -253,6 +255,46 @@ pub struct NewPromptRecord {
     pub id: String,
     pub session_id: String,
     pub prompt_json: String,
+}
+
+/// The terminal row a prompt task writes once its turn is over. `None`
+/// writes SQL NULL, so a settle never inherits columns from an earlier status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptSettlement<'a> {
+    pub status: PromptStatus,
+    pub stop_reason: Option<&'a str>,
+    pub error_code: Option<&'a str>,
+    pub error_message: Option<&'a str>,
+    pub failure_class: Option<&'a str>,
+    pub failure_detail_json: Option<&'a str>,
+}
+
+/// What `settle_prompt` did with the row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptSettle {
+    /// An in-flight row took the settlement.
+    Applied,
+    /// A `stalled` row took the settlement in place of the sweeper's verdict.
+    ReplacedStall,
+    /// The row was already terminal and was left as it was.
+    AlreadyTerminal,
+}
+
+/// How long an in-flight prompt may go without a `session/update` before the
+/// sweeper gives up on it: `quiet` normally, `open_tool_call` while the turn
+/// has a tool call that has not completed or failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PromptStaleThresholds {
+    pub quiet: std::time::Duration,
+    pub open_tool_call: std::time::Duration,
+}
+
+/// A prompt the sweeper flipped to `stalled`, with the threshold it exceeded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StalledPrompt {
+    pub prompt_id: String,
+    pub session_id: String,
+    pub threshold: std::time::Duration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

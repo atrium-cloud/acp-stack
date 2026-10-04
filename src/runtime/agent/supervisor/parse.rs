@@ -8,6 +8,15 @@ pub(super) enum Outcome {
     Cancelled,
 }
 
+impl Outcome {
+    /// Whether this outcome may replace a `stalled` row. A settled ACP call is
+    /// the agent's own verdict on the turn; `Cancelled` is the token acps fires
+    /// itself on agent stop, which says nothing about how the turn went.
+    pub(super) fn replaces_stall(&self) -> bool {
+        matches!(self, Outcome::Settled(_))
+    }
+}
+
 /// Owned fields the spawned prompt task hands to the state store on settle.
 /// Built BEFORE awaiting the state mutex so the lock is never held while
 /// constructing JSON payloads.
@@ -19,6 +28,37 @@ pub(super) struct TerminalOutcome {
     pub(super) failure_class: Option<&'static str>,
     pub(super) failure_detail_json: Option<String>,
     pub(super) session_event: Option<TerminalSessionEvent>,
+}
+
+impl TerminalOutcome {
+    pub(super) fn settlement(&self) -> PromptSettlement<'_> {
+        PromptSettlement {
+            status: self.status,
+            stop_reason: self.stop_reason.as_deref(),
+            error_code: self.error_code.as_deref(),
+            error_message: self.error_message.as_deref(),
+            failure_class: self.failure_class,
+            failure_detail_json: self.failure_detail_json.as_deref(),
+        }
+    }
+
+    /// The event announcing that this outcome replaced the sweeper's `stalled`
+    /// verdict, so a reader that saw `prompt.stalled` learns how the turn ended.
+    pub(super) fn stall_resolved_event(&self, prompt_id: &str) -> TerminalSessionEvent {
+        TerminalSessionEvent {
+            level: "info",
+            source: EVENT_SOURCE_SYSTEM,
+            kind: EVENT_KIND_PROMPT_STALL_RESOLVED,
+            message: "prompt stall resolved",
+            payload_json: json!({
+                "prompt_id": prompt_id,
+                "status": self.status.as_str(),
+                "stop_reason": self.stop_reason,
+                "error_code": self.error_code,
+            })
+            .to_string(),
+        }
+    }
 }
 
 /// Companion session-scoped event emitted alongside the terminal status write.

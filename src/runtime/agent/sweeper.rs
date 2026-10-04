@@ -1,7 +1,8 @@
 //! Background state sweeper. Guarantees every `prompts` row reaches a
-//! terminal status (flips in-flight prompts to `Stalled` when no ACP
-//! `session/update` has touched the row within the configured threshold),
-//! demotes idle `active` sessions to `available`, and prunes deleted-session
+//! terminal status by flipping in-flight prompts to `Stalled` once no ACP
+//! `session/update` has touched the row for `stale_threshold`, or for
+//! `tool_call_stale_threshold` while the turn has a tool call open. It also
+//! demotes idle `active` sessions to `available` and prunes deleted-session
 //! tombstones past their retention window.
 
 use std::sync::Arc;
@@ -11,13 +12,23 @@ use tokio::sync::Mutex as TokioMutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::config::PromptsConfig;
 use crate::state::{
     EVENT_KIND_PROMPT_STALLED, EVENT_KIND_SESSION_AVAILABLE, EVENT_SOURCE_SYSTEM,
-    SESSION_TOMBSTONE_RETENTION, StateStore,
+    PromptStaleThresholds, SESSION_TOMBSTONE_RETENTION, StateStore,
 };
 
 /// `error_message` written onto every `Stalled` prompt by the sweeper.
 pub const SWEEPER_STALL_REASON: &str = "no agent updates within threshold";
+
+/// The stale thresholds `[prompts]` configures, shared by the sweep and every
+/// stuck-prompt probe so they agree on what counts as stuck.
+pub fn prompt_stale_thresholds(prompts: &PromptsConfig) -> PromptStaleThresholds {
+    PromptStaleThresholds {
+        quiet: prompts.effective_stale_threshold(),
+        open_tool_call: prompts.effective_tool_call_stale_threshold(),
+    }
+}
 
 /// Handle owning the background sweep task and its cancellation token;
 /// dropping it cancels the task.
@@ -31,7 +42,7 @@ impl StateSweeper {
     /// `sweep_interval` so startup reconcile settles before any scan.
     pub fn spawn(
         state: Arc<TokioMutex<StateStore>>,
-        threshold: Duration,
+        thresholds: PromptStaleThresholds,
         sweep_interval: Duration,
         session_idle_threshold: Duration,
     ) -> Self {
@@ -43,7 +54,7 @@ impl StateSweeper {
                     _ = tokio::time::sleep(sweep_interval) => {}
                     _ = cancel_inner.cancelled() => return,
                 }
-                sweep_stalled_prompts(&state, threshold).await;
+                sweep_stalled_prompts(&state, thresholds).await;
                 sweep_idle_sessions(&state, session_idle_threshold).await;
                 sweep_session_tombstones(&state).await;
             }
@@ -65,29 +76,28 @@ impl StateSweeper {
     }
 }
 
-async fn sweep_stalled_prompts(state: &Arc<TokioMutex<StateStore>>, threshold: Duration) {
-    let pairs = {
-        let guard = state.lock().await;
-        match guard.mark_stalled_prompts(threshold, SWEEPER_STALL_REASON) {
-            Ok(pairs) => pairs,
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    "state sweeper: mark_stalled_prompts failed"
-                );
-                return;
-            }
+async fn sweep_stalled_prompts(
+    state: &Arc<TokioMutex<StateStore>>,
+    thresholds: PromptStaleThresholds,
+) {
+    // One guard covers the flip and its events: a prompt task waiting on the
+    // lock could otherwise replace the stall and log `prompt.stall_resolved`
+    // before the `prompt.stalled` row it resolves.
+    let guard = state.lock().await;
+    let stalled = match guard.mark_stalled_prompts(thresholds, SWEEPER_STALL_REASON) {
+        Ok(stalled) => stalled,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "state sweeper: mark_stalled_prompts failed"
+            );
+            return;
         }
     };
-    if pairs.is_empty() {
-        return;
-    }
-    let threshold_secs = threshold.as_secs();
-    let guard = state.lock().await;
-    for (prompt_id, session_id) in pairs {
-        let payload = stalled_event_payload(&prompt_id, threshold_secs);
+    for prompt in stalled {
+        let payload = stalled_event_payload(&prompt.prompt_id, prompt.threshold.as_secs());
         if let Err(err) = guard.append_session_event_with_source(
-            &session_id,
+            &prompt.session_id,
             "warn",
             EVENT_KIND_PROMPT_STALLED,
             EVENT_SOURCE_SYSTEM,
@@ -96,8 +106,8 @@ async fn sweep_stalled_prompts(state: &Arc<TokioMutex<StateStore>>, threshold: D
         ) {
             tracing::warn!(
                 error = %err,
-                prompt_id = %prompt_id,
-                session_id = %session_id,
+                prompt_id = %prompt.prompt_id,
+                session_id = %prompt.session_id,
                 "state sweeper: failed to append prompt.stalled event"
             );
         }

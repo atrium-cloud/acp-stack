@@ -148,6 +148,15 @@ pub(crate) struct AcpArgs {
     /// answering for as long as the turn is open.
     #[arg(long, default_value_t = 1)]
     pub(crate) prompt_await_permission_rounds: u32,
+    /// Run one `execute` tool call that stays silent for this long: announce it
+    /// `in_progress`, send nothing until the hold ends, then complete it and end
+    /// the turn, the way an adapter reports a long shell command.
+    #[arg(long)]
+    pub(crate) prompt_tool_call_hold_ms: Option<u64>,
+    /// Announce an `in_progress` tool call, then exit the process mid-turn,
+    /// leaving the tool call open and the prompt unanswered.
+    #[arg(long)]
+    pub(crate) prompt_tool_call_then_exit: bool,
     #[arg(long)]
     pub(crate) session_list_paginated: bool,
     #[arg(long)]

@@ -8,6 +8,7 @@ use crate::fs_util::{
     set_owner_only_file,
 };
 use crate::ownership;
+use crate::runtime::agent::sweeper::prompt_stale_thresholds;
 use crate::runtime::dependencies::deps_apply::{DEPS_APPLY_AGENT_ID, DEPS_APPLY_STEP};
 use crate::runtime::health::{
     DEPS_RECENT_ROW_LIMIT, deps_cluster_has_failure_for_latest, deps_status_is_failure,
@@ -119,12 +120,13 @@ pub(super) fn run_status(output: OutputFormat) -> Result<()> {
 }
 
 fn prompts_status_json(store: &StateStore, config: &Config) -> Result<serde_json::Value> {
-    let threshold = config.prompts.effective_stale_threshold();
-    let (count, oldest_at) = store.count_stuck_prompts(threshold)?;
+    let thresholds = prompt_stale_thresholds(&config.prompts);
+    let (count, oldest_at) = store.count_stuck_prompts(thresholds)?;
     Ok(serde_json::json!({
         "ok": count == 0,
         "stuck_count": count,
-        "threshold_secs": threshold.as_secs(),
+        "threshold_secs": thresholds.quiet.as_secs(),
+        "tool_call_threshold_secs": thresholds.open_tool_call.as_secs(),
         "oldest_at": oldest_at,
         "oldest_age_secs": oldest_at.as_deref().and_then(prompts_age_seconds),
     }))
@@ -133,11 +135,15 @@ fn prompts_status_json(store: &StateStore, config: &Config) -> Result<serde_json
 // Mirrors `runtime/health.rs::collect_prompts` so the CLI stays in step with
 // `/v1/health/ready`.
 fn print_prompts_status(store: &StateStore, config: &Config) -> Result<()> {
-    let threshold = config.prompts.effective_stale_threshold();
-    let threshold_secs = threshold.as_secs();
-    let (count, oldest_at) = store.count_stuck_prompts(threshold)?;
+    let thresholds = prompt_stale_thresholds(&config.prompts);
+    let threshold_label = format!(
+        "threshold {}s, {}s with an open tool call",
+        thresholds.quiet.as_secs(),
+        thresholds.open_tool_call.as_secs()
+    );
+    let (count, oldest_at) = store.count_stuck_prompts(thresholds)?;
     if count == 0 {
-        println!("prompts:   ok (threshold {threshold_secs}s)");
+        println!("prompts:   ok ({threshold_label})");
         return Ok(());
     }
     let age_suffix = oldest_at
@@ -145,7 +151,7 @@ fn print_prompts_status(store: &StateStore, config: &Config) -> Result<()> {
         .and_then(prompts_age_seconds)
         .map(|age| format!(", oldest {age}s"))
         .unwrap_or_default();
-    println!("prompts:   {count} stuck (threshold {threshold_secs}s{age_suffix})");
+    println!("prompts:   {count} stuck ({threshold_label}{age_suffix})");
     Ok(())
 }
 

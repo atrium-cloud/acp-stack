@@ -906,8 +906,8 @@ The `agent.inference_*` codes carry a sanitized public message of the form `"inf
 - Response: prompt status.
 - Notes:
     - Prompt status values are `pending`, `running`, `completed`, `errored`, `cancelled`, and `stalled`.
-    - `stalled` is a terminal status reached only when the stale-prompt sweeper observes no ACP `session/update` activity for longer than `[prompts].stale_threshold`.
-    - From the client's perspective, a `stalled` prompt is final: it will not transition back to `running`, and recovery means submitting a new prompt.
+    - `stalled` is reached only when the stale-prompt sweeper observes no ACP `session/update` activity for longer than `[prompts].stale_threshold`, or `[prompts].tool_call_stale_threshold` while the turn has an open tool call.
+    - A `stalled` prompt never transitions back to `running`. When the turn's ACP call later returns, its result replaces `stalled` with `completed`, `errored`, or `cancelled`, and a `prompt.stall_resolved` session event records the change.
     - See [runtime.md](../runtime.md) for the sweeper contract.
 
 ### `GET /v1/sessions/{id}/events`

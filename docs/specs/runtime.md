@@ -287,26 +287,28 @@ On Unix, the validated CWD is rebound through a verified directory handle at spa
 
 ### Stale-Prompt Sweeper
 
-A background task flips `pending`/`running` prompt rows to terminal `stalled` when no ACP `session/update` notification has touched the row within the configured threshold, so an agent that crashed mid-stream or hung on an upstream call cannot leave rows in `running` forever.
+A background task flips `pending`/`running` prompt rows to terminal `stalled` when no ACP `session/update` notification has touched the row within the configured thresholds, so an agent that crashed mid-stream or hung on an upstream call cannot leave rows in `running` forever.
 
 Config under `[prompts]`:
 
 ```toml
 [prompts]
-stale_threshold = "5m"
-sweep_interval  = "30s"
+stale_threshold           = "5m"
+tool_call_stale_threshold = "1h"
+sweep_interval            = "30s"
 ```
 
-- Defaults are `5m` / `30s`.
+- Defaults are `5m` / `1h` / `30s`. An unset `tool_call_stale_threshold` is the longer of `1h` and `stale_threshold`; a set one must not be shorter than `stale_threshold`.
+- While the turn has an open tool call, `tool_call_stale_threshold` applies instead of `stale_threshold`. An open tool call is a `tool_call` the agent announced since the prompt was submitted whose latest status is neither `completed` nor `failed`.
 - The sweeper runs every `sweep_interval` from `acps serve`. The first sweep happens after one interval has elapsed, not immediately at boot, so startup reconcile settles first.
-- `stalled` is terminal: a flipped row does not transition back. Recovery means submitting a fresh prompt.
 - Each flipped row also emits a `prompt.stalled` session event (see [state-logging.md](state-logging.md)).
+- When the turn's ACP call later returns, its result (the agent's stop reason, or the error that ended the call, adapter exit included) replaces `stalled` and emits `prompt.stall_resolved`. A turn that acps cancels itself while stopping the agent stays `stalled`.
 
 #### Re-Touch Path
 
 - Every ACP `session/update` advances `updated_at` on the oldest in-flight prompt for that session.
 - ACP notifications carry no `prompt_id`, so the session-scoped lookup is the best precision available. Concurrent multi-prompt sessions are not currently supported through this path.
-- The `PromptsHealth` probe surfaced through `/v1/health/ready` and `acps status` reports the stuck-prompt count using the same threshold, so operators see stalled traffic before the next sweep cadence.
+- The `PromptsHealth` probe surfaced through `/v1/health/ready` and `acps status` reports the stuck-prompt count using the same thresholds, open tool calls included, so operators see stalled traffic before the next sweep cadence.
 
 ### Inference Failure Classifier
 

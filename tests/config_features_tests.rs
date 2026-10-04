@@ -634,14 +634,23 @@ fn parses_prompts_block_with_overrides() {
         "{VALID_CONFIG}\n\
          [prompts]\n\
          stale_threshold = \"10m\"\n\
+         tool_call_stale_threshold = \"2h\"\n\
          sweep_interval = \"45s\"\n"
     );
     let config = load_config_from_str(&config_text).expect("config with [prompts] should parse");
     assert_eq!(config.prompts.stale_threshold, "10m");
+    assert_eq!(
+        config.prompts.tool_call_stale_threshold.as_deref(),
+        Some("2h")
+    );
     assert_eq!(config.prompts.sweep_interval, "45s");
     assert_eq!(
         config.prompts.effective_stale_threshold(),
         std::time::Duration::from_secs(600)
+    );
+    assert_eq!(
+        config.prompts.effective_tool_call_stale_threshold(),
+        std::time::Duration::from_secs(7_200)
     );
     assert_eq!(
         config.prompts.effective_sweep_interval(),
@@ -653,14 +662,87 @@ fn parses_prompts_block_with_overrides() {
 fn omitted_prompts_block_falls_back_to_defaults() {
     let config = load_config_from_str(VALID_CONFIG).expect("default config should parse");
     assert_eq!(config.prompts.stale_threshold, "5m");
+    assert_eq!(config.prompts.tool_call_stale_threshold, None);
     assert_eq!(config.prompts.sweep_interval, "30s");
     assert_eq!(
         config.prompts.effective_stale_threshold(),
         std::time::Duration::from_secs(300)
     );
     assert_eq!(
+        config.prompts.effective_tool_call_stale_threshold(),
+        std::time::Duration::from_secs(3_600)
+    );
+    assert_eq!(
         config.prompts.effective_sweep_interval(),
         std::time::Duration::from_secs(30)
+    );
+}
+
+#[test]
+fn prompts_block_without_tool_call_threshold_takes_its_default() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [prompts]\n\
+         stale_threshold = \"10m\"\n\
+         sweep_interval = \"45s\"\n"
+    );
+    let config = load_config_from_str(&config_text).expect("config with [prompts] should parse");
+    assert_eq!(config.prompts.tool_call_stale_threshold, None);
+    assert_eq!(
+        config.prompts.effective_tool_call_stale_threshold(),
+        std::time::Duration::from_secs(3_600)
+    );
+}
+
+#[test]
+fn unset_tool_call_threshold_never_undercuts_a_raised_stale_threshold() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [prompts]\n\
+         stale_threshold = \"2h\"\n\
+         sweep_interval = \"30s\"\n"
+    );
+    let config =
+        load_config_from_str(&config_text).expect("a raised stale_threshold alone must stay valid");
+    assert_eq!(
+        config.prompts.effective_tool_call_stale_threshold(),
+        std::time::Duration::from_secs(7_200)
+    );
+}
+
+#[test]
+fn rejects_prompts_with_zero_tool_call_threshold() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [prompts]\n\
+         stale_threshold = \"5m\"\n\
+         tool_call_stale_threshold = \"0s\"\n\
+         sweep_interval = \"30s\"\n"
+    );
+    let err = load_config_from_str(&config_text)
+        .expect_err("zero tool_call_stale_threshold must be rejected");
+    assert!(
+        err.to_string()
+            .contains("prompts.tool_call_stale_threshold"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn rejects_tool_call_threshold_shorter_than_stale_threshold() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [prompts]\n\
+         stale_threshold = \"10m\"\n\
+         tool_call_stale_threshold = \"5m\"\n\
+         sweep_interval = \"30s\"\n"
+    );
+    let err = load_config_from_str(&config_text)
+        .expect_err("a tool_call_stale_threshold below stale_threshold must be rejected");
+    assert!(
+        err.to_string()
+            .contains("prompts.tool_call_stale_threshold"),
+        "got: {err}"
     );
 }
 

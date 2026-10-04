@@ -449,6 +449,11 @@ async fn health_ready_surfaces_stuck_prompts_in_failing() {
         prompts["threshold_secs"].as_i64().unwrap_or(0) > 0,
         "threshold_secs must surface in PromptsHealth, got {prompts:?}"
     );
+    assert!(
+        prompts["tool_call_threshold_secs"].as_i64().unwrap_or(0)
+            >= prompts["threshold_secs"].as_i64().unwrap_or(i64::MAX),
+        "tool_call_threshold_secs must surface in PromptsHealth, got {prompts:?}"
+    );
 }
 
 #[tokio::test]
@@ -650,20 +655,23 @@ async fn mark_stalled_prompts_appends_stalled_event_when_invoked_directly() {
 
     {
         let guard = harness.state.lock().await;
-        let pairs = guard
-            .mark_stalled_prompts(std::time::Duration::from_secs(60), "test stall")
+        let stalled = guard
+            .mark_stalled_prompts(
+                common::state::uniform_stale_thresholds(std::time::Duration::from_secs(60)),
+                "test stall",
+            )
             .expect("mark_stalled_prompts should run");
-        assert_eq!(pairs.len(), 1);
+        assert_eq!(stalled.len(), 1);
         // Mirror the sweeper's emit so the events surface for the API check.
         let payload = serde_json::json!({
-            "prompt_id": pairs[0].0,
-            "threshold_secs": 60u64,
+            "prompt_id": stalled[0].prompt_id,
+            "threshold_secs": stalled[0].threshold.as_secs(),
             "cause": "test stall",
         })
         .to_string();
         guard
             .append_session_event_with_source(
-                &pairs[0].1,
+                &stalled[0].session_id,
                 "warn",
                 acp_stack::state::EVENT_KIND_PROMPT_STALLED,
                 acp_stack::state::EVENT_SOURCE_SYSTEM,

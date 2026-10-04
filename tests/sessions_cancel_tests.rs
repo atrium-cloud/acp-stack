@@ -333,7 +333,10 @@ async fn a_stalled_turn_does_not_block_cancelling_the_live_one() {
     {
         let store = harness.state.lock().await;
         let stalled = store
-            .mark_stalled_prompts(Duration::from_secs(0), "test forced stall")
+            .mark_stalled_prompts(
+                common::state::uniform_stale_thresholds(Duration::ZERO),
+                "test forced stall",
+            )
             .expect("mark stalled");
         assert_eq!(stalled.len(), 1, "only the first turn should be swept");
     }
@@ -347,8 +350,9 @@ async fn a_stalled_turn_does_not_block_cancelling_the_live_one() {
     assert_eq!(cancel.status(), StatusCode::OK);
     let live = prompt_record(&harness, &session_id, &live_prompt_id).await;
     assert_eq!(live["status"], "cancelled", "record = {live}");
-    let stalled = prompt_record(&harness, &session_id, &stalled_prompt_id).await;
-    assert_eq!(stalled["status"], "stalled", "record = {stalled}");
+    // The placebo settles every turn parked at cancel time, the swept one
+    // included, and the agent's own verdict replaces the sweeper's.
+    await_prompt_status(&harness, &session_id, &stalled_prompt_id, "cancelled").await;
 }
 
 async fn post_prompt(harness: &Harness, session_id: &str, text: &str) -> reqwest::Response {

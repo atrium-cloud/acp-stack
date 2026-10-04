@@ -143,7 +143,7 @@ Lifecycle semantics that span routes:
 
 - A session's durable `status` is `active`, `available`, or `closed`. The windowed status route derives a separate per-row `state` (`idle`, `working`, `done`, and so on) from recent activity.
 - `active` means attached to the running agent with recent work. Rows demote to `available` on agent stop, unplanned agent exit, daemon startup, or after `[sessions].idle_threshold` of inactivity, and re-promote to `active` on `load`, `resume`, or a new prompt (see [runtime.md](../runtime.md)).
-- Prompt statuses are `pending`, `running`, `completed`, `errored`, `cancelled`, and `stalled`. `stalled` is terminal: the stale-prompt sweeper writes it after `[prompts].stale_threshold` with no ACP activity, and the prompt never returns to `running`. Recovery means submitting a new prompt.
+- Prompt statuses are `pending`, `running`, `completed`, `errored`, `cancelled`, and `stalled`. The stale-prompt sweeper writes `stalled` after `[prompts].stale_threshold` with no ACP activity, or `[prompts].tool_call_stale_threshold` while the turn has an open tool call. A `stalled` prompt never returns to `running`; when the turn's ACP call later returns, its result replaces `stalled` with `completed`, `errored`, or `cancelled` and a `prompt.stall_resolved` event.
 - Session close preserves history; only `POST /v1/sessions/{id}/delete` hard-deletes, and only when the agent advertises the capability.
 - Declared config the agent does not advertise (mode, model, effort, config options) never fails session creation. The session proceeds on agent defaults and the response reports the omission in an `ignored` array.
 
