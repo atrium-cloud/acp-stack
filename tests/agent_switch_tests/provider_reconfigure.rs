@@ -75,6 +75,17 @@ async fn start_primary(harness: &AgentHarness) {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
+async fn stop_primary(harness: &AgentHarness) {
+    let response = http()
+        .await
+        .post(format!("{}/v1/agent/stop", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .send()
+        .await
+        .expect("stop primary");
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
 async fn primary_process_state(harness: &AgentHarness) -> Value {
     primary_field(harness, "process_state").await
 }
@@ -131,9 +142,9 @@ async fn agent_switch_same_target_sets_provider_and_restarts() {
 }
 
 /// Repeating the configured provider, with or without its configured model and with `model`
-/// absent or null, keeps that model and commits nothing.
+/// absent or null, keeps that model and the config bytes, and restarts the agent each time.
 #[tokio::test]
-async fn agent_switch_same_target_identical_provider_is_noop() {
+async fn agent_switch_same_target_identical_provider_restarts() {
     let tempdir = TempDir::new().expect("tempdir");
     seed_provider_secrets(tempdir.path());
     let fixture_path = write_config_options_fixture(
@@ -153,7 +164,7 @@ async fn agent_switch_same_target_identical_provider_is_noop() {
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(body["data"]["provider_status"], "set");
     let committed = std::fs::read(&harness.config_path).expect("config after first request");
-    let pid = primary_field(&harness, "pid").await;
+    let mut pid = primary_field(&harness, "pid").await;
 
     for request in [
         json!({ "agent_id": "opencode", "provider": "anthropic" }),
@@ -162,23 +173,58 @@ async fn agent_switch_same_target_identical_provider_is_noop() {
     ] {
         let (status, body) = switch_request(&harness, request.clone()).await;
         assert_eq!(status, StatusCode::OK, "{request}: {body}");
-        assert_eq!(body["data"]["provider_status"], "no_op", "{request}");
+        assert_eq!(body["data"]["provider_status"], "set", "{request}");
         assert_eq!(body["data"]["provider"], "anthropic");
         assert_eq!(body["data"]["model"], "anthropic/claude-sonnet-4-5");
         assert_eq!(body["data"]["set_model"], false);
-        assert_eq!(body["data"]["restarted"], false);
-        assert_eq!(body["data"]["restart_started"], false);
+        assert_eq!(body["data"]["restarted"], true);
+        assert_eq!(body["data"]["restart_started"], true);
         assert_eq!(
             std::fs::read(&harness.config_path).expect("config after retry"),
             committed,
-            "an identical selection must not rewrite the config: {request}"
+            "an identical selection keeps the config bytes: {request}"
         );
+        let restarted_pid = primary_field(&harness, "pid").await;
+        assert!(restarted_pid.is_number(), "{request}: {restarted_pid}");
+        assert_ne!(
+            restarted_pid, pid,
+            "an identical selection restarts the agent: {request}"
+        );
+        pid = restarted_pid;
     }
-    assert_eq!(
-        primary_field(&harness, "pid").await,
-        pid,
-        "an identical selection must not restart the agent"
-    );
+}
+
+/// A provider body starts a stopped agent, for a changed selection and an identical one alike.
+#[tokio::test]
+async fn agent_switch_same_target_provider_body_starts_a_stopped_agent() {
+    let tempdir = TempDir::new().expect("tempdir");
+    seed_provider_secrets(tempdir.path());
+    let harness =
+        AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
+    assert_eq!(primary_process_state(&harness).await, "stopped");
+
+    let selection = json!({ "agent_id": "opencode", "provider": "anthropic" });
+    let (status, body) = switch_request(&harness, selection.clone()).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["data"]["provider_status"], "set");
+    assert_eq!(body["data"]["restarted"], true);
+    assert_eq!(body["data"]["restart_started"], true);
+    assert_eq!(primary_process_state(&harness).await, "running");
+    let pid = primary_field(&harness, "pid").await;
+    assert!(pid.is_number(), "{pid}");
+
+    stop_primary(&harness).await;
+    assert_eq!(primary_process_state(&harness).await, "stopped");
+
+    let (status, body) = switch_request(&harness, selection).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["data"]["provider_status"], "set");
+    assert_eq!(body["data"]["restarted"], true);
+    assert_eq!(body["data"]["restart_started"], true);
+    assert_eq!(primary_process_state(&harness).await, "running");
+    let restarted_pid = primary_field(&harness, "pid").await;
+    assert!(restarted_pid.is_number(), "{restarted_pid}");
+    assert_ne!(restarted_pid, pid);
 }
 
 /// The completed journal a reconfigure leaves behind must not swallow the next
@@ -571,7 +617,7 @@ async fn agent_switch_same_target_pre_commit_interruption_replans_and_converges(
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(body["data"]["provider_status"], "set");
     assert_eq!(body["data"]["provider"], "anthropic");
-    assert_eq!(body["data"]["restarted"], false);
+    assert_eq!(body["data"]["restarted"], true);
     let journal = load_switch_journal(&harness.config_path)
         .expect("journal load")
         .expect("journal present");

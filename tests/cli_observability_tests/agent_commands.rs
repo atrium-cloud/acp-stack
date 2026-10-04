@@ -1152,8 +1152,8 @@ async fn agent_switch_posts_model_with_provider() {
         "provider_status": "set",
         "provider": "opencode-go",
         "model": "opencode-go/glm-5.3-flash",
-        "restarted": false,
-        "restart_started": false,
+        "restarted": true,
+        "restart_started": true,
         "set_model": false,
         "models": []
     }))
@@ -1196,8 +1196,8 @@ async fn agent_switch_provider_change_without_model_reports_the_clear() {
         "agent_id": "opencode",
         "provider_status": "set",
         "provider": "opencode-go",
-        "restarted": false,
-        "restart_started": false,
+        "restarted": true,
+        "restart_started": true,
         "set_model": true,
         "models": [],
         "follow_up": "acps agent set --model <model-id>"
@@ -1229,11 +1229,11 @@ async fn agent_switch_naming_the_configured_provider_keeps_the_model_in_the_plan
     let (base_url, recorded, _join) = spawn_switch_recorder(serde_json::json!({
         "old_agent_id": "opencode",
         "agent_id": "opencode",
-        "provider_status": "no_op",
+        "provider_status": "set",
         "provider": "opencode-go",
         "model": "opencode-go/glm-5.3-flash",
-        "restarted": false,
-        "restart_started": false,
+        "restarted": true,
+        "restart_started": true,
         "set_model": false,
         "models": []
     }))

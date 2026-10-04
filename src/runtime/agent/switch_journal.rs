@@ -20,7 +20,7 @@ pub struct SwitchJournal {
     pub target_agent_id: String,
     /// SHA-256 hex of the canonical candidate TOML. A mismatch means the operator edited config mid-flight, so the in-flight switch must not be resumed blindly.
     pub candidate_fingerprint: String,
-    /// Whether the old target's agent was running when the switch committed, which a retry after a process restart can no longer observe.
+    /// Whether the switch restarts the agent: the old target's agent was running, or the body named `provider`. A retry after a process restart can no longer observe either.
     pub was_running: bool,
     pub phase: SwitchJournalPhase,
     /// The `model` request field as sent. The committed value is the resolved form, so only this spelling can vouch for a post-commit retry naming a model.

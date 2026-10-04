@@ -286,13 +286,15 @@ pub(crate) async fn agent_switch_handler(
 
     let old_target_id = fresh_config.array.primary_target.clone();
     let old_target = state.agent_target(&old_target_id)?;
-    let was_running = old_target.supervisor.snapshot().await.state.as_wire_str() == "running";
+    // A provider body starts a stopped Agent too, so the selected credential reaches a process.
+    let restart_agent = body.provider.is_some()
+        || old_target.supervisor.snapshot().await.state.as_wire_str() == "running";
     let mut journal = SwitchJournal {
         old_target_id: old_target_id.clone(),
         new_target_id: body.agent_id.clone(),
         target_agent_id: plan.target_agent_id.clone(),
         candidate_fingerprint: candidate_fingerprint(&canonical),
-        was_running,
+        was_running: restart_agent,
         phase: SwitchJournalPhase::Planned,
         requested_model: body.model.clone(),
     };
@@ -304,7 +306,7 @@ pub(crate) async fn agent_switch_handler(
             old_target_id: &old_target_id,
             candidate_config: &candidate_config,
             canonical: &canonical,
-            was_running,
+            was_running: restart_agent,
             resume_journal: resume_journal.as_ref(),
             rename_sessions: true,
         },
@@ -342,7 +344,7 @@ pub(crate) async fn agent_switch_handler(
         required_env_refs: plan.required_env_refs,
         secret_migrations,
         install: Some(install),
-        restarted: was_running,
+        restarted: restart_agent,
         restart_started,
         set_model,
         models,
@@ -586,7 +588,7 @@ async fn reconfigure_primary_target(
             deferred_model = Some(model);
         } else {
             // The committed agent-owned config already serves this provider, so the probe runs
-            // before anything is written and an identical selection stays a no-op.
+            // before anything is written and an identical model-only body stays a no-op.
             let response = probe_advertisement(home, &candidate_config).await?;
             let resolved =
                 resolve_advertised_switch_model(&candidate_config.agent, &response, model)?;
@@ -595,8 +597,13 @@ async fn reconfigure_primary_target(
         canonical = candidate_config.to_canonical_toml()?;
         candidate_config = reload_candidate_config(&canonical, target_entry)?;
     }
-    // A retry that resolves to the bytes already committed has nothing to write and nothing to restart.
-    if resume_journal.is_none() && canonical == fresh_config.to_canonical_toml()? {
+    // A model-only body that resolves to the bytes already committed has nothing to write and
+    // nothing to restart. A provider body re-provisions from the store and restarts regardless, so
+    // a stored credential whose value changed reaches the Agent.
+    if resume_journal.is_none()
+        && body.provider.is_none()
+        && canonical == fresh_config.to_canonical_toml()?
+    {
         return Ok(completed_switch_response(
             &fresh_config,
             &fresh_config.agent.id,
@@ -636,13 +643,15 @@ async fn reconfigure_primary_target(
         provisioned,
     } = prepared;
 
-    let was_running = target.supervisor.snapshot().await.state.as_wire_str() == "running";
+    // A provider body starts a stopped Agent too, so the selected credential reaches a process.
+    let restart_agent = body.provider.is_some()
+        || target.supervisor.snapshot().await.state.as_wire_str() == "running";
     let mut journal = SwitchJournal {
         old_target_id: target_id.clone(),
         new_target_id: target_id.clone(),
         target_agent_id: candidate_config.agent.id.clone(),
         candidate_fingerprint: candidate_fingerprint(&canonical),
-        was_running,
+        was_running: restart_agent,
         phase: SwitchJournalPhase::Planned,
         requested_model: body.model.clone(),
     };
@@ -652,7 +661,7 @@ async fn reconfigure_primary_target(
             old_target_id: &target_id,
             candidate_config: &candidate_config,
             canonical: &canonical,
-            was_running,
+            was_running: restart_agent,
             resume_journal: resume_journal.as_ref(),
             rename_sessions: false,
         },
@@ -690,7 +699,7 @@ async fn reconfigure_primary_target(
         required_env_refs,
         secret_migrations: Vec::new(),
         install: None,
-        restarted: was_running,
+        restarted: restart_agent,
         restart_started,
         set_model,
         models: Vec::new(),
@@ -1018,8 +1027,8 @@ async fn commit_switch_and_apply_runtime(
 /// idempotent, and slow (install plus model discovery burn minutes), and the
 /// only step a retry must converge is the post-commit runtime re-apply. The
 /// response therefore reports those pre-commit fields as empty/skipped and
-/// uses the journaled `was_running`, which a process restart could not
-/// re-observe.
+/// uses the journaled `was_running` restart decision, which a process restart
+/// could not re-derive.
 async fn resume_committed_switch(
     state: &AppState,
     registry: &RegistryCatalog,

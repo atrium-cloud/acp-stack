@@ -443,7 +443,13 @@ creates = "true"
 }
 
 pub fn write_pi_registry_override(config_dir: &std::path::Path) {
-    let body = r#"
+    write_pi_registry_override_with_command(config_dir, "true");
+}
+
+/// The synthetic pi entry with its adapter launching `command`, for tests that start the target.
+pub fn write_pi_registry_override_with_command(config_dir: &std::path::Path, command: &str) {
+    let body = format!(
+        r#"
 [[agents]]
 id = "pi"
 name = "Pi Agent"
@@ -456,7 +462,7 @@ agent_skills_install_dir = "~/.agents/skills"
 support_doc = "docs/agents/pi.md"
 
 [agents.adapter]
-id = "true"
+id = "{command}"
 
 [agents.adapter.install.shell]
 script = "true"
@@ -468,7 +474,8 @@ id = "true"
 [agents.harness.install.shell]
 script = "true"
 creates = "true"
-"#;
+"#
+    );
     std::fs::write(config_dir.join("agents.toml"), body).expect("registry override");
 }
 

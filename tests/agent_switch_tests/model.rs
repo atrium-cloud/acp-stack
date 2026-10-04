@@ -17,7 +17,7 @@ use crate::common::agent::{
     AgentHarness, EnvVarGuard, add_codex_placebo_target, add_kimi_placebo_target, admin_bearer,
     http, session_bearer, test_config, write_amp_registry_override, write_config_options_fixture,
     write_gated_placebo_shim, write_kimi_registry_override_with_command,
-    write_pi_registry_override,
+    write_pi_registry_override_with_command,
 };
 
 const CONFIG_OPTIONS_FIXTURE_ENV: &str = "ACP_STACK_AGENT_CONFIG_OPTIONS_PATH";
@@ -65,11 +65,22 @@ async fn spawn(tempdir: &TempDir, config: Config) -> AgentHarness {
     AgentHarness::spawn_with_config_and_home(config, tempdir.path().to_path_buf()).await
 }
 
+/// The file that lets the synthetic pi shim start; without it every launch and probe fails.
+fn pi_ready_marker(tempdir: &TempDir) -> std::path::PathBuf {
+    tempdir.path().join("pi-ready")
+}
+
 /// A harness whose registry carries the synthetic pi entry, for different-target switches.
 async fn spawn_with_pi_registry(tempdir: &TempDir) -> AgentHarness {
     let config_dir = tempdir.path().join(".config/acp-stack");
     std::fs::create_dir_all(&config_dir).expect("config dir");
-    write_pi_registry_override(&config_dir);
+    // One shim is the pi adapter command and the `pi` binary the bridge resolves for `PI_ACP_PI_BIN`.
+    let bin_dir = tempdir.path().join(".local").join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("local bin dir");
+    let shim_path = bin_dir.join("pi");
+    write_gated_placebo_shim(&shim_path, &pi_ready_marker(tempdir));
+    std::fs::write(pi_ready_marker(tempdir), b"ready\n").expect("write pi marker");
+    write_pi_registry_override_with_command(&config_dir, &shim_path.to_string_lossy());
     spawn(tempdir, workspace_config(tempdir)).await
 }
 
@@ -100,6 +111,17 @@ async fn start_primary(harness: &AgentHarness) {
         .send()
         .await
         .expect("start primary");
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+async fn stop_primary(harness: &AgentHarness) {
+    let response = http()
+        .await
+        .post(format!("{}/v1/agent/stop", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .send()
+        .await
+        .expect("stop primary");
     assert_eq!(response.status(), StatusCode::OK);
 }
 
@@ -194,6 +216,13 @@ async fn different_target_switch_commits_the_resolved_model() {
     assert_eq!(body["data"]["model"], "opencode-go/glm-5.3-flash");
     assert_eq!(body["data"]["set_model"], false);
     assert!(body["data"].get("follow_up").is_none(), "{body}");
+    // A provider body starts the new harness even though the source agent was stopped.
+    assert_eq!(body["data"]["restarted"], true);
+    assert_eq!(body["data"]["restart_started"], true);
+    assert_eq!(
+        target_field(&harness, "pi", "process_state").await,
+        "running"
+    );
     assert!(
         !body["data"]["models"]
             .as_array()
@@ -366,8 +395,8 @@ async fn model_only_body_commits_the_model_with_the_provider_unchanged() {
     assert_eq!(body["data"]["api_key_ref"], "OPENCODE_API_KEY");
     assert_eq!(body["data"]["model"], "opencode-go/glm-5.3-flash");
     assert_eq!(body["data"]["set_model"], false);
-    assert_eq!(body["data"]["restarted"], false);
-    assert_eq!(body["data"]["restart_started"], false);
+    assert_eq!(body["data"]["restarted"], true);
+    assert_eq!(body["data"]["restart_started"], true);
     let committed = committed_config(&harness);
     assert_eq!(committed.agent.env, env_before);
     let provider = committed.agent.provider.expect("provider kept");
@@ -400,6 +429,35 @@ async fn model_only_body_commits_the_model_with_the_provider_unchanged() {
 }
 
 #[tokio::test]
+async fn model_only_body_leaves_a_stopped_agent_stopped() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let _fixture = advertised_models_fixture(&tempdir);
+    let harness = spawn(&tempdir, workspace_config(&tempdir)).await;
+    let (status, body) = switch_request(
+        &harness,
+        json!({ "agent_id": "opencode", "provider": "anthropic" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    stop_primary(&harness).await;
+
+    let (status, body) = switch_request(
+        &harness,
+        json!({ "agent_id": "opencode", "model": "claude-haiku-4-5" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["data"]["provider_status"], "unchanged");
+    assert_eq!(body["data"]["model"], "anthropic/claude-haiku-4-5");
+    assert_eq!(body["data"]["restarted"], false);
+    assert_eq!(body["data"]["restart_started"], false);
+    assert_eq!(
+        target_field(&harness, "opencode", "process_state").await,
+        "stopped"
+    );
+}
+
+#[tokio::test]
 async fn model_only_body_restarts_a_running_agent_once() {
     let tempdir = TempDir::new().expect("tempdir");
     let _fixture = advertised_models_fixture(&tempdir);
@@ -410,7 +468,6 @@ async fn model_only_body_restarts_a_running_agent_once() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
-    start_primary(&harness).await;
     let pid_before = target_field(&harness, "opencode", "pid").await;
     assert!(pid_before.is_number(), "{pid_before}");
 
@@ -469,7 +526,7 @@ async fn same_target_unadvertised_model_restores_agent_owned_config() {
 }
 
 /// A harness that takes its model verbatim gets it with no probe: the target command fails on
-/// launch and no discovery fixture is set, so a probe would turn the switch into a 502.
+/// launch and no discovery fixture is set, so a probe would fail the switch before its config write.
 #[tokio::test]
 async fn explicit_harness_takes_the_model_verbatim_without_a_probe() {
     let _no_fixture = EnvVarGuard::unset(CONFIG_OPTIONS_FIXTURE_ENV);
@@ -511,14 +568,22 @@ async fn explicit_harness_takes_the_model_verbatim_without_a_probe() {
         Some("kimi-k3-turbo")
     );
 
+    // A provider body starts the agent, which this shim refuses, so the request fails after the
+    // config write; a probe would have failed before it and left the config as it was.
     let (status, body) = switch_request(
         &harness,
         json!({ "agent_id": "kimi", "provider": "anthropic", "model": "claude-sonnet-4-5" }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "body: {body}");
-    assert_eq!(body["data"]["provider_status"], "set");
-    assert_eq!(body["data"]["model"], "claude-sonnet-4-5");
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "body: {body}");
+    assert_eq!(body["error"]["code"], "agent.initialize_failed");
+    assert_eq!(
+        load_switch_journal(&harness.config_path)
+            .expect("journal load")
+            .expect("journal present")
+            .phase,
+        SwitchJournalPhase::Committed
+    );
     let committed = committed_config(&harness);
     assert_eq!(committed.agent.model, None);
     assert_eq!(
@@ -809,7 +874,8 @@ async fn probe_failure_commits_nothing() {
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     drop(fixture);
-    // The synthetic pi adapter is `true`, which exits before answering `initialize`.
+    // Without its marker the synthetic pi shim exits before answering `initialize`.
+    std::fs::remove_file(pi_ready_marker(&tempdir)).expect("remove pi marker");
     let no_fixture = EnvVarGuard::unset(CONFIG_OPTIONS_FIXTURE_ENV);
     let config_before = config_bytes(&harness);
     let journal_before = journal_bytes(&harness);
@@ -830,6 +896,8 @@ async fn probe_failure_commits_nothing() {
     );
     drop(no_fixture);
 
+    // The switch starts pi, so the shim must be able to launch.
+    std::fs::write(pi_ready_marker(&tempdir), b"ready\n").expect("restore pi marker");
     let fixture = advertised_models_fixture(&tempdir);
     let (status, body) = switch_request(
         &harness,
@@ -838,6 +906,7 @@ async fn probe_failure_commits_nothing() {
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     drop(fixture);
+    std::fs::remove_file(pi_ready_marker(&tempdir)).expect("remove pi marker");
     let _no_fixture = EnvVarGuard::unset(CONFIG_OPTIONS_FIXTURE_ENV);
     let config_before = config_bytes(&harness);
     let journal_before = journal_bytes(&harness);
