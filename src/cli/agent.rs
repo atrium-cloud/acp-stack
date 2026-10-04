@@ -353,6 +353,9 @@ pub struct AgentSwitchArgs {
     /// Secret ref to inject for the target provider.
     #[arg(long = "api-key-ref")]
     pub(super) api_key_ref: Option<String>,
+    /// Model id to commit with the switch. Alone on the current default target, it changes only the model.
+    #[arg(long)]
+    pub(super) model: Option<String>,
     /// Admin API key. Required when stdin is not a terminal.
     #[arg(long = "admin-key")]
     pub(super) admin_key: Option<String>,

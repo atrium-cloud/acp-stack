@@ -10,7 +10,10 @@ use acp_stack::runtime::agent::switch_journal::{
 };
 use acp_stack::secrets::{ManagedCredentialSelection, SecretStore};
 
-use crate::common::agent::{AgentHarness, admin_bearer, http, session_bearer, test_config};
+use crate::common::agent::{
+    AgentHarness, EnvVarGuard, admin_bearer, http, session_bearer, test_config,
+    write_config_options_fixture,
+};
 
 fn seed_provider_secrets(home: &std::path::Path) {
     let mut secrets = SecretStore::open_or_create(home).expect("secret store");
@@ -73,6 +76,10 @@ async fn start_primary(harness: &AgentHarness) {
 }
 
 async fn primary_process_state(harness: &AgentHarness) -> Value {
+    primary_field(harness, "process_state").await
+}
+
+async fn primary_field(harness: &AgentHarness, field: &str) -> Value {
     let body: Value = http()
         .await
         .get(format!("{}/v1/array/status", harness.base_url))
@@ -88,7 +95,7 @@ async fn primary_process_state(harness: &AgentHarness) -> Value {
         .expect("targets array")
         .iter()
         .find(|target| target["id"] == "opencode")
-        .expect("primary target reported")["process_state"]
+        .expect("primary target reported")[field]
         .clone()
 }
 
@@ -123,36 +130,54 @@ async fn agent_switch_same_target_sets_provider_and_restarts() {
     assert_eq!(primary_process_state(&harness).await, "running");
 }
 
+/// Repeating the configured provider, with or without its configured model and with `model`
+/// absent or null, keeps that model and commits nothing.
 #[tokio::test]
 async fn agent_switch_same_target_identical_provider_is_noop() {
     let tempdir = TempDir::new().expect("tempdir");
     seed_provider_secrets(tempdir.path());
+    let fixture_path = write_config_options_fixture(
+        tempdir.path(),
+        &["anthropic/claude-sonnet-4-5", "openai/gpt-5.5"],
+    );
+    let _fixture_guard = EnvVarGuard::set("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &fixture_path);
     let harness =
         AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
+    start_primary(&harness).await;
 
     let (status, body) = switch_request(
         &harness,
-        json!({ "agent_id": "opencode", "provider": "anthropic" }),
+        json!({ "agent_id": "opencode", "provider": "anthropic", "model": "claude-sonnet-4-5" }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(body["data"]["provider_status"], "set");
     let committed = std::fs::read(&harness.config_path).expect("config after first request");
+    let pid = primary_field(&harness, "pid").await;
 
-    let (status, body) = switch_request(
-        &harness,
+    for request in [
         json!({ "agent_id": "opencode", "provider": "anthropic" }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "body: {body}");
-    assert_eq!(body["data"]["provider_status"], "no_op");
-    assert_eq!(body["data"]["provider"], "anthropic");
-    assert_eq!(body["data"]["restarted"], false);
-    assert_eq!(body["data"]["restart_started"], false);
+        json!({ "agent_id": "opencode", "provider": "anthropic", "model": null }),
+        json!({ "agent_id": "opencode", "provider": "anthropic", "model": "claude-sonnet-4-5" }),
+    ] {
+        let (status, body) = switch_request(&harness, request.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{request}: {body}");
+        assert_eq!(body["data"]["provider_status"], "no_op", "{request}");
+        assert_eq!(body["data"]["provider"], "anthropic");
+        assert_eq!(body["data"]["model"], "anthropic/claude-sonnet-4-5");
+        assert_eq!(body["data"]["set_model"], false);
+        assert_eq!(body["data"]["restarted"], false);
+        assert_eq!(body["data"]["restart_started"], false);
+        assert_eq!(
+            std::fs::read(&harness.config_path).expect("config after retry"),
+            committed,
+            "an identical selection must not rewrite the config: {request}"
+        );
+    }
     assert_eq!(
-        std::fs::read(&harness.config_path).expect("config after retry"),
-        committed,
-        "an identical selection must not rewrite the config"
+        primary_field(&harness, "pid").await,
+        pid,
+        "an identical selection must not restart the agent"
     );
 }
 

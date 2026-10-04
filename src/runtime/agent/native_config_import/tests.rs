@@ -124,6 +124,39 @@ fn default_selection_preserves_canonical_provider_and_selected_values_replace_it
     );
 }
 
+/// The agent switch keeps the model when the configured provider is named again; a provider-only
+/// import of that same provider still clears it.
+#[test]
+fn provider_only_import_of_the_configured_provider_clears_the_model() {
+    let current = opencode_config("openrouter", "openrouter/old-model");
+    let inspected = inspect_native_config(
+        "opencode",
+        Some("opencode.json"),
+        r#"{"model":"openrouter/new-model"}"#,
+    )
+    .expect("inspect");
+    let prepared = prepare_native_config_import(
+        &inspected,
+        &NativeConfigSelection {
+            revision: inspected.revision().to_owned(),
+            selected_managed_field_ids: vec!["provider".to_owned()],
+            executable_settings_acknowledged: false,
+        },
+        &current,
+        Path::new("/tmp/home"),
+    )
+    .expect("prepare provider-only import");
+    let provider = prepared
+        .canonical_config
+        .agent
+        .provider
+        .as_ref()
+        .expect("provider");
+    assert_eq!(provider.id, "openrouter");
+    assert_eq!(provider.model, None);
+    assert_eq!(prepared.canonical_config.agent.model, None);
+}
+
 #[test]
 fn provider_import_preserves_structured_catalog_credentials_through_rebase() {
     let home = tempfile::tempdir().expect("home");

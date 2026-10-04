@@ -7,6 +7,8 @@ mod common;
 
 #[path = "agent_switch_tests/array_targets.rs"]
 mod array_targets;
+#[path = "agent_switch_tests/model.rs"]
+mod model;
 #[path = "agent_switch_tests/native_config.rs"]
 mod native_config;
 #[path = "agent_switch_tests/provider_reconfigure.rs"]

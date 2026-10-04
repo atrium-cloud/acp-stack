@@ -416,12 +416,12 @@ acps agent install [--yes] [--admin-key <key>]
 
 ## `acps agent switch`
 
-Migrates to another supported harness through the running daemon, or moves the current harness onto another provider.
+Migrates to another supported harness through the running daemon, or moves the current harness onto another provider or model.
 
 ### Synopsis
 
 ```sh
-acps agent switch <agent> [--drop] [--provider <provider-id>] [--api-key-ref <ref>] [--admin-key <key>]
+acps agent switch <agent> [--drop] [--provider <provider-id>] [--api-key-ref <ref>] [--model <model-id>] [--admin-key <key>]
 ```
 
 ### Flags
@@ -429,18 +429,19 @@ acps agent switch <agent> [--drop] [--provider <provider-id>] [--api-key-ref <re
 - `<agent>`: target agent, positional.
 - `--drop`: remove only the source agent-owned config after the target switch succeeds. Does not delete runtime MCP declarations, secrets, binaries, adapters, or sessions.
 - `--provider <provider-id>`, `--api-key-ref <ref>`: provider selection for the target. Naming the agent that is already the default target with `--provider` reconfigures that agent's provider in place, within the providers the agent supports.
+- `--model <model-id>`: model to commit with the switch, resolved against the target the way `acps agent set --model` resolves it. Naming the agent that is already the default target with `--model` alone changes only its model.
 - `--admin-key <key>`: required for non-interactive runs; interactive runs prompt without echoing it.
 
 ### Output
 
-- Before calling the daemon, switch prints the target install steps, config that will migrate as-is, compatible provider credentials, optional source config cleanup, and fields that need input.
+- Before calling the daemon, switch prints the target install steps, config that will migrate as-is, compatible provider credentials, optional source config cleanup, fields set from input such as `--model`, and fields that need input.
 - Switch installs the target harness and reuses a compatible flat ref or the current structured provider/alias selection.
 - Installed Agent Skills are copied into the target skills directory when needed. Same-named target skills without the managed marker are left untouched and printed as kept unmanaged. Symlinks are refreshed when the target declares a separate discovery directory, e.g. Claude Code's `~/.claude/skills`. The marker and link rules: [skills.md](../agents/skills.md).
-- Switch clears the model and prints advertised model values only when the target supports model selection. Interactive runs can select and apply a model before the command exits. Non-interactive runs print `acps agent set --model <model-id>` as the follow-up only when model selection is supported.
+- With `--model`, switch commits the resolved model with the harness or provider change and prints it. Without it, a different-target switch or a provider change clears the model, and switch prints advertised model values only when the target supports model selection. Interactive runs can select and apply a model before the command exits. Non-interactive runs print `acps agent set --model <model-id>` as the follow-up only when the target supports model selection and has no model.
 - Switch preserves runtime-scoped config: workspace, MCP declarations, permissions, secrets config, and sessions. By default it also preserves source agent-owned config, secrets, and installed harnesses/adapters, so switching back is fast.
 - A switch is journaled in `agent-switch.json` beside the canonical config, so a failure after the config write, such as the new agent's first start, does not strand the daemon.
-- Retrying the same target resumes the interrupted switch and converges it (`provider_status: "resumed"`). Retrying a finished switch is a no-op success (`provider_status: "no_op"`). Requesting a different target while a switch is incomplete fails with `409 agent.switch_conflict`.
-- Naming the current default target with `--provider` keeps the harness and commits the new provider (`provider_status: "set"`), restarting the agent only when it was already running. Repeating the same selection with no intervening config change is a no-op success. Retrying an interrupted reconfigure with different provider flags fails with `409 agent.switch_conflict`. `--drop`, and `--api-key-ref` without `--provider`, stay refused for the current default target.
+- Retrying the same target resumes the interrupted switch and converges it (`provider_status: "resumed"`). Retrying a finished switch is a no-op success (`provider_status: "no_op"`). Requesting a different target while a switch is incomplete fails with `409 agent.switch_conflict`, and so does a retry after the config write whose `--model` differs from the interrupted request's spelling.
+- Naming the current default target with `--provider` keeps the harness and commits the new provider (`provider_status: "set"`), restarting the agent only when it was already running. Naming the provider already configured keeps its model, and the plan prints "clears the configured model" only for a provider change without `--model`. `--model` alone commits only the model (`provider_status: "unchanged"`). Repeating the same selection with no intervening config change is a no-op success. Retrying an interrupted reconfigure with different provider flags fails with `409 agent.switch_conflict`. `--drop`, and `--api-key-ref` without `--provider`, stay refused for the current default target.
 
 ## `acps agent provider`
 

@@ -48,7 +48,7 @@ flowchart LR
 - Provider CLI: target activation and status, credential catalog mutation, legacy credential migration, and shared provider validation.
 - Model catalog: cached `models.dev` model metadata for prompt modality gating.
 - Provider model catalog: live provider model-list fetch and per-provider cache (`src/runtime/agent/provider_model_catalog.rs`) backing `GET /v1/models` and `availableModels` provisioning.
-- Agent switch: harness migration planning, provider/API-key compatibility, and the pending-switch journal (`src/runtime/agent/switch_journal.rs`) that makes retries converge.
+- Agent switch: harness migration planning, provider/API-key compatibility, model selection on the switch route (`src/api/routes/agent/switch/model.rs`), and the pending-switch journal (`src/runtime/agent/switch_journal.rs`) that makes retries converge.
 - Native config import: redacted inspection and transactional semantic replacement of supported harness global config.
 
 ### Install and update

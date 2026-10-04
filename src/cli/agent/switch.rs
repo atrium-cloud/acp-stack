@@ -40,6 +40,7 @@ pub(super) fn run_agent_switch(args: AgentSwitchArgs) -> Result<()> {
             target_entry,
             &plan,
             args.drop_configs,
+            args.model.as_deref(),
         );
     }
 
@@ -48,6 +49,7 @@ pub(super) fn run_agent_switch(args: AgentSwitchArgs) -> Result<()> {
         "agent_id": args.agent,
         "provider": args.provider,
         "api_key_ref": args.api_key_ref,
+        "model": args.model,
         "drop": args.drop_configs,
     });
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -131,19 +133,37 @@ fn print_existing_target_switch_plan(
 ) -> Result<()> {
     let agent = &target.id;
     if config.array.primary_target == *agent {
-        let Some(provider) = args.provider.as_deref() else {
+        if args.provider.is_none() && args.model.is_none() {
             return Err(StackError::InvalidParam {
                 field: "agent",
                 reason: format!("agent `{agent}` is already the default target"),
             });
-        };
+        }
         println!("agent provider plan: {agent} keeps its harness");
-        println!("set from input: provider {provider}");
+        if let Some(provider) = args.provider.as_deref() {
+            println!("set from input: provider {provider}");
+        }
         if let Some(api_key_ref) = args.api_key_ref.as_deref() {
             println!("set from input: api_key_ref {api_key_ref}");
         }
+        if let Some(model) = args.model.as_deref() {
+            println!("set from input: model {model}");
+        }
         println!("migrated as-is: workspace, MCP, permissions, auth, and secrets config");
-        println!("clears the configured model");
+        // Naming the provider already configured keeps its model.
+        let committed_provider = target
+            .agent
+            .provider
+            .as_ref()
+            .map(|provider| provider.id.as_str());
+        if args.model.is_none()
+            && args
+                .provider
+                .as_deref()
+                .is_some_and(|provider| Some(provider) != committed_provider)
+        {
+            println!("clears the configured model");
+        }
         return Ok(());
     }
     let required_env_refs = &target.agent.env;
@@ -165,8 +185,8 @@ fn print_switch_plan(
     target_entry: &RegistryEntry,
     plan: &AgentSwitchPlan,
     drop_configs: bool,
+    requested_model: Option<&str>,
 ) {
-    let target_sets_model = target_entry.set_model;
     println!(
         "agent switch plan: {} -> {}",
         plan.old_agent_id, plan.target_agent_id
@@ -196,11 +216,6 @@ fn print_switch_plan(
     match provider_status {
         AgentSwitchProviderStatus::NotApplicable => {
             println!("migrated as-is: workspace, MCP, permissions, auth, and secrets config");
-            if target_sets_model {
-                println!("requires input: model");
-            } else {
-                println!("requires input: none");
-            }
         }
         AgentSwitchProviderStatus::Reused {
             provider_id,
@@ -212,11 +227,6 @@ fn print_switch_plan(
             if let Some(api_key_ref) = api_key_ref {
                 println!("migrated api_key_ref: {api_key_ref}");
             }
-            if target_sets_model {
-                println!("requires input: model");
-            } else {
-                println!("requires input: none");
-            }
         }
         AgentSwitchProviderStatus::Set {
             provider_id,
@@ -227,12 +237,12 @@ fn print_switch_plan(
             if let Some(api_key_ref) = api_key_ref {
                 println!("set from input: api_key_ref {api_key_ref}");
             }
-            if target_sets_model {
-                println!("requires input: model");
-            } else {
-                println!("requires input: none");
-            }
         }
+    }
+    match requested_model {
+        Some(model) => println!("set from input: model {model}"),
+        None if target_entry.set_model => println!("requires input: model"),
+        None => println!("requires input: none"),
     }
 }
 
@@ -255,6 +265,9 @@ fn print_switch_result(data: &Value) {
         if let Some(api_key_ref) = data.get("api_key_ref").and_then(Value::as_str) {
             println!("api_key_ref: {api_key_ref}");
         }
+    }
+    if let Some(model) = data.get("model").and_then(Value::as_str) {
+        println!("model: {model}");
     }
     if let Some(install) = data.get("install") {
         let outcome = install

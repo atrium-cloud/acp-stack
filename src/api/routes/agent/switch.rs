@@ -2,9 +2,21 @@
 
 use super::*;
 use crate::api::routes::providers::ModelJson;
+use crate::runtime::agent::model_discovery::{
+    discovery_is_blocked_without_a_model, model_value_is_explicit_without_discovery,
+};
 use crate::runtime::agent::switch_journal::{
     SwitchJournal, SwitchJournalPhase, candidate_fingerprint, load_switch_journal,
     persist_switch_journal, remove_switch_journal,
+};
+use crate::runtime::install::agent_registry::RegistryEntry;
+
+mod model;
+
+use self::model::{
+    committed_model, ensure_entry_sets_model, model_follow_up, probe_advertisement,
+    resolve_advertised_switch_model, restore_committed_agent_config, set_agent_model,
+    validate_requested_model_value,
 };
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -16,18 +28,23 @@ pub(crate) struct AgentSwitchRequest {
     provider: Option<String>,
     #[serde(default)]
     api_key_ref: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct AgentSwitchResponse {
     old_agent_id: String,
     agent_id: String,
-    #[schemars(extend("enum" = ["not_applicable", "reused", "set", "selected", "resumed", "no_op"]))]
+    #[schemars(extend("enum" = ["not_applicable", "reused", "set", "selected", "resumed", "no_op", "unchanged"]))]
     provider_status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     api_key_ref: Option<String>,
+    /// The committed model: the provider slot, else the root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     required_env_refs: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -97,6 +114,7 @@ pub(crate) async fn agent_switch_handler(
     State(state): State<AppState>,
     Json(body): Json<AgentSwitchRequest>,
 ) -> std::result::Result<ApiSuccess<AgentSwitchResponse>, StackError> {
+    validate_requested_model_value(body.model.as_deref())?;
     let _mutation = state.lock_agent_config_mutation().await?;
     let home = state.runtime_paths.home.clone();
     let fresh_config = Config::load_from_path(&state.runtime_paths.config_path)?;
@@ -105,7 +123,8 @@ pub(crate) async fn agent_switch_handler(
     )?;
     // The journal must gate dispatch first, or the fresh-path validation below rejects a
     // same-target retry of an interrupted switch as "already configured".
-    let provider_reconfigure_requested = body.provider.is_some() || body.api_key_ref.is_some();
+    let reconfigure_requested =
+        body.provider.is_some() || body.api_key_ref.is_some() || body.model.is_some();
     let resume_journal = match load_switch_journal(&state.runtime_paths.config_path)? {
         Some(journal) => match classify_switch_journal(
             &journal,
@@ -113,11 +132,13 @@ pub(crate) async fn agent_switch_handler(
             &fresh_config,
             body.provider.as_deref(),
             body.api_key_ref.as_deref(),
+            body.model.as_deref(),
         )? {
             SwitchJournalAction::NoOp => {
                 return Ok(completed_switch_response(
                     &fresh_config,
                     &journal.target_agent_id,
+                    registry.lookup(&fresh_config.agent.id),
                 ));
             }
             SwitchJournalAction::ResumeCommitted => {
@@ -140,18 +161,18 @@ pub(crate) async fn agent_switch_handler(
     if resume_journal.is_none()
         && fresh_config.array.primary_target == body.agent_id
         && !body.drop_configs
-        && body.provider.is_none()
-        && body.api_key_ref.is_none()
+        && !reconfigure_requested
     {
         return Ok(completed_switch_response(
             &fresh_config,
             &fresh_config.agent.id,
+            registry.lookup(&fresh_config.agent.id),
         ));
     }
-    // Harness and provider are separate choices, bounded only by the per-agent support matrix, so a
-    // body naming the current primary target with `provider` set reconfigures that target in place.
-    if fresh_config.array.primary_target == body.agent_id && provider_reconfigure_requested {
-        return reconfigure_primary_target_provider(
+    // Harness, provider, and model are separate choices, bounded only by the per-agent support
+    // matrix, so a body naming the current primary target with any of them reconfigures it in place.
+    if fresh_config.array.primary_target == body.agent_id && reconfigure_requested {
+        return reconfigure_primary_target(
             &state,
             &home,
             &registry,
@@ -183,6 +204,9 @@ pub(crate) async fn agent_switch_handler(
         },
     )?;
     let target_entry = registry.lookup_required(&plan.target_agent_id)?;
+    if body.model.is_some() {
+        ensure_entry_sets_model(target_entry)?;
+    }
     let mut candidate_config = plan.config.clone();
     candidate_config.agent.adapter = adapter_from_registry_entry(target_entry);
     rename_default_target_config(
@@ -190,10 +214,18 @@ pub(crate) async fn agent_switch_handler(
         &plan.target_agent_id,
         plan.config.agent.clone(),
     )?;
+    // A harness that takes its model verbatim gets it before the only provisioning; every other
+    // harness resolves it against the discovery probe below.
+    let explicit_model = body
+        .model
+        .clone()
+        .filter(|_| model_value_is_explicit_without_discovery(&candidate_config.agent));
+    if let Some(model) = explicit_model.clone() {
+        set_agent_model(&mut candidate_config.agent, model);
+    }
 
-    let canonical = candidate_config.to_canonical_toml()?;
-    let mut candidate_config = crate::config::load_config_from_str(&canonical)?;
-    candidate_config.agent.adapter = adapter_from_registry_entry(target_entry);
+    let mut canonical = candidate_config.to_canonical_toml()?;
+    let mut candidate_config = reload_candidate_config(&canonical, target_entry)?;
     let secret_migrations = apply_switch_secret_migrations(&home, &plan.secret_migrations)?;
     let _env = open_agent_env(&state.runtime_paths.home, &candidate_config)?;
 
@@ -203,45 +235,47 @@ pub(crate) async fn agent_switch_handler(
         &candidate_config,
     )
     .await;
-    let provisioned =
-        crate::runtime::agent::agent_headless_config::provision_agent_headless_config(
-            &candidate_config,
-            &home,
-        )?
-        .into_iter()
-        .map(ProvisionedAgentConfigJson::from)
-        .collect::<Vec<_>>();
+    let mut provisioned = provision_agent_config_for_response(&candidate_config, &home)?;
 
     // A target that resolves its model while starting a session cannot answer a
-    // discovery session yet, so the switch reports no models rather than failing.
+    // discovery session yet, so a model-less switch reports no models rather than failing.
     // Where the provider publishes a catalog, `GET /v1/models` serves the list
     // once the switch lands; where it does not, no route can list models until a
     // model is named explicitly.
-    let models = if target_entry.set_model
-        && !crate::runtime::agent::model_discovery::discovery_is_blocked_without_a_model(
-            &candidate_config.agent,
-        ) {
-        // Only the model list is read here, and that list is the same for every model, so the
-        // probe applies none.
-        let discovered = fetch_session_config_with_timeout(
-            &home,
-            &candidate_config,
-            None,
-            DEFAULT_MODELS_DISCOVERY_TIMEOUT,
-        )
-        .await?;
-        advertised_values_for_category(&discovered.response, AgentSessionConfigCategory::Model)?
-            .into_iter()
-            // ACP advertises bare values with no separate label, so there is no display name to carry.
-            .map(|value| ModelJson {
-                value,
-                display_name: None,
-                efforts: Vec::new(),
-            })
-            .collect()
+    let discovered = if explicit_model.is_none()
+        && (body.model.is_some()
+            || (target_entry.set_model
+                && !discovery_is_blocked_without_a_model(&candidate_config.agent)))
+    {
+        Some(probe_advertisement(&home, &candidate_config).await?)
     } else {
-        Vec::new()
+        None
     };
+    let models = match discovered.as_ref() {
+        Some(response) => {
+            advertised_values_for_category(response, AgentSessionConfigCategory::Model)?
+                .into_iter()
+                // ACP advertises bare values with no separate label, so there is no display name to carry.
+                .map(|value| ModelJson {
+                    value,
+                    display_name: None,
+                    efforts: Vec::new(),
+                })
+                .collect()
+        }
+        None => Vec::new(),
+    };
+    // The model is resolved against the probe of the model-free candidate, so a value the target
+    // does not list is refused before any harness runs with it.
+    if explicit_model.is_none()
+        && let (Some(model), Some(response)) = (body.model.as_deref(), discovered.as_ref())
+    {
+        let resolved = resolve_advertised_switch_model(&candidate_config.agent, response, model)?;
+        set_agent_model(&mut candidate_config.agent, resolved);
+        canonical = candidate_config.to_canonical_toml()?;
+        candidate_config = reload_candidate_config(&canonical, target_entry)?;
+        provisioned = provision_agent_config_for_response(&candidate_config, &home)?;
+    }
     let skills_port = port_agent_skills(
         &home,
         &registry,
@@ -260,7 +294,10 @@ pub(crate) async fn agent_switch_handler(
         candidate_fingerprint: candidate_fingerprint(&canonical),
         was_running,
         phase: SwitchJournalPhase::Planned,
+        requested_model: body.model.clone(),
     };
+    // The target's newly provisioned files stay after a failure here: they are inert while the
+    // committed config names the source harness, and the next switch to this target rewrites them.
     let restart_started = commit_switch_and_apply_runtime(
         SwitchCommit {
             state: &state,
@@ -294,22 +331,22 @@ pub(crate) async fn agent_switch_handler(
     journal.phase = SwitchJournalPhase::Completed;
     persist_switch_journal(&state.runtime_paths.config_path, &journal)?;
 
+    let (set_model, follow_up) = model_follow_up(Some(target_entry), &candidate_config.agent);
     let response = AgentSwitchResponse {
         old_agent_id: plan.old_agent_id,
         agent_id: plan.target_agent_id,
         provider_status: plan.provider_status.label(),
         provider: plan.provider_status.provider_id().map(str::to_owned),
         api_key_ref: plan.provider_status.api_key_ref().map(str::to_owned),
+        model: committed_model(&candidate_config.agent),
         required_env_refs: plan.required_env_refs,
         secret_migrations,
         install: Some(install),
         restarted: was_running,
         restart_started,
-        set_model: target_entry.set_model,
+        set_model,
         models,
-        follow_up: target_entry
-            .set_model
-            .then_some("acps agent set --model <model-id>"),
+        follow_up,
         provisioned,
         skills_port,
         skills_link: link_outcome.report,
@@ -332,6 +369,12 @@ async fn switch_to_existing_array_target(
         return Err(StackError::InvalidParam {
             field: "provider",
             reason: "provider flags are ignored when switching to an existing Array target; use `acps array set --target ...` first".to_owned(),
+        });
+    }
+    if body.model.is_some() {
+        return Err(StackError::InvalidParam {
+            field: "model",
+            reason: "a model cannot be set while selecting an existing Array target; select the target first, then switch to it with `model` alone".to_owned(),
         });
     }
     if body.drop_configs {
@@ -360,8 +403,7 @@ async fn switch_to_existing_array_target(
     candidate_config.array.primary_target = body.agent_id.clone();
     candidate_config.agent = target_agent;
     let canonical = candidate_config.to_canonical_toml()?;
-    let mut candidate_config = crate::config::load_config_from_str(&canonical)?;
-    candidate_config.agent.adapter = adapter_from_registry_entry(target_entry);
+    let candidate_config = reload_candidate_config(&canonical, target_entry)?;
     // Selecting an existing target repoints the native config the override lives in, so it faces the same survival check as a planned switch.
     crate::runtime::agent::switch::ensure_endpoint_override_survives_target(
         &state.runtime_paths.home,
@@ -382,14 +424,7 @@ async fn switch_to_existing_array_target(
         &candidate_config,
     )
     .await;
-    let provisioned =
-        crate::runtime::agent::agent_headless_config::provision_agent_headless_config(
-            &candidate_config,
-            home,
-        )?
-        .into_iter()
-        .map(ProvisionedAgentConfigJson::from)
-        .collect::<Vec<_>>();
+    let provisioned = provision_agent_config_for_response(&candidate_config, home)?;
     let skills_port = port_agent_skills(
         home,
         registry,
@@ -408,6 +443,7 @@ async fn switch_to_existing_array_target(
         candidate_fingerprint: candidate_fingerprint(&canonical),
         was_running,
         phase: SwitchJournalPhase::Planned,
+        requested_model: None,
     };
     let restart_started = commit_switch_and_apply_runtime(
         SwitchCommit {
@@ -425,9 +461,9 @@ async fn switch_to_existing_array_target(
     journal.phase = SwitchJournalPhase::Completed;
     persist_switch_journal(&state.runtime_paths.config_path, &journal)?;
 
+    let (set_model, follow_up) = model_follow_up(Some(target_entry), &candidate_config.agent);
     Ok(ApiSuccess::new(AgentSwitchResponse {
         old_agent_id: fresh_config.agent.id,
-        agent_id: candidate_config.agent.id,
         provider_status: "selected",
         provider: candidate_config
             .agent
@@ -439,14 +475,16 @@ async fn switch_to_existing_array_target(
             .provider
             .as_ref()
             .and_then(|provider| provider.api_key_ref.clone()),
+        model: committed_model(&candidate_config.agent),
+        agent_id: candidate_config.agent.id,
         required_env_refs,
         secret_migrations: Vec::new(),
         install: Some(install),
         restarted: was_running,
         restart_started,
-        set_model: false,
+        set_model,
         models: Vec::new(),
-        follow_up: None,
+        follow_up,
         provisioned,
         skills_port,
         skills_link: link_outcome.report,
@@ -456,10 +494,10 @@ async fn switch_to_existing_array_target(
     }))
 }
 
-/// Reconfigure the provider of the target that is already primary. The harness
-/// does not move, so this arm runs neither the installer nor skills porting:
-/// only provider resolution, the config commit, and the runtime re-apply.
-async fn reconfigure_primary_target_provider(
+/// Reconfigure the target that is already primary: its provider, its model, or both. The
+/// harness does not move, so this arm runs neither the installer nor skills porting: only
+/// provider and model resolution, the config commit, and the runtime re-apply.
+async fn reconfigure_primary_target(
     state: &AppState,
     home: &std::path::Path,
     registry: &RegistryCatalog,
@@ -474,39 +512,98 @@ async fn reconfigure_primary_target_provider(
                 .to_owned(),
         });
     }
-    let Some(provider_id) = body.provider.as_deref() else {
-        return Err(StackError::InvalidParam {
-            field: "api_key_ref",
-            reason:
-                "an API-key ref for the current target needs the provider it belongs to; pass `provider` as well"
-                    .to_owned(),
-        });
-    };
     let target_entry = registry.lookup_required(&fresh_config.agent.id)?;
+    if body.model.is_some() {
+        ensure_entry_sets_model(target_entry)?;
+    }
     let mut candidate_config = fresh_config.clone();
-    let required_env_refs = crate::runtime::agent::provider_keys::apply_mapped_agent_provider(
-        &mut candidate_config,
-        provider_id,
-        body.api_key_ref.clone(),
-    )?;
-    // MUST run after provider resolution so the pair-level refusal sees the provider the target would actually run.
-    crate::runtime::agent::switch::ensure_endpoint_override_survives_target(
-        home,
-        &target_entry.id,
-        target_entry.set_provider_base_url,
-        Some(provider_id),
-    )?;
-    let canonical = candidate_config.to_canonical_toml()?;
+    let (provider_status, required_env_refs) = match body.provider.as_deref() {
+        Some(provider_id) => {
+            // Naming the provider already configured keeps its model, including a hand-written root
+            // model, which moves into the provider slot.
+            let kept_model = fresh_config
+                .agent
+                .provider
+                .as_ref()
+                .filter(|provider| body.model.is_none() && provider.id == provider_id)
+                .and_then(|_| committed_model(&fresh_config.agent));
+            let required_env_refs =
+                crate::runtime::agent::provider_keys::apply_mapped_agent_provider(
+                    &mut candidate_config,
+                    provider_id,
+                    body.api_key_ref.clone(),
+                )?;
+            candidate_config
+                .agent
+                .provider
+                .as_mut()
+                .ok_or(StackError::MissingField {
+                    field: "agent.provider",
+                })?
+                .model = kept_model;
+            // MUST run after provider resolution so the pair-level refusal sees the provider the target would actually run.
+            crate::runtime::agent::switch::ensure_endpoint_override_survives_target(
+                home,
+                &target_entry.id,
+                target_entry.set_provider_base_url,
+                Some(provider_id),
+            )?;
+            ("set", required_env_refs)
+        }
+        None if body.api_key_ref.is_some() => {
+            return Err(StackError::InvalidParam {
+                field: "api_key_ref",
+                reason:
+                    "an API-key ref for the current target needs the provider it belongs to; pass `provider` as well"
+                        .to_owned(),
+            });
+        }
+        // A model-only body leaves the provider selection and env as committed.
+        None => {
+            if target_entry.set_provider && fresh_config.agent.provider.is_none() {
+                return Err(StackError::InvalidParam {
+                    field: "model",
+                    reason: format!(
+                        "{} has no provider configured; pass `provider` with `model`",
+                        target_entry.name
+                    ),
+                });
+            }
+            ("unchanged", fresh_config.agent.env.clone())
+        }
+    };
+    let provider_changed =
+        provider_selection(&fresh_config.agent) != provider_selection(&candidate_config.agent);
+    let mut canonical = candidate_config.to_canonical_toml()?;
+    let mut candidate_config = reload_candidate_config(&canonical, target_entry)?;
+    let mut deferred_model = None;
+    if let Some(model) = body.model.as_deref() {
+        if model_value_is_explicit_without_discovery(&candidate_config.agent) {
+            set_agent_model(&mut candidate_config.agent, model.to_owned());
+        } else if provider_changed {
+            // The probe reads the new provider's agent-owned config, so it waits for the
+            // provisioning below.
+            deferred_model = Some(model);
+        } else {
+            // The committed agent-owned config already serves this provider, so the probe runs
+            // before anything is written and an identical selection stays a no-op.
+            let response = probe_advertisement(home, &candidate_config).await?;
+            let resolved =
+                resolve_advertised_switch_model(&candidate_config.agent, &response, model)?;
+            set_agent_model(&mut candidate_config.agent, resolved);
+        }
+        canonical = candidate_config.to_canonical_toml()?;
+        candidate_config = reload_candidate_config(&canonical, target_entry)?;
+    }
     // A retry that resolves to the bytes already committed has nothing to write and nothing to restart.
     if resume_journal.is_none() && canonical == fresh_config.to_canonical_toml()? {
         return Ok(completed_switch_response(
             &fresh_config,
             &fresh_config.agent.id,
+            Some(target_entry),
         ));
     }
-    let mut candidate_config = crate::config::load_config_from_str(&canonical)?;
-    candidate_config.agent.adapter = adapter_from_registry_entry(target_entry);
-    // The credential the new provider resolves through must exist before anything is written.
+    // The credential the provider resolves through must exist before anything is written.
     let _env = open_agent_env(&state.runtime_paths.home, &candidate_config)?;
 
     crate::runtime::agent::provider_model_catalog::refresh_provider_models_best_effort(
@@ -514,17 +611,31 @@ async fn reconfigure_primary_target_provider(
         &candidate_config,
     )
     .await;
-    let provisioned =
-        crate::runtime::agent::agent_headless_config::provision_agent_headless_config(
-            &candidate_config,
-            home,
-        )?
-        .into_iter()
-        .map(ProvisionedAgentConfigJson::from)
-        .collect::<Vec<_>>();
-
     let target_id = fresh_config.array.primary_target.clone();
     let target = state.agent_target(&target_id)?;
+    // From the first provisioning on, a failure before the config write puts the committed
+    // agent-owned config back.
+    let prepared = match provision_reconfigure_candidate(
+        home,
+        target_entry,
+        candidate_config,
+        canonical,
+        deferred_model,
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            restore_committed_agent_config(&fresh_config, home);
+            return Err(error);
+        }
+    };
+    let PreparedCandidate {
+        config: candidate_config,
+        canonical,
+        provisioned,
+    } = prepared;
+
     let was_running = target.supervisor.snapshot().await.state.as_wire_str() == "running";
     let mut journal = SwitchJournal {
         old_target_id: target_id.clone(),
@@ -533,8 +644,9 @@ async fn reconfigure_primary_target_provider(
         candidate_fingerprint: candidate_fingerprint(&canonical),
         was_running,
         phase: SwitchJournalPhase::Planned,
+        requested_model: body.model.clone(),
     };
-    let restart_started = commit_switch_and_apply_runtime(
+    let restart_started = match commit_switch_and_apply_runtime(
         SwitchCommit {
             state,
             old_target_id: &target_id,
@@ -546,14 +658,24 @@ async fn reconfigure_primary_target_provider(
         },
         &mut journal,
     )
-    .await?;
+    .await
+    {
+        Ok(restart_started) => restart_started,
+        Err(SwitchCommitError::BeforeConfigWrite(error)) => {
+            restore_committed_agent_config(&fresh_config, home);
+            return Err(error);
+        }
+        // The agent-owned files already match the written config, and a retry resumes the switch.
+        Err(SwitchCommitError::AfterConfigWrite(error)) => return Err(error),
+    };
     journal.phase = SwitchJournalPhase::Completed;
     persist_switch_journal(&state.runtime_paths.config_path, &journal)?;
 
+    let (set_model, follow_up) = model_follow_up(Some(target_entry), &candidate_config.agent);
     Ok(ApiSuccess::new(AgentSwitchResponse {
         old_agent_id: candidate_config.agent.id.clone(),
         agent_id: candidate_config.agent.id.clone(),
-        provider_status: "set",
+        provider_status,
         provider: candidate_config
             .agent
             .provider
@@ -564,18 +686,15 @@ async fn reconfigure_primary_target_provider(
             .provider
             .as_ref()
             .and_then(|provider| provider.api_key_ref.clone()),
+        model: committed_model(&candidate_config.agent),
         required_env_refs,
         secret_migrations: Vec::new(),
         install: None,
         restarted: was_running,
         restart_started,
-        // The provider change clears the configured model, so an agent that
-        // needs one explicitly needs it again.
-        set_model: target_entry.set_model,
+        set_model,
         models: Vec::new(),
-        follow_up: target_entry
-            .set_model
-            .then_some("acps agent set --model <model-id>"),
+        follow_up,
         provisioned,
         skills_port: None,
         skills_link: None,
@@ -583,6 +702,69 @@ async fn reconfigure_primary_target_provider(
         cleaned_configs: Vec::new(),
         cleanup_errors: Vec::new(),
     }))
+}
+
+/// A reconfigure candidate whose agent-owned config is on disk, ready to commit.
+struct PreparedCandidate {
+    config: Config,
+    canonical: String,
+    provisioned: Vec<ProvisionedAgentConfigJson>,
+}
+
+/// Provision the reconfigure candidate. A model that waits on the new provider's agent-owned
+/// config is resolved against a probe of that model-free candidate, then provisioned again.
+async fn provision_reconfigure_candidate(
+    home: &std::path::Path,
+    target_entry: &RegistryEntry,
+    mut config: Config,
+    mut canonical: String,
+    deferred_model: Option<&str>,
+) -> Result<PreparedCandidate> {
+    let mut provisioned = provision_agent_config_for_response(&config, home)?;
+    if let Some(model) = deferred_model {
+        let response = probe_advertisement(home, &config).await?;
+        let resolved = resolve_advertised_switch_model(&config.agent, &response, model)?;
+        set_agent_model(&mut config.agent, resolved);
+        canonical = config.to_canonical_toml()?;
+        config = reload_candidate_config(&canonical, target_entry)?;
+        provisioned = provision_agent_config_for_response(&config, home)?;
+    }
+    Ok(PreparedCandidate {
+        config,
+        canonical,
+        provisioned,
+    })
+}
+
+/// The provider id and API-key ref a reconfigure compares to decide whether the committed
+/// agent-owned config already serves the candidate.
+fn provider_selection(agent: &crate::config::AgentConfig) -> Option<(&str, Option<&str>)> {
+    agent
+        .provider
+        .as_ref()
+        .map(|provider| (provider.id.as_str(), provider.api_key_ref.as_deref()))
+}
+
+/// Load a candidate from its canonical TOML and set the registry-derived adapter again, which
+/// the TOML round trip does not carry.
+fn reload_candidate_config(canonical: &str, entry: &RegistryEntry) -> Result<Config> {
+    let mut config = crate::config::load_config_from_str(canonical)?;
+    config.agent.adapter = adapter_from_registry_entry(entry);
+    Ok(config)
+}
+
+fn provision_agent_config_for_response(
+    config: &Config,
+    home: &std::path::Path,
+) -> Result<Vec<ProvisionedAgentConfigJson>> {
+    Ok(
+        crate::runtime::agent::agent_headless_config::provision_agent_headless_config(
+            config, home,
+        )?
+        .into_iter()
+        .map(ProvisionedAgentConfigJson::from)
+        .collect(),
+    )
 }
 
 /// How a pending-switch journal entry steers the current request.
@@ -608,9 +790,11 @@ fn classify_switch_journal(
     fresh_config: &Config,
     requested_provider: Option<&str>,
     requested_api_key_ref: Option<&str>,
+    requested_model: Option<&str>,
 ) -> Result<SwitchJournalAction> {
-    let provider_reconfigure_requested =
-        requested_provider.is_some() || requested_api_key_ref.is_some();
+    let reconfigure_requested = requested_provider.is_some()
+        || requested_api_key_ref.is_some()
+        || requested_model.is_some();
     let same_target = journal.requested_target_matches(requested);
     let candidate_on_disk =
         candidate_fingerprint(&fresh_config.to_canonical_toml()?) == journal.candidate_fingerprint;
@@ -622,9 +806,9 @@ fn classify_switch_journal(
         fresh_config.agent.id == journal.target_agent_id
     };
     if journal.phase == SwitchJournalPhase::Completed {
-        // A body carrying provider flags asks for a selection this journal cannot vouch for,
-        // so it is planned afresh and converges on its own byte comparison.
-        if same_target && committed_on_disk && !provider_reconfigure_requested {
+        // A body carrying provider or model fields asks for a selection this journal cannot
+        // vouch for, so it is planned afresh and converges on its own byte comparison.
+        if same_target && committed_on_disk && !reconfigure_requested {
             return Ok(SwitchJournalAction::NoOp);
         }
         return Ok(SwitchJournalAction::FreshStart);
@@ -645,6 +829,18 @@ fn classify_switch_journal(
             return Err(StackError::AgentSwitchConflict {
                 reason: format!(
                     "the on-disk config for `{}` does not match the interrupted switch's candidate; repair the config or the switch journal before retrying",
+                    journal.new_target_id
+                ),
+            });
+        }
+        // The committed model is the resolved form, so only the journaled request spelling can
+        // vouch for a retry naming a model, whichever kind of switch was interrupted.
+        if let Some(model) = requested_model
+            && journal.requested_model.as_deref() != Some(model)
+        {
+            return Err(StackError::AgentSwitchConflict {
+                reason: format!(
+                    "the interrupted switch to `{}` already committed a different model selection; retry without `model`, or with the model the interrupted request named, to converge it",
                     journal.new_target_id
                 ),
             });
@@ -721,6 +917,23 @@ struct SwitchCommit<'a> {
     rename_sessions: bool,
 }
 
+/// Which side of the canonical config write a commit failure came from. Before it the old config
+/// is still on disk, so a same-target caller restores the agent-owned config it provisioned;
+/// after it the agent-owned files already match the written config and a retry resumes it.
+enum SwitchCommitError {
+    BeforeConfigWrite(StackError),
+    AfterConfigWrite(StackError),
+}
+
+impl From<SwitchCommitError> for StackError {
+    fn from(error: SwitchCommitError) -> Self {
+        match error {
+            SwitchCommitError::BeforeConfigWrite(error)
+            | SwitchCommitError::AfterConfigWrite(error) => error,
+        }
+    }
+}
+
 /// Shared commit boundary for both switch paths: journal the plan, apply the
 /// commit (session rename + canonical config write), re-apply the runtime,
 /// and advance the journal to RuntimeApplied. The caller runs its own
@@ -728,21 +941,23 @@ struct SwitchCommit<'a> {
 async fn commit_switch_and_apply_runtime(
     commit: SwitchCommit<'_>,
     journal: &mut SwitchJournal,
-) -> Result<bool> {
+) -> std::result::Result<bool, SwitchCommitError> {
+    use SwitchCommitError::{AfterConfigWrite, BeforeConfigWrite};
+
     let state = commit.state;
     // A same-target resume must reproduce the journaled candidate byte for byte, or this retry
     // converges on a different switch than the one that was interrupted.
     if let Some(prior) = commit.resume_journal
         && prior.candidate_fingerprint != journal.candidate_fingerprint
     {
-        return Err(StackError::AgentSwitchConflict {
+        return Err(BeforeConfigWrite(StackError::AgentSwitchConflict {
             reason: format!(
                 "the recomputed switch to `{}` no longer matches the interrupted attempt's candidate; restore the previous config or repair the switch journal before retrying",
                 prior.new_target_id
             ),
-        });
+        }));
     }
-    persist_switch_journal(&state.runtime_paths.config_path, journal)?;
+    persist_switch_journal(&state.runtime_paths.config_path, journal).map_err(BeforeConfigWrite)?;
     if commit.rename_sessions {
         // The session rename MUST precede the config write: it can fail on a UNIQUE collision, and
         // if it does the on-disk config must stay untouched so config and DB never diverge.
@@ -757,18 +972,32 @@ async fn commit_switch_and_apply_runtime(
             // Nothing durable changed, so drop the Planned journal rather than strand a record that
             // would 409 every later switch.
             if matches!(rename_error, StackError::SessionTargetRenameConflict { .. }) {
-                remove_switch_journal(&state.runtime_paths.config_path)?;
+                remove_switch_journal(&state.runtime_paths.config_path)
+                    .map_err(BeforeConfigWrite)?;
             }
-            return Err(rename_error);
+            return Err(BeforeConfigWrite(rename_error));
         }
     }
-    crate::fs_util::atomic_write_owner_only(
+    if let Err(error) = crate::fs_util::atomic_write_owner_only(
         &state.runtime_paths.config_path,
         commit.canonical.as_bytes(),
-    )?;
-    state.refresh_array_runtime_from_disk().await?;
+    ) {
+        // The rename into place is the commit point; a failure after it (permissions, fsync)
+        // still left the new bytes on disk.
+        let landed = std::fs::read(&state.runtime_paths.config_path)
+            .is_ok_and(|on_disk| on_disk == commit.canonical.as_bytes());
+        return Err(if landed {
+            AfterConfigWrite(error)
+        } else {
+            BeforeConfigWrite(error)
+        });
+    }
+    state
+        .refresh_array_runtime_from_disk()
+        .await
+        .map_err(AfterConfigWrite)?;
     journal.phase = SwitchJournalPhase::Committed;
-    persist_switch_journal(&state.runtime_paths.config_path, journal)?;
+    persist_switch_journal(&state.runtime_paths.config_path, journal).map_err(AfterConfigWrite)?;
     let restart_started = apply_switch_runtime(
         state,
         commit.old_target_id,
@@ -776,9 +1005,10 @@ async fn commit_switch_and_apply_runtime(
         commit.candidate_config,
         commit.was_running,
     )
-    .await?;
+    .await
+    .map_err(AfterConfigWrite)?;
     journal.phase = SwitchJournalPhase::RuntimeApplied;
-    persist_switch_journal(&state.runtime_paths.config_path, journal)?;
+    persist_switch_journal(&state.runtime_paths.config_path, journal).map_err(AfterConfigWrite)?;
     Ok(restart_started)
 }
 
@@ -829,6 +1059,7 @@ async fn resume_committed_switch(
     journal.phase = SwitchJournalPhase::Completed;
     persist_switch_journal(&state.runtime_paths.config_path, &journal)?;
 
+    let (set_model, follow_up) = model_follow_up(Some(target_entry), &candidate_config.agent);
     Ok(ApiSuccess::new(AgentSwitchResponse {
         old_agent_id: old_agent_label(&candidate_config, &journal.old_target_id),
         agent_id: journal.target_agent_id.clone(),
@@ -843,14 +1074,15 @@ async fn resume_committed_switch(
             .provider
             .as_ref()
             .and_then(|provider| provider.api_key_ref.clone()),
+        model: committed_model(&candidate_config.agent),
         required_env_refs: candidate_config.agent.env.clone(),
         secret_migrations: Vec::new(),
         install: None,
         restarted: journal.was_running,
         restart_started,
-        set_model: false,
+        set_model,
         models: Vec::new(),
-        follow_up: None,
+        follow_up,
         provisioned: Vec::new(),
         skills_port: None,
         skills_link: None,
@@ -869,7 +1101,9 @@ async fn resume_committed_switch(
 fn completed_switch_response(
     fresh_config: &Config,
     target_agent_id: &str,
+    target_entry: Option<&RegistryEntry>,
 ) -> ApiSuccess<AgentSwitchResponse> {
+    let (set_model, follow_up) = model_follow_up(target_entry, &fresh_config.agent);
     ApiSuccess::new(AgentSwitchResponse {
         old_agent_id: fresh_config.agent.id.clone(),
         agent_id: target_agent_id.to_owned(),
@@ -884,14 +1118,15 @@ fn completed_switch_response(
             .provider
             .as_ref()
             .and_then(|provider| provider.api_key_ref.clone()),
+        model: committed_model(&fresh_config.agent),
         required_env_refs: fresh_config.agent.env.clone(),
         secret_migrations: Vec::new(),
         install: None,
         restarted: false,
         restart_started: false,
-        set_model: false,
+        set_model,
         models: Vec::new(),
-        follow_up: None,
+        follow_up,
         provisioned: Vec::new(),
         skills_port: None,
         skills_link: None,

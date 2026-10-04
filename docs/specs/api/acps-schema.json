@@ -47,6 +47,13 @@
               "null"
             ],
             "default": null
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
           }
         },
         "required": [
@@ -2671,7 +2678,8 @@
               "set",
               "selected",
               "resumed",
-              "no_op"
+              "no_op",
+              "unchanged"
             ]
           },
           "provider": {
@@ -2685,6 +2693,13 @@
               "string",
               "null"
             ]
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The committed model: the provider slot, else the root."
           },
           "required_env_refs": {
             "type": "array",

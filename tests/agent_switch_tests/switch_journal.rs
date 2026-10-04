@@ -337,6 +337,7 @@ async fn agent_switch_same_primary_still_conflicts_while_foreign_journal_incompl
         candidate_fingerprint: "pending".to_owned(),
         was_running: false,
         phase: SwitchJournalPhase::Planned,
+        requested_model: None,
     };
     persist_switch_journal(&harness.config_path, &journal).expect("persist incomplete journal");
 
@@ -357,6 +358,7 @@ async fn agent_switch_stale_completed_journal_still_noops_same_target() {
         candidate_fingerprint: "stale".to_owned(),
         was_running: false,
         phase: SwitchJournalPhase::Completed,
+        requested_model: None,
     };
     persist_switch_journal(&harness.config_path, &journal).expect("persist stale journal");
     let config_before = std::fs::read_to_string(&harness.config_path).expect("config before");
@@ -390,6 +392,7 @@ async fn agent_switch_conflicts_when_resumed_candidate_differs() {
             candidate_fingerprint: "00".repeat(32),
             was_running: false,
             phase: SwitchJournalPhase::Planned,
+            requested_model: None,
         },
     )
     .expect("seed journal");

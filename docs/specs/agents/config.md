@@ -2,7 +2,7 @@
 
 Provider config describes which model backend the configured agent uses. It is separate from the ACP agent id.
 
-The `acps agent provider`, `acps agent set`, `acps subagent`, and `acps agent switch` commands are documented in [cli-flags.md](../cli/cli-flags.md). Switch clears the configured model because model ids are agent-specific.
+The `acps agent provider`, `acps agent set`, `acps subagent`, and `acps agent switch` commands are documented in [cli-flags.md](../cli/cli-flags.md). Switch commits the model it names, keeps the model when it names the provider already configured, and otherwise clears it, because model ids are agent- and provider-specific.
 
 ## Config Shape
 

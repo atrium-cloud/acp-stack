@@ -23,6 +23,9 @@ pub struct SwitchJournal {
     /// Whether the old target's agent was running when the switch committed, which a retry after a process restart can no longer observe.
     pub was_running: bool,
     pub phase: SwitchJournalPhase,
+    /// The `model` request field as sent. The committed value is the resolved form, so only this spelling can vouch for a post-commit retry naming a model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +131,7 @@ mod tests {
             candidate_fingerprint: candidate_fingerprint("canonical"),
             was_running: true,
             phase,
+            requested_model: None,
         }
     }
 
@@ -148,6 +152,38 @@ mod tests {
                 .expect("journal present");
             assert_eq!(loaded, journal);
         }
+    }
+
+    #[test]
+    fn journal_written_before_requested_model_loads_without_one() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let config_path = tempdir.path().join("acps-config.toml");
+        std::fs::write(
+            tempdir.path().join(SWITCH_JOURNAL_FILE_NAME),
+            br#"{"old_target_id":"opencode","new_target_id":"opencode","target_agent_id":"opencode","candidate_fingerprint":"ab","was_running":false,"phase":"committed"}"#,
+        )
+        .expect("write legacy journal");
+
+        let loaded = load_switch_journal(&config_path)
+            .expect("load")
+            .expect("journal present");
+        assert_eq!(loaded.requested_model, None);
+        assert_eq!(loaded.phase, SwitchJournalPhase::Committed);
+    }
+
+    #[test]
+    fn requested_model_round_trips() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let config_path = tempdir.path().join("acps-config.toml");
+        let journal = SwitchJournal {
+            requested_model: Some("glm-5.3-flash".to_owned()),
+            ..sample_journal(SwitchJournalPhase::Planned)
+        };
+        persist_switch_journal(&config_path, &journal).expect("persist");
+        assert_eq!(
+            load_switch_journal(&config_path).expect("load"),
+            Some(journal)
+        );
     }
 
     #[test]

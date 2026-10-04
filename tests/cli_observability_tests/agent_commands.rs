@@ -1064,6 +1064,211 @@ fn agent_switch_noninteractive_requires_admin_key() {
         .stderr(predicates::str::contains("--admin-key"));
 }
 
+/// A stand-in daemon that records each `POST /v1/agent/switch` body and answers with `data`.
+async fn spawn_switch_recorder(
+    data: Value,
+) -> (
+    String,
+    std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+    tokio::task::JoinHandle<std::io::Result<()>>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind switch recorder");
+    let base_url = format!("http://{}", listener.local_addr().expect("local addr"));
+    let recorded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = recorded.clone();
+    let app = axum::Router::new().route(
+        "/v1/agent/switch",
+        axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+            let sink = sink.clone();
+            let data = data.clone();
+            async move {
+                sink.lock().expect("recorder lock").push(body);
+                axum::Json(serde_json::json!({ "ok": true, "data": data }))
+            }
+        }),
+    );
+    let join = tokio::spawn(async move { axum::serve(listener, app).await });
+    (base_url, recorded, join)
+}
+
+fn recorded_switch_body(recorded: &std::sync::Mutex<Vec<Value>>) -> Value {
+    let bodies = recorded.lock().expect("recorder lock");
+    assert_eq!(bodies.len(), 1, "one switch request: {bodies:?}");
+    bodies[0].clone()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_switch_model_alone_on_the_current_target_posts_the_model() {
+    let (base_url, recorded, _join) = spawn_switch_recorder(serde_json::json!({
+        "old_agent_id": "opencode",
+        "agent_id": "opencode",
+        "provider_status": "unchanged",
+        "provider": "opencode-go",
+        "model": "opencode-go/glm-5.3-flash",
+        "restarted": false,
+        "restart_started": false,
+        "set_model": false,
+        "models": []
+    }))
+    .await;
+    let home = tempfile::tempdir().expect("home tempdir");
+    write_cli_home(home.path(), &base_url, ADMIN_KEY);
+
+    acps_command(home.path())
+        .args([
+            "agent",
+            "switch",
+            "opencode",
+            "--model",
+            "glm-5.3-flash",
+            "--admin-key",
+            ADMIN_KEY,
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "set from input: model glm-5.3-flash",
+        ))
+        .stdout(predicates::str::contains("set from input: provider").not())
+        .stdout(predicates::str::contains("clears the configured model").not())
+        .stdout(predicates::str::contains(
+            "model: opencode-go/glm-5.3-flash",
+        ));
+
+    let body = recorded_switch_body(&recorded);
+    assert_eq!(body["agent_id"], "opencode");
+    assert_eq!(body["model"], "glm-5.3-flash");
+    assert!(body["provider"].is_null(), "{body}");
+    assert!(body["api_key_ref"].is_null(), "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_switch_posts_model_with_provider() {
+    let (base_url, recorded, _join) = spawn_switch_recorder(serde_json::json!({
+        "old_agent_id": "opencode",
+        "agent_id": "opencode",
+        "provider_status": "set",
+        "provider": "opencode-go",
+        "model": "opencode-go/glm-5.3-flash",
+        "restarted": false,
+        "restart_started": false,
+        "set_model": false,
+        "models": []
+    }))
+    .await;
+    let home = tempfile::tempdir().expect("home tempdir");
+    write_cli_home(home.path(), &base_url, ADMIN_KEY);
+
+    acps_command(home.path())
+        .args([
+            "agent",
+            "switch",
+            "opencode",
+            "--provider",
+            "opencode-go",
+            "--model",
+            "glm-5.3-flash",
+            "--admin-key",
+            ADMIN_KEY,
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "set from input: provider opencode-go",
+        ))
+        .stdout(predicates::str::contains(
+            "set from input: model glm-5.3-flash",
+        ))
+        .stdout(predicates::str::contains("clears the configured model").not());
+
+    let body = recorded_switch_body(&recorded);
+    assert_eq!(body["agent_id"], "opencode");
+    assert_eq!(body["provider"], "opencode-go");
+    assert_eq!(body["model"], "glm-5.3-flash");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_switch_provider_change_without_model_reports_the_clear() {
+    let (base_url, recorded, _join) = spawn_switch_recorder(serde_json::json!({
+        "old_agent_id": "opencode",
+        "agent_id": "opencode",
+        "provider_status": "set",
+        "provider": "opencode-go",
+        "restarted": false,
+        "restart_started": false,
+        "set_model": true,
+        "models": [],
+        "follow_up": "acps agent set --model <model-id>"
+    }))
+    .await;
+    let home = tempfile::tempdir().expect("home tempdir");
+    write_cli_home(home.path(), &base_url, ADMIN_KEY);
+
+    acps_command(home.path())
+        .args([
+            "agent",
+            "switch",
+            "opencode",
+            "--provider",
+            "opencode-go",
+            "--admin-key",
+            ADMIN_KEY,
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("clears the configured model"));
+
+    let body = recorded_switch_body(&recorded);
+    assert!(body["model"].is_null(), "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_switch_naming_the_configured_provider_keeps_the_model_in_the_plan() {
+    let (base_url, recorded, _join) = spawn_switch_recorder(serde_json::json!({
+        "old_agent_id": "opencode",
+        "agent_id": "opencode",
+        "provider_status": "no_op",
+        "provider": "opencode-go",
+        "model": "opencode-go/glm-5.3-flash",
+        "restarted": false,
+        "restart_started": false,
+        "set_model": false,
+        "models": []
+    }))
+    .await;
+    let home = tempfile::tempdir().expect("home tempdir");
+    write_cli_home(home.path(), &base_url, ADMIN_KEY);
+    let config_path = home.path().join(".config/acp-stack/acps-config.toml");
+    let mut config = fs::read_to_string(&config_path).expect("cli home config");
+    config.push_str(
+        "\n[agent.provider]\nid = \"opencode-go\"\nmodel = \"opencode-go/glm-5.3-flash\"\napi_key_ref = \"OPENCODE_API_KEY\"\n",
+    );
+    fs::write(&config_path, config).expect("write provider config");
+
+    acps_command(home.path())
+        .args([
+            "agent",
+            "switch",
+            "opencode",
+            "--provider",
+            "opencode-go",
+            "--admin-key",
+            ADMIN_KEY,
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "set from input: provider opencode-go",
+        ))
+        .stdout(predicates::str::contains("clears the configured model").not());
+
+    let body = recorded_switch_body(&recorded);
+    assert_eq!(body["provider"], "opencode-go");
+    assert!(body["model"].is_null(), "{body}");
+}
+
 #[test]
 fn agent_switch_accepts_drop_flag() {
     let home = tempfile::tempdir().expect("home tempdir");
