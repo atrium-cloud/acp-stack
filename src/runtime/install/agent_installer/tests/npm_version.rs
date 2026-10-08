@@ -105,10 +105,9 @@ exit 99
         &entry,
         &HarnessInstall::Install,
         HashMap::new(),
-        tempdir.path(),
+        &host(tempdir.path()),
         &dest_dir,
         None,
-        tempdir.path(),
     );
 
     result.outcome.expect("npm install should pass");
@@ -162,10 +161,9 @@ exit 99
         &entry,
         &HarnessInstall::Install,
         HashMap::new(),
-        tempdir.path(),
+        &host(tempdir.path()),
         &dest_dir,
         None,
-        tempdir.path(),
     );
 
     result.outcome.expect("array version output should pass");
@@ -209,10 +207,9 @@ exit 99
         &entry,
         &HarnessInstall::Install,
         HashMap::new(),
-        tempdir.path(),
+        &host(tempdir.path()),
         &dest_dir,
         None,
-        tempdir.path(),
     );
 
     assert!(matches!(
@@ -260,10 +257,9 @@ exit 99
         &entry,
         &HarnessInstall::Install,
         HashMap::new(),
-        tempdir.path(),
+        &host(tempdir.path()),
         &dest_dir,
         None,
-        tempdir.path(),
     );
 
     assert!(matches!(
@@ -311,10 +307,9 @@ exit 99
         &entry,
         &HarnessInstall::Install,
         HashMap::new(),
-        tempdir.path(),
+        &host(tempdir.path()),
         &dest_dir,
         None,
-        tempdir.path(),
     );
 
     assert!(matches!(

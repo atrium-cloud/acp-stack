@@ -330,7 +330,7 @@ fn init_custom_agent_acp_gate_skips_when_spawn_cwd_absent() {
             "--custom-agent-id",
             "my-agent",
             "--custom-agent-command",
-            "bin/my-agent",
+            "my-agent-not-on-path",
             "--custom-agent-install",
             "true",
             "--custom-agent-creates",

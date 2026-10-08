@@ -7,11 +7,17 @@ use super::{
     help_output_contains_command, update_agent_for_config, update_component, update_components,
 };
 use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry};
+use crate::runtime::process_runner::HostExec;
 use crate::state::{
     INSTALLER_METHOD_APT, INSTALLER_METHOD_GITHUB, INSTALLER_METHOD_NATIVE, INSTALLER_METHOD_NPM,
     INSTALLER_METHOD_SHELL, INSTALLER_OPERATION_INSTALL, INSTALLER_OPERATION_UPDATE,
     INSTALLER_STATUS_KEPT, INSTALLER_STATUS_RAN, InstallerRun, InstallerRunInput, StateStore,
 };
+
+fn host(home: &std::path::Path) -> HostExec {
+    HostExec::with_profile(home, crate::runtime::sandbox::SandboxProfile::default())
+        .expect("host exec")
+}
 
 #[cfg(unix)]
 #[test]
@@ -26,14 +32,40 @@ fn command_step_runs_with_null_stdin() {
         std::path::PathBuf::from("sh"),
         &["-c", "cat"],
         &super::CommandStepContext {
-            workspace_root: tempdir.path(),
+            host: &host(tempdir.path()),
             dest_dir: tempdir.path(),
             timeout: std::time::Duration::from_secs(5),
-            home: tempdir.path(),
         },
     );
     assert_eq!(row.status, "ran");
     assert_eq!(row.exit_status, Some(0));
+}
+
+#[cfg(unix)]
+#[test]
+fn command_step_runs_in_the_host_exec_dir_with_the_runtime_home() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let home = tempdir.path().join("home");
+    fs::create_dir(&home).expect("home");
+    let host = host(&home);
+    let row = super::run_command_step_with_started_at(
+        "harness",
+        "native",
+        crate::runtime::install::agent_installer::current_timestamp(),
+        std::path::PathBuf::from("/bin/sh"),
+        &["-c", "printf '%s %s' \"$(pwd -P)\" \"$HOME\""],
+        &super::CommandStepContext {
+            host: &host,
+            dest_dir: tempdir.path(),
+            timeout: std::time::Duration::from_secs(5),
+        },
+    );
+    assert_eq!(row.status, "ran", "{row:?}");
+    let host_exec_dir = fs::canonicalize(host.cwd()).expect("canonical host-exec dir");
+    assert_eq!(
+        row.stdout,
+        format!("{} {}", host_exec_dir.display(), home.display())
+    );
 }
 
 #[test]
@@ -197,11 +229,10 @@ fn native_update_runs_detected_update_subcommand() {
         &config,
         entry,
         &state,
-        &workspace,
+        &host(tempdir.path()),
         &dest,
         None,
         AgentUpdateOptions::default(),
-        tempdir.path(),
     )
     .expect("update");
     assert!(report.updated, "{report:?}");
@@ -236,7 +267,7 @@ fn native_update_publishes_running_row_while_executing() {
     let state = StateStore::open(tempdir.path().join("state.sqlite")).expect("state");
     state.migrate().expect("migrate");
 
-    let worker = spawn_update_worker(&state, config, registry, &workspace, &dest);
+    let worker = spawn_update_worker(&state, config, registry, &dest);
     let active = wait_for_active_run(&state, "fake");
     assert_eq!(active.step, "install");
     assert_eq!(active.operation, INSTALLER_OPERATION_UPDATE);
@@ -271,7 +302,7 @@ fn apt_update_publishes_running_row_while_executing() {
     let state = StateStore::open(tempdir.path().join("state.sqlite")).expect("state");
     state.migrate().expect("migrate");
 
-    let worker = spawn_update_worker(&state, config, registry, &workspace, &dest);
+    let worker = spawn_update_worker(&state, config, registry, &dest);
     let active = wait_for_active_run(&state, "fake");
     assert_eq!(active.step, "install");
     assert_eq!(active.operation, INSTALLER_OPERATION_UPDATE);
@@ -296,13 +327,9 @@ fn native_probe_failure_detail_includes_status_exit_and_output() {
     permissions.set_mode(0o755);
     fs::set_permissions(&command_path, permissions).expect("chmod");
 
-    let failure = super::probe_native_update_subcommand(
-        &command_path,
-        tempdir.path(),
-        tempdir.path(),
-        tempdir.path(),
-    )
-    .expect_err("probe should fail");
+    let failure =
+        super::probe_native_update_subcommand(&command_path, &host(tempdir.path()), tempdir.path())
+            .expect_err("probe should fail");
 
     assert!(failure.command_ran);
     let detail = failure.detail;
@@ -320,13 +347,9 @@ fn native_probe_spawn_error_is_visible_in_detail() {
     // Not executable, so the spawn itself fails rather than the command.
     fs::write(&command_path, "#!/bin/sh\nexit 0\n").expect("fake command");
 
-    let failure = super::probe_native_update_subcommand(
-        &command_path,
-        tempdir.path(),
-        tempdir.path(),
-        tempdir.path(),
-    )
-    .expect_err("probe should fail");
+    let failure =
+        super::probe_native_update_subcommand(&command_path, &host(tempdir.path()), tempdir.path())
+            .expect_err("probe should fail");
 
     assert!(!failure.command_ran);
     let detail = failure.detail;
@@ -360,13 +383,13 @@ fn update_plan_reports_up_to_date_at_pin() {
     let component = harness_update_component(entry, &agent);
     let mut installed = installer_run_with_method(Some(INSTALLER_METHOD_GITHUB));
     installed.version = Some("1.2.3".to_owned());
+    let host = host(tempdir.path());
     let context = UpdateExecutionContext {
-        workspace_root: tempdir.path(),
+        host: &host,
         dest_dir: tempdir.path(),
         state: &state,
         log_base: None,
         force: false,
-        home: tempdir.path(),
     };
 
     let report =
@@ -405,13 +428,13 @@ fn update_plan_reports_up_to_date_at_an_npm_pin() {
     let component = harness_update_component(entry, &agent);
     let mut installed = installer_run_with_method(Some(INSTALLER_METHOD_NPM));
     installed.version = Some("1.2.3".to_owned());
+    let host = host(tempdir.path());
     let context = UpdateExecutionContext {
-        workspace_root: tempdir.path(),
+        host: &host,
         dest_dir: tempdir.path(),
         state: &state,
         log_base: None,
         force: false,
-        home: tempdir.path(),
     };
 
     let report =
@@ -443,14 +466,13 @@ fn update_skips_a_kept_agent_cli_even_when_forced() {
         &config,
         entry,
         &state,
-        &workspace,
+        &host(tempdir.path()),
         &dest,
         None,
         AgentUpdateOptions {
             force: true,
             agent_running: false,
         },
-        tempdir.path(),
     )
     .expect("update");
 
@@ -685,11 +707,10 @@ shell_rerun = true
         &config,
         entry,
         &state,
-        &workspace,
+        &host(tempdir.path()),
         &dest,
         None,
         AgentUpdateOptions::default(),
-        tempdir.path(),
     )
     .expect("update");
 
@@ -876,11 +897,9 @@ fn spawn_update_worker(
     state: &StateStore,
     config: crate::config::Config,
     registry: RegistryCatalog,
-    workspace: &std::path::Path,
     dest: &std::path::Path,
 ) -> std::thread::JoinHandle<crate::error::Result<AgentUpdateReport>> {
     let state_path = state.path().to_path_buf();
-    let workspace = workspace.to_path_buf();
     let dest = dest.to_path_buf();
     std::thread::spawn(move || {
         let worker_state = StateStore::open(&state_path).expect("worker state");
@@ -889,11 +908,10 @@ fn spawn_update_worker(
             &config,
             entry,
             &worker_state,
-            &workspace,
+            &host(&dest),
             &dest,
             None,
             AgentUpdateOptions::default(),
-            &dest,
         )
     })
 }

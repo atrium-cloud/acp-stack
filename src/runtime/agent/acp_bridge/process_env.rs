@@ -174,8 +174,7 @@ fn build_pi_process_env(
             ),
         });
     }
-    // A bare name never consults the cwd argument, so `home` stands in for it.
-    let pi_path = super::spawn::resolve_command_path(PI_HARNESS_COMMAND, home, home).ok_or_else(
+    let pi_path = super::spawn::resolve_command_path(PI_HARNESS_COMMAND, home).ok_or_else(
         || StackError::AgentInitializeFailed {
             reason: format!(
                 "Pi Agent harness `{PI_HARNESS_COMMAND}` not found in {} or on PATH; the pi-acp adapter launches it through `{PI_ACP_PI_BIN_ENV}`",

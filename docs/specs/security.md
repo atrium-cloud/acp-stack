@@ -195,6 +195,13 @@ Termination does not depend on signalling the identity's uid:
 
 `acps` clears its ambient capability set at startup, so every process the runtime starts begins without capabilities. Only the sandbox wrapper chain gets them back, and it drops them before the workload runs.
 
+Agent installs and updates, and the version and interpreter probes they run, execute as the runtime in a runtime-owned empty directory with the runtime `HOME` and a cleared environment. With an identity declared:
+
+- Their `PATH` omits identity-writable directories, and an executable whose symlink chain has an identity-writable hop is refused with `sandbox.workload_writable_executable`. The network-provider executable and every absolute path among its arguments get the same check at startup and in `acps workspace sandbox set`. An argument that does not exist yet is refused when the identity could create it.
+- After an install or update, every hop of the Agent's binary chain must be readable and executable by the identity and not writable by it. Otherwise the install fails with `sandbox.workload_unreachable`.
+
+`[agent].command` and `[agent.install].creates` must be absolute paths or bare names.
+
 The integrator provisions:
 
 - The workload user with a primary group of its own, and a workspace it can write.

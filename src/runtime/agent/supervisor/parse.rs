@@ -323,15 +323,13 @@ pub fn parse_mcp_servers(value: Option<&Value>) -> Result<Vec<McpServer>> {
 /// or the hash covers a different file than the one that runs.
 pub(super) fn verify_agent_binary_sha256(
     command: &str,
-    cwd: &std::path::Path,
     expected: &str,
     home: &std::path::Path,
 ) -> Result<()> {
-    let path = resolve_command_path(command, cwd, home).ok_or_else(|| {
-        StackError::AgentInitializeFailed {
+    let path =
+        resolve_command_path(command, home).ok_or_else(|| StackError::AgentInitializeFailed {
             reason: format!("agent command `{command}` not found on PATH"),
-        }
-    })?;
+        })?;
     let bytes = std::fs::read(&path).map_err(|source| StackError::AgentSpawnFailed { source })?;
     let mut hasher = Sha256::new();
     hasher.update(&bytes);

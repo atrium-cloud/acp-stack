@@ -15,6 +15,7 @@ use crate::runtime::install::agent_registry::{RegistryCatalog, effective_registr
 use crate::runtime::install::install_ownership::{
     BinaryOwnership, ComponentRole, InstallComponent, classify_component, install_components,
 };
+use crate::runtime::process_runner::HostExec;
 use crate::secrets::SecretStore;
 use crate::state::StateStore;
 
@@ -132,12 +133,10 @@ pub(super) fn detect_existing_agent_binaries(
         return Ok(Vec::new());
     }
     let entry = registry.lookup_required(&config.agent.id)?;
-    let workspace_root = Path::new(&config.workspace.root);
     install_components(&config.agent, entry)?
         .into_iter()
         .map(|component| {
-            let ownership =
-                classify_component(store, &config.agent.id, &component, workspace_root, home)?;
+            let ownership = classify_component(store, &config.agent.id, &component, home)?;
             Ok((component, ownership))
         })
         .collect()
@@ -182,16 +181,15 @@ pub(super) fn recorded_agent_install(payload_json: &str) -> Result<RecordedAgent
 /// Whether a resumed `agent_install` step may be skipped: every binary it lays down still
 /// resolves and spawns, and was installed by acp-stack, except an agent CLI the recorded choice
 /// kept. A replacement choice therefore never passes on a binary acp-stack did not install.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn installer_postcondition_holds(
     config: &Config,
     registry: &RegistryCatalog,
     store: &StateStore,
     choice: Option<ExistingAgentArg>,
-    workspace_root: &Path,
     local_bin_dir: &Path,
     home: &Path,
 ) -> Result<bool> {
+    let host = HostExec::new(home, &config.workspace.sandbox)?;
     let (target, extra_path_dirs): (&str, Vec<&Path>) =
         if let Some(install) = config.agent.install.as_ref() {
             (install.creates.as_str(), Vec::new())
@@ -200,10 +198,9 @@ pub(super) fn installer_postcondition_holds(
         };
     let entry_point_runs = resolve_creates_for_init_resume(
         target,
-        workspace_root,
+        &host,
         &extra_path_dirs,
         config.agent.expected_sha256.as_deref(),
-        home,
     )
     .is_some();
     if !entry_point_runs {
@@ -221,14 +218,8 @@ pub(super) fn installer_postcondition_holds(
             }
         };
         if !holds
-            || resolve_creates_for_init_resume(
-                &component.command,
-                workspace_root,
-                &[local_bin_dir],
-                None,
-                home,
-            )
-            .is_none()
+            || resolve_creates_for_init_resume(&component.command, &host, &[local_bin_dir], None)
+                .is_none()
         {
             return Ok(false);
         }
@@ -277,19 +268,19 @@ pub(super) fn install_configured_agent(
     store: &StateStore,
     harness: &HarnessInstall,
 ) -> Result<InstallerOutcome> {
-    let workspace_root = PathBuf::from(config.workspace.root.clone());
+    let host = HostExec::new(home, &config.workspace.sandbox)?;
     let log_base = crate::state::default_installer_log_base(home);
     if let Some(install) = config.agent.install.as_ref() {
         let env = resolve_agent_env(home, config)?;
         return run_installer(
             &config.agent.id,
+            &config.agent.command,
             install,
             config.agent.expected_sha256.as_deref(),
             env,
-            &workspace_root,
+            &host,
             store,
             Some(&log_base),
-            home,
         );
     }
     let entry = registry.lookup_required(&config.agent.id)?;
@@ -298,11 +289,10 @@ pub(super) fn install_configured_agent(
         entry,
         harness,
         Default::default(),
-        &workspace_root,
+        &host,
         &local_bin_dir(home),
         store,
         Some(&log_base),
-        home,
     )
 }
 
@@ -348,10 +338,11 @@ fn install_error_is_retryable(error: &StackError) -> bool {
             | StackError::AgentInstallerBinaryUnrunnable { .. }
             | StackError::AgentInstallerCreatesMissing { .. }
             | StackError::AgentInstallerPrerequisitesMissing { .. }
-            | StackError::AgentInstallerWorkingDirectoryMissing { .. }
             | StackError::AgentSha256Mismatch { .. }
             | StackError::AgentVersionUnsupported { .. }
             | StackError::RegistryLoad { .. }
+            | StackError::WorkloadUnreachable { .. }
+            | StackError::WorkloadWritableExecutable { .. }
     )
 }
 
@@ -570,7 +561,6 @@ provided_by = "adapter"
                 &registry,
                 &store,
                 choice,
-                home.path(),
                 &local_bin,
                 home.path(),
             )

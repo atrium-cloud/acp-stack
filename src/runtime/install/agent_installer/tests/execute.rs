@@ -4,50 +4,184 @@ use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 
 #[test]
-fn init_resume_creates_resolver_checks_local_bin_and_workspace_relative_paths() {
+fn init_resume_creates_resolver_checks_local_bin_and_refuses_relative_paths() {
     let tempdir = TempDir::new().expect("tempdir");
-    let workspace_root = tempdir.path().join("workspace");
+    let host = host(tempdir.path());
     let local_bin = tempdir.path().join(".local/bin");
-    std::fs::create_dir_all(workspace_root.join("bin")).expect("workspace bin");
+    let bin_dir = tempdir.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("bin dir");
     std::fs::create_dir_all(&local_bin).expect("local bin");
-    let workspace_agent = workspace_root.join("bin/agent");
+    let absolute_agent = bin_dir.join("agent");
     let local_agent = local_bin.join("managed-agent");
-    std::fs::write(&workspace_agent, b"#!/bin/sh\n").expect("workspace agent");
+    std::fs::write(&absolute_agent, b"#!/bin/sh\n").expect("absolute agent");
     std::fs::write(&local_agent, b"#!/bin/sh\n").expect("local agent");
     let executable = std::fs::Permissions::from_mode(0o755);
-    std::fs::set_permissions(&workspace_agent, executable.clone()).expect("chmod workspace agent");
+    std::fs::set_permissions(&absolute_agent, executable.clone()).expect("chmod absolute agent");
     std::fs::set_permissions(&local_agent, executable).expect("chmod local agent");
 
     assert_eq!(
         resolve_creates_for_init_resume(
-            "bin/agent",
-            &workspace_root,
+            absolute_agent.to_str().expect("utf8 tempdir path"),
+            &host,
             &[&local_bin],
             None,
-            tempdir.path()
         ),
-        Some(workspace_agent),
+        Some(absolute_agent),
     );
     assert_eq!(
-        resolve_creates_for_init_resume(
-            "managed-agent",
-            &workspace_root,
-            &[&local_bin],
-            None,
-            tempdir.path()
-        ),
+        resolve_creates_for_init_resume("bin/agent", &host, &[&local_bin], None),
+        None,
+        "a relative path with a separator never resolves against a working directory",
+    );
+    assert_eq!(resolve_creates("bin/agent", &host, &[tempdir.path()]), None);
+    assert_eq!(
+        resolve_creates_for_init_resume("managed-agent", &host, &[&local_bin], None),
         Some(local_agent),
     );
     assert_eq!(
-        resolve_creates_for_init_resume(
-            "managed-agent",
-            &workspace_root,
-            &[],
-            None,
-            tempdir.path()
-        ),
+        resolve_creates_for_init_resume("managed-agent", &host, &[], None),
         None,
         "custom [agent.install] verifier must not search managed local bin unless it is on PATH",
+    );
+}
+
+#[test]
+fn install_steps_and_version_probes_run_in_the_host_exec_dir_with_the_runtime_home() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let home = tempdir.path().join("home");
+    std::fs::create_dir(&home).expect("home");
+    let host = host(&home);
+    let dest_dir = tempdir.path().join("bin");
+    let binary = dest_dir.join("cwd-agent");
+    let install_capture = tempdir.path().join("install-capture");
+    let probe_capture = tempdir.path().join("probe-capture");
+    // The planted binary appends rather than truncates: the spawn gate kills its probe at once,
+    // and a truncating write cut short there would erase the version probe's record.
+    let script = format!(
+        "mkdir -p {bin}\n\
+         printf '%s %s\\n' \"$(pwd -P)\" \"$HOME\" > {install_capture}\n\
+         cat > {binary} <<'EOF'\n\
+         #!/bin/sh\n\
+         printf '%s %s\\n' \"$(pwd -P)\" \"$HOME\" >> {probe_capture}\n\
+         EOF\n\
+         chmod 755 {binary}",
+        bin = shell_quote_path(&dest_dir),
+        install_capture = shell_quote_path(&install_capture),
+        binary = shell_quote_path(&binary),
+        probe_capture = shell_quote_path(&probe_capture),
+    );
+    let entry = native_entry(
+        "cwd-agent",
+        "Cwd Agent",
+        Some("docs/agents/cwd-agent.md"),
+        harness_spec("cwd-agent", shell_install_set(&script, "cwd-agent")),
+    );
+
+    let result = install_resolved_capture(
+        &agent_config("cwd-agent"),
+        &entry,
+        &HarnessInstall::Install,
+        HashMap::new(),
+        &host,
+        &dest_dir,
+        None,
+    );
+
+    result.outcome.expect("install should succeed");
+    let expected = format!(
+        "{} {}",
+        std::fs::canonicalize(host.cwd())
+            .expect("canonical host-exec dir")
+            .display(),
+        home.display()
+    );
+    let install_record = std::fs::read_to_string(&install_capture).expect("install record");
+    assert_eq!(install_record.trim_end(), expected);
+    let probe_records = std::fs::read_to_string(&probe_capture).expect("probe record");
+    assert!(
+        probe_records.lines().any(|line| !line.is_empty()),
+        "the version probe must have run"
+    );
+    for record in probe_records.lines().filter(|line| !line.is_empty()) {
+        assert_eq!(record, expected);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires CAP_SETUID/CAP_SETGID and ACPS_TEST_WORKLOAD_USER"]
+fn workload_reachability_follows_the_binary_chain_permissions() {
+    use crate::runtime::sandbox::{SandboxProfile, WorkloadIdentity};
+
+    let name = std::env::var("ACPS_TEST_WORKLOAD_USER").expect("ACPS_TEST_WORKLOAD_USER");
+    let entry = crate::ownership::lookup_user(&name)
+        .expect("passwd lookup")
+        .expect("the workload user exists");
+    let profile = SandboxProfile {
+        config: crate::config::SandboxConfig {
+            workload_user: Some(name.clone()),
+            ..Default::default()
+        },
+        identity: Some(WorkloadIdentity {
+            name,
+            uid: entry.uid,
+            gid: entry.gid,
+            home: entry.home,
+        }),
+    };
+    // The checkout's ancestors stand in for a runtime-owned install root; under a world-writable
+    // temp dir every chain would read as swappable.
+    let root = tempfile::Builder::new()
+        .prefix(".acps-reachability-")
+        .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+        .expect("fixture root");
+    let home = root.path().join("home");
+    let local = home.join(".local");
+    let bin = local.join("bin");
+    std::fs::create_dir_all(&bin).expect("bin dir");
+    let binary = bin.join("reachability-agent");
+    std::fs::write(&binary, b"#!/bin/sh\n").expect("binary");
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let host = HostExec::with_profile(&home, profile).expect("host exec");
+    let set_chain_mode = |mode: u32| {
+        for dir in [root.path(), home.as_path(), local.as_path(), bin.as_path()] {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).expect("chmod");
+        }
+    };
+
+    set_chain_mode(0o700);
+    let error = verify_workload_reachable(&host, &["reachability-agent"])
+        .expect_err("a 0700 chain is unreachable by the workload");
+    assert_eq!(error.error_code(), "sandbox.workload_unreachable");
+
+    // A shell recipe that left an unreachable binary records a failed step with no artifact, so
+    // the binary is not later recognised as one acp-stack installed. `creates` is absolute because
+    // its resolver does not search `~/.local/bin`.
+    let creates = binary.to_str().expect("utf-8 fixture path");
+    let shell_step = super::super::step_runners::finalize_shell_step(
+        STEP_INSTALL,
+        current_timestamp(),
+        Ok(super::super::step_runners::CapturedOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_status: Some(0),
+            timed_out_after: None,
+        }),
+        creates,
+        None,
+        "reachability-agent",
+        &host,
+    );
+    let shell_error = shell_step.outcome.expect_err("unreachable shell install");
+    assert_eq!(shell_error.error_code(), "sandbox.workload_unreachable");
+    assert_eq!(shell_step.row.status, "failed");
+    assert!(shell_step.row.artifact.is_none());
+    assert!(shell_step.row.stderr.contains("not reachable"));
+
+    set_chain_mode(0o755);
+    verify_workload_reachable(&host, &["reachability-agent"]).expect(
+        "a 0755 chain is runnable and not writable by the workload; the checkout's ancestors \
+         must be traversable and not writable by the workload user, as a runtime home must be",
     );
 }
 
@@ -68,13 +202,13 @@ fn installer_env_is_non_interactive_and_reserved_names_resist_agent_env() {
     agent_env.insert("CUSTOM".to_owned(), "custom-value".to_owned());
     let _ = run_installer(
         "test-agent",
+        &install.creates,
         &install,
         None,
         agent_env,
-        &workspace_root(),
+        &host(tempdir.path()),
         &store,
         None,
-        tempdir.path(),
     );
     let captured = std::fs::read_to_string(&capture).expect("script ran and captured env");
     assert_eq!(
@@ -107,10 +241,9 @@ fn install_step_home_is_the_threaded_home_not_the_process_env() {
         &entry,
         &HarnessInstall::Install,
         HashMap::new(),
-        tempdir.path(),
+        &host(&threaded_home),
         tempdir.path(),
         None,
-        &threaded_home,
     );
 
     result.outcome.expect("install should succeed");
@@ -135,13 +268,13 @@ fn precheck_short_circuits_when_creates_resolves() {
     let install = install_config("false", "true");
     let outcome = run_installer(
         "test-agent",
+        &install.creates,
         &install,
         None,
         HashMap::new(),
-        &workspace_root(),
+        &host(_tempdir.path()),
         &store,
         None,
-        _tempdir.path(),
     )
     .expect("ok");
     assert_eq!(outcome.label(), "already_present");
@@ -157,13 +290,13 @@ fn missing_creates_after_run_returns_creates_missing() {
     let install = install_config("true", "definitely-not-a-real-binary-xyz123");
     let err = run_installer(
         "test-agent",
+        &install.creates,
         &install,
         None,
         HashMap::new(),
-        &workspace_root(),
+        &host(_tempdir.path()),
         &store,
         None,
-        _tempdir.path(),
     )
     .expect_err("must fail");
     assert!(matches!(
@@ -177,43 +310,18 @@ fn missing_creates_after_run_returns_creates_missing() {
 }
 
 #[test]
-fn missing_workspace_root_returns_typed_installer_error() {
-    let tempdir = TempDir::new().expect("tempdir");
-    let missing_workspace = tempdir.path().join("missing-workspace");
-    let install = install_config("true", "definitely-not-a-real-binary-xyz123");
-
-    let result = run_installer_capture(
-        &install,
-        None,
-        HashMap::new(),
-        &missing_workspace,
-        None,
-        tempdir.path(),
-    );
-    let err = result.outcome.expect_err("missing cwd must fail");
-
-    assert!(matches!(
-        err,
-        StackError::AgentInstallerWorkingDirectoryMissing { path }
-            if path == missing_workspace
-    ));
-    assert_eq!(result.row.status, "error");
-    assert_eq!(result.row.step, "install");
-}
-
-#[test]
 fn nonzero_exit_returns_installer_failed() {
     let (_tempdir, store) = open_store();
     let install = install_config("false", "definitely-not-a-real-binary-xyz123");
     let err = run_installer(
         "test-agent",
+        &install.creates,
         &install,
         None,
         HashMap::new(),
-        &workspace_root(),
+        &host(_tempdir.path()),
         &store,
         None,
-        _tempdir.path(),
     )
     .expect_err("must fail");
     assert!(matches!(
@@ -233,13 +341,13 @@ fn sha256_mismatch_returns_typed_error() {
     let bogus = "0".repeat(64);
     let err = run_installer(
         "test-agent",
+        &install.creates,
         &install,
         Some(&bogus),
         HashMap::new(),
-        &workspace_root(),
+        &host(_tempdir.path()),
         &store,
         None,
-        _tempdir.path(),
     )
     .expect_err("must fail");
     assert!(matches!(err, StackError::AgentSha256Mismatch { .. }));
@@ -259,13 +367,13 @@ fn output_truncation_keeps_rows_bounded() {
     let install = install_config(&shell, "definitely-not-a-real-binary-xyz123");
     let _ = run_installer(
         "test-agent",
+        &install.creates,
         &install,
         None,
         HashMap::new(),
-        &workspace_root(),
+        &host(_tempdir.path()),
         &store,
         None,
-        _tempdir.path(),
     );
     let runs = store.query_installer_runs(10).expect("query");
     assert!(
@@ -292,10 +400,9 @@ fn unsupported_registry_entry_fails_before_running_steps() {
         &entry,
         &HarnessInstall::Install,
         HashMap::new(),
-        tempdir.path(),
+        &host(tempdir.path()),
         tempdir.path(),
         None,
-        tempdir.path(),
     );
     assert!(result.rows.is_empty());
     let err = result.outcome.expect_err("must reject unsupported agent");
@@ -327,10 +434,9 @@ fn final_verification_searches_managed_bin_dir() {
         &entry,
         &HarnessInstall::Install,
         HashMap::new(),
-        tempdir.path(),
+        &host(tempdir.path()),
         &dest_dir,
         None,
-        tempdir.path(),
     );
     let outcome = result.outcome.expect("managed binary should resolve");
     assert_eq!(outcome.path(), binary_path.as_path());
@@ -363,10 +469,9 @@ fn registry_installs_do_not_receive_agent_runtime_secrets() {
         &entry,
         &HarnessInstall::Install,
         agent_env,
-        tempdir.path(),
+        &host(tempdir.path()),
         tempdir.path(),
         None,
-        tempdir.path(),
     );
 
     let outcome = result
@@ -404,10 +509,9 @@ fn bootstrap_can_install_directly_into_managed_bin() {
         &entry,
         &HarnessInstall::Install,
         HashMap::new(),
-        tempdir.path(),
+        &host(tempdir.path()),
         &dest_dir,
         None,
-        tempdir.path(),
     );
 
     let outcome = result.outcome.expect("managed opencode link should verify");
@@ -419,7 +523,6 @@ fn bootstrap_can_install_directly_into_managed_bin() {
 #[test]
 fn running_row_is_visible_while_step_executes() {
     let (tempdir, store) = open_store();
-    let workspace_root = workspace_root();
     // The script blocks until released, so the `running` row is observable
     // while the step is genuinely in flight.
     let proceed = tempdir.path().join("proceed");
@@ -429,18 +532,18 @@ fn running_row_is_visible_while_step_executes() {
     );
     let install = install_config(&script, "definitely-not-a-real-binary-xyz123");
     let state_path = store.path().to_path_buf();
-    let worker_home = tempdir.path().to_path_buf();
+    let worker_host = host(tempdir.path());
     let worker = std::thread::spawn(move || {
         let worker_store = StateStore::open(&state_path).expect("worker store");
         run_installer(
             "test-agent",
+            &install.creates,
             &install,
             None,
             HashMap::new(),
-            &workspace_root,
+            &worker_host,
             &worker_store,
             None,
-            &worker_home,
         )
     });
 

@@ -5,6 +5,7 @@ use crate::runtime::install::agent_installer::{
 use crate::runtime::install::install_ownership::{
     BinaryOwnership, ComponentRole, InstallComponent,
 };
+use crate::runtime::process_runner::HostExec;
 
 /// Step: agent_install. Installs the configured agent if requested.
 pub(super) fn run_agent_install_step(flow: &mut InitFlow) -> Result<()> {
@@ -33,7 +34,6 @@ pub(super) fn run_agent_install_step(flow: &mut InitFlow) -> Result<()> {
     };
     let verify_choice = flow.args.existing_agent.or(recorded.existing_agent);
     let verify_config = flow.config.clone();
-    let verify_workspace_root = PathBuf::from(flow.config.workspace.root.clone());
     let verify_local_bin_dir = local_bin_dir(&flow.home);
     let verify_home = flow.home.clone();
     let store = &flow.store;
@@ -59,7 +59,6 @@ pub(super) fn run_agent_install_step(flow: &mut InitFlow) -> Result<()> {
                 registry,
                 store,
                 verify_choice,
-                &verify_workspace_root,
                 &verify_local_bin_dir,
                 &verify_home,
             )
@@ -299,16 +298,9 @@ fn prompt_existing_agent_choice(
             .expected_sha256
             .as_deref()
             .is_none_or(|expected| expected == artifact.sha256);
-    let workspace_root = Path::new(&config.workspace.root);
+    let host = HostExec::new(home, &config.workspace.sandbox)?;
     let version = pin_holds
-        .then(|| {
-            probe_binary_version(
-                &artifact.path,
-                workspace_root,
-                &[&local_bin_dir(home)],
-                home,
-            )
-        })
+        .then(|| probe_binary_version(&artifact.path, &host, &[&local_bin_dir(home)]))
         .flatten()
         .unwrap_or_else(|| "version unknown".to_owned());
     let prompt_text = format!(

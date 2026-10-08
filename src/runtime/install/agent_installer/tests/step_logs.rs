@@ -82,20 +82,25 @@ fn installer_log_persist_failure_prevents_history_row() {
     let (_state_dir, store) = open_store();
     let log_base_file = tempdir.path().join("not-a-directory");
     std::fs::write(&log_base_file, b"file blocks log dir").expect("write blocker file");
+    let binary = tempdir.path().join("bin/test-agent");
     let install = install_config(
-        "printf 'audit stdout\n'; mkdir -p bin; printf agent > bin/test-agent",
-        "bin/test-agent",
+        &format!(
+            "printf 'audit stdout\\n'; mkdir -p {bin}; printf agent > {binary}",
+            bin = shell_quote_path(&tempdir.path().join("bin")),
+            binary = shell_quote_path(&binary),
+        ),
+        binary.to_str().expect("utf8 tempdir path"),
     );
 
     let err = run_installer(
         "test-agent",
+        &install.creates,
         &install,
         None,
         HashMap::new(),
-        tempdir.path(),
+        &host(tempdir.path()),
         &store,
         Some(&log_base_file),
-        tempdir.path(),
     )
     .expect_err("log persistence failure must fail install wrapper");
 

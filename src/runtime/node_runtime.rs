@@ -391,7 +391,7 @@ fn install_latest(home: &Path, root: &Path, node_arch: &str, dist_base: &str) ->
         )));
     }
     write_npm_builtin_config(&unpacked_release, home)?;
-    let version = probe_version(&unpacked_release.join("bin").join("node"))?;
+    let version = probe_version(&unpacked_release.join("bin").join("node"), home)?;
 
     let release_dir = releases.join(&release_name);
     if std::fs::symlink_metadata(&release_dir).is_ok() {
@@ -513,11 +513,14 @@ fn write_npm_builtin_config(release: &Path, home: &Path) -> Result<()> {
         .map_err(|source| install_failed(format!("write {}: {source}", path.display())))
 }
 
-/// Run the unpacked `node --version` so a wrong-architecture or libc-incompatible build fails
-/// before it becomes `current`.
-fn probe_version(node: &Path) -> Result<String> {
+/// Run the unpacked `node --version` in the host-exec dir so a wrong-architecture or
+/// libc-incompatible build fails before it becomes `current`.
+fn probe_version(node: &Path, home: &Path) -> Result<String> {
     let mut command = std::process::Command::new(node);
-    command.arg("--version").env_clear();
+    command
+        .arg("--version")
+        .current_dir(crate::runtime::process_runner::host_exec_dir(home)?)
+        .env_clear();
     let outcome = run_captured(
         &mut command,
         VERSION_PROBE_TIMEOUT,

@@ -383,12 +383,8 @@ pub(super) fn configure_model_and_mode_for_init(
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(&config.workspace.root));
     let binary_missing = !fixture_discovery
-        && crate::runtime::agent::acp_bridge::resolve_command_path(
-            &config.agent.command,
-            &spawn_cwd,
-            home,
-        )
-        .is_none();
+        && crate::runtime::agent::acp_bridge::resolve_command_path(&config.agent.command, home)
+            .is_none();
     let cwd_missing = !fixture_discovery && !spawn_cwd.is_dir();
     if !fixture_discovery && (binary_missing || cwd_missing) {
         if let Some(flags) = explicit_flags {
@@ -1500,12 +1496,8 @@ pub(super) fn agent_spawn_preflight(
     if !spawn_cwd.is_dir() {
         return AgentSpawnPreflight::CwdMissing(spawn_cwd);
     }
-    if crate::runtime::agent::acp_bridge::resolve_command_path(
-        &config.agent.command,
-        &spawn_cwd,
-        home,
-    )
-    .is_none()
+    if crate::runtime::agent::acp_bridge::resolve_command_path(&config.agent.command, home)
+        .is_none()
     {
         return AgentSpawnPreflight::BinaryMissing;
     }

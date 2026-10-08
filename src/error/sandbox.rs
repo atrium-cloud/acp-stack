@@ -14,6 +14,8 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         WorkloadUserSharesGroup { .. } => "sandbox.workload_user_shares_group",
         WorkloadUserModeUnsupported { .. } => "sandbox.workload_user_mode_unsupported",
         NetworkProviderRequired => "sandbox.network_provider_required",
+        WorkloadUnreachable { .. } => "sandbox.workload_unreachable",
+        WorkloadWritableExecutable { .. } => "sandbox.workload_writable_executable",
         _ => return None,
     })
 }
@@ -42,6 +44,13 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
         NetworkProviderRequired => {
             "sandbox requires a network-provider extension and none is declared".to_owned()
         }
+        // `path` and `reason` carry local filesystem detail.
+        WorkloadUnreachable { subject, .. } => {
+            format!("{subject} is not reachable by the sandbox workload user")
+        }
+        WorkloadWritableExecutable { subject, .. } => {
+            format!("{subject} is writable by the sandbox workload user")
+        }
         _ => return None,
     })
 }
@@ -55,7 +64,9 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         | WorkloadUserIsRuntime { .. }
         | WorkloadUserIsRoot { .. }
         | WorkloadUserSharesGroup { .. }
-        | NetworkProviderRequired => StatusCode::INTERNAL_SERVER_ERROR,
+        | NetworkProviderRequired
+        | WorkloadUnreachable { .. }
+        | WorkloadWritableExecutable { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         _ => return None,
     })
 }

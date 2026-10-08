@@ -39,6 +39,8 @@ async fn status_returns_200_with_session_key() {
         "sandbox-workload-user",
         "sandbox-capability-drop",
         "sandbox-workload-termination",
+        "host-exec-trusted-inputs",
+        "install-workload-reachability",
         "sandbox-require-network-provider",
         "sandbox-off-identity",
     ] {

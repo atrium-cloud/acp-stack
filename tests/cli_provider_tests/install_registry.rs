@@ -13,9 +13,13 @@ fn agent_install_registry_path_prepares_workspace_root_without_secret_store() {
         .join(".local")
         .join("bin")
         .join("cli-registry-agent");
+    // The workspace exists before the recipe runs, and the recipe runs in the runtime-owned
+    // host-exec dir rather than in it.
+    let host_exec_dir = tempdir.path().join(".local/share/acp-stack/host-exec");
     let script = format!(
-        "test \"$(pwd -P)\" = \"$(cd {workspace} && pwd -P)\" && mkdir -p {bin} && printf '#!/bin/sh\\n' > {binary} && chmod 755 {binary}",
+        "test -d {workspace} && test \"$(pwd -P)\" = \"$(cd {host_exec} && pwd -P)\" && mkdir -p {bin} && printf '#!/bin/sh\\n' > {binary} && chmod 755 {binary}",
         workspace = shell_quote_path(&workspace_root),
+        host_exec = shell_quote_path(&host_exec_dir),
         bin = shell_quote_path(binary_path.parent().expect("binary has parent")),
         binary = shell_quote_path(&binary_path),
     );

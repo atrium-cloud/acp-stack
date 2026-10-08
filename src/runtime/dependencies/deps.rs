@@ -7,7 +7,7 @@ use std::process::Command;
 use serde::Serialize;
 
 use crate::config::{Config, DependencyEntry};
-use crate::runtime::process_runner::managed_search_dirs;
+use crate::runtime::process_runner::{is_executable_file, managed_search_dirs};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -257,7 +257,7 @@ fn check_mcp(entry: &DependencyEntry, config: &Config) -> DepStatus {
 pub(crate) fn resolve_command_path(command: &str, home: &Path) -> Option<PathBuf> {
     if command.contains('/') {
         let candidate = PathBuf::from(command);
-        if executable_file(&candidate) {
+        if is_executable_file(&candidate) {
             return Some(candidate);
         }
         return None;
@@ -265,24 +265,7 @@ pub(crate) fn resolve_command_path(command: &str, home: &Path) -> Option<PathBuf
     managed_search_dirs(home, &[])
         .into_iter()
         .map(|dir| dir.join(command))
-        .find(|candidate| executable_file(candidate))
-}
-
-fn executable_file(path: &std::path::Path) -> bool {
-    if !path.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        path.metadata()
-            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false)
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
+        .find(|candidate| is_executable_file(candidate))
 }
 
 #[cfg(test)]

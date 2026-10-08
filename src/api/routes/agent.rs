@@ -35,6 +35,7 @@ use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::runtime::install::skill_installer::{
     SkillLinkReport, SkillPortReport, link_agent_skills_best_effort, port_agent_skills,
 };
+use crate::runtime::process_runner::HostExec;
 use crate::runtime::workspace_sources::workspace_init::prepare_workspace_base_dirs;
 use crate::secrets::SecretStore;
 
@@ -176,8 +177,8 @@ async fn install_agent_for_config(
     config: &Config,
 ) -> Result<AgentInstallResponse> {
     prepare_workspace_base_dirs(&config.workspace)?;
-    let workspace_root = std::path::PathBuf::from(config.workspace.root.clone());
     let home = state.runtime_paths.home.clone();
+    let host = HostExec::new(&home, &config.workspace.sandbox)?;
     let local_bin = home.join(".local").join("bin");
     let log_base = crate::state::default_installer_log_base(&home);
 
@@ -187,6 +188,7 @@ async fn install_agent_for_config(
         let env = open_agent_env(&home, config)?;
         let expected_sha256 = config.agent.expected_sha256.clone();
         let agent_id = config.agent.id.clone();
+        let agent_command = config.agent.command.clone();
         let store_handle = state.state.clone();
         let step_log_base = log_base.clone();
         let mut result = tokio::task::spawn_blocking(move || {
@@ -199,11 +201,11 @@ async fn install_agent_for_config(
             };
             run_installer_capture(
                 &install,
+                &agent_command,
                 expected_sha256.as_deref(),
                 env,
-                &workspace_root,
+                &host,
                 Some(&progress),
-                &home,
             )
         })
         .await
@@ -243,10 +245,9 @@ async fn install_agent_for_config(
                 &entry,
                 &HarnessInstall::Install,
                 Default::default(),
-                &workspace_root,
+                &host,
                 &local_bin,
                 Some(&progress),
-                &home,
             )
         })
         .await

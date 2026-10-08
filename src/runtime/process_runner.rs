@@ -17,6 +17,148 @@ pub const READER_JOIN_GRACE: Duration = Duration::from_secs(2);
 /// Upper bound for any install timeout, since `run_captured`'s `Instant::now() + timeout` panics on overflow.
 pub const MAX_INSTALL_TIMEOUT_SECS: u64 = 86_400;
 
+/// The runtime-owned, otherwise empty directory under the state directory that host-side probes,
+/// installs and updates run in.
+const HOST_EXEC_DIR_NAME: &str = "host-exec";
+
+/// The host-exec working directory, created owner-only on first use. Tools that read
+/// `.npmrc`, `node_modules/`, `uv.toml` or `pip/` from their cwd or its parents find only
+/// runtime-owned paths here, never the workload-writable workspace.
+pub fn host_exec_dir(home: &Path) -> crate::error::Result<PathBuf> {
+    let dir = crate::secrets::state_dir(home).join(HOST_EXEC_DIR_NAME);
+    crate::fs_util::create_dir_owner_only(&dir)?;
+    Ok(dir)
+}
+
+/// Runtime-owned inputs for a host-side probe, install or update: the host-exec cwd, the runtime
+/// HOME, and a managed PATH holding no directory the workload identity can write. Executables are
+/// refused when their symlink chain has a workload-writable hop.
+#[derive(Debug, Clone)]
+pub struct HostExec {
+    home: PathBuf,
+    cwd: PathBuf,
+    sandbox: crate::runtime::sandbox::SandboxProfile,
+}
+
+impl HostExec {
+    /// Resolve the workload identity `sandbox` declares and ensure the host-exec directory.
+    pub fn new(home: &Path, sandbox: &crate::config::SandboxConfig) -> crate::error::Result<Self> {
+        Self::with_profile(
+            home,
+            crate::runtime::sandbox::SandboxProfile::resolve(sandbox)?,
+        )
+    }
+
+    pub fn with_profile(
+        home: &Path,
+        sandbox: crate::runtime::sandbox::SandboxProfile,
+    ) -> crate::error::Result<Self> {
+        Ok(Self {
+            home: home.to_path_buf(),
+            cwd: host_exec_dir(home)?,
+            sandbox,
+        })
+    }
+
+    pub fn home(&self) -> &Path {
+        &self.home
+    }
+
+    pub fn cwd(&self) -> &Path {
+        &self.cwd
+    }
+
+    pub fn sandbox(&self) -> &crate::runtime::sandbox::SandboxProfile {
+        &self.sandbox
+    }
+
+    /// [`managed_search_dirs`] minus the directories the workload identity can write.
+    pub fn search_dirs(&self, extra_path_dirs: &[&Path]) -> Vec<PathBuf> {
+        self.sandbox
+            .without_workload_writable(managed_search_dirs(&self.home, extra_path_dirs))
+    }
+
+    /// [`HostExec::search_dirs`] joined for `Command::env("PATH", _)`.
+    pub fn path_env(&self, extra_path_dirs: &[&Path]) -> Option<OsString> {
+        std::env::join_paths(self.search_dirs(extra_path_dirs)).ok()
+    }
+
+    /// An absolute path, or a bare name resolved on [`HostExec::search_dirs`], vetted by
+    /// [`HostExec::verify_executable`].
+    pub fn resolve_program(
+        &self,
+        program: &str,
+        extra_path_dirs: &[&Path],
+    ) -> crate::error::Result<PathBuf> {
+        let as_path = Path::new(program);
+        let resolved = if as_path.is_absolute() {
+            as_path.to_path_buf()
+        } else if program.contains('/') || program.is_empty() {
+            return Err(crate::error::StackError::InvalidParam {
+                field: "program",
+                reason: format!("`{program}` is neither an absolute path nor a bare command name"),
+            });
+        } else {
+            self.search_dirs(extra_path_dirs)
+                .into_iter()
+                .map(|dir| dir.join(program))
+                .find(|candidate| is_executable_file(candidate))
+                .ok_or_else(|| crate::error::StackError::InvalidParam {
+                    field: "program",
+                    reason: format!("`{program}` was not found on the managed PATH"),
+                })?
+        };
+        self.verify_executable(&resolved)?;
+        Ok(resolved)
+    }
+
+    /// Refuse an executable the workload identity could swap. A no-op without an identity, where
+    /// the workload already runs as the runtime.
+    pub fn verify_executable(&self, path: &Path) -> crate::error::Result<()> {
+        if self.sandbox.identity.is_none() {
+            return Ok(());
+        }
+        let absolute = std::path::absolute(path).map_err(|source| {
+            crate::error::StackError::AgentBinaryInspect {
+                path: path.to_path_buf(),
+                source,
+            }
+        })?;
+        match crate::workload_fs::exec_chain_writable_component(
+            &self.sandbox.executor(),
+            &absolute,
+        )? {
+            None => Ok(()),
+            Some(writable) => Err(crate::error::StackError::WorkloadWritableExecutable {
+                subject: format!("executable `{}`", absolute.display()),
+                path: writable,
+            }),
+        }
+    }
+
+    /// A command for an already vetted `program` with the host-exec cwd and a cleared env holding
+    /// only PATH, HOME, LANG and [`NON_INTERACTIVE_ENV`].
+    pub fn command(&self, program: &Path, extra_path_dirs: &[&Path]) -> Command {
+        let mut command = Command::new(program);
+        command.current_dir(&self.cwd).env_clear();
+        if let Some(path) = self.path_env(extra_path_dirs) {
+            command.env("PATH", path);
+        }
+        command.env("HOME", &self.home);
+        forward_host_env(&mut command, "LANG");
+        apply_non_interactive_env(&mut command);
+        command
+    }
+}
+
+/// True when `path` is a regular file with at least one execute bit set, the candidates `execvp`
+/// would run.
+pub fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.metadata()
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
 /// Forward a single named host env var to a sync `Command`, if present on the
 /// daemon. Unset on the host means unset on the child, never fabricated.
 pub fn forward_host_env(command: &mut Command, name: &str) {
@@ -173,12 +315,16 @@ pub fn apply_non_interactive_env(command: &mut Command) {
     }
 }
 
-/// The real interpreter behind `python3`, resolved against `path_env`. Exists
-/// so node-gyp calls the binary directly instead of paying a version-manager
-/// wrapper's cost once per native module; `None` degrades to leaving
+/// The real interpreter behind `python3`, resolved against `path_env` and run in `cwd` with only
+/// PATH and `home` in its env. Exists so node-gyp calls the binary directly instead of paying a
+/// version-manager wrapper's cost once per native module; `None` degrades to leaving
 /// `npm_config_python` unset.
-pub fn resolved_python_interpreter(path_env: Option<&OsString>) -> Option<PathBuf> {
-    resolved_python_interpreter_with_timeout(path_env, PYTHON_PROBE_TIMEOUT)
+pub fn resolved_python_interpreter(
+    path_env: Option<&OsString>,
+    home: Option<&Path>,
+    cwd: &Path,
+) -> Option<PathBuf> {
+    resolved_python_interpreter_with_timeout(path_env, home, cwd, PYTHON_PROBE_TIMEOUT)
 }
 
 /// Upper bound on the `python3 -c 'sys.executable'` probe; past this the
@@ -190,12 +336,20 @@ const PYTHON_PROBE_STREAM_CAP: usize = 4 * 1024;
 /// The timeout-parameterized body of [`resolved_python_interpreter`].
 pub(crate) fn resolved_python_interpreter_with_timeout(
     path_env: Option<&OsString>,
+    home: Option<&Path>,
+    cwd: &Path,
     timeout: Duration,
 ) -> Option<PathBuf> {
     let mut probe = Command::new("python3");
-    probe.args(["-c", "import sys; print(sys.executable)"]);
+    probe
+        .args(["-c", "import sys; print(sys.executable)"])
+        .current_dir(cwd)
+        .env_clear();
     if let Some(path) = path_env {
         probe.env("PATH", path);
+    }
+    if let Some(home) = home {
+        probe.env("HOME", home);
     }
     let outcome = run_captured(&mut probe, timeout, PYTHON_PROBE_STREAM_CAP).ok()?;
     let stdout = match outcome {
@@ -455,6 +609,71 @@ pub fn join_reader_bounded<T>(handle: JoinHandle<T>) -> Option<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn host_exec(home: &Path) -> HostExec {
+        HostExec::with_profile(home, crate::runtime::sandbox::SandboxProfile::default())
+            .expect("host exec")
+    }
+
+    #[test]
+    fn host_exec_runs_in_a_runtime_owned_dir_with_a_cleared_env() {
+        let home = tempfile::tempdir().expect("home");
+        let host = host_exec(home.path());
+        assert_eq!(
+            host.cwd(),
+            crate::secrets::state_dir(home.path()).join(HOST_EXEC_DIR_NAME)
+        );
+        assert!(host.cwd().is_dir());
+        let command = host.command(Path::new("/bin/sh"), &[]);
+        assert_eq!(command.get_current_dir(), Some(host.cwd()));
+        let names: Vec<String> = command
+            .get_envs()
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect();
+        assert!(names.iter().any(|name| name == "HOME"));
+        assert!(names.iter().all(|name| {
+            matches!(name.as_str(), "PATH" | "HOME" | "LANG")
+                || NON_INTERACTIVE_ENV
+                    .iter()
+                    .any(|(reserved, _)| reserved == name)
+        }));
+        let home_value = command
+            .get_envs()
+            .find(|(name, _)| *name == "HOME")
+            .and_then(|(_, value)| value)
+            .expect("HOME");
+        assert_eq!(home_value, home.path().as_os_str());
+    }
+
+    #[test]
+    fn host_exec_resolves_absolute_and_bare_names_and_refuses_relative_paths() {
+        let home = tempfile::tempdir().expect("home");
+        let host = host_exec(home.path());
+        assert_eq!(
+            host.resolve_program("/bin/sh", &[]).expect("absolute"),
+            PathBuf::from("/bin/sh")
+        );
+        use std::os::unix::fs::PermissionsExt as _;
+        // A non-executable shadow earlier on the PATH is skipped, as execvp would.
+        let shadow = crate::runtime::node_runtime::managed_bin_dir(home.path());
+        std::fs::create_dir_all(&shadow).expect("shadow dir");
+        std::fs::write(shadow.join("acps-host-exec-probe"), b"").expect("shadow");
+        let bin = home.path().join(".local/bin");
+        std::fs::create_dir_all(&bin).expect("bin dir");
+        std::fs::write(bin.join("acps-host-exec-probe"), b"#!/bin/sh\n").expect("probe");
+        std::fs::set_permissions(
+            bin.join("acps-host-exec-probe"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .expect("chmod probe");
+        assert_eq!(
+            host.resolve_program("acps-host-exec-probe", &[])
+                .expect("bare name on the managed PATH"),
+            bin.join("acps-host-exec-probe")
+        );
+        assert!(host.resolve_program("bin/agent", &[]).is_err());
+        assert!(host.resolve_program("", &[]).is_err());
+    }
 
     #[test]
     fn managed_node_bin_precedes_local_bin_extras_and_daemon_path() {

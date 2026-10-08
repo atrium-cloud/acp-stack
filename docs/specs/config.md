@@ -154,7 +154,7 @@ expected_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abc
 | ----------------- | --------------------------------------------------------------------------------------------------- |
 | `id`              | embedded agent catalog id                                                                           |
 | `name`            | display name                                                                                        |
-| `command`         | executable                                                                                          |
+| `command`         | executable: an absolute path, or a bare name resolved on the managed `PATH`                         |
 | `args`            | argv after the executable                                                                           |
 | `cwd`             | launch directory; defaults to workspace root when omitted                                           |
 | `env`             | secret refs injected as environment variables                                                       |
@@ -176,7 +176,7 @@ Provider and model fields are documented in [agents/config.md](agents/config.md)
 
 `[agent.install]` is the operator escape hatch for a custom (non-registry) agent:
 
-- Fields: `type = "shell"`, a `shell` snippet that installs the harness (and any adapter), and `creates`, the path that must resolve to an executable after the install runs.
+- Fields: `type = "shell"`, a `shell` snippet that installs the harness (and any adapter), and `creates`, the absolute path or bare command name that must resolve to an executable after the install runs.
 - When present for an `id` the registry does not know, the runtime drives the agent from `[agent]`/`[agent.install]` directly. It skips the registry-only support, provider/model auto-config, and managed auto-update.
 - There is no upstream version to resolve, so `acps agent update set` is rejected and the daemon skips it.
 - `acps init --custom-agent-*` writes this block. An adapter-backed custom agent uses the same shape with `command` pointing at the adapter binary.

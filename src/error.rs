@@ -117,6 +117,18 @@ pub enum StackError {
     )]
     NetworkProviderRequired,
 
+    #[error("{subject} is not reachable by the workload user at {path}: {reason}")]
+    WorkloadUnreachable {
+        subject: String,
+        path: PathBuf,
+        reason: String,
+    },
+
+    #[error(
+        "{subject} at {path} is writable by the workload user; refusing to run it as the runtime"
+    )]
+    WorkloadWritableExecutable { subject: String, path: PathBuf },
+
     // === extensions ===
     #[error("no managed-state extension named `{name}` is declared")]
     ExtensionNamespaceUnknown { name: String },
@@ -515,9 +527,6 @@ pub enum StackError {
 
     #[error("agent installer hit the 10-minute timeout")]
     AgentInstallerTimeout,
-
-    #[error("agent installer working directory `{path}` does not exist or is not a directory")]
-    AgentInstallerWorkingDirectoryMissing { path: PathBuf },
 
     #[error("failed to persist installer log at {path}: {source}")]
     AgentInstallerLogPersist {

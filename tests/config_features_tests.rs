@@ -979,6 +979,19 @@ fn require_network_provider_needs_unshare() {
 }
 
 #[test]
+fn rejects_a_relative_agent_command_with_a_separator() {
+    let config_text =
+        VALID_CONFIG.replacen("command = \"opencode\"", "command = \"bin/opencode\"", 1);
+    assert_ne!(
+        config_text, VALID_CONFIG,
+        "fixture must carry the agent command"
+    );
+    let err = load_config_from_str(&config_text)
+        .expect_err("a relative command path resolves against the cwd and is refused");
+    assert!(err.to_string().contains("agent.command"), "got: {err}");
+}
+
+#[test]
 fn rejects_network_provider_extension_outside_unshare() {
     for mode in ["off", "bwrap"] {
         let config_text = format!(

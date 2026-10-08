@@ -380,6 +380,16 @@ pub(crate) fn validate_agent_restart(value: &str) -> Result<()> {
 
 pub(crate) fn validate_agent_install(install: &AgentInstallConfig) -> Result<()> {
     validate_nonempty("agent.install.creates", &install.creates)?;
+    // A relative path with a separator would resolve against the workload-writable workspace.
+    if !std::path::Path::new(&install.creates).is_absolute() && install.creates.contains('/') {
+        return Err(StackError::InvalidParam {
+            field: "agent.install.creates",
+            reason: format!(
+                "`{}` is a relative path; use an absolute path or a bare command name",
+                install.creates
+            ),
+        });
+    }
     match install.install_type.as_str() {
         "shell" => {
             require_present("agent.install.shell", install.shell.as_deref())?;
@@ -679,6 +689,29 @@ mod tests {
                 .to_string()
                 .contains("reserved by the mapped-provider registry")
         );
+    }
+
+    #[test]
+    fn install_creates_rejects_a_relative_path_with_a_separator() {
+        let install = |creates: &str| AgentInstallConfig {
+            install_type: "shell".to_owned(),
+            creates: creates.to_owned(),
+            shell: Some("true".to_owned()),
+        };
+        let error = validate_agent_install(&install("bin/agent"))
+            .expect_err("a relative creates path is refused");
+        assert!(
+            matches!(
+                error,
+                StackError::InvalidParam {
+                    field: "agent.install.creates",
+                    ..
+                }
+            ),
+            "got {error:?}"
+        );
+        validate_agent_install(&install("agent")).expect("a bare name is accepted");
+        validate_agent_install(&install("/opt/agent/bin/agent")).expect("an absolute path");
     }
 
     #[test]

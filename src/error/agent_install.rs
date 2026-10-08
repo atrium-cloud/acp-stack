@@ -24,7 +24,6 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         AgentInstallerBinaryUnrunnable { .. } => "agent.installer_binary_unrunnable",
         AgentInstallerPrerequisitesMissing { .. } => "agent.installer_prerequisites_missing",
         AgentInstallerTimeout => "agent.installer_timeout",
-        AgentInstallerWorkingDirectoryMissing { .. } => "agent.installer_working_directory_missing",
         AgentInstallerLogPersist { .. } => "agent.installer_log_persist_failed",
         AgentRegistryMissing { .. } => "agent.registry_missing",
         AgentPlaceholderConfigured => "agent.placeholder_configured",
@@ -92,9 +91,6 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
             )
         }
         AgentInstallerTimeout => "agent installer hit the configured timeout".to_owned(),
-        AgentInstallerWorkingDirectoryMissing { .. } => {
-            "agent installer workspace root is not an existing directory".to_owned()
-        }
         AgentInstallerLogPersist { .. } => "failed to persist the installer log".to_owned(),
         AgentRegistryMissing { id } => format!("ACP registry does not contain agent `{id}`"),
         AgentPlaceholderConfigured => {
@@ -228,7 +224,6 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         | AgentInstallerBinaryUnrunnable { .. }
         | AgentInstallerPrerequisitesMissing { .. }
         | AgentInstallerTimeout
-        | AgentInstallerWorkingDirectoryMissing { .. }
         | AgentInstallerLogPersist { .. }
         | AgentRegistryMissing { .. }
         | InitRunCorrupted { .. }

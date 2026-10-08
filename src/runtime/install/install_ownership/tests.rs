@@ -139,14 +139,7 @@ impl Fixture {
     }
 
     fn classify(&self, component: &InstallComponent) -> BinaryOwnership {
-        classify_component(
-            &self.store,
-            "duo",
-            component,
-            self.home.path(),
-            self.home.path(),
-        )
-        .expect("classify")
+        classify_component(&self.store, "duo", component, self.home.path()).expect("classify")
     }
 }
 
@@ -316,7 +309,6 @@ fn an_unreadable_binary_is_an_inspect_failure() {
         &fixture.store,
         "duo",
         &harness_of("duo"),
-        fixture.home.path(),
         fixture.home.path(),
     )
     .expect_err("an unreadable binary cannot be hashed");

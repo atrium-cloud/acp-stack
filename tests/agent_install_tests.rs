@@ -14,6 +14,8 @@ use acp_stack::runtime::install::agent_registry::{
     AdapterSpec, ArchMap, ArchiveKind, GithubInstall, HarnessSpec, InstallSet, RegistryEntry,
     RegistryKind, RegistryStdioFraming, default_acp_args,
 };
+use acp_stack::runtime::process_runner::HostExec;
+use acp_stack::runtime::sandbox::SandboxProfile;
 use axum::Router;
 use axum::extract::{Path as AxPath, State};
 use axum::http::StatusCode;
@@ -23,6 +25,10 @@ use serde_json::json;
 
 /// Serializes every test that mutates the process-wide installer env vars.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+fn host(home: &std::path::Path) -> HostExec {
+    HostExec::with_profile(home, SandboxProfile::default()).expect("host exec")
+}
 
 /// RAII env-var guard holding `ENV_LOCK` for its lifetime, so only one test at
 /// a time mutates the var even if a panic unwinds.
@@ -324,10 +330,9 @@ fn install_resolved_two_step_flow_against_mocked_github_api() {
         &entry,
         &HarnessInstall::Install,
         std::collections::HashMap::new(),
-        dest_dir.path(),
+        &host(dest_dir.path()),
         dest_dir.path(),
         None,
-        dest_dir.path(),
     );
 
     let outcome = result
@@ -418,10 +423,9 @@ fn a_harness_version_pin_fetches_that_release_tag_verbatim() {
         &adapter_kind_entry(),
         &HarnessInstall::Install,
         std::collections::HashMap::new(),
-        dest_dir.path(),
+        &host(dest_dir.path()),
         dest_dir.path(),
         None,
-        dest_dir.path(),
     );
 
     result.outcome.expect("the pinned tag exists");
@@ -458,10 +462,9 @@ fn a_harness_version_pin_is_not_rewritten_into_another_tag() {
         &adapter_kind_entry(),
         &HarnessInstall::Install,
         std::collections::HashMap::new(),
-        dest_dir.path(),
+        &host(dest_dir.path()),
         dest_dir.path(),
         None,
-        dest_dir.path(),
     );
 
     assert!(
@@ -512,10 +515,9 @@ fn install_resolved_runs_adapter_step_for_native_entry_with_override() {
         &entry,
         &HarnessInstall::Install,
         std::collections::HashMap::new(),
-        dest_dir.path(),
+        &host(dest_dir.path()),
         dest_dir.path(),
         None,
-        dest_dir.path(),
     );
 
     result
@@ -563,10 +565,9 @@ fn install_resolved_links_a_bundle_release_into_the_bin_dir() {
         &entry,
         &HarnessInstall::Install,
         std::collections::HashMap::new(),
-        home.path(),
+        &host(home.path()),
         home.path(),
         None,
-        home.path(),
     );
 
     result
@@ -621,10 +622,9 @@ fn install_resolved_replaces_a_bundle_link_instead_of_writing_through_it() {
         &adapter_kind_entry(),
         &HarnessInstall::Install,
         std::collections::HashMap::new(),
-        home.path(),
+        &host(home.path()),
         home.path(),
         None,
-        home.path(),
     );
 
     result
@@ -664,10 +664,9 @@ fn install_resolved_records_failure_when_release_endpoint_missing() {
         &entry,
         &HarnessInstall::Install,
         std::collections::HashMap::new(),
-        dest_dir.path(),
+        &host(dest_dir.path()),
         dest_dir.path(),
         None,
-        dest_dir.path(),
     );
 
     assert!(

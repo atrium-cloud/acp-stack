@@ -14,9 +14,12 @@ use sha2::{Digest, Sha256};
 
 use crate::config::{AgentConfig, AgentInstallConfig};
 use crate::error::{Result, StackError};
+use crate::runtime::agent::acp_bridge::resolve_command_path;
 use crate::runtime::install::agent_registry::{
     ArchiveKind, InstallSet, RegistryEntry, RegistryKind,
 };
+use crate::runtime::install::install_ownership::install_components;
+use crate::runtime::process_runner::HostExec;
 use crate::state::{
     INSTALLER_OPERATION_INSTALL, INSTALLER_OUTPUT_CAP_BYTES, INSTALLER_STATUS_KEPT,
     INSTALLER_STATUS_RUNNING, InstallerRunFinish, InstallerRunInput, StateStore,
@@ -387,13 +390,13 @@ pub struct InstallerSequenceResult {
 #[allow(clippy::too_many_arguments)]
 pub fn run_installer(
     agent_id: &str,
+    agent_command: &str,
     install: &AgentInstallConfig,
     expected_sha256: Option<&str>,
     agent_env: HashMap<String, String>,
-    workspace_root: &Path,
+    host: &HostExec,
     state: &StateStore,
     log_base: Option<&Path>,
-    home: &Path,
 ) -> Result<InstallerOutcome> {
     let sink = ReconnectingInstallerSink::new(state.path().to_path_buf());
     let progress = InstallProgress {
@@ -404,11 +407,11 @@ pub fn run_installer(
     };
     let mut result = run_installer_capture(
         install,
+        agent_command,
         expected_sha256,
         agent_env,
-        workspace_root,
+        host,
         Some(&progress),
-        home,
     );
     persist_untracked_installer_row(
         state,
@@ -421,14 +424,15 @@ pub fn run_installer(
 }
 
 /// Run the escape-hatch installer without holding the state store across the
-/// shell run, returning the row draft for the caller to persist.
+/// shell run, returning the row draft for the caller to persist. `agent_command`
+/// is what the runtime spawns once the recipe has run.
 pub fn run_installer_capture(
     install: &AgentInstallConfig,
+    agent_command: &str,
     expected_sha256: Option<&str>,
     agent_env: HashMap<String, String>,
-    workspace_root: &Path,
+    host: &HostExec,
     progress: Option<&InstallProgress<'_>>,
-    home: &Path,
 ) -> InstallerResult {
     if install.install_type.as_str() != "shell" {
         return InstallerResult {
@@ -446,12 +450,12 @@ pub fn run_installer_capture(
         }
     };
     let started_at = current_timestamp();
-    crate::runtime::node_runtime::ensure_before_install(home);
+    crate::runtime::node_runtime::ensure_before_install(host.home());
 
     // Integrity first: the spawn gate executes the file, and a binary failing
     // the operator's sha256 pin must never run. A present binary that fails the
     // gate reads as absent so the recipe re-runs and replaces it.
-    if let Some(path) = resolve_creates(&install.creates, workspace_root, &[], home) {
+    if let Some(path) = resolve_creates(&install.creates, host, &[]) {
         let integrity = (|| {
             let sha256 = sha256_of_file(&path)?;
             verify_expected_sha256(expected_sha256, &sha256)?;
@@ -464,15 +468,21 @@ pub fn run_installer_capture(
                     row: InstallerRowDraft::skipped(STEP_INSTALL, &started_at),
                 };
             }
-            Ok(sha256) => match verify_binary_spawns(&path, workspace_root, &[], home) {
+            Ok(sha256) => match verify_binary_spawns(&path, host, &[]) {
                 Ok(()) => {
-                    return InstallerResult {
-                        outcome: Ok(InstallerOutcome::AlreadyPresent {
+                    let mut row = InstallerRowDraft::skipped(STEP_INSTALL, &started_at);
+                    let outcome = match verify_workload_reachable(host, &[agent_command]) {
+                        Ok(()) => Ok(InstallerOutcome::AlreadyPresent {
                             path: path.clone(),
                             sha256,
                         }),
-                        row: InstallerRowDraft::skipped(STEP_INSTALL, &started_at),
+                        Err(error) => {
+                            row.status = "failed".to_owned();
+                            row.stderr = step_runners::append_stderr_detail(&row.stderr, &error);
+                            Err(error)
+                        }
                     };
+                    return InstallerResult { outcome, row };
                 }
                 Err(error) => {
                     tracing::warn!(%error, "existing agent binary failed the spawn gate; re-running installer");
@@ -484,22 +494,15 @@ pub fn run_installer_capture(
     let run_id = progress.and_then(|progress| {
         begin_tracked_step(progress, STEP_INSTALL, Some(INSTALL_METHOD_SHELL))
     });
-    let run_result = run_shell_install(
-        shell,
-        &agent_env,
-        workspace_root,
-        &[],
-        DEFAULT_INSTALLER_TIMEOUT,
-        home,
-    );
+    let run_result = run_shell_install(shell, &agent_env, host, &[], DEFAULT_INSTALLER_TIMEOUT);
     let mut result = finalize_shell_step(
         STEP_INSTALL,
         started_at,
         run_result,
         &install.creates,
         expected_sha256,
-        workspace_root,
-        home,
+        agent_command,
+        host,
     );
     if let Some(progress) = progress {
         finalize_tracked_step(progress, run_id, &mut result.row);
@@ -519,11 +522,10 @@ pub fn install_resolved(
     entry: &RegistryEntry,
     harness: &HarnessInstall,
     agent_env: HashMap<String, String>,
-    workspace_root: &Path,
+    host: &HostExec,
     dest_dir: &Path,
     state: &StateStore,
     log_base: Option<&Path>,
-    home: &Path,
 ) -> Result<InstallerOutcome> {
     let sink = ReconnectingInstallerSink::new(state.path().to_path_buf());
     let progress = InstallProgress {
@@ -537,10 +539,9 @@ pub fn install_resolved(
         entry,
         harness,
         agent_env,
-        workspace_root,
+        host,
         dest_dir,
         Some(&progress),
-        home,
     );
     for row in result.rows.iter_mut() {
         persist_untracked_installer_row(
@@ -556,24 +557,72 @@ pub fn install_resolved(
 
 pub(super) fn final_verification(
     agent: &AgentConfig,
-    workspace_root: &Path,
+    entry: &RegistryEntry,
+    host: &HostExec,
     dest_dir: &Path,
     rows: Vec<InstallerRowDraft>,
-    home: &Path,
 ) -> InstallerSequenceResult {
     let outcome = (|| {
-        let path = resolve_creates(&agent.command, workspace_root, &[dest_dir], home).ok_or_else(
-            || StackError::AgentInstallerCreatesMissing {
+        let path = resolve_creates(&agent.command, host, &[dest_dir]).ok_or_else(|| {
+            StackError::AgentInstallerCreatesMissing {
                 name: agent.command.clone(),
-            },
-        )?;
+            }
+        })?;
         let sha256 = sha256_of_file(&path)?;
         verify_expected_sha256(agent.expected_sha256.as_deref(), &sha256)?;
-        verify_binary_spawns(&path, workspace_root, &[dest_dir], home)?;
+        verify_binary_spawns(&path, host, &[dest_dir])?;
+        let components = install_components(agent, entry)?;
+        let commands: Vec<&str> = components
+            .iter()
+            .map(|component| component.command.as_str())
+            .collect();
+        verify_workload_reachable(host, &commands)?;
         Ok(InstallerOutcome::Installed { path, sha256 })
     })();
 
     InstallerSequenceResult { outcome, rows }
+}
+
+/// Refuse an install whose binaries the workload identity could not run or could swap. Each
+/// command resolves the way spawning resolves it, then its exec chain must be readable and
+/// executable by the workload with no workload-writable hop. A no-op without an identity.
+pub(crate) fn verify_workload_reachable(host: &HostExec, commands: &[&str]) -> Result<()> {
+    if host.sandbox().identity.is_none() {
+        return Ok(());
+    }
+    let executor = host.sandbox().executor();
+    for command in commands {
+        let subject = format!("agent binary `{command}`");
+        let path = resolve_command_path(command, host.home()).ok_or_else(|| {
+            StackError::WorkloadUnreachable {
+                subject: subject.clone(),
+                path: PathBuf::from(command),
+                reason: "it does not resolve on the managed PATH".to_owned(),
+            }
+        })?;
+        if let Err(error) = crate::workload_fs::check_exec_chain(&executor, &path) {
+            return Err(StackError::WorkloadUnreachable {
+                subject,
+                path: workload_fs_error_path(&error)
+                    .unwrap_or(&path)
+                    .to_path_buf(),
+                reason: error.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn workload_fs_error_path(error: &StackError) -> Option<&Path> {
+    match error {
+        StackError::WorkloadFsWorkloadUnreadable { path }
+        | StackError::WorkloadFsWorkloadWritable { path }
+        | StackError::WorkloadFsNotFound { path }
+        | StackError::WorkloadFsSymlinkLoop { path, .. }
+        | StackError::WorkloadFsInvalidPath { path, .. }
+        | StackError::WorkloadFsIo { path, .. } => Some(path),
+        _ => None,
+    }
 }
 
 pub(super) struct StepResult {
@@ -615,12 +664,11 @@ pub(super) enum ResolvedInstallSpec {
 /// never executed and simply reads as absent.
 pub fn resolve_creates_for_init_resume(
     name: &str,
-    workspace_root: &Path,
+    host: &HostExec,
     extra_path_dirs: &[&Path],
     expected_sha256: Option<&str>,
-    home: &Path,
 ) -> Option<PathBuf> {
-    let path = resolve_creates(name, workspace_root, extra_path_dirs, home)?;
+    let path = resolve_creates(name, host, extra_path_dirs)?;
     if expected_sha256.is_some() {
         let pinned = sha256_of_file(&path)
             .and_then(|sha256| verify_expected_sha256(expected_sha256, &sha256));
@@ -629,7 +677,7 @@ pub fn resolve_creates_for_init_resume(
             return None;
         }
     }
-    if let Err(error) = verify_binary_spawns(&path, workspace_root, extra_path_dirs, home) {
+    if let Err(error) = verify_binary_spawns(&path, host, extra_path_dirs) {
         tracing::warn!(%error, "installed agent binary failed the spawn gate; re-running installer");
         return None;
     }
@@ -641,13 +689,12 @@ pub fn resolve_creates_for_init_resume(
 /// binary that fails the operator's pin must never reach it.
 pub(crate) fn verify_binary_spawns(
     path: &Path,
-    workspace_root: &Path,
+    host: &HostExec,
     extra_path_dirs: &[&Path],
-    home: &Path,
 ) -> Result<()> {
     use crate::runtime::process_runner::kill_process_group;
     verify_executable_header(path)?;
-    let mut command = version_probe_command(path, workspace_root, extra_path_dirs, home);
+    let mut command = version_probe_command(path, host, extra_path_dirs)?;
     command
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -666,37 +713,22 @@ pub(crate) fn verify_binary_spawns(
     }
 }
 
-/// `<path> --version` under the same narrow environment the install steps use.
+/// `<path> --version` under the same narrow environment the install steps use, refused when the
+/// workload identity could swap the binary.
 fn version_probe_command(
     path: &Path,
-    workspace_root: &Path,
+    host: &HostExec,
     extra_path_dirs: &[&Path],
-    home: &Path,
-) -> std::process::Command {
-    use crate::runtime::process_runner::{
-        apply_non_interactive_env, detach_into_new_session, forward_host_env, managed_path_env,
-    };
-    // The probe changes cwd to `workspace_root`, so a relative `path` would
-    // resolve differently here than it did in `resolve_creates`.
+) -> Result<std::process::Command> {
+    use crate::runtime::process_runner::detach_into_new_session;
+    // The probe runs in the host-exec dir, so a relative `path` would resolve
+    // differently here than it did in `resolve_creates`.
     let exec_path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-    let mut command = std::process::Command::new(&exec_path);
-    command
-        .arg("--version")
-        .stdin(std::process::Stdio::null())
-        .env_clear();
-    if workspace_root.is_dir() {
-        command.current_dir(workspace_root);
-    }
-    if let Some(path_env) = managed_path_env(home, extra_path_dirs) {
-        command.env("PATH", path_env);
-    }
-    // HOME is the boot-time runtime home, not the daemon's process env, for
-    // the same test-isolation reason as the install steps.
-    command.env("HOME", home);
-    forward_host_env(&mut command, "LANG");
-    apply_non_interactive_env(&mut command);
+    host.verify_executable(&exec_path)?;
+    let mut command = host.command(&exec_path, extra_path_dirs);
+    command.arg("--version").stdin(std::process::Stdio::null());
     detach_into_new_session(&mut command);
-    command
+    Ok(command)
 }
 
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -706,14 +738,19 @@ const VERSION_PROBE_CAP_BYTES: usize = 4 * 1024;
 /// any failure since the spawn gate already proved the binary runs.
 pub(crate) fn probe_binary_version(
     path: &Path,
-    workspace_root: &Path,
+    host: &HostExec,
     extra_path_dirs: &[&Path],
-    home: &Path,
 ) -> Option<String> {
     use crate::runtime::process_runner::{
         kill_process_group, spawn_capped_reader, wait_with_timeout,
     };
-    let mut command = version_probe_command(path, workspace_root, extra_path_dirs, home);
+    let mut command = match version_probe_command(path, host, extra_path_dirs) {
+        Ok(command) => command,
+        Err(error) => {
+            tracing::warn!(%error, path = %path.display(), "version probe refused");
+            return None;
+        }
+    };
     command
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
@@ -814,12 +851,13 @@ pub(crate) fn verify_executable_header(path: &Path) -> Result<()> {
 
 /// Resolve `[agent.install].creates` to a real path, per the lookup order in
 /// `docs/specs/runtime.md`. A bare name searches the managed Node `bin` first,
-/// so `node`/`npm` prerequisites resolve to it, then `extra_path_dirs`, then PATH.
+/// so `node`/`npm` prerequisites resolve to it, then `extra_path_dirs`, then PATH,
+/// skipping directories the workload identity can write. A relative path with a
+/// separator resolves to nothing.
 pub(crate) fn resolve_creates(
     name: &str,
-    workspace_root: &Path,
+    host: &HostExec,
     extra_path_dirs: &[&Path],
-    home: &Path,
 ) -> Option<PathBuf> {
     if name.is_empty() {
         return None;
@@ -833,18 +871,18 @@ pub(crate) fn resolve_creates(
         };
     }
     if name.contains('/') {
-        let candidate = workspace_root.join(name);
-        return if candidate.is_file() {
-            Some(candidate)
-        } else {
-            None
-        };
+        return None;
     }
-    std::iter::once(crate::runtime::node_runtime::managed_bin_dir(home))
-        .chain(extra_path_dirs.iter().map(|dir| dir.to_path_buf()))
-        .chain(std::env::split_paths(
-            &std::env::var_os("PATH").unwrap_or_default(),
-        ))
+    let dirs: Vec<PathBuf> =
+        std::iter::once(crate::runtime::node_runtime::managed_bin_dir(host.home()))
+            .chain(extra_path_dirs.iter().map(|dir| dir.to_path_buf()))
+            .chain(std::env::split_paths(
+                &std::env::var_os("PATH").unwrap_or_default(),
+            ))
+            .collect();
+    host.sandbox()
+        .without_workload_writable(dirs)
+        .into_iter()
         .map(|dir| dir.join(name))
         .find(|candidate| candidate.is_file())
 }

@@ -11,11 +11,14 @@ use tempfile::TempDir;
 /// installer subprocess itself, not merely be computed.
 #[test]
 fn an_install_step_sees_a_resolved_python_interpreter() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let host = host(tempdir.path());
     // A host without `python3` leaves the variable unset, so there is nothing to assert.
-    if resolved_python_interpreter(None).is_none() {
+    if resolved_python_interpreter(host.path_env(&[]).as_ref(), Some(host.home()), host.cwd())
+        .is_none()
+    {
         return;
     }
-    let tempdir = TempDir::new().expect("tempdir");
     let install = shell_install_set(
         "printf 'interpreter=%s\\n' \"${npm_config_python:-UNSET}\"; \
          test -x \"${npm_config_python:-}\" && printf 'executable=yes\\n'",
@@ -33,10 +36,9 @@ fn an_install_step_sees_a_resolved_python_interpreter() {
         &entry,
         &HarnessInstall::Install,
         HashMap::new(),
-        tempdir.path(),
+        &host,
         tempdir.path(),
         None,
-        tempdir.path(),
     );
 
     let stdout = &result.rows[0].stdout;
@@ -60,7 +62,10 @@ fn an_install_step_sees_a_resolved_python_interpreter() {
 fn an_empty_path_resolves_no_interpreter() {
     let empty = TempDir::new().expect("tempdir");
     let path = std::ffi::OsString::from(empty.path());
-    assert_eq!(resolved_python_interpreter(Some(&path)), None);
+    assert_eq!(
+        resolved_python_interpreter(Some(&path), None, empty.path()),
+        None
+    );
 }
 
 /// A hung version-manager shim must degrade to "no override": the probe runs before the step
@@ -75,8 +80,12 @@ fn a_hung_python_shim_resolves_no_interpreter_promptly() {
     let path = std::ffi::OsString::from(tempdir.path());
 
     let started = std::time::Instant::now();
-    let resolved =
-        resolved_python_interpreter_with_timeout(Some(&path), Duration::from_millis(200));
+    let resolved = resolved_python_interpreter_with_timeout(
+        Some(&path),
+        None,
+        tempdir.path(),
+        Duration::from_millis(200),
+    );
 
     assert_eq!(resolved, None);
     assert!(

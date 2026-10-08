@@ -23,7 +23,7 @@ pub(super) async fn spawn_agent_bridge(
     // The integrity guard MUST run before spawning: `[agent].command` can
     // resolve to a different binary than the one the installer hashed.
     if let Some(expected) = agent.expected_sha256.as_deref() {
-        verify_agent_binary_sha256(&agent.command, &cwd, expected, home)?;
+        verify_agent_binary_sha256(&agent.command, expected, home)?;
     }
 
     append_and_publish_agent_lifecycle(

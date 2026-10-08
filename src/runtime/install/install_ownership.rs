@@ -94,16 +94,14 @@ fn component_command(install: &InstallSet, id: &str) -> String {
 }
 
 /// Resolve `component` the way spawning does and trace the binary back to the step that put it
-/// there. A relative command with a slash resolves against `workspace_root`, as the installer
-/// resolves `creates`.
+/// there.
 pub fn classify_component(
     store: &StateStore,
     agent_id: &str,
     component: &InstallComponent,
-    workspace_root: &Path,
     home: &Path,
 ) -> Result<BinaryOwnership> {
-    let Some(path) = resolve_command_path(&component.command, workspace_root, home) else {
+    let Some(path) = resolve_command_path(&component.command, home) else {
         return Ok(BinaryOwnership::Absent);
     };
     let artifact = InstalledArtifact::of(&path)?;

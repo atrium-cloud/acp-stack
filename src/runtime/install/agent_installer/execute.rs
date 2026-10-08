@@ -9,13 +9,12 @@ pub fn install_resolved_capture(
     entry: &RegistryEntry,
     harness_install: &HarnessInstall,
     _agent_env: HashMap<String, String>,
-    workspace_root: &Path,
+    host: &HostExec,
     dest_dir: &Path,
     progress: Option<&InstallProgress<'_>>,
-    home: &Path,
 ) -> InstallerSequenceResult {
     // Before the prerequisite checks below, which look for `npm` and recipe tools like `node`.
-    crate::runtime::node_runtime::ensure_before_install(home);
+    crate::runtime::node_runtime::ensure_before_install(host.home());
     let mut rows = Vec::new();
     let installer_env = HashMap::new();
     // An operator adapter override turns the entry adapter-kind, so the sequencing below drives the operator's adapter alongside the managed harness recipe.
@@ -78,8 +77,7 @@ pub fn install_resolved_capture(
             if let Some(path) = kept_harness {
                 // The entry's integrity pin names the adapter here, so it is checked on the
                 // adapter by `final_verification` and not on the harness.
-                let kept =
-                    keep_existing_harness(STEP_HARNESS, path, None, workspace_root, dest_dir, home);
+                let kept = keep_existing_harness(STEP_HARNESS, path, None, host, dest_dir);
                 rows.push(kept.row);
                 if let Err(err) = kept.outcome {
                     return InstallerSequenceResult {
@@ -96,11 +94,10 @@ pub fn install_resolved_capture(
                 adapter.github.as_deref(),
                 None,
                 &installer_env,
-                workspace_root,
+                host,
                 dest_dir,
                 pin_declared,
                 progress,
-                home,
             );
             rows.extend(adapter_chain.rows);
             if let Some(err) = adapter_chain.terminal_error {
@@ -110,27 +107,21 @@ pub fn install_resolved_capture(
                 };
             }
 
-            return final_verification(agent, workspace_root, dest_dir, rows, home);
+            return final_verification(agent, entry, host, dest_dir, rows);
         }
 
         // Harness and adapter install in parallel, each walking its own priority chain.
-        let harness_workspace = workspace_root.to_path_buf();
         let harness_dest = dest_dir.to_path_buf();
         let harness_env = installer_env.clone();
         let harness_install = harness.install.clone();
         let harness_github = entry.github.clone();
         let harness_version = agent.harness_version.clone();
         let harness_id = entry.id.clone();
-        let adapter_workspace = workspace_root.to_path_buf();
         let adapter_dest = dest_dir.to_path_buf();
         let adapter_env = installer_env.clone();
         let adapter_install = adapter.install.clone();
         let adapter_github = adapter.github.clone();
         let adapter_id = entry.id.clone();
-        // A `&Path` is `Copy`, so each scoped thread gets its own copy of the
-        // borrow alongside the cloned path buffers above.
-        let harness_home = home;
-        let adapter_home = home;
         // Scoped threads so the borrowed `progress` sink can cross, and both handles are joined
         // manually inside the scope so a panicking installer thread lands in `unwrap_or_else`
         // rather than propagating at scope exit.
@@ -144,11 +135,10 @@ pub fn install_resolved_capture(
                     harness_github.as_deref(),
                     harness_version.as_deref(),
                     &harness_env,
-                    &harness_workspace,
+                    host,
                     &harness_dest,
                     pin_declared,
                     progress,
-                    harness_home,
                 )
             });
             let adapter_thread = scope.spawn(move || {
@@ -160,11 +150,10 @@ pub fn install_resolved_capture(
                     adapter_github.as_deref(),
                     None,
                     &adapter_env,
-                    &adapter_workspace,
+                    host,
                     &adapter_dest,
                     pin_declared,
                     progress,
-                    adapter_home,
                 )
             });
             let harness_chain = harness_thread.join().unwrap_or_else(|_| FallbackChain {
@@ -196,7 +185,7 @@ pub fn install_resolved_capture(
             };
         }
 
-        return final_verification(agent, workspace_root, dest_dir, rows, home);
+        return final_verification(agent, entry, host, dest_dir, rows);
     }
 
     if let HarnessInstall::Keep(path) = harness_install {
@@ -205,20 +194,19 @@ pub fn install_resolved_capture(
             harness_step_label,
             path,
             agent.expected_sha256.as_deref(),
-            workspace_root,
+            host,
             dest_dir,
-            home,
         );
         rows.push(kept.row);
-        return InstallerSequenceResult {
-            outcome: kept
-                .outcome
-                .map(|artifact| InstallerOutcome::AlreadyPresent {
-                    path: artifact.path,
-                    sha256: artifact.sha256,
-                }),
-            rows,
-        };
+        // A kept binary must be as reachable by the workload as a freshly installed one.
+        let outcome = kept.outcome.and_then(|artifact| {
+            verify_workload_reachable(host, &[agent.command.as_str()])?;
+            Ok(InstallerOutcome::AlreadyPresent {
+                path: artifact.path,
+                sha256: artifact.sha256,
+            })
+        });
+        return InstallerSequenceResult { outcome, rows };
     }
 
     let chain = install_one_with_fallback(
@@ -229,11 +217,10 @@ pub fn install_resolved_capture(
         entry.github.as_deref(),
         agent.harness_version.as_deref(),
         &installer_env,
-        workspace_root,
+        host,
         dest_dir,
         pin_declared,
         progress,
-        home,
     );
     rows.extend(chain.rows);
     if let Some(err) = chain.terminal_error {
@@ -243,7 +230,7 @@ pub fn install_resolved_capture(
         };
     }
 
-    final_verification(agent, workspace_root, dest_dir, rows, home)
+    final_verification(agent, entry, host, dest_dir, rows)
 }
 
 struct KeptHarness {
@@ -257,15 +244,14 @@ fn keep_existing_harness(
     step_label: &'static str,
     path: &Path,
     expected_sha256: Option<&str>,
-    workspace_root: &Path,
+    host: &HostExec,
     dest_dir: &Path,
-    home: &Path,
 ) -> KeptHarness {
     let started_at = current_timestamp();
     let outcome = (|| -> Result<InstalledArtifact> {
         let artifact = InstalledArtifact::of(path)?;
         verify_expected_sha256(expected_sha256, &artifact.sha256)?;
-        verify_binary_spawns(path, workspace_root, &[dest_dir], home)?;
+        verify_binary_spawns(path, host, &[dest_dir])?;
         Ok(artifact)
     })();
     let mut row = InstallerRowDraft {
@@ -284,7 +270,7 @@ fn keep_existing_harness(
     };
     match &outcome {
         Ok(artifact) => {
-            row.version = probe_binary_version(path, workspace_root, &[dest_dir], home);
+            row.version = probe_binary_version(path, host, &[dest_dir]);
             row.artifact = Some(artifact.clone());
         }
         Err(err) => {
@@ -333,11 +319,10 @@ pub(crate) fn install_one_with_fallback(
     github_url: Option<&str>,
     version_pin: Option<&str>,
     env: &HashMap<String, String>,
-    workspace_root: &Path,
+    host: &HostExec,
     dest_dir: &Path,
     pin_declared: bool,
     progress: Option<&InstallProgress<'_>>,
-    home: &Path,
 ) -> FallbackChain {
     let mut remaining = install.clone();
     let mut rows = Vec::new();
@@ -374,7 +359,7 @@ pub(crate) fn install_one_with_fallback(
             }
         };
         let kind = path_kind_of(&spec);
-        let missing_for_path = missing_required_tools(&spec, workspace_root, dest_dir, home);
+        let missing_for_path = missing_required_tools(&spec, host, dest_dir);
         if !missing_for_path.is_empty() {
             attempts.push((
                 path_label_of(kind),
@@ -402,15 +387,7 @@ pub(crate) fn install_one_with_fallback(
             continue;
         }
         let step = run_guarded_install_step(step_label, path_label_of(kind), progress, || {
-            run_install_step(
-                step_label,
-                spec,
-                env,
-                workspace_root,
-                dest_dir,
-                pin_declared,
-                home,
-            )
+            run_install_step(step_label, spec, env, host, dest_dir, pin_declared)
         });
         rows.push(step.row);
         match step.outcome {
@@ -530,9 +507,8 @@ fn path_kind_of(spec: &ResolvedInstallSpec) -> InstallPathKind {
 
 pub(super) fn missing_required_tools(
     spec: &ResolvedInstallSpec,
-    workspace_root: &Path,
+    host: &HostExec,
     dest_dir: &Path,
-    home: &Path,
 ) -> Vec<String> {
     let required_tools: Vec<&str> = match spec {
         ResolvedInstallSpec::Shell { required_tools, .. } => {
@@ -543,7 +519,7 @@ pub(super) fn missing_required_tools(
     };
     required_tools
         .into_iter()
-        .filter(|tool| resolve_creates(tool, workspace_root, &[dest_dir], home).is_none())
+        .filter(|tool| resolve_creates(tool, host, &[dest_dir]).is_none())
         .map(str::to_owned)
         .collect()
 }

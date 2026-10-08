@@ -22,8 +22,10 @@ pub(crate) fn install_config(shell: &str, creates: &str) -> AgentInstallConfig {
     }
 }
 
-pub(crate) fn workspace_root() -> PathBuf {
-    std::env::temp_dir()
+/// Host-exec inputs rooted at `home`, with no workload identity.
+pub(crate) fn host(home: &Path) -> HostExec {
+    HostExec::with_profile(home, crate::runtime::sandbox::SandboxProfile::default())
+        .expect("host exec")
 }
 
 pub(crate) fn agent_config(command: &str) -> AgentConfig {

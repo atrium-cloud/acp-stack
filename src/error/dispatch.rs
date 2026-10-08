@@ -102,7 +102,6 @@ impl StackError {
             | StackError::AgentInstallerCreatesMissing { .. }
             | StackError::AgentInstallerBinaryUnrunnable { .. }
             | StackError::AgentInstallerPrerequisitesMissing { .. }
-            | StackError::AgentInstallerWorkingDirectoryMissing { .. }
             | StackError::AgentInstallerTimeout => {
                 "inspect `acps installer history`, then retry with `acps agent install`"
             }

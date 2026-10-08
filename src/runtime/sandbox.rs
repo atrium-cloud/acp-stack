@@ -421,6 +421,52 @@ pub fn preflight(
     }
 }
 
+/// The runtime runs the network provider before every isolated spawn, so with a workload identity
+/// its executable chain, and every existing absolute path in its arguments (an interpreted
+/// provider's script), must be out of the identity's reach.
+pub fn verify_provider_executable(
+    profile: &SandboxProfile,
+    network: Option<&NetworkProviderExtension>,
+) -> Result<()> {
+    if profile.identity.is_none() {
+        return Ok(());
+    }
+    let Some(network) = network else {
+        return Ok(());
+    };
+    let Some((executable, arguments)) = network.provider.split_first() else {
+        return Ok(());
+    };
+    let executor = profile.executor();
+    let vetted_arguments = arguments
+        .iter()
+        .filter(|argument| Path::new(argument).is_absolute());
+    for (index, path) in std::iter::once(executable)
+        .chain(vetted_arguments)
+        .enumerate()
+    {
+        // An argument may name a path that does not exist yet, which the identity must not be
+        // able to create either.
+        let writable = if index == 0 {
+            crate::workload_fs::exec_chain_writable_component(&executor, Path::new(path))?
+        } else {
+            crate::workload_fs::future_path_writable_component(&executor, Path::new(path))?
+        };
+        if let Some(writable) = writable {
+            let subject = if index == 0 {
+                format!("network provider `{path}`")
+            } else {
+                format!("network provider `{executable}` argument `{path}`")
+            };
+            return Err(StackError::WorkloadWritableExecutable {
+                subject,
+                path: writable,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Re-uid'ing the workload needs `setpriv`, the capabilities its drop chain uses, and under
 /// `unshare` a `setpriv` that can re-arm the parent-death signal.
 fn preflight_identity(mode: SandboxMode) -> std::result::Result<(), String> {
@@ -1300,5 +1346,74 @@ mod tests {
     fn preflight_off_is_ok_custom_requires_wrapper() {
         assert!(preflight(&profile(SandboxMode::Off), None).is_ok());
         assert!(preflight(&profile(SandboxMode::Custom), None).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires CAP_SETUID/CAP_SETGID and ACPS_TEST_WORKLOAD_USER"]
+    fn provider_check_covers_absolute_script_arguments() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let name = std::env::var("ACPS_TEST_WORKLOAD_USER").expect("ACPS_TEST_WORKLOAD_USER");
+        let entry = crate::ownership::lookup_user(&name)
+            .expect("passwd lookup")
+            .expect("the workload user exists");
+        let profile = SandboxProfile {
+            identity: Some(WorkloadIdentity {
+                name: name.clone(),
+                uid: entry.uid,
+                gid: entry.gid,
+                home: entry.home,
+            }),
+            config: SandboxConfig {
+                workload_user: Some(name),
+                ..cfg(SandboxMode::Unshare)
+            },
+        };
+        // The checkout's ancestors stand in for runtime-owned dirs; a temp dir's would not.
+        let root = tempfile::Builder::new()
+            .prefix(".acps-provider-")
+            .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+            .expect("fixture root");
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("chmod root");
+        let scripts = root.path().join("scripts");
+        std::fs::create_dir(&scripts).expect("scripts dir");
+        let script = scripts.join("setup-net.sh");
+        std::fs::write(&script, b"#!/bin/sh\n").expect("script");
+        let provider = vec![
+            "/bin/sh".to_owned(),
+            "--verbose".to_owned(),
+            root.path().join("created-later.sock").display().to_string(),
+            script.display().to_string(),
+        ];
+        let network = network_extension(provider, None);
+
+        std::fs::set_permissions(&scripts, std::fs::Permissions::from_mode(0o777))
+            .expect("chmod scripts");
+        let error = verify_provider_executable(&profile, Some(&network))
+            .expect_err("a workload-writable script argument is refused");
+        assert_eq!(error.error_code(), "sandbox.workload_writable_executable");
+
+        std::fs::set_permissions(&scripts, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod scripts");
+        verify_provider_executable(&profile, Some(&network))
+            .expect("flags are skipped; the script and the missing path are out of reach");
+
+        // A missing argument still counts when the identity could create it.
+        let drop_dir = root.path().join("drop");
+        std::fs::create_dir(&drop_dir).expect("drop dir");
+        std::fs::set_permissions(&drop_dir, std::fs::Permissions::from_mode(0o777))
+            .expect("chmod drop");
+        let pending = network_extension(
+            vec![
+                "/bin/sh".to_owned(),
+                drop_dir.join("absent.sh").display().to_string(),
+            ],
+            None,
+        );
+        let error = verify_provider_executable(&profile, Some(&pending))
+            .expect_err("a missing argument in a workload-writable dir is refused");
+        assert_eq!(error.error_code(), "sandbox.workload_writable_executable");
     }
 }

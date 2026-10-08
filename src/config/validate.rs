@@ -316,6 +316,16 @@ fn validate_agent_config(agent: &AgentConfig) -> Result<()> {
     if let Some(cwd) = &agent.cwd {
         validate_absolute_path("agent.cwd", cwd)?;
     }
+    // A relative path with a separator would resolve against the workload-writable cwd.
+    if !Path::new(&agent.command).is_absolute() && agent.command.contains('/') {
+        return Err(StackError::InvalidParam {
+            field: "agent.command",
+            reason: format!(
+                "`{}` is a relative path; use an absolute path or a bare command name",
+                agent.command
+            ),
+        });
+    }
     validate_agent_restart(&agent.restart)?;
     if let Some(expected_sha256) = &agent.expected_sha256 {
         validate_expected_sha256(expected_sha256)?;

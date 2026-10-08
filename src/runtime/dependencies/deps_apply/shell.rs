@@ -134,22 +134,3 @@ pub(crate) fn resolve_command(name: &str, home: &Path) -> Option<std::path::Path
         .map(|dir| dir.join(name))
         .find(|candidate| is_executable_file(candidate))
 }
-
-/// True when `path` is a regular file with at least one execute bit set; without the mode check a failed `chmod` would let the postcheck pass against a non-executable placeholder.
-fn is_executable_file(path: &Path) -> bool {
-    if !path.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        match std::fs::metadata(path) {
-            Ok(meta) => (meta.mode() & 0o111) != 0,
-            Err(_) => false,
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
-}

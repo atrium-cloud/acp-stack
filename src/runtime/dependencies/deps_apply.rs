@@ -15,7 +15,7 @@ use crate::error::{Result, StackError};
 use crate::runtime::dependencies::deps::{DepStatus, check_dependencies};
 use crate::runtime::process_runner::{
     CaptureOutcome, NON_INTERACTIVE_ENV, apply_non_interactive_env, detach_into_new_session,
-    join_reader_bounded, kill_process_group, wait_with_timeout,
+    is_executable_file, join_reader_bounded, kill_process_group, wait_with_timeout,
 };
 use crate::state::{
     INSTALLER_OUTPUT_CAP_BYTES, INSTALLER_STATUS_RUNNING, InstallerRunFinish, InstallerRunInput,

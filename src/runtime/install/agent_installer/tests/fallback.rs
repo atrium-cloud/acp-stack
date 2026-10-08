@@ -46,10 +46,9 @@ exit 9
         &entry,
         &HarnessInstall::Install,
         HashMap::new(),
-        tempdir.path(),
+        &host(tempdir.path()),
         tempdir.path(),
         None,
-        tempdir.path(),
     );
 
     match result
@@ -137,11 +136,10 @@ exit 1
         None,
         None,
         &HashMap::new(),
-        tempdir.path(),
+        &host(tempdir.path()),
         &dest_dir,
         false,
         None,
-        tempdir.path(),
     );
 
     assert!(
@@ -180,10 +178,9 @@ fn shell_install_records_no_version() {
         &entry,
         &HarnessInstall::Install,
         HashMap::new(),
-        tempdir.path(),
+        &host(tempdir.path()),
         tempdir.path(),
         None,
-        tempdir.path(),
     );
     result.outcome.expect("install ok");
     assert_eq!(result.rows.len(), 1);
@@ -215,11 +212,10 @@ fn missing_shell_required_tool_fails_when_no_fallback_is_runnable() {
         None,
         None,
         &HashMap::new(),
-        tempdir.path(),
+        &host(tempdir.path()),
         tempdir.path(),
         false,
         None,
-        tempdir.path(),
     );
 
     match chain.terminal_error.expect("missing prerequisite") {
@@ -272,11 +268,10 @@ exit 9
         None,
         None,
         &HashMap::new(),
-        tempdir.path(),
+        &host(tempdir.path()),
         tempdir.path(),
         false,
         None,
-        tempdir.path(),
     );
 
     match chain.terminal_error.expect("chain should fail") {
@@ -351,11 +346,10 @@ fn single_path_failure_keeps_its_typed_error() {
         None,
         None,
         &HashMap::new(),
-        tempdir.path(),
+        &host(tempdir.path()),
         tempdir.path(),
         false,
         None,
-        tempdir.path(),
     );
 
     assert!(
@@ -381,9 +375,7 @@ fn github_release_install_path_has_no_host_tool_prerequisites() {
         version_pin: None,
     };
     let tempdir = TempDir::new().expect("tempdir");
-    assert!(
-        missing_required_tools(&spec, tempdir.path(), tempdir.path(), tempdir.path()).is_empty()
-    );
+    assert!(missing_required_tools(&spec, &host(tempdir.path()), tempdir.path()).is_empty());
 }
 
 #[cfg(unix)]
@@ -404,7 +396,7 @@ fn required_tools_resolve_from_the_managed_node_bin() {
     };
 
     assert_eq!(
-        missing_required_tools(&spec, home.path(), home.path(), home.path()),
+        missing_required_tools(&spec, &host(home.path()), home.path()),
         ["definitely-not-installed-tool-12345"]
     );
 }

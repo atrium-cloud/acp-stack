@@ -117,6 +117,10 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
     {
         return Err(crate::error::StackError::SandboxFailed { reason });
     }
+    crate::runtime::sandbox::verify_provider_executable(
+        &sandbox_profile,
+        network_provider.as_ref(),
+    )?;
     // A previous daemon that died uncleanly leaves its workload cgroups, and their processes, behind.
     if crate::runtime::sandbox::cgroup::uses_workload_cgroups(&sandbox_profile) {
         let removed = crate::runtime::sandbox::cgroup::sweep_stale();

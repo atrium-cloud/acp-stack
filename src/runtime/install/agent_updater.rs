@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -13,6 +12,7 @@ use crate::runtime::install::agent_installer::{
     ReconnectingInstallerSink, STEP_ADAPTER, STEP_HARNESS, STEP_INSTALL, begin_tracked_step,
     finalize_tracked_step, install_one_with_fallback, npm_version_for_pin,
     persist_untracked_installer_row, probe_binary_version, resolve_creates,
+    verify_workload_reachable,
 };
 use crate::runtime::install::agent_registry::{
     AdapterSpec, AptUpdate, HarnessSpec, InstallSet, RegistryEntry, RegistryKind,
@@ -20,8 +20,7 @@ use crate::runtime::install::agent_registry::{
 };
 use crate::runtime::install::agent_version_check::normalize_version;
 use crate::runtime::process_runner::{
-    CaptureOutcome, apply_non_interactive_env, forward_host_env, join_reader_bounded,
-    kill_process_group, managed_path_env, run_captured,
+    CaptureOutcome, HostExec, join_reader_bounded, kill_process_group, run_captured,
 };
 use crate::state::{
     INSTALLER_METHOD_APT, INSTALLER_METHOD_GITHUB, INSTALLER_METHOD_NATIVE, INSTALLER_METHOD_NPM,
@@ -30,6 +29,7 @@ use crate::state::{
 };
 
 const UPDATE_COMMAND_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const APT_GET_PROGRAM: &str = "apt-get";
 const HELP_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const NATIVE_UPDATE_COMMANDS: &[&str] = &["update", "upgrade"];
 const PROBE_FAILURE_OUTPUT_TAIL_BYTES: usize = 200;
@@ -144,31 +144,28 @@ pub fn run_managed_agent_update(
         }
         Err(error) => return Err(error),
     };
-    let workspace_root = PathBuf::from(config.workspace.root.clone());
+    let host = HostExec::new(&home, &config.workspace.sandbox)?;
     let dest_dir = crate::runtime::install::local_bin_dir(&home);
     let log_base = crate::state::default_installer_log_base(&home);
     update_agent_for_config(
         &config,
         entry,
         &store,
-        &workspace_root,
+        &host,
         &dest_dir,
         Some(&log_base),
         options,
-        &home,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn update_agent_for_config(
     config: &Config,
     entry: &RegistryEntry,
     state: &StateStore,
-    workspace_root: &Path,
+    host: &HostExec,
     dest_dir: &Path,
     log_base: Option<&Path>,
     options: AgentUpdateOptions,
-    home: &Path,
 ) -> Result<AgentUpdateReport> {
     if options.agent_running {
         return Ok(AgentUpdateReport::skipped(
@@ -178,18 +175,17 @@ pub fn update_agent_for_config(
     }
 
     entry.ensure_supported()?;
-    crate::runtime::node_runtime::ensure_before_install(home);
+    crate::runtime::node_runtime::ensure_before_install(host.home());
     let entry =
         crate::runtime::install::agent_registry::effective_registry_entry(entry, &config.agent)?;
     let entry = entry.as_ref();
     let installed_rows = state.latest_successful_installer_runs_for_agent(&config.agent.id)?;
     let context = UpdateExecutionContext {
-        workspace_root,
+        host,
         dest_dir,
         state,
         log_base,
         force: options.force,
-        home,
     };
     let mut steps = Vec::new();
     for component in update_components(entry, &config.agent)? {
@@ -244,12 +240,11 @@ pub fn update_agent_for_config(
 }
 
 struct UpdateExecutionContext<'a> {
-    workspace_root: &'a Path,
+    host: &'a HostExec,
     dest_dir: &'a Path,
     state: &'a StateStore,
     log_base: Option<&'a Path>,
     force: bool,
-    home: &'a Path,
 }
 
 fn update_component(
@@ -302,13 +297,12 @@ fn update_component(
                 component.github_url,
                 version_pin,
                 &HashMap::new(),
-                context.workspace_root,
+                context.host,
                 context.dest_dir,
                 // The update path has no `expected_sha256` verification step, so
                 // the step-level spawn probe MUST keep running here.
                 false,
                 Some(&progress),
-                context.home,
             );
             if let Some(err) = chain.terminal_error {
                 let mut rows = chain.rows;
@@ -328,37 +322,27 @@ fn update_component(
             &progress,
             component.step,
             INSTALL_METHOD_APT,
-            || {
-                run_apt_update_step(
-                    component.step,
-                    apt,
-                    context.workspace_root,
-                    context.dest_dir,
-                    context.home,
-                )
-            },
+            || run_apt_update_step(component.step, apt, context.host, context.dest_dir),
         )],
         UpdatePlanKind::Native { command } => vec![run_tracked_update_step(
             &progress,
             component.step,
             INSTALL_METHOD_NATIVE,
-            || {
-                run_native_update_step(
-                    component.step,
-                    &command,
-                    context.workspace_root,
-                    context.dest_dir,
-                    context.home,
-                )
-            },
+            || run_native_update_step(component.step, &command, context.host, context.dest_dir),
         )],
     };
 
     persist_update_rows(&mut rows, agent, context.state, context.log_base)?;
     let failed = rows.iter().find(|row| row.status != "ran");
+    let message = match failed {
+        Some(row) => Some(row.stderr.clone()).filter(|value| !value.is_empty()),
+        None => verify_workload_reachable(context.host, &[native_probe_target(component).as_str()])
+            .err()
+            .map(|error| error.to_string()),
+    };
     Ok(AgentUpdateStepReport {
         step: component.step.to_owned(),
-        status: if failed.is_some() {
+        status: if failed.is_some() || message.is_some() {
             AgentUpdateStepStatus::Failed
         } else {
             AgentUpdateStepStatus::Updated
@@ -366,9 +350,7 @@ fn update_component(
         method: Some(plan.method.to_owned()),
         installed,
         latest: plan.latest,
-        message: failed
-            .map(|row| row.stderr.clone())
-            .filter(|value| !value.is_empty()),
+        message,
     })
 }
 
@@ -661,32 +643,40 @@ fn run_tracked_update_step(
 fn run_apt_update_step(
     step: &'static str,
     apt: AptUpdate,
-    workspace_root: &Path,
+    host: &HostExec,
     dest_dir: &Path,
-    home: &Path,
 ) -> crate::runtime::install::agent_installer::InstallerRowDraft {
+    let started_at = crate::runtime::install::agent_installer::current_timestamp();
+    let program = match host.resolve_program(APT_GET_PROGRAM, &[dest_dir]) {
+        Ok(program) => program,
+        Err(error) => {
+            return command_error_row(step, INSTALL_METHOD_APT, started_at, error.to_string());
+        }
+    };
     let args = ["install", "--only-upgrade", "-y", apt.package.as_str()];
-    run_command_step(
+    let context = CommandStepContext {
+        host,
+        dest_dir,
+        timeout: UPDATE_COMMAND_TIMEOUT,
+    };
+    run_command_step_with_started_at(
         step,
         INSTALL_METHOD_APT,
-        "apt-get",
+        started_at,
+        program,
         &args,
-        workspace_root,
-        dest_dir,
-        UPDATE_COMMAND_TIMEOUT,
-        home,
+        &context,
     )
 }
 
 fn run_native_update_step(
     step: &'static str,
     command: &str,
-    workspace_root: &Path,
+    host: &HostExec,
     dest_dir: &Path,
-    home: &Path,
 ) -> crate::runtime::install::agent_installer::InstallerRowDraft {
     let started_at = crate::runtime::install::agent_installer::current_timestamp();
-    let Some(path) = resolve_creates(command, workspace_root, &[dest_dir], home) else {
+    let Some(path) = resolve_creates(command, host, &[dest_dir]) else {
         return command_error_row(
             step,
             INSTALL_METHOD_NATIVE,
@@ -694,7 +684,10 @@ fn run_native_update_step(
             format!("native update command `{command}` did not resolve"),
         );
     };
-    let subcommand = match probe_native_update_subcommand(&path, workspace_root, dest_dir, home) {
+    if let Err(error) = host.verify_executable(&path) {
+        return command_error_row(step, INSTALL_METHOD_NATIVE, started_at, error.to_string());
+    }
+    let subcommand = match probe_native_update_subcommand(&path, host, dest_dir) {
         Ok(subcommand) => subcommand,
         Err(failure) => {
             let headline = if failure.command_ran {
@@ -714,10 +707,9 @@ fn run_native_update_step(
         }
     };
     let context = CommandStepContext {
-        workspace_root,
+        host,
         dest_dir,
         timeout: UPDATE_COMMAND_TIMEOUT,
-        home,
     };
     let mut row = run_command_step_with_started_at(
         step,
@@ -728,7 +720,7 @@ fn run_native_update_step(
         &context,
     );
     if row.status == "ran" {
-        row.version = probe_binary_version(&path, workspace_root, &[dest_dir], home);
+        row.version = probe_binary_version(&path, host, &[dest_dir]);
         match InstalledArtifact::of(&path) {
             Ok(artifact) => row.artifact = Some(artifact),
             // The update itself ran; an unreadable result only costs the ownership
@@ -752,15 +744,13 @@ struct NativeProbeFailure {
 
 fn probe_native_update_subcommand(
     path: &Path,
-    workspace_root: &Path,
+    host: &HostExec,
     dest_dir: &Path,
-    home: &Path,
 ) -> std::result::Result<String, NativeProbeFailure> {
     let context = CommandStepContext {
-        workspace_root,
+        host,
         dest_dir,
         timeout: HELP_PROBE_TIMEOUT,
-        home,
     };
     let mut command_ran = false;
     let mut failures = Vec::new();
@@ -853,41 +843,15 @@ fn help_output_contains_command(output: &str, command: &str) -> bool {
         .any(|token| token == command)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run_command_step(
-    step: &'static str,
-    method: &'static str,
-    program: &str,
-    args: &[&str],
-    workspace_root: &Path,
-    dest_dir: &Path,
-    timeout: Duration,
-    home: &Path,
-) -> crate::runtime::install::agent_installer::InstallerRowDraft {
-    let started_at = crate::runtime::install::agent_installer::current_timestamp();
-    let context = CommandStepContext {
-        workspace_root,
-        dest_dir,
-        timeout,
-        home,
-    };
-    run_command_step_with_started_at(
-        step,
-        method,
-        started_at,
-        PathBuf::from(program),
-        args,
-        &context,
-    )
-}
-
 struct CommandStepContext<'a> {
-    workspace_root: &'a Path,
+    host: &'a HostExec,
     dest_dir: &'a Path,
     timeout: Duration,
-    home: &'a Path,
 }
 
+/// Run an already vetted `program` through the host-exec environment. HOME is the boot-time
+/// runtime home threaded down from the entry point, not the daemon's process env, so updater
+/// subprocesses stay out of the developer's real home when tests drive the updater in-process.
 fn run_command_step_with_started_at(
     step: &'static str,
     method: &'static str,
@@ -896,19 +860,8 @@ fn run_command_step_with_started_at(
     args: &[&str],
     context: &CommandStepContext<'_>,
 ) -> crate::runtime::install::agent_installer::InstallerRowDraft {
-    let mut command = Command::new(program);
+    let mut command = context.host.command(&program, &[context.dest_dir]);
     command.args(args);
-    command.current_dir(context.workspace_root);
-    command.env_clear();
-    // HOME is the boot-time runtime home threaded down from the entry point,
-    // not the daemon's process env, so updater subprocesses stay out of the
-    // developer's real home when tests drive the updater in-process.
-    command.env("HOME", context.home);
-    forward_host_env(&mut command, "LANG");
-    if let Some(path) = managed_path_env(context.home, &[context.dest_dir]) {
-        command.env("PATH", path);
-    }
-    apply_non_interactive_env(&mut command);
     // `run_captured` detaches the child, so a native updater probing the
     // terminal cannot prompt-and-block the daemon's uncancellable update task.
     let outcome = match run_captured(&mut command, context.timeout, INSTALLER_OUTPUT_CAP_BYTES) {

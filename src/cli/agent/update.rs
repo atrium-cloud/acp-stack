@@ -1,5 +1,4 @@
 use std::io::IsTerminal;
-use std::path::PathBuf;
 
 use http::StatusCode;
 
@@ -17,6 +16,7 @@ use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::runtime::install::agent_updater::{
     AgentUpdateOptions, AgentUpdateReport, NON_REGISTRY_SKIP_REASON, update_agent_for_config,
 };
+use crate::runtime::process_runner::HostExec;
 use crate::state::{StateStore, default_installer_log_base, default_state_path};
 
 use super::{AgentUpdateArgs, AgentUpdateSetArgs, AgentUpdateSubcommand};
@@ -225,18 +225,17 @@ fn update_agent_offline(
 
     let registry = RegistryCatalog::load_with_override(&operator_registry_override(home))?;
     let entry = registry.lookup_required(&config.agent.id)?;
-    let workspace_root = PathBuf::from(config.workspace.root.clone());
+    let host = HostExec::new(home, &config.workspace.sandbox)?;
     let local_bin = local_bin_dir(home);
     let log_base = default_installer_log_base(home);
     update_agent_for_config(
         config,
         entry,
         &store,
-        &workspace_root,
+        &host,
         &local_bin,
         Some(&log_base),
         options,
-        home,
     )
 }
 

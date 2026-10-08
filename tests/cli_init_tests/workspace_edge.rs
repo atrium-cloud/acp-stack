@@ -71,9 +71,13 @@ fn init_prepares_workspace_root_before_agent_install() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     let workspace_root = tempdir.path().join("workspace");
     let managed_binary = tempdir.path().join(".local/bin/cwd-agent");
+    // The workspace exists before the recipe runs, and the recipe runs in the runtime-owned
+    // host-exec dir rather than in it.
+    let host_exec_dir = tempdir.path().join(".local/share/acp-stack/host-exec");
     let shell = format!(
-        "test \"$(pwd -P)\" = \"$(cd {workspace} && pwd -P)\" && mkdir -p {bin} && printf '#!/bin/sh\\necho cwd-agent\\n' > {binary} && chmod 755 {binary}",
+        "test -d {workspace} && test \"$(pwd -P)\" = \"$(cd {host_exec} && pwd -P)\" && mkdir -p {bin} && printf '#!/bin/sh\\necho cwd-agent\\n' > {binary} && chmod 755 {binary}",
         workspace = shell_quote_path(&workspace_root),
+        host_exec = shell_quote_path(&host_exec_dir),
         bin = shell_quote_path(managed_binary.parent().expect("binary has parent")),
         binary = shell_quote_path(&managed_binary),
     );

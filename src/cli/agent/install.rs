@@ -12,6 +12,7 @@ use crate::runtime::agent::provider_keys::{
 };
 use crate::runtime::install::agent_installer::{HarnessInstall, install_resolved, run_installer};
 use crate::runtime::install::agent_registry::RegistryCatalog;
+use crate::runtime::process_runner::HostExec;
 use crate::runtime::workspace_sources::workspace_init::prepare_workspace_base_dirs;
 use crate::secrets::SecretStore;
 use crate::state::{StateStore, default_state_path};
@@ -139,7 +140,7 @@ pub(super) fn run_agent_install(args: AgentInstallArgs, output: OutputFormat) ->
     store.migrate()?;
     set_owner_only_file(&state_path)?;
 
-    let workspace_root = PathBuf::from(config.workspace.root.clone());
+    let host = HostExec::new(&home, &config.workspace.sandbox)?;
     prepare_workspace_base_dirs(&config.workspace)?;
     let log_base = crate::state::default_installer_log_base(&home);
 
@@ -152,13 +153,13 @@ pub(super) fn run_agent_install(args: AgentInstallArgs, output: OutputFormat) ->
         let expected_sha256 = config.agent.expected_sha256.clone();
         run_installer(
             &config.agent.id,
+            &config.agent.command,
             install,
             expected_sha256.as_deref(),
             env,
-            &workspace_root,
+            &host,
             &store,
             Some(&log_base),
-            &home,
         )?
     } else {
         if !output.is_json() {
@@ -175,11 +176,10 @@ pub(super) fn run_agent_install(args: AgentInstallArgs, output: OutputFormat) ->
             entry,
             &HarnessInstall::Install,
             Default::default(),
-            &workspace_root,
+            &host,
             &dest,
             &store,
             Some(&log_base),
-            &home,
         )?
     };
 

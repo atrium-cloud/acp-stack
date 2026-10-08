@@ -54,10 +54,9 @@ fn timed_out_step_keeps_the_installer_output_it_captured() {
         &entry,
         &HarnessInstall::Install,
         HashMap::new(),
-        tempdir.path(),
+        &host(tempdir.path()),
         tempdir.path(),
         None,
-        tempdir.path(),
     );
 
     assert!(
@@ -114,8 +113,8 @@ fn escape_hatch_timeout_row_keeps_output_and_appends_the_marker() {
         Ok(captured),
         "never-created",
         None,
-        tempdir.path(),
-        tempdir.path(),
+        "never-created",
+        &host(tempdir.path()),
     );
 
     assert!(

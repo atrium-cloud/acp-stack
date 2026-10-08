@@ -127,10 +127,9 @@ fn keeping_a_native_cli_skips_its_install_and_records_a_kept_row() {
         &entry,
         &HarnessInstall::Keep(existing.clone()),
         HashMap::new(),
-        tempdir.path(),
+        &host(tempdir.path()),
         tempdir.path(),
         None,
-        tempdir.path(),
     );
 
     let outcome = result.outcome.expect("keeping a runnable binary succeeds");
@@ -163,10 +162,9 @@ fn keeping_a_cli_that_cannot_spawn_fails_the_install() {
         &entry,
         &HarnessInstall::Keep(existing),
         HashMap::new(),
-        tempdir.path(),
+        &host(tempdir.path()),
         tempdir.path(),
         None,
-        tempdir.path(),
     );
 
     assert!(matches!(
@@ -202,10 +200,9 @@ fn keeping_an_adapter_kind_cli_still_installs_the_adapter() {
         &entry,
         &HarnessInstall::Keep(existing.clone()),
         HashMap::new(),
-        tempdir.path(),
+        &host(tempdir.path()),
         tempdir.path(),
         None,
-        tempdir.path(),
     );
 
     result
@@ -255,10 +252,9 @@ fn an_installed_step_records_the_binary_it_left() {
         &entry,
         &HarnessInstall::Install,
         HashMap::new(),
-        tempdir.path(),
+        &host(tempdir.path()),
         tempdir.path(),
         None,
-        tempdir.path(),
     );
 
     let outcome = result.outcome.expect("install succeeds");

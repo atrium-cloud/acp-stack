@@ -48,6 +48,8 @@ pub const FEATURE_MANAGED_NODE_RUNTIME: &str = "managed-node-runtime";
 pub const FEATURE_SANDBOX_WORKLOAD_USER: &str = "sandbox-workload-user";
 pub const FEATURE_SANDBOX_CAPABILITY_DROP: &str = "sandbox-capability-drop";
 pub const FEATURE_SANDBOX_WORKLOAD_TERMINATION: &str = "sandbox-workload-termination";
+pub const FEATURE_HOST_EXEC_TRUSTED_INPUTS: &str = "host-exec-trusted-inputs";
+pub const FEATURE_INSTALL_WORKLOAD_REACHABILITY: &str = "install-workload-reachability";
 pub const FEATURE_SANDBOX_REQUIRE_NETWORK_PROVIDER: &str = "sandbox-require-network-provider";
 pub const FEATURE_SANDBOX_OFF_IDENTITY: &str = "sandbox-off-identity";
 
@@ -60,6 +62,8 @@ const SERVER_FEATURES: &[&str] = &[
     FEATURE_SANDBOX_WORKLOAD_USER,
     FEATURE_SANDBOX_CAPABILITY_DROP,
     FEATURE_SANDBOX_WORKLOAD_TERMINATION,
+    FEATURE_HOST_EXEC_TRUSTED_INPUTS,
+    FEATURE_INSTALL_WORKLOAD_REACHABILITY,
     FEATURE_SANDBOX_REQUIRE_NETWORK_PROVIDER,
     FEATURE_SANDBOX_OFF_IDENTITY,
 ];
@@ -73,7 +77,8 @@ pub(crate) struct ServerInfo {
     /// Advertised capability names, currently `network-provider-workload-env`,
     /// `agent-test-json`, `managed-credential-base-url`, `sandbox-mask-files`,
     /// `managed-node-runtime`, `sandbox-workload-user`, `sandbox-capability-drop`,
-    /// `sandbox-workload-termination`, `sandbox-require-network-provider`, and
+    /// `sandbox-workload-termination`, `host-exec-trusted-inputs`,
+    /// `install-workload-reachability`, `sandbox-require-network-provider`, and
     /// `sandbox-off-identity`. The list grows over time; an absent or empty list
     /// means none are present.
     features: &'static [&'static str],
@@ -393,6 +398,8 @@ mod tests {
                 "sandbox-workload-user",
                 "sandbox-capability-drop",
                 "sandbox-workload-termination",
+                "host-exec-trusted-inputs",
+                "install-workload-reachability",
                 "sandbox-require-network-provider",
                 "sandbox-off-identity",
             ])

@@ -397,6 +397,7 @@ fn apply_sandbox_set(config: &mut Config, args: &SandboxSetArgs) -> Result<()> {
         sandbox::preflight(&profile, network_provider.as_ref())
             .map_err(|reason| StackError::SandboxFailed { reason })?;
     }
+    sandbox::verify_provider_executable(&profile, network_provider.as_ref())?;
     config.workspace.sandbox = sandbox_config;
     let validated = validate_candidate_config(config)?;
     *config = validated;

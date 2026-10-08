@@ -125,7 +125,7 @@ async fn wait_for_managed_node(home: &Path) {
     }
 }
 
-/// Resolve `[agent].command` against PATH/cwd and apply the sandbox wrapper.
+/// Resolve `[agent].command` on the managed PATH and apply the sandbox wrapper.
 fn wrap_agent_command(
     agent: &AgentConfig,
     cwd: &Path,
@@ -133,7 +133,7 @@ fn wrap_agent_command(
     network_provider: Option<&crate::extensions::NetworkProviderExtension>,
     home: &Path,
 ) -> Result<crate::runtime::sandbox::WrappedCommand> {
-    let command_path = resolve_command_path(&agent.command, cwd, home).ok_or_else(|| {
+    let command_path = resolve_command_path(&agent.command, home).ok_or_else(|| {
         StackError::AgentInitializeFailed {
             reason: format!("agent command `{}` not found on PATH", agent.command),
         }
@@ -596,8 +596,10 @@ async fn fail_spawn(
     let _ = child.wait().await;
 }
 
-/// Resolve a configured command path the same way process spawning will.
-pub(crate) fn resolve_command_path(command: &str, cwd: &Path, home: &Path) -> Option<PathBuf> {
+/// Resolve a configured command path the same way process spawning will: an absolute
+/// path as is, a bare name on the managed search path. Config validation refuses a
+/// relative path with a separator, which would resolve against the workload-writable cwd.
+pub(crate) fn resolve_command_path(command: &str, home: &Path) -> Option<PathBuf> {
     if command.is_empty() {
         return None;
     }
@@ -610,12 +612,7 @@ pub(crate) fn resolve_command_path(command: &str, cwd: &Path, home: &Path) -> Op
         };
     }
     if command.contains('/') {
-        let candidate = cwd.join(command);
-        return if candidate.is_file() {
-            Some(candidate)
-        } else {
-            None
-        };
+        return None;
     }
     for dir in command_search_paths(home) {
         let candidate = dir.join(command);

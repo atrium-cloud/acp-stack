@@ -3,7 +3,6 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
 
 use crate::error::{Result, StackError};
@@ -12,8 +11,8 @@ use crate::runtime::install::agent_registry::{
 };
 use crate::runtime::install::github_release::{self, GithubReleaseInstall};
 use crate::runtime::process_runner::{
-    CaptureOutcome, apply_non_interactive_env, forward_host_env, join_reader_bounded,
-    kill_process_group, managed_path_env, resolved_python_interpreter, run_captured,
+    CaptureOutcome, HostExec, join_reader_bounded, kill_process_group, resolved_python_interpreter,
+    run_captured,
 };
 
 use super::{
@@ -21,6 +20,7 @@ use super::{
     InstallerOutcome, InstallerResult, InstallerRowDraft, MAX_INSTALLER_STREAM_BYTES,
     ResolvedInstallSpec, StepResult, current_timestamp, probe_binary_version, resolve_creates,
     sha256_of_file, verify_binary_spawns, verify_executable_header, verify_expected_sha256,
+    verify_workload_reachable,
 };
 
 /// Whole-run budget for one install step when nothing declares its own.
@@ -151,10 +151,9 @@ pub(super) fn run_install_step(
     step_label: &'static str,
     spec: ResolvedInstallSpec,
     agent_env: &HashMap<String, String>,
-    workspace_root: &Path,
+    host: &HostExec,
     dest_dir: &Path,
     pin_declared: bool,
-    home: &Path,
 ) -> StepResult {
     let started_at = current_timestamp();
     match spec {
@@ -164,27 +163,19 @@ pub(super) fn run_install_step(
             required_tools: _,
             timeout,
         } => {
-            let result = run_shell_install(
-                &script,
-                agent_env,
-                workspace_root,
-                &[dest_dir],
-                timeout,
-                home,
-            );
+            let result = run_shell_install(&script, agent_env, host, &[dest_dir], timeout);
             shell_step_with_creates(
                 step_label,
                 started_at,
                 result,
                 CreatesCheck {
                     creates: &creates,
-                    workspace_root,
+                    host,
                     extra_path_dirs: &[dest_dir],
                     pin_declared,
                 },
                 Some(INSTALL_METHOD_SHELL.to_owned()),
                 None,
-                home,
             )
         }
         ResolvedInstallSpec::Npm {
@@ -200,29 +191,26 @@ pub(super) fn run_install_step(
                     started_at.clone(),
                     &package,
                     agent_env,
-                    workspace_root,
+                    host,
                     dest_dir,
-                    home,
                 ) {
                     Ok(version) => (npm_package_with_version(&package, &version), version),
                     Err(step) => return *step,
                 },
             };
-            let result =
-                run_npm_install(&package, &name, agent_env, workspace_root, dest_dir, home);
+            let result = run_npm_install(&package, &name, agent_env, host, dest_dir);
             shell_step_with_creates(
                 step_label,
                 started_at,
                 result,
                 CreatesCheck {
                     creates: &creates,
-                    workspace_root,
+                    host,
                     extra_path_dirs: &[dest_dir],
                     pin_declared,
                 },
                 Some(INSTALL_METHOD_NPM.to_owned()),
                 Some(version),
-                home,
             )
         }
         ResolvedInstallSpec::GithubRelease {
@@ -250,10 +238,9 @@ pub(super) fn run_install_step(
                 install,
                 version_pin.as_deref(),
                 agent_env,
-                workspace_root,
+                host,
                 dest_dir,
                 pin_declared,
-                home,
             )
         }
     }
@@ -261,7 +248,7 @@ pub(super) fn run_install_step(
 
 pub(super) struct CreatesCheck<'a> {
     creates: &'a str,
-    workspace_root: &'a Path,
+    host: &'a HostExec,
     extra_path_dirs: &'a [&'a Path],
     pin_declared: bool,
 }
@@ -273,7 +260,6 @@ pub(super) fn shell_step_with_creates(
     creates_check: CreatesCheck<'_>,
     method: Option<String>,
     version: Option<String>,
-    home: &Path,
 ) -> StepResult {
     let finished_at = current_timestamp();
     match run_result {
@@ -318,9 +304,8 @@ pub(super) fn shell_step_with_creates(
             }
             let outcome = resolve_creates(
                 creates_check.creates,
-                creates_check.workspace_root,
+                creates_check.host,
                 creates_check.extra_path_dirs,
-                home,
             )
             .ok_or_else(|| StackError::AgentInstallerCreatesMissing {
                 name: creates_check.creates.to_owned(),
@@ -332,12 +317,7 @@ pub(super) fn shell_step_with_creates(
                 if creates_check.pin_declared {
                     verify_executable_header(&path)?;
                 } else {
-                    verify_binary_spawns(
-                        &path,
-                        creates_check.workspace_root,
-                        creates_check.extra_path_dirs,
-                        home,
-                    )?;
+                    verify_binary_spawns(&path, creates_check.host, creates_check.extra_path_dirs)?;
                 }
                 let artifact = InstalledArtifact::of(&path)?;
                 Ok((path, artifact))
@@ -348,9 +328,8 @@ pub(super) fn shell_step_with_creates(
                     if row.version.is_none() && !creates_check.pin_declared {
                         row.version = probe_binary_version(
                             path,
-                            creates_check.workspace_root,
+                            creates_check.host,
                             creates_check.extra_path_dirs,
-                            home,
                         );
                     }
                     row.artifact = Some(artifact.clone());
@@ -392,13 +371,12 @@ pub(super) fn github_release_step(
     install: GithubReleaseInstall<'_>,
     version_pin: Option<&str>,
     agent_env: &HashMap<String, String>,
-    workspace_root: &Path,
+    host: &HostExec,
     dest_dir: &Path,
     pin_declared: bool,
-    home: &Path,
 ) -> StepResult {
     let binary_path = dest_dir.join(install.binary_name);
-    let result = github_release::install(install, version_pin, dest_dir, home, agent_env);
+    let result = github_release::install(install, version_pin, dest_dir, host.home(), agent_env);
     let finished_at = current_timestamp();
     match result {
         Ok(outcome) => {
@@ -410,7 +388,7 @@ pub(super) fn github_release_step(
             let gate = if pin_declared {
                 verify_executable_header(&binary_path)
             } else {
-                verify_binary_spawns(&binary_path, workspace_root, &[dest_dir], home)
+                verify_binary_spawns(&binary_path, host, &[dest_dir])
             }
             .and_then(|()| InstalledArtifact::of(&binary_path));
             let mut row = InstallerRowDraft {
@@ -468,8 +446,8 @@ pub(super) fn finalize_shell_step(
     run_result: Result<CapturedOutput>,
     creates: &str,
     expected_sha256: Option<&str>,
-    workspace_root: &Path,
-    home: &Path,
+    agent_command: &str,
+    host: &HostExec,
 ) -> InstallerResult {
     let finished_at = current_timestamp();
     match run_result {
@@ -513,15 +491,15 @@ pub(super) fn finalize_shell_step(
                 };
             }
             let outcome = (|| {
-                let resolved =
-                    resolve_creates(creates, workspace_root, &[], home).ok_or_else(|| {
-                        StackError::AgentInstallerCreatesMissing {
-                            name: creates.to_owned(),
-                        }
-                    })?;
+                let resolved = resolve_creates(creates, host, &[]).ok_or_else(|| {
+                    StackError::AgentInstallerCreatesMissing {
+                        name: creates.to_owned(),
+                    }
+                })?;
                 let sha256 = sha256_of_file(&resolved)?;
                 verify_expected_sha256(expected_sha256, &sha256)?;
-                verify_binary_spawns(&resolved, workspace_root, &[], home)?;
+                verify_binary_spawns(&resolved, host, &[])?;
+                verify_workload_reachable(host, &[agent_command])?;
                 Ok(InstallerOutcome::Installed {
                     path: resolved,
                     sha256,
@@ -574,19 +552,17 @@ pub(super) struct CapturedOutput {
 pub(super) fn run_shell_install(
     shell: &str,
     agent_env: &HashMap<String, String>,
-    workspace_root: &Path,
+    host: &HostExec,
     extra_path_dirs: &[&Path],
     timeout: Duration,
-    home: &Path,
 ) -> Result<CapturedOutput> {
     run_program_install(
         "/bin/sh",
         &["-c".to_owned(), shell.to_owned()],
         agent_env,
-        workspace_root,
+        host,
         extra_path_dirs,
         timeout,
-        home,
     )
 }
 
@@ -599,9 +575,8 @@ fn run_npm_install(
     package: &str,
     name: &str,
     agent_env: &HashMap<String, String>,
-    workspace_root: &Path,
+    host: &HostExec,
     dest_dir: &Path,
-    home: &Path,
 ) -> Result<CapturedOutput> {
     let prefix = dest_dir.parent().ok_or_else(|| StackError::RegistryLoad {
         reason: format!(
@@ -624,10 +599,9 @@ fn run_npm_install(
         "npm",
         &args,
         agent_env,
-        workspace_root,
+        host,
         &[dest_dir],
         DEFAULT_INSTALLER_TIMEOUT,
-        home,
     )
 }
 
@@ -636,9 +610,8 @@ fn resolve_npm_package_version(
     started_at: String,
     package: &str,
     agent_env: &HashMap<String, String>,
-    workspace_root: &Path,
+    host: &HostExec,
     dest_dir: &Path,
-    home: &Path,
 ) -> std::result::Result<String, Box<StepResult>> {
     let args = vec![
         "view".to_owned(),
@@ -650,10 +623,9 @@ fn resolve_npm_package_version(
         "npm",
         &args,
         agent_env,
-        workspace_root,
+        host,
         &[dest_dir],
         DEFAULT_INSTALLER_TIMEOUT,
-        home,
     );
     match result {
         Ok(captured) if captured.exit_status == Some(0) => {
@@ -813,7 +785,7 @@ fn timed_out_row(
     }
 }
 
-fn append_stderr_detail(stderr: &str, detail: impl std::fmt::Display) -> String {
+pub(super) fn append_stderr_detail(stderr: &str, detail: impl std::fmt::Display) -> String {
     if stderr.is_empty() {
         detail.to_string()
     } else {
@@ -825,36 +797,24 @@ fn run_program_install(
     program: &str,
     args: &[String],
     agent_env: &HashMap<String, String>,
-    workspace_root: &Path,
+    host: &HostExec,
     extra_path_dirs: &[&Path],
     timeout: Duration,
-    home: &Path,
 ) -> Result<CapturedOutput> {
-    if !workspace_root.is_dir() {
-        return Err(StackError::AgentInstallerWorkingDirectoryMissing {
-            path: workspace_root.to_path_buf(),
-        });
-    }
-
-    let mut command = Command::new(program);
-    command.args(args).current_dir(workspace_root).env_clear();
-
     // Minimal env so the installer is no wider a door than the agent itself.
-    let path_env = managed_path_env(home, extra_path_dirs);
-    if let Some(path) = &path_env {
-        command.env("PATH", path);
-    }
-    // HOME comes from the boot-time runtime home threaded down by the entry
-    // point, not the daemon's process env: a test running the installer
-    // in-process must not send recipes or the npm cache into the developer's
-    // real home.
-    command.env("HOME", home);
-    forward_host_env(&mut command, "LANG");
-    apply_non_interactive_env(&mut command);
+    // HOME is the boot-time runtime home threaded down by the entry point, not
+    // the daemon's process env: a test running the installer in-process must
+    // not send recipes or the npm cache into the developer's real home.
+    let resolved = host.resolve_program(program, extra_path_dirs)?;
+    let mut command = host.command(&resolved, extra_path_dirs);
+    command.args(args);
     // Point node-gyp at the interpreter binary rather than whatever wrapper
     // `python3` happens to be. Set before `[agent].env` so an entry that knows
     // better can override it, unlike the reserved names below.
-    if let Some(interpreter) = resolved_python_interpreter(path_env.as_ref()) {
+    let path_env = host.path_env(extra_path_dirs);
+    if let Some(interpreter) =
+        resolved_python_interpreter(path_env.as_ref(), Some(host.home()), host.cwd())
+    {
         command.env("npm_config_python", interpreter);
     }
     // `[agent].env` must not override PATH/HOME/LANG (the daemon owns where
