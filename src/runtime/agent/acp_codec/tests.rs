@@ -984,3 +984,122 @@ async fn queued_notification_survives_backpressured_producer_cancellation_in_fif
         ]
     );
 }
+
+const FS_SESSION_ID: &str = "sess_fs";
+
+fn fs_context(cwd: &Path, state: Option<Arc<TokioMutex<StateStore>>>) -> AcpFsContext {
+    AcpFsContext {
+        anchor: Arc::new(crate::workload_fs::Anchor::open(cwd).expect("anchor")),
+        cwd: cwd.to_path_buf(),
+        sandbox: crate::runtime::sandbox::SandboxProfile::default(),
+        state,
+        sink: Arc::new(RecordingSink::default()),
+    }
+}
+
+fn read_request(path: &Path) -> ReadTextFileRequest {
+    ReadTextFileRequest::new(SessionId::new(FS_SESSION_ID), path)
+}
+
+fn write_request(path: &Path, content: &str) -> WriteTextFileRequest {
+    WriteTextFileRequest::new(SessionId::new(FS_SESSION_ID), path, content)
+}
+
+fn assert_invalid_params(error: &AcpFsError) {
+    assert_eq!(
+        error.code,
+        AcpFsError::invalid_params().code,
+        "expected invalid_params, got {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn fs_handlers_round_trip_a_file_through_both_cwd_spellings_and_audit_the_write() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let cwd = tempfile::tempdir().expect("cwd");
+    std::fs::create_dir(cwd.path().join("notes")).expect("notes");
+    let state_dir = tempfile::tempdir().expect("state dir");
+    let store = StateStore::open(state_dir.path().join("state.sqlite")).expect("open");
+    store.migrate().expect("migrate");
+    let state = Arc::new(TokioMutex::new(store));
+    let context = fs_context(cwd.path(), Some(Arc::clone(&state)));
+    let canonical = context.anchor.path().join("notes/lines.txt");
+
+    handle_write_text_file(
+        &context,
+        write_request(&cwd.path().join("notes/lines.txt"), "one\ntwo\nthree\n"),
+    )
+    .await
+    .expect("write through the configured spelling");
+    let mut request = read_request(&canonical);
+    request.line = Some(2);
+    request.limit = Some(1);
+    let response = handle_read_text_file(&context, request)
+        .await
+        .expect("read through the canonical spelling");
+
+    assert_eq!(response.content, "two");
+    let mode = std::fs::metadata(&canonical)
+        .expect("metadata")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, crate::workload_fs::OWNER_ONLY_FILE_MODE);
+    let events = state
+        .lock()
+        .await
+        .query_events(crate::state::LogFilter {
+            limit: 10,
+            kind: Some("fs.write"),
+            ..Default::default()
+        })
+        .expect("events");
+    assert_eq!(events.len(), 1);
+    assert!(events[0].payload_json.contains("lines.txt"));
+}
+
+#[tokio::test]
+async fn fs_handlers_keep_the_spawn_time_cwd_after_it_is_swapped_for_a_symlink() {
+    let parent = tempfile::tempdir().expect("parent");
+    let cwd = parent.path().join("cwd");
+    std::fs::create_dir(&cwd).expect("cwd");
+    let outside = tempfile::tempdir().expect("outside");
+    std::fs::write(outside.path().join("secret"), "outside").expect("secret");
+    let context = fs_context(&cwd, None);
+
+    let moved = parent.path().join("moved");
+    std::fs::rename(&cwd, &moved).expect("move the original cwd away");
+    std::os::unix::fs::symlink(outside.path(), &cwd).expect("plant the swap");
+
+    handle_write_text_file(&context, write_request(&cwd.join("planted"), "agent"))
+        .await
+        .expect("write lands in the anchored directory");
+    let read = handle_read_text_file(&context, read_request(&cwd.join("secret")))
+        .await
+        .expect_err("the swapped-in directory is never read");
+
+    assert_eq!(read.code, AcpFsError::resource_not_found(None).code);
+    assert_eq!(
+        std::fs::read_to_string(moved.join("planted")).expect("anchored write"),
+        "agent"
+    );
+    assert!(!outside.path().join("planted").exists());
+}
+
+#[tokio::test]
+async fn fs_handlers_refuse_paths_outside_the_cwd() {
+    let cwd = tempfile::tempdir().expect("cwd");
+    let context = fs_context(cwd.path(), None);
+
+    let outside = handle_write_text_file(
+        &context,
+        write_request(Path::new("/etc/acp-stack-escape-attempt"), "x"),
+    )
+    .await
+    .expect_err("outside the cwd");
+    assert_invalid_params(&outside);
+    let traversal = handle_read_text_file(&context, read_request(&cwd.path().join("../escape")))
+        .await
+        .expect_err("traversal");
+    assert_invalid_params(&traversal);
+}

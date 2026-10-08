@@ -6,10 +6,10 @@ use crate::runtime::agent::provider_keys::providers_for_agent;
 /// override names. Every other override-capable provider's `baseURL` is dropped on each write so a
 /// cleared or moved override restores the vendor endpoint.
 pub(super) fn provision_kilo_config(
-    home: &Path,
+    workload: &WorkloadHome,
     endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
 ) -> Result<Vec<PathBuf>> {
-    let path = kilo_config_path(home);
+    let path = kilo_config_path(workload.home());
     let rerouted = match endpoint {
         Some(endpoint) => {
             let native_provider_id =
@@ -31,14 +31,14 @@ pub(super) fn provision_kilo_config(
         }
         None => None,
     };
-    if rerouted.is_none() && !path.exists() {
+    if rerouted.is_none() && !workload.exists(&path)? {
         return Ok(Vec::new());
     }
-    let mut root = read_json_object(&path)?;
+    let mut root = read_json_object(workload, &path)?;
     let changed = remove_managed_kilo_base_urls(&mut root);
     let Some((native_provider_id, base_url)) = rerouted else {
         if changed {
-            write_or_remove_json_object(&path, root)?;
+            write_or_remove_json_object(workload, &path, root)?;
             return Ok(vec![path]);
         }
         return Ok(Vec::new());
@@ -47,20 +47,20 @@ pub(super) fn provision_kilo_config(
     let provider_config = ensure_object_field(providers, native_provider_id, &path)?;
     let options = ensure_object_field(provider_config, "options", &path)?;
     options.insert("baseURL".to_owned(), json!(base_url));
-    write_json_object(&path, root)?;
+    write_json_object(workload, &path, root)?;
     Ok(vec![path])
 }
 
-pub(super) fn cleanup_kilo_config(home: &Path) -> Result<Vec<CleanedAgentConfig>> {
-    let path = kilo_config_path(home);
-    if !path.exists() {
+pub(super) fn cleanup_kilo_config(workload: &WorkloadHome) -> Result<Vec<CleanedAgentConfig>> {
+    let path = kilo_config_path(workload.home());
+    if !workload.exists(&path)? {
         return Ok(Vec::new());
     }
-    let mut root = read_json_object(&path)?;
+    let mut root = read_json_object(workload, &path)?;
     if !remove_managed_kilo_base_urls(&mut root) {
         return Ok(Vec::new());
     }
-    write_or_remove_json_object(&path, root)?;
+    write_or_remove_json_object(workload, &path, root)?;
     Ok(vec![CleanedAgentConfig {
         label: "Kilo config",
         path,
@@ -133,8 +133,9 @@ mod tests {
     #[test]
     fn kilo_writes_nothing_without_an_override() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
 
-        let written = provision_kilo_config(tempdir.path(), None).expect("provision");
+        let written = provision_kilo_config(&workload, None).expect("provision");
 
         assert!(written.is_empty());
         assert!(kilo_config_value(tempdir.path()).is_none());
@@ -143,8 +144,9 @@ mod tests {
     #[test]
     fn kilo_gateway_endpoint_keeps_the_vendor_path_and_is_restored() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
 
-        provision_kilo_config(tempdir.path(), Some(&kilo_endpoint("kilo")))
+        provision_kilo_config(&workload, Some(&kilo_endpoint("kilo")))
             .expect("provision with override");
         let value = kilo_config_value(tempdir.path()).expect("kilo config written");
         assert_eq!(
@@ -152,13 +154,14 @@ mod tests {
             "http://127.0.0.1:3129/api/gateway"
         );
 
-        provision_kilo_config(tempdir.path(), None).expect("provision without");
+        provision_kilo_config(&workload, None).expect("provision without");
         assert!(kilo_config_value(tempdir.path()).is_none());
     }
 
     #[test]
     fn kilo_leaves_operator_keys_alone_when_clearing() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let path = kilo_config_path(tempdir.path());
         std::fs::create_dir_all(path.parent().expect("path has parent")).expect("create parent");
         std::fs::write(
@@ -167,7 +170,7 @@ mod tests {
         )
         .expect("write kilo config");
 
-        provision_kilo_config(tempdir.path(), None).expect("provision without");
+        provision_kilo_config(&workload, None).expect("provision without");
 
         let value = kilo_config_value(tempdir.path()).expect("kilo config kept");
         assert_eq!(value["model"], "kilo/claude");
@@ -182,8 +185,9 @@ mod tests {
     #[test]
     fn kilo_openrouter_endpoint_keeps_the_vendor_path() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
 
-        provision_kilo_config(tempdir.path(), Some(&kilo_endpoint("openrouter")))
+        provision_kilo_config(&workload, Some(&kilo_endpoint("openrouter")))
             .expect("provision with override");
 
         let value = kilo_config_value(tempdir.path()).expect("kilo config written");
@@ -196,8 +200,9 @@ mod tests {
     #[test]
     fn kilo_refuses_a_provider_it_does_not_map() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
 
-        let error = provision_kilo_config(tempdir.path(), Some(&kilo_endpoint("cerebras")))
+        let error = provision_kilo_config(&workload, Some(&kilo_endpoint("cerebras")))
             .expect_err("unmapped provider must refuse");
 
         assert!(error.to_string().contains("cerebras"), "{error}");
@@ -206,10 +211,11 @@ mod tests {
     #[test]
     fn kilo_cleanup_removes_the_managed_base_url() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        provision_kilo_config(tempdir.path(), Some(&kilo_endpoint("kilo")))
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
+        provision_kilo_config(&workload, Some(&kilo_endpoint("kilo")))
             .expect("provision with override");
 
-        let cleaned = cleanup_kilo_config(tempdir.path()).expect("cleanup");
+        let cleaned = cleanup_kilo_config(&workload).expect("cleanup");
 
         assert_eq!(cleaned.len(), 1);
         assert!(kilo_config_value(tempdir.path()).is_none());

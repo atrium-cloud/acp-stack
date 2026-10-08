@@ -567,19 +567,19 @@ fn claude_snapshot_journal_excludes_auth_state_and_digest_ignores_it() {
         br#"{"oauthAccessToken":"never-persist-this","hasCompletedOnboarding":false}"#,
     )
     .expect("state write");
-    let snapshots =
-        capture_native_config_snapshots(std::slice::from_ref(&claude_state), home.path())
-            .expect("snapshot");
-    let digests =
-        capture_native_config_file_digests(std::slice::from_ref(&claude_state), home.path())
-            .expect("digest");
-
-    let config = opencode_config("openrouter", "openrouter/old-model");
     let config_path = home
         .path()
         .join(".config")
         .join("acp-stack")
         .join("acps-config.toml");
+    let workload = WorkloadHome::with_process_credentials(home.path(), home.path());
+    let files = NativeConfigFiles::new(&config_path, &workload);
+    let snapshots = capture_native_config_snapshots(std::slice::from_ref(&claude_state), files)
+        .expect("snapshot");
+    let digests = capture_native_config_file_digests(std::slice::from_ref(&claude_state), files)
+        .expect("digest");
+
+    let config = opencode_config("openrouter", "openrouter/old-model");
     let state_path = home
         .path()
         .join(".local")
@@ -631,15 +631,15 @@ fn claude_snapshot_journal_excludes_auth_state_and_digest_ignores_it() {
         br#"{"oauthAccessToken":"changed","hasCompletedOnboarding":false}"#,
     )
     .expect("unrelated state change");
-    validate_native_config_file_digests(&digests, home.path())
+    validate_native_config_file_digests(&digests, files)
         .expect("unrelated auth state is outside the owned digest");
     atomic_write_owner_only(
         &claude_state,
         br#"{"oauthAccessToken":"changed","hasCompletedOnboarding":true}"#,
     )
     .expect("owned state change");
-    assert!(validate_native_config_file_digests(&digests, home.path()).is_err());
-    restore_native_config_snapshots(&snapshots, home.path()).expect("restore");
+    assert!(validate_native_config_file_digests(&digests, files).is_err());
+    restore_native_config_snapshots(&snapshots, files).expect("restore");
     let restored: JsonValue =
         serde_json::from_slice(&std::fs::read(&claude_state).expect("restored state"))
             .expect("restored json");
@@ -683,17 +683,18 @@ fn semantic_replacement_and_snapshot_restore_are_atomic_at_file_boundary() {
         home.path(),
     )
     .expect("prepare");
-    let paths = prepare_native_config_file_paths(&prepared, &config_path, home.path())
-        .expect("prepare paths");
-    let snapshots = capture_native_config_snapshots(&paths, home.path()).expect("snapshots");
-    write_native_config_files(&prepared, &config_path, home.path()).expect("write");
+    let workload = WorkloadHome::with_process_credentials(home.path(), home.path());
+    let files = NativeConfigFiles::new(&config_path, &workload);
+    let paths = prepare_native_config_file_paths(&prepared, files).expect("prepare paths");
+    let snapshots = capture_native_config_snapshots(&paths, files).expect("snapshots");
+    write_native_config_files(&prepared, files).expect("write");
     let written: JsonValue =
         serde_json::from_slice(&std::fs::read(&native_path).expect("read native")).expect("json");
     assert_eq!(written["theme"], "dark");
     assert_eq!(written["model"], "openrouter/old-model");
     assert!(written.get("old_unmanaged").is_none());
 
-    restore_native_config_snapshots(&snapshots, home.path()).expect("restore");
+    restore_native_config_snapshots(&snapshots, files).expect("restore");
     let restored: JsonValue =
         serde_json::from_slice(&std::fs::read(&native_path).expect("read restored")).expect("json");
     assert_eq!(restored["old_unmanaged"], true);

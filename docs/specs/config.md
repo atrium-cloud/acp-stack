@@ -144,6 +144,7 @@ expected_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abc
 
 - Supported code sources: Git repositories.
 - Supported data sources: absolute local paths, HTTPS downloads, and S3 objects.
+- Local sources must not contain symlinks. With `[workspace.sandbox].workload_user` set, they must not contain hard-linked files either.
 - Downloads and extraction are size-capped; archives cannot write outside their destination.
 
 ## Agent

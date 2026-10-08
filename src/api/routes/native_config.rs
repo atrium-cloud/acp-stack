@@ -13,18 +13,19 @@ use crate::config::Config;
 use crate::envelope::ApiSuccess;
 use crate::error::{Result, StackError};
 use crate::runtime::agent::acp_bridge::AgentSessionConfigCategory;
+use crate::runtime::agent::config_io::WorkloadHome;
 use crate::runtime::agent::model_discovery::{
     DEFAULT_MODELS_DISCOVERY_TIMEOUT, fetch_session_config_with_timeout,
     model_value_is_explicit_without_discovery, validate_advertised_value,
 };
 use crate::runtime::agent::native_config_import::{
-    APPLIED_ROLLBACK_RETENTION_SECONDS, NativeConfigImportRequest, NativeConfigInspection,
-    NativeConfigOperation, NativeConfigOperationError, NativeConfigOperationPhase,
-    NativeConfigOperationRecord, NativeConfigOperationStatus, NativeConfigPathSnapshot,
-    NativeConfigRestartMetadata, PreparedNativeConfigImport, TERMINAL_RETENTION_SECONDS,
-    capture_native_config_file_digests, capture_native_config_snapshots,
-    load_native_config_operation_journal, native_config_projection,
-    native_config_transaction_paths, next_native_config_operation_id,
+    APPLIED_ROLLBACK_RETENTION_SECONDS, NativeConfigFiles, NativeConfigImportRequest,
+    NativeConfigInspection, NativeConfigOperation, NativeConfigOperationError,
+    NativeConfigOperationPhase, NativeConfigOperationRecord, NativeConfigOperationStatus,
+    NativeConfigPathSnapshot, NativeConfigRestartMetadata, PreparedNativeConfigImport,
+    TERMINAL_RETENTION_SECONDS, capture_native_config_file_digests,
+    capture_native_config_snapshots, load_native_config_operation_journal,
+    native_config_projection, native_config_transaction_paths, next_native_config_operation_id,
     persist_native_config_operation, prepare_native_config_file_paths,
     remove_native_config_operation_journal, restore_native_config_snapshots,
     validate_native_config_file_digests, validate_native_config_secret_refs_read_only,
@@ -70,11 +71,13 @@ pub(crate) async fn native_config_import_handler(
     let selection = request.selection();
     let home = state.runtime_paths.home.clone();
     let current = state.refresh_array_runtime_from_disk().await?;
-    let prepared = state
-        .native_config_imports
-        .lock()
-        .await
-        .prepare(&selection, &current, &home)?;
+    let workload = native_workload_home(&state)?;
+    let prepared =
+        state
+            .native_config_imports
+            .lock()
+            .await
+            .prepare(&selection, &current, workload.home())?;
     validate_native_config_secret_refs_read_only(&prepared, &home)?;
     let _mutation = state.lock_agent_config_mutation().await?;
 
@@ -96,8 +99,11 @@ pub(crate) async fn native_config_import_handler(
         let mut imports = state.native_config_imports.lock().await;
         if let Some(existing) = imports.operation_for_fingerprint(&prepared.transaction_fingerprint)
             && (existing.operation.status == NativeConfigOperationStatus::Queued
-                || validate_native_config_file_digests(&existing.applied_file_digests, &home)
-                    .is_ok())
+                || validate_native_config_file_digests(
+                    &existing.applied_file_digests,
+                    NativeConfigFiles::new(&state.runtime_paths.config_path, &workload),
+                )
+                .is_ok())
         {
             return Ok(ApiSuccess::new(existing.operation));
         }
@@ -235,9 +241,10 @@ pub(crate) async fn native_config_cancel_handler(
 
     if validate_applied_files {
         ensure_latest_applied_operation(&state, &operation_id).await?;
+        let workload = native_workload_home(&state)?;
         validate_native_config_file_digests(
             &original.applied_file_digests,
-            &state.runtime_paths.home,
+            NativeConfigFiles::new(&state.runtime_paths.config_path, &workload),
         )?;
     }
     let rollback_marker = mutate_operation_record(&state, &operation_id, |record| {
@@ -298,7 +305,7 @@ pub(crate) async fn recover_native_config_imports(state: &AppState) -> Result<()
     let records = load_native_config_operation_journal(
         &state.runtime_paths.state_path,
         &state.runtime_paths.config_path,
-        &state.runtime_paths.home,
+        native_workload_home(state)?.home(),
     )?;
     let pending = records
         .iter()
@@ -434,6 +441,10 @@ fn spawn_queued_worker(state: AppState, operation_id: String) {
             }
         }
     });
+}
+
+fn native_workload_home(state: &AppState) -> Result<WorkloadHome> {
+    WorkloadHome::resolve(&state.config, &state.runtime_paths.home)
 }
 
 fn native_error(code: &'static str) -> StackError {

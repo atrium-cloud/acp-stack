@@ -42,6 +42,21 @@ impl AcpBridge {
         command_log: Option<TerminalCommandLog>,
     ) -> Result<Self> {
         wait_for_managed_node(home).await;
+        // Opened before anything is spawned, so a failure leaves no child to reap.
+        let fs_anchor = crate::workload_fs::Anchor::open_with(&cwd, sandbox.link_policy(true))
+            .map_err(|error| StackError::AgentSpawnFailed {
+                source: std::io::Error::other(format!(
+                    "agent cwd `{}` could not be opened: {error}",
+                    cwd.display()
+                )),
+            })?;
+        let fs_context = Arc::new(AcpFsContext {
+            anchor: Arc::new(fs_anchor),
+            cwd: cwd.clone(),
+            sandbox: sandbox.clone(),
+            state: command_log.as_ref().map(|log| Arc::clone(&log.state)),
+            sink: sink.clone(),
+        });
         let mut env = build_agent_process_env(agent, home, env)?;
         // Last write wins, so the namespace owner's declaration overrides both
         // `[agent].env` and the runtime-managed rewrites above it.
@@ -82,6 +97,7 @@ impl AcpBridge {
             sink.clone(),
             Arc::clone(&notification_drain),
             terminal_context,
+            fs_context,
             exit.clone(),
         );
 
@@ -235,6 +251,7 @@ fn spawn_agent_child(
 }
 
 /// Register the client-side ACP handlers and drive the connection.
+#[allow(clippy::too_many_arguments)]
 fn spawn_connection_task(
     stdin: ChildStdin,
     stdout: ChildStdout,
@@ -242,6 +259,7 @@ fn spawn_connection_task(
     sink: Arc<dyn SessionEventSink>,
     notification_drain: Arc<NotificationDrain>,
     terminal_context: Arc<TerminalHandlerContext>,
+    fs_context: Arc<AcpFsContext>,
     exit: ExitReporter,
 ) -> ConnectionTask {
     let transport = agent_client_protocol::ByteStreams::new(stdin.compat_write(), stdout.compat());
@@ -254,9 +272,9 @@ fn spawn_connection_task(
     let output_context = Arc::clone(&terminal_context);
     let wait_context = Arc::clone(&terminal_context);
     let kill_context = Arc::clone(&terminal_context);
-    let release_context = Arc::clone(&terminal_context);
-    let fs_read_context = Arc::clone(&terminal_context);
-    let fs_write_context = terminal_context;
+    let release_context = terminal_context;
+    let fs_read_context = Arc::clone(&fs_context);
+    let fs_write_context = fs_context;
 
     let task: JoinHandle<()> = tokio::spawn(async move {
         let run = Client
@@ -360,9 +378,7 @@ fn spawn_connection_task(
                 async move |request: ReadTextFileRequest, responder, cx| {
                     let context = Arc::clone(&fs_read_context);
                     cx.spawn(async move {
-                        match handle_read_text_file(&context.workspace_root, &context.sink, request)
-                            .await
-                        {
+                        match handle_read_text_file(&context, request).await {
                             Ok(response) => responder.respond(response),
                             Err(error) => responder.respond_with_error(error),
                         }
@@ -374,14 +390,7 @@ fn spawn_connection_task(
                 async move |request: WriteTextFileRequest, responder, cx| {
                     let context = Arc::clone(&fs_write_context);
                     cx.spawn(async move {
-                        match handle_write_text_file(
-                            &context.workspace_root,
-                            context.command_log.as_ref().map(|log| &log.state),
-                            &context.sink,
-                            request,
-                        )
-                        .await
-                        {
+                        match handle_write_text_file(&context, request).await {
                             Ok(response) => responder.respond(response),
                             Err(error) => responder.respond_with_error(error),
                         }

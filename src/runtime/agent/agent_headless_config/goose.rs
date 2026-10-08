@@ -12,9 +12,10 @@ const GOOSE_MANAGED_HOST_KEYS: [&str; 4] = [
 
 pub(super) fn provision_goose_config(
     config: &Config,
-    home: &Path,
+    workload: &WorkloadHome,
     endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
 ) -> Result<Vec<PathBuf>> {
+    let home = workload.home();
     let path = home.join(".config").join("goose").join("config.yaml");
     let mut written = Vec::new();
     let Some(provider) = config.agent.provider.as_ref() else {
@@ -26,13 +27,13 @@ pub(super) fn provision_goose_config(
         let base_url_override =
             super::rerouted_base_url_for(endpoint, provider_id, &custom.base_url)?;
         let custom_provider_path = write_goose_custom_provider(
-            home,
+            workload,
             provider_id,
             custom,
             api_key_ref,
             base_url_override.as_deref().unwrap_or(&custom.base_url),
         )?;
-        let mut root = read_yaml_mapping(&path)?;
+        let mut root = read_yaml_mapping(workload, &path)?;
         // A custom provider carries its endpoint in its own file; a host left by an earlier
         // mapped-provider override would otherwise linger in config.yaml.
         for key in GOOSE_MANAGED_HOST_KEYS {
@@ -53,7 +54,7 @@ pub(super) fn provision_goose_config(
         // An empty pin is not a model: goose fails to resolve it while starting a
         // session, so an unset model must leave the key absent instead.
         write_goose_model(&mut root, config);
-        write_yaml_mapping(&path, root)?;
+        write_yaml_mapping(workload, &path, root)?;
         written.push(path.clone());
         written.push(custom_provider_path);
         return Ok(written);
@@ -84,7 +85,7 @@ pub(super) fn provision_goose_config(
         });
     }
 
-    let mut root = read_yaml_mapping(&path)?;
+    let mut root = read_yaml_mapping(workload, &path)?;
     let values = [
         (
             "GOOSE_PROVIDER",
@@ -123,7 +124,7 @@ pub(super) fn provision_goose_config(
     }
     write_goose_model(&mut root, config);
 
-    write_yaml_mapping(&path, root)?;
+    write_yaml_mapping(workload, &path, root)?;
     written.push(path.clone());
     Ok(written)
 }
@@ -146,12 +147,13 @@ fn write_goose_model(root: &mut serde_norway::Mapping, config: &Config) {
 
 pub(super) fn cleanup_goose_config(
     config: &Config,
-    home: &Path,
+    workload: &WorkloadHome,
 ) -> Result<Vec<CleanedAgentConfig>> {
+    let home = workload.home();
     let mut cleaned = Vec::new();
     let path = home.join(".config").join("goose").join("config.yaml");
-    if path.exists() {
-        let mut root = read_yaml_mapping(&path)?;
+    if workload.exists(&path)? {
+        let mut root = read_yaml_mapping(workload, &path)?;
         let mut changed = false;
         for key in [
             "GOOSE_PROVIDER",
@@ -166,7 +168,7 @@ pub(super) fn cleanup_goose_config(
             changed |= root.remove(YamlValue::String(key.to_owned())).is_some();
         }
         if changed {
-            write_or_remove_yaml_mapping(&path, root)?;
+            write_or_remove_yaml_mapping(workload, &path, root)?;
             cleaned.push(CleanedAgentConfig {
                 label: "Goose config",
                 path: path.clone(),
@@ -181,7 +183,7 @@ pub(super) fn cleanup_goose_config(
             .join("goose")
             .join("custom_providers")
             .join(format!("{}.json", provider.id));
-        if remove_file_if_exists(&path)? {
+        if workload.remove_file_if_present(&path)? {
             cleaned.push(CleanedAgentConfig {
                 label: "Goose custom provider",
                 path,
@@ -192,12 +194,13 @@ pub(super) fn cleanup_goose_config(
 }
 
 fn write_goose_custom_provider(
-    home: &Path,
+    workload: &WorkloadHome,
     provider_id: &str,
     custom: &AgentCustomProviderConfig,
     api_key_ref: &str,
     base_url: &str,
 ) -> Result<PathBuf> {
+    let home = workload.home();
     let path = home
         .join(".config")
         .join("goose")
@@ -214,7 +217,7 @@ fn write_goose_custom_provider(
         "output_max_tokens".to_owned(),
         json!(custom.output_max_tokens),
     );
-    write_json_object(&path, root)?;
+    write_json_object(workload, &path, root)?;
     Ok(path)
 }
 
@@ -444,11 +447,12 @@ mod tests {
     #[test]
     fn goose_mapped_provider_endpoint_rejects_an_override_carrying_a_path() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let config = goose_openrouter_config();
         let mut override_ = goose_endpoint("openrouter");
         override_.base_url = "http://127.0.0.1:3129/v1".to_owned();
 
-        let error = provision_goose_config(&config, tempdir.path(), Some(&override_))
+        let error = provision_goose_config(&config, &workload, Some(&override_))
             .expect_err("a path in the stored override must not reach the host setting");
         assert!(error.to_string().contains("carries a path"), "{error}");
     }
@@ -456,14 +460,15 @@ mod tests {
     #[test]
     fn goose_mapped_provider_endpoint_writes_the_host_origin_and_restores_it() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let config = goose_openrouter_config();
 
-        provision_goose_config(&config, tempdir.path(), Some(&goose_endpoint("openrouter")))
+        provision_goose_config(&config, &workload, Some(&goose_endpoint("openrouter")))
             .expect("provision with override");
         let value = goose_config_value(tempdir.path());
         assert_eq!(value["OPENROUTER_HOST"], "http://127.0.0.1:3129");
 
-        provision_goose_config(&config, tempdir.path(), None).expect("provision without");
+        provision_goose_config(&config, &workload, None).expect("provision without");
         let value = goose_config_value(tempdir.path());
         assert!(value["OPENROUTER_HOST"].is_null(), "{value:?}");
         assert_eq!(value["GOOSE_PROVIDER"], "openrouter");
@@ -472,10 +477,11 @@ mod tests {
     #[test]
     fn goose_endpoint_for_another_provider_is_ignored() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
 
         provision_goose_config(
             &goose_openrouter_config(),
-            tempdir.path(),
+            &workload,
             Some(&goose_endpoint("openai")),
         )
         .expect("provision");
@@ -488,6 +494,7 @@ mod tests {
     #[test]
     fn goose_provider_without_a_host_setting_refuses_the_override() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let mut config = config_with_agent("goose", &["CEREBRAS_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "cerebras".to_owned(),
@@ -496,9 +503,8 @@ mod tests {
             custom: None,
         });
 
-        let error =
-            provision_goose_config(&config, tempdir.path(), Some(&goose_endpoint("cerebras")))
-                .expect_err("no host setting must refuse");
+        let error = provision_goose_config(&config, &workload, Some(&goose_endpoint("cerebras")))
+            .expect_err("no host setting must refuse");
 
         assert!(error.to_string().contains("no host setting"), "{error}");
     }
@@ -506,10 +512,11 @@ mod tests {
     #[test]
     fn goose_custom_provider_endpoint_keeps_the_declared_path() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let config =
             custom_provider_config("goose", crate::config::CustomProviderApi::ChatCompletions);
 
-        provision_goose_config(&config, tempdir.path(), Some(&goose_endpoint("myprovider")))
+        provision_goose_config(&config, &workload, Some(&goose_endpoint("myprovider")))
             .expect("provision");
 
         let provider_path = tempdir

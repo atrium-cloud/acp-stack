@@ -4,14 +4,12 @@
 use super::*;
 
 pub fn port_agent_skills(
-    home: &Path,
+    workload: &WorkloadHome,
     registry: &RegistryCatalog,
     old_agent_id: &str,
     target_agent_id: &str,
 ) -> Result<Option<SkillPortReport>> {
-    let home = home
-        .canonicalize()
-        .map_err(|source| skill_io_err("canonicalize home directory", home, source))?;
+    let home = workload.canonical_home()?;
     let Some(old_entry) = registry.lookup(old_agent_id) else {
         return Ok(None);
     };
@@ -27,10 +25,11 @@ pub fn port_agent_skills(
     let Some(target_root) = agent_skill_root(&home, target_entry)? else {
         return Ok(None);
     };
-    port_skill_directories(&source_root, &target_root).map(Some)
+    port_skill_directories(workload, &source_root, &target_root).map(Some)
 }
 
 pub(super) fn port_skill_directories(
+    workload: &WorkloadHome,
     source_root: &Path,
     target_root: &Path,
 ) -> Result<SkillPortReport> {
@@ -44,7 +43,7 @@ pub(super) fn port_skill_directories(
             kept_unmanaged: Vec::new(),
         });
     }
-    if !source_root_exists_without_symlink_ancestors(source_root)? {
+    if !ensure_directory_no_symlink_ancestors(workload, source_root, false)? {
         return Ok(SkillPortReport {
             source_root: source_root.to_path_buf(),
             target_root: target_root.to_path_buf(),
@@ -55,7 +54,7 @@ pub(super) fn port_skill_directories(
         });
     }
     let mut candidates = Vec::new();
-    collect_port_skill_directories(source_root, source_root, &mut candidates)?;
+    collect_port_skill_directories(workload, source_root, source_root, &mut candidates)?;
 
     if candidates.is_empty() {
         return Ok(SkillPortReport {
@@ -68,7 +67,7 @@ pub(super) fn port_skill_directories(
         });
     }
 
-    ensure_directory_no_symlink_ancestors(target_root, true)?;
+    ensure_directory_no_symlink_ancestors(workload, target_root, true)?;
     let mut installs = Vec::with_capacity(candidates.len());
     let mut kept_unmanaged = Vec::new();
     for (skill_name, entry_path) in candidates {
@@ -78,10 +77,10 @@ pub(super) fn port_skill_directories(
             .ok_or_else(|| StackError::SkillInstallFailed {
                 reason: format!("skill target `{}` has no parent", target_dir.display()),
             })?;
-        ensure_directory_no_symlink_ancestors(target_parent, true)?;
-        let action = match existing_target_state(&target_dir)? {
+        ensure_directory_no_symlink_ancestors(workload, target_parent, true)?;
+        let action = match existing_target_state(workload, &target_dir)? {
             ExistingTargetState::Missing => PortAction::Copy,
-            ExistingTargetState::AlreadyInstalled if has_managed_marker(&target_dir) => {
+            ExistingTargetState::AlreadyInstalled if has_managed_marker(workload, &target_dir) => {
                 PortAction::Overwrite
             }
             ExistingTargetState::AlreadyInstalled => {
@@ -113,6 +112,7 @@ pub(super) fn port_skill_directories(
                 // Ported skills keep the source dir's marker; nothing new is
                 // installed here, so no marker is staged.
                 copy_skill_dir_atomically(
+                    workload,
                     &install.source_dir,
                     &install.target_dir,
                     &install.name,
@@ -125,6 +125,7 @@ pub(super) fn port_skill_directories(
             }
             PortAction::Overwrite => {
                 replace_skill_dir_atomically(
+                    workload,
                     &install.source_dir,
                     &install.target_dir,
                     &install.name,

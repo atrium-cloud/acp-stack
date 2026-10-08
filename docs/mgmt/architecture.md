@@ -97,6 +97,7 @@ flowchart LR
 ### Isolation and extensions
 
 - The sandbox backend is selected by config and is portable across deployments; the masked sensitive paths are derived from the runtime's own path helpers, never from operator config.
+- With a workload identity, the runtime home (installs, managed `PATH`, masks, config, state) and the workload home (child `HOME`, native Agent config, skills) are separate, and runtime code takes both explicitly.
 - Platform-specific behavior ships behind the typed extension seams (`[extensions]`), each a generic contract `acp-stack` supervises or serves without learning the extension's semantics. Routes stay static, and plugin code runs only in external processes (see [../specs/extensions.md](../specs/extensions.md)).
 - Network isolation is the `network-provider` extension type on the `unshare` backend: a per-spawn supervisor owns the namespace lifecycle and gates workload execution on the provider's setup. All network policy lives in the provider behind a small versioned env-var contract.
 - Managed state is the `managed-state` extension type: an external orchestrator owns a named namespace through one fixed admin apply endpoint with revision watermarks, and the secret store enforces operator-vs-external provenance. During hosted init the same apply runs through the init-tier `POST /v1/init/credential`, which commits flat-store secrets and the apply under one lock.

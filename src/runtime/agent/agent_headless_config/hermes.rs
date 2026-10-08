@@ -113,10 +113,10 @@ fn hermes_managed_transport(
 
 pub(super) fn provision_hermes_config(
     config: &Config,
-    home: &Path,
+    workload: &WorkloadHome,
     endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
 ) -> Result<Vec<PathBuf>> {
-    let path = hermes_config_path(home);
+    let path = hermes_config_path(workload.home());
     let mut written = Vec::new();
     let Some(provider) = config.agent.provider.as_ref() else {
         return Ok(written);
@@ -131,7 +131,7 @@ pub(super) fn provision_hermes_config(
     let base_url_override = base_url_override.as_deref();
     let api_key_ref = require_agent_env_for_provider(config, provider_id, &path)?;
 
-    let mut root = read_yaml_mapping(&path)?;
+    let mut root = read_yaml_mapping(workload, &path)?;
     let mut model = match root.remove(YamlValue::String(HERMES_MODEL_KEY.to_owned())) {
         Some(YamlValue::Mapping(existing)) => existing,
         // A scalar `model:` left by a user is superseded by the managed block.
@@ -174,7 +174,7 @@ pub(super) fn provision_hermes_config(
             YamlValue::String(HERMES_MODEL_KEY.to_owned()),
             YamlValue::Mapping(model),
         );
-        write_yaml_mapping(&path, root)?;
+        write_yaml_mapping(workload, &path, root)?;
         written.push(path);
         return Ok(written);
     }
@@ -257,21 +257,21 @@ pub(super) fn provision_hermes_config(
         YamlValue::Mapping(model),
     );
 
-    write_yaml_mapping(&path, root)?;
+    write_yaml_mapping(workload, &path, root)?;
     written.push(path);
     Ok(written)
 }
 
 pub(super) fn cleanup_hermes_config(
     _config: &Config,
-    home: &Path,
+    workload: &WorkloadHome,
 ) -> Result<Vec<CleanedAgentConfig>> {
     let mut cleaned = Vec::new();
-    let path = hermes_config_path(home);
-    if !path.exists() {
+    let path = hermes_config_path(workload.home());
+    if !workload.exists(&path)? {
         return Ok(cleaned);
     }
-    let mut root = read_yaml_mapping(&path)?;
+    let mut root = read_yaml_mapping(workload, &path)?;
     let mut changed = remove_managed_provider_entry(&mut root);
     if let Some(YamlValue::Mapping(mut model)) =
         root.remove(YamlValue::String(HERMES_MODEL_KEY.to_owned()))
@@ -291,7 +291,7 @@ pub(super) fn cleanup_hermes_config(
         }
     }
     if changed {
-        write_or_remove_yaml_mapping(&path, root)?;
+        write_or_remove_yaml_mapping(workload, &path, root)?;
         cleaned.push(CleanedAgentConfig {
             label: "Hermes config",
             path,
@@ -535,9 +535,10 @@ mod tests {
     #[test]
     fn hermes_mapped_provider_endpoint_keeps_the_native_provider_lane() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let config = hermes_openrouter_config();
 
-        provision_hermes_config(&config, tempdir.path(), Some(&endpoint("openrouter")))
+        provision_hermes_config(&config, &workload, Some(&endpoint("openrouter")))
             .expect("provision with override");
         let value = hermes_config_value(tempdir.path());
         assert_eq!(value["model"]["provider"], "openrouter");
@@ -552,7 +553,7 @@ mod tests {
 
         // Clearing the override leaves the same native lane; the endpoint only ever lived in the
         // launch environment.
-        provision_hermes_config(&config, tempdir.path(), None).expect("provision without");
+        provision_hermes_config(&config, &workload, None).expect("provision without");
         let value = hermes_config_value(tempdir.path());
         assert_eq!(value["model"]["provider"], "openrouter");
         assert_eq!(value["model"]["default"], "deepseek/deepseek-v4-flash");
@@ -562,6 +563,7 @@ mod tests {
     #[test]
     fn hermes_native_env_lane_drops_a_previously_written_managed_entry() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let path = hermes_config_path(tempdir.path());
         std::fs::create_dir_all(path.parent().expect("path has parent")).expect("create parent");
         std::fs::write(
@@ -572,7 +574,7 @@ mod tests {
 
         provision_hermes_config(
             &hermes_openrouter_config(),
-            tempdir.path(),
+            &workload,
             Some(&endpoint("openrouter")),
         )
         .expect("provision with override");
@@ -585,6 +587,7 @@ mod tests {
     #[test]
     fn hermes_provider_without_a_base_url_env_rides_the_managed_named_lane_and_is_restored() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let mut config = config_with_agent("hermes", &["ANTHROPIC_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "anthropic".to_owned(),
@@ -593,7 +596,7 @@ mod tests {
             custom: None,
         });
 
-        provision_hermes_config(&config, tempdir.path(), Some(&endpoint("anthropic")))
+        provision_hermes_config(&config, &workload, Some(&endpoint("anthropic")))
             .expect("provision with override");
         let value = hermes_config_value(tempdir.path());
         assert_eq!(value["model"]["provider"], "custom:acps-managed");
@@ -605,7 +608,7 @@ mod tests {
         assert_eq!(entry["transport"], "anthropic_messages");
 
         // Clearing the override restores the mapped lane and drops the emptied providers map.
-        provision_hermes_config(&config, tempdir.path(), None).expect("provision without");
+        provision_hermes_config(&config, &workload, None).expect("provision without");
         let value = hermes_config_value(tempdir.path());
         assert_eq!(value["model"]["provider"], "anthropic");
         assert!(value["providers"].is_null(), "{value:?}");
@@ -614,6 +617,7 @@ mod tests {
     #[test]
     fn hermes_override_provisions_codex_responses_transport() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let mut config = config_with_agent("hermes", &["OPENAI_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "openai".to_owned(),
@@ -622,7 +626,7 @@ mod tests {
             custom: None,
         });
 
-        provision_hermes_config(&config, tempdir.path(), Some(&endpoint("openai")))
+        provision_hermes_config(&config, &workload, Some(&endpoint("openai")))
             .expect("provision with override");
 
         let value = hermes_config_value(tempdir.path());
@@ -690,9 +694,10 @@ mod tests {
     #[test]
     fn hermes_override_without_configured_model_drops_the_stale_default() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let config = hermes_opencode_config(None);
 
-        provision_hermes_config(&config, tempdir.path(), Some(&endpoint("opencode")))
+        provision_hermes_config(&config, &workload, Some(&endpoint("opencode")))
             .expect("provision with override");
 
         let value = hermes_config_value(tempdir.path());
@@ -709,9 +714,10 @@ mod tests {
     #[test]
     fn hermes_override_google_wire_model_rides_the_native_lane() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let config = hermes_opencode_config(Some("gemini-3-flash"));
 
-        provision_hermes_config(&config, tempdir.path(), Some(&endpoint("opencode")))
+        provision_hermes_config(&config, &workload, Some(&endpoint("opencode")))
             .expect("the native lane leaves transport selection to hermes");
 
         let value = hermes_config_value(tempdir.path());
@@ -732,9 +738,10 @@ mod tests {
             ),
         ] {
             let tempdir = tempfile::tempdir().expect("tempdir");
+            let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
             let config = custom_provider_config("hermes", api);
 
-            provision_hermes_config(&config, tempdir.path(), None).expect("provision");
+            provision_hermes_config(&config, &workload, None).expect("provision");
 
             let value = hermes_config_value(tempdir.path());
             assert_eq!(
@@ -747,13 +754,14 @@ mod tests {
     #[test]
     fn hermes_override_reprovision_is_byte_identical() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let config = hermes_openrouter_config();
         let path = hermes_config_path(tempdir.path());
 
-        provision_hermes_config(&config, tempdir.path(), Some(&endpoint("openrouter")))
+        provision_hermes_config(&config, &workload, Some(&endpoint("openrouter")))
             .expect("first provision");
         let first = std::fs::read(&path).expect("first config readable");
-        provision_hermes_config(&config, tempdir.path(), Some(&endpoint("openrouter")))
+        provision_hermes_config(&config, &workload, Some(&endpoint("openrouter")))
             .expect("second provision");
         let second = std::fs::read(&path).expect("second config readable");
 
@@ -763,6 +771,7 @@ mod tests {
     #[test]
     fn hermes_override_preserves_user_providers_and_model_keys() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let path = hermes_config_path(tempdir.path());
         std::fs::create_dir_all(path.parent().expect("path has parent")).expect("create parent");
         std::fs::write(
@@ -772,7 +781,7 @@ mod tests {
         .expect("write existing config");
         let config = hermes_openrouter_config();
 
-        provision_hermes_config(&config, tempdir.path(), Some(&endpoint("openrouter")))
+        provision_hermes_config(&config, &workload, Some(&endpoint("openrouter")))
             .expect("provision with override");
 
         let value = hermes_config_value(tempdir.path());
@@ -790,6 +799,7 @@ mod tests {
     #[test]
     fn hermes_override_strips_the_advertised_prefix_with_the_mapped_provider_id() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let mut config = hermes_openrouter_config();
         config
             .agent
@@ -799,7 +809,7 @@ mod tests {
             .model
             .replace("openrouter:deepseek/deepseek-v4-flash".to_owned());
 
-        provision_hermes_config(&config, tempdir.path(), Some(&endpoint("openrouter")))
+        provision_hermes_config(&config, &workload, Some(&endpoint("openrouter")))
             .expect("provision with override");
 
         let value = hermes_config_value(tempdir.path());
@@ -810,9 +820,10 @@ mod tests {
     #[test]
     fn hermes_endpoint_for_another_provider_is_ignored() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let config = hermes_openrouter_config();
 
-        provision_hermes_config(&config, tempdir.path(), Some(&endpoint("anthropic")))
+        provision_hermes_config(&config, &workload, Some(&endpoint("anthropic")))
             .expect("provision");
 
         let value = hermes_config_value(tempdir.path());
@@ -829,6 +840,7 @@ mod tests {
     #[test]
     fn hermes_custom_provider_endpoint_overrides_the_declared_base_url() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let config =
             custom_provider_config("hermes", crate::config::CustomProviderApi::ChatCompletions);
         let provider_id = config
@@ -839,7 +851,7 @@ mod tests {
             .id
             .clone();
 
-        provision_hermes_config(&config, tempdir.path(), Some(&endpoint(&provider_id)))
+        provision_hermes_config(&config, &workload, Some(&endpoint(&provider_id)))
             .expect("provision");
 
         let value = hermes_config_value(tempdir.path());

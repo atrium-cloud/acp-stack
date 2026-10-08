@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use crate::error::{Result, StackError};
+use crate::runtime::agent::config_io::WorkloadHome;
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::runtime::install::skill_installer::{
     ResolvedSkillSource, SOURCE_CUSTOM_GITHUB_PREFIX, SkillInstallReport, SkillLinkOutcome,
@@ -17,6 +18,7 @@ use super::{InitArgs, prompt, prompts_enabled};
 
 #[derive(Debug, Clone)]
 pub(super) struct InitSkillInstallPlan {
+    pub(super) workload: WorkloadHome,
     pub(super) destination_root: PathBuf,
     pub(super) selections: Vec<InitSkillSelectionPlan>,
 }
@@ -206,7 +208,8 @@ pub(super) fn resolve_skill_install_plan(
                 config.agent.id
             ),
         })?;
-    let destination_root = expand_agent_skills_install_dir(home, install_dir)?;
+    let workload = WorkloadHome::resolve(config, home)?;
+    let destination_root = expand_agent_skills_install_dir(workload.home(), install_dir)?;
 
     let mut selections = Vec::new();
     if args.essential_skills {
@@ -228,6 +231,7 @@ pub(super) fn resolve_skill_install_plan(
     }
     validate_unique_install_targets(&selections)?;
     Ok(Some(InitSkillInstallPlan {
+        workload,
         destination_root,
         selections,
     }))
@@ -292,13 +296,17 @@ pub(super) fn skill_install_postcondition_holds(
     _prior_steps: &[InitStepRecord],
 ) -> bool {
     plan.selections.iter().all(|selection| {
-        all_skills_installed(&selection.source, &plan.destination_root, &selection.skills)
+        all_skills_installed(
+            &selection.source,
+            &plan.workload,
+            &plan.destination_root,
+            &selection.skills,
+        )
     })
 }
 
 pub(super) fn install_init_skills(
     plan: &InitSkillInstallPlan,
-    home: &Path,
     config: &Config,
     registry: &RegistryCatalog,
 ) -> Result<(Vec<SkillInstallReport>, SkillLinkOutcome)> {
@@ -306,12 +314,17 @@ pub(super) fn install_init_skills(
         .selections
         .iter()
         .map(|selection| {
-            install_from_github(&selection.source, &plan.destination_root, &selection.skills)
+            install_from_github(
+                &selection.source,
+                &plan.workload,
+                &plan.destination_root,
+                &selection.skills,
+            )
         })
         .collect::<Result<Vec<_>>>()?;
     let link_outcome = registry
         .lookup(&config.agent.id)
-        .map(|entry| link_agent_skills_best_effort(home, entry))
+        .map(|entry| link_agent_skills_best_effort(&plan.workload, entry))
         .unwrap_or(SkillLinkOutcome {
             report: None,
             error: None,
@@ -365,6 +378,7 @@ mod tests {
         let destination = home.path().canonicalize().expect("home").join("skills");
         install_skill_dir(&destination, "android");
         let plan = InitSkillInstallPlan {
+            workload: WorkloadHome::with_process_credentials(home.path(), home.path()),
             destination_root: destination,
             selections: vec![InitSkillSelectionPlan {
                 source: resolved_source("openai-plugins", "zoom/android", "android"),

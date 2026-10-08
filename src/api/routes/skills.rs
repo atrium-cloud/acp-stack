@@ -15,6 +15,7 @@ use crate::config::{Config, DEFAULT_SKILL_SOURCE_BRANCH, UserSkillSource};
 use crate::envelope::ApiSuccess;
 use crate::error::StackError;
 use crate::fs_util::atomic_write_owner_only;
+use crate::runtime::agent::config_io::WorkloadHome;
 use crate::runtime::install::agent_registry::RegistryEntry;
 use crate::runtime::install::skill_installer::{
     InstalledSkill, SkillInstallReport, SkillLinkReport, SkillMetadata, SkillRemoveReport,
@@ -39,17 +40,17 @@ pub(crate) struct SkillsListResponse {
 pub(crate) async fn skills_list_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<SkillsListResponse>, StackError> {
-    let home = state.runtime_paths.home.clone();
     let config = Config::load_lenient_from_path(&state.runtime_paths.config_path)?;
+    let workload = WorkloadHome::resolve(&config, &state.runtime_paths.home)?;
     let registry = load_active_registry_for_home(&state.runtime_paths.home)?;
     let entry = registry.lookup_required(&config.agent.id)?;
     let install_dir = agent_install_dir(entry);
-    let skills = list_installed_skills(&home, entry)?;
+    let skills = list_installed_skills(&workload, entry)?;
     Ok(ApiSuccess::new(SkillsListResponse {
         agent_id: config.agent.id.clone(),
         supported: install_dir.is_some(),
         install_dir: install_dir
-            .map(|dir| expand_agent_skills_install_dir(&home, dir))
+            .map(|dir| expand_agent_skills_install_dir(workload.home(), dir))
             .transpose()?,
         skills,
     }))
@@ -138,7 +139,6 @@ pub(crate) async fn skills_add_handler(
     State(state): State<AppState>,
     Json(body): Json<SkillsAddRequest>,
 ) -> std::result::Result<ApiSuccess<SkillsAddResponse>, StackError> {
-    let home = state.runtime_paths.home.clone();
     let config = Config::load_lenient_from_path(&state.runtime_paths.config_path)?;
     let registry = load_active_registry_for_home(&state.runtime_paths.home)?;
     let entry = registry.lookup_required(&config.agent.id)?;
@@ -167,17 +167,24 @@ pub(crate) async fn skills_add_handler(
 
     // An `agent switch` may have landed during the fetch, so re-resolve the
     // active agent under the lock rather than trusting the pre-fetch config.
-    let (agent_id, entry, install) = {
+    let (agent_id, entry, workload, install) = {
         let _mutation = state.lock_agent_config_mutation().await?;
         let config = Config::load_lenient_from_path(&state.runtime_paths.config_path)?;
+        let workload = WorkloadHome::resolve(&config, &state.runtime_paths.home)?;
         let registry = load_active_registry_for_home(&state.runtime_paths.home)?;
         let entry = registry.lookup_required(&config.agent.id)?;
         let install_dir = agent_install_dir(entry)
             .ok_or_else(|| unsupported_skills_agent_error(&config.agent.id))?;
-        let destination_root = expand_agent_skills_install_dir(&home, install_dir)?;
+        let destination_root = expand_agent_skills_install_dir(workload.home(), install_dir)?;
+        let install_workload = workload.clone();
         let install = tokio::task::spawn_blocking(move || {
-            let report =
-                install_from_extracted_root(&source, &archive_root, &destination_root, &skills);
+            let report = install_from_extracted_root(
+                &source,
+                &archive_root,
+                &install_workload,
+                &destination_root,
+                &skills,
+            );
             // Hold the tempdir open until the copy finishes, then let it drop.
             drop(archive);
             report
@@ -186,10 +193,10 @@ pub(crate) async fn skills_add_handler(
         .map_err(|err| StackError::SkillInstallFailed {
             reason: format!("skill install thread join failed: {err}"),
         })??;
-        (config.agent.id.clone(), entry.clone(), install)
+        (config.agent.id.clone(), entry.clone(), workload, install)
     };
 
-    let link_outcome = link_agent_skills_best_effort(&home, &entry);
+    let link_outcome = link_agent_skills_best_effort(&workload, &entry);
     // The payload carries no filesystem paths: events are session-tier readable.
     let installed: Vec<&str> = install
         .installed
@@ -247,26 +254,26 @@ pub(crate) async fn skills_remove_handler(
         field: "skill",
         reason: format!("`{}` is not a valid skill install name", body.skill),
     })?;
-    let home = state.runtime_paths.home.clone();
     let config = Config::load_lenient_from_path(&state.runtime_paths.config_path)?;
     let registry = load_active_registry_for_home(&state.runtime_paths.home)?;
     let entry = registry.lookup_required(&config.agent.id)?;
     if agent_install_dir(entry).is_none() {
         return Err(unsupported_skills_agent_error(&config.agent.id));
     }
-    let (agent_id, entry, remove) = {
+    let (agent_id, entry, workload, remove) = {
         let _mutation = state.lock_agent_config_mutation().await?;
         // Re-check under the lock: the active agent may have changed.
         let config = Config::load_lenient_from_path(&state.runtime_paths.config_path)?;
+        let workload = WorkloadHome::resolve(&config, &state.runtime_paths.home)?;
         let registry = load_active_registry_for_home(&state.runtime_paths.home)?;
         let entry = registry.lookup_required(&config.agent.id)?;
         if agent_install_dir(entry).is_none() {
             return Err(unsupported_skills_agent_error(&config.agent.id));
         }
-        let remove = remove_agent_skill(&home, entry, &body.skill)?;
-        (config.agent.id.clone(), entry.clone(), remove)
+        let remove = remove_agent_skill(&workload, entry, &body.skill)?;
+        (config.agent.id.clone(), entry.clone(), workload, remove)
     };
-    let link_outcome = link_agent_skills_best_effort(&home, &entry);
+    let link_outcome = link_agent_skills_best_effort(&workload, &entry);
     record_skill_event(
         &state,
         "skill.remove",

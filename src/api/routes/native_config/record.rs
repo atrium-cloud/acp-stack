@@ -155,7 +155,7 @@ pub(super) fn persist_operation_record_value(
     persist_native_config_operation(
         &state.runtime_paths.state_path,
         &state.runtime_paths.config_path,
-        &state.runtime_paths.home,
+        native_workload_home(state)?.home(),
         record,
     )
 }

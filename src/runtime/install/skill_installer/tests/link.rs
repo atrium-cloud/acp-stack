@@ -7,7 +7,7 @@ fn link_agent_skills_is_none_without_link_dir() {
     let catalog = RegistryCatalog::load_embedded().expect("registry");
     let opencode = catalog.lookup("opencode").expect("opencode entry");
 
-    let report = link_agent_skills(home.path(), opencode).expect("link");
+    let report = link_agent_skills(&home_workload(&home), opencode).expect("link");
 
     assert_eq!(report, None);
 }
@@ -21,7 +21,7 @@ fn link_agent_skills_links_installed_skills() {
     write_installed_skill(&install_root, "repo-map", "# Repo Map\n");
     write_installed_skill(&install_root, "contact-center/android", "# Android\n");
 
-    let report = link_agent_skills(home.path(), claude_code_entry(&catalog))
+    let report = link_agent_skills(&home_workload(&home), claude_code_entry(&catalog))
         .expect("link")
         .expect("report");
 
@@ -60,10 +60,10 @@ fn link_agent_skills_is_idempotent_and_repoints_stale_links() {
         .expect("stale");
 
     let entry = claude_code_entry(&catalog);
-    let first = link_agent_skills(home.path(), entry)
+    let first = link_agent_skills(&home_workload(&home), entry)
         .expect("link")
         .expect("report");
-    let second = link_agent_skills(home.path(), entry)
+    let second = link_agent_skills(&home_workload(&home), entry)
         .expect("relink")
         .expect("report");
 
@@ -91,7 +91,7 @@ fn link_agent_skills_keeps_existing_real_directory_as_conflict() {
     let link_root = home_path.join(".claude/skills");
     write_installed_skill(&link_root, "repo-map", "# User owned\n");
 
-    let report = link_agent_skills(home.path(), claude_code_entry(&catalog))
+    let report = link_agent_skills(&home_workload(&home), claude_code_entry(&catalog))
         .expect("link")
         .expect("report");
 
@@ -120,7 +120,7 @@ fn link_agent_skills_keeps_existing_regular_file_as_conflict() {
     std::fs::create_dir_all(&link_root).expect("link root");
     std::fs::write(link_root.join("repo-map"), "not a directory\n").expect("file");
 
-    let report = link_agent_skills(home.path(), claude_code_entry(&catalog))
+    let report = link_agent_skills(&home_workload(&home), claude_code_entry(&catalog))
         .expect("link")
         .expect("report");
 
@@ -144,11 +144,11 @@ fn link_agent_skills_resolves_symlinked_link_root_ancestor() {
     std::fs::create_dir_all(&dotfiles_claude).expect("dotfiles dir");
     std::os::unix::fs::symlink(&dotfiles_claude, home_path.join(".claude")).expect("symlink");
 
-    let report = link_agent_skills(home.path(), claude_code_entry(&catalog))
+    let report = link_agent_skills(&home_workload(&home), claude_code_entry(&catalog))
         .expect("link")
         .expect("report");
 
-    assert_eq!(report.link_root, dotfiles_claude.join("skills"));
+    assert_eq!(report.link_root, home_path.join(".claude/skills"));
     assert_eq!(report.linked.len(), 1);
     assert_eq!(
         std::fs::read_link(dotfiles_claude.join("skills/repo-map")).expect("target"),
@@ -184,7 +184,7 @@ fn link_agent_skills_prunes_dangling_links_but_keeps_foreign_ones() {
     )
     .expect("foreign link");
 
-    let report = link_agent_skills(home.path(), claude_code_entry(&catalog))
+    let report = link_agent_skills(&home_workload(&home), claude_code_entry(&catalog))
         .expect("link")
         .expect("report");
 
@@ -206,7 +206,8 @@ fn link_agent_skills_missing_install_root_returns_none() {
     let catalog = RegistryCatalog::load_embedded().expect("registry");
     let home_path = canonical_temp_home(&home);
 
-    let report = link_agent_skills(home.path(), claude_code_entry(&catalog)).expect("link");
+    let report =
+        link_agent_skills(&home_workload(&home), claude_code_entry(&catalog)).expect("link");
 
     assert_eq!(report, None);
     assert!(!home_path.join(".claude/skills").exists());
@@ -228,7 +229,7 @@ fn link_agent_skills_skips_stray_symlinks_in_install_root() {
     std::os::unix::fs::symlink(home_path.join("elsewhere"), install_root.join("stray"))
         .expect("stray symlink");
 
-    let report = link_agent_skills(home.path(), claude_code_entry(&catalog))
+    let report = link_agent_skills(&home_workload(&home), claude_code_entry(&catalog))
         .expect("link")
         .expect("report");
 
@@ -252,15 +253,15 @@ fn link_agent_skills_resolves_symlinked_install_root_ancestor() {
     write_installed_skill(&real_agents.join("skills"), "repo-map", "# Repo Map\n");
     std::os::unix::fs::symlink(&real_agents, home_path.join(".agents")).expect("symlink");
 
-    let report = link_agent_skills(home.path(), claude_code_entry(&catalog))
+    let report = link_agent_skills(&home_workload(&home), claude_code_entry(&catalog))
         .expect("link")
         .expect("report");
 
-    assert_eq!(report.install_root, real_agents.join("skills"));
+    assert_eq!(report.install_root, home_path.join(".agents/skills"));
     assert_eq!(report.linked.len(), 1);
     assert_eq!(
         std::fs::read_link(home_path.join(".claude/skills/repo-map")).expect("target"),
-        real_agents.join("skills/repo-map")
+        home_path.join(".agents/skills/repo-map")
     );
 }
 
@@ -278,7 +279,7 @@ fn link_agent_skills_leaves_user_directories_untouched() {
         .expect("user symlink");
     std::fs::write(user_dir.join("notes.md"), "user notes\n").expect("user file");
 
-    let report = link_agent_skills(home.path(), claude_code_entry(&catalog))
+    let report = link_agent_skills(&home_workload(&home), claude_code_entry(&catalog))
         .expect("link")
         .expect("report");
 
@@ -309,7 +310,7 @@ fn link_agent_skills_best_effort_reports_error_without_failing() {
     // A regular file where the harness config dir should be makes the link root unusable.
     std::fs::write(home_path.join(".claude"), "not a directory\n").expect("file");
 
-    let outcome = link_agent_skills_best_effort(home.path(), claude_code_entry(&catalog));
+    let outcome = link_agent_skills_best_effort(&home_workload(&home), claude_code_entry(&catalog));
 
     assert_eq!(outcome.report, None);
     let error = outcome.error.expect("error reported");
@@ -327,7 +328,7 @@ fn link_agent_skills_prunes_nested_links_and_emptied_group_dirs() {
     let link_root = home_path.join(".claude/skills");
 
     let entry = claude_code_entry(&catalog);
-    let first = link_agent_skills(home.path(), entry)
+    let first = link_agent_skills(&home_workload(&home), entry)
         .expect("link")
         .expect("report");
     assert_eq!(first.linked.len(), 2);
@@ -337,7 +338,7 @@ fn link_agent_skills_prunes_nested_links_and_emptied_group_dirs() {
     // Remove both skills from the install root: the nested links dangle.
     std::fs::remove_dir_all(install_root.join("contact-center")).expect("remove skill");
     std::fs::remove_dir_all(install_root.join("tools")).expect("remove skill");
-    let second = link_agent_skills(home.path(), entry)
+    let second = link_agent_skills(&home_workload(&home), entry)
         .expect("relink")
         .expect("report");
 
@@ -373,7 +374,7 @@ fn link_agent_skills_collects_per_skill_errors_and_continues() {
     )
     .expect("dangling link");
 
-    let report = link_agent_skills(home.path(), claude_code_entry(&catalog))
+    let report = link_agent_skills(&home_workload(&home), claude_code_entry(&catalog))
         .expect("link")
         .expect("report");
 

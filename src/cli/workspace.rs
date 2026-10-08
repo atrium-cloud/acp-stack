@@ -299,7 +299,7 @@ fn run_optional_sync_after_add(
 fn sync_workspace(config: &Config) -> Result<MaterializeReport> {
     let home = home_dir()?;
     let secrets = SecretStore::open(&home)?;
-    materialize_workspace(&config.workspace, &secrets, None)
+    materialize_workspace(&config.workspace, &secrets, &home, None)
 }
 
 fn add_code_source_to_config(config: &mut Config, source: CodeSourceConfig) -> Result<String> {

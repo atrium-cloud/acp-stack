@@ -17,11 +17,11 @@ const CODEX_REASONING_SUMMARIES_KEY: &str = "model_supports_reasoning_summaries"
 
 pub(super) fn provision_codex_config(
     config: &Config,
-    home: &Path,
+    workload: &WorkloadHome,
     endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
 ) -> Result<Vec<PathBuf>> {
     let mut written = Vec::new();
-    if let Some(path) = provision_codex_main_config(config, home, endpoint)? {
+    if let Some(path) = provision_codex_main_config(config, workload, endpoint)? {
         written.push(path);
     }
     Ok(written)
@@ -29,13 +29,13 @@ pub(super) fn provision_codex_config(
 
 pub(super) fn cleanup_codex_config(
     config: &Config,
-    home: &Path,
+    workload: &WorkloadHome,
 ) -> Result<Vec<CleanedAgentConfig>> {
-    let path = home.join(".codex").join("config.toml");
-    if !path.exists() {
+    let path = workload.home().join(".codex").join("config.toml");
+    if !workload.exists(&path)? {
         return Ok(Vec::new());
     }
-    let mut root = read_toml_table(&path)?;
+    let mut root = read_toml_table(workload, &path)?;
     let mut changed = root.remove("model").is_some();
     changed |= remove_codex_reasoning_effort_pin(&mut root);
     if let Some(provider_key) = codex_provider_config_key(config) {
@@ -60,7 +60,7 @@ pub(super) fn cleanup_codex_config(
     if !changed {
         return Ok(Vec::new());
     }
-    write_or_remove_toml_table(&path, root)?;
+    write_or_remove_toml_table(workload, &path, root)?;
     Ok(vec![CleanedAgentConfig {
         label: "Codex config",
         path,
@@ -103,10 +103,10 @@ fn codex_provider_config_key(config: &Config) -> Option<String> {
 
 fn provision_codex_main_config(
     config: &Config,
-    home: &Path,
+    workload: &WorkloadHome,
     endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
 ) -> Result<Option<PathBuf>> {
-    let path = home.join(".codex").join("config.toml");
+    let path = workload.home().join(".codex").join("config.toml");
     let Some(provider) = config.agent.provider.as_ref() else {
         return Ok(None);
     };
@@ -130,7 +130,7 @@ fn provision_codex_main_config(
             return Ok(None);
         };
         let api_key_ref = require_agent_env_for_provider(config, &provider.id, &path)?;
-        let mut root = read_toml_table(&path)?;
+        let mut root = read_toml_table(workload, &path)?;
         remove_codex_reasoning_effort_pin(&mut root);
         write_codex_custom_provider_selection(
             &mut root,
@@ -141,7 +141,7 @@ fn provision_codex_main_config(
             &path,
             base_url_override,
         )?;
-        write_toml_table(&path, root)?;
+        write_toml_table(workload, &path, root)?;
         return Ok(Some(path));
     }
     if provider.id == CODEX_OPENAI_PROVIDER_ID {
@@ -156,7 +156,7 @@ fn provision_codex_main_config(
                     .to_owned(),
             });
         }
-        return provision_codex_openai_config(config, &path);
+        return provision_codex_openai_config(config, workload, &path);
     }
     if provider.id != CODEX_OPENROUTER_PROVIDER_ID {
         return Err(StackError::AgentConfigProvision {
@@ -205,7 +205,7 @@ fn provision_codex_main_config(
         });
     }
 
-    let mut root = read_toml_table(&path)?;
+    let mut root = read_toml_table(workload, &path)?;
     // Settle the provider table even with no model selected: a
     // `model_provider = "openrouter"` without a matching table leaves the
     // launched harness unable to resolve auth.
@@ -258,14 +258,12 @@ fn provision_codex_main_config(
         "wire_api".to_owned(),
         TomlValue::String("responses".to_owned()),
     );
-    let effort = config
-        .agent
-        .effort
-        .as_deref()
-        .filter(|effort| codex_catalog_effort_applies(home, model_opt.as_deref(), effort));
+    let effort = config.agent.effort.as_deref().filter(|effort| {
+        codex_catalog_effort_applies(workload.runtime_home(), model_opt.as_deref(), effort)
+    });
     write_codex_reasoning_effort_pin(&mut root, effort);
 
-    write_toml_table(&path, root)?;
+    write_toml_table(workload, &path, root)?;
     Ok(Some(path))
 }
 
@@ -326,14 +324,18 @@ fn write_codex_custom_provider_selection(
     Ok(())
 }
 
-fn provision_codex_openai_config(config: &Config, path: &Path) -> Result<Option<PathBuf>> {
+fn provision_codex_openai_config(
+    config: &Config,
+    workload: &WorkloadHome,
+    path: &Path,
+) -> Result<Option<PathBuf>> {
     let Some(model) = configured_provider_model(config) else {
         // Provider switched to openai with no model: clear any model a prior
         // run wrote so the harness does not keep using it under the new lane.
-        if !path.exists() {
+        if !workload.exists(path)? {
             return Ok(None);
         }
-        let mut root = read_toml_table(path)?;
+        let mut root = read_toml_table(workload, path)?;
         let removed_model = root.remove("model").is_some();
         let removed_pin = remove_codex_reasoning_effort_pin(&mut root);
         let prior_provider = root
@@ -350,15 +352,15 @@ fn provision_codex_openai_config(config: &Config, path: &Path) -> Result<Option<
             );
         }
         if removed_model || removed_pin || provider_changed {
-            write_toml_table(path, root)?;
+            write_toml_table(workload, path, root)?;
             return Ok(Some(path.to_path_buf()));
         }
         return Ok(None);
     };
-    let mut root = read_toml_table(path)?;
+    let mut root = read_toml_table(workload, path)?;
     remove_codex_reasoning_effort_pin(&mut root);
     if let Some(provider_id) = codex_custom_provider_to_remove(&root) {
-        backup_codex_config(path, &provider_id)?;
+        backup_codex_config(workload, path, &provider_id)?;
         if let Some(providers) = root
             .get_mut("model_providers")
             .and_then(TomlValue::as_table_mut)
@@ -374,7 +376,7 @@ fn provision_codex_openai_config(config: &Config, path: &Path) -> Result<Option<
         "model_provider".to_owned(),
         TomlValue::String("openai".to_owned()),
     );
-    write_toml_table(path, root)?;
+    write_toml_table(workload, path, root)?;
     Ok(Some(path.to_path_buf()))
 }
 
@@ -389,31 +391,33 @@ fn codex_custom_provider_to_remove(root: &TomlMap<String, TomlValue>) -> Option<
         .then(|| model_provider.to_owned())
 }
 
-fn backup_codex_config(path: &Path, provider_id: &str) -> Result<()> {
-    if !path.exists() {
+/// Copy the config to the first free `config.<provider>[-<n>].toml`. Each name is claimed with an
+/// exclusive create, so an entry already there, a planted symlink included, is skipped rather
+/// than overwritten.
+fn backup_codex_config(workload: &WorkloadHome, path: &Path, provider_id: &str) -> Result<()> {
+    let Some(content) = workload.read(path)? else {
         return Ok(());
-    }
-    let parent = parent_dir(path)?;
-    let backup_path = unique_codex_backup_path(parent, provider_id);
-    std::fs::copy(path, &backup_path).map_err(|source| StackError::ConfigWrite {
-        path: backup_path,
-        source,
-    })?;
-    Ok(())
+    };
+    let parent = workload.relative(parent_dir(path)?)?;
+    let provider_id = provider_id.to_owned();
+    workload.run(move |anchor, options| {
+        let mut index = 0;
+        loop {
+            let backup = parent.join(codex_backup_file_name(&provider_id, index));
+            match crate::workload_fs::write_file_new(anchor, &backup, &content, options) {
+                Err(StackError::WorkloadFsAlreadyExists { .. }) => index += 1,
+                claimed => return claimed,
+            }
+        }
+    })
 }
 
-fn unique_codex_backup_path(parent: &Path, provider_id: &str) -> PathBuf {
-    let first = parent.join(format!("config.{provider_id}.toml"));
-    if !first.exists() {
-        return first;
+fn codex_backup_file_name(provider_id: &str, index: usize) -> String {
+    if index == 0 {
+        format!("config.{provider_id}.toml")
+    } else {
+        format!("config.{provider_id}-{index}.toml")
     }
-    for index in 1.. {
-        let path = parent.join(format!("config.{provider_id}-{index}.toml"));
-        if !path.exists() {
-            return path;
-        }
-    }
-    unreachable!("unbounded suffix search returns a backup path")
 }
 
 #[cfg(test)]
@@ -448,9 +452,10 @@ mod tests {
     #[test]
     fn codex_openrouter_endpoint_keeps_the_responses_path_behind_the_override_origin() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let config = codex_openrouter_config();
 
-        provision_codex_config(&config, tempdir.path(), Some(&codex_endpoint("openrouter")))
+        provision_codex_config(&config, &workload, Some(&codex_endpoint("openrouter")))
             .expect("provision with override");
         let value = codex_config_value(tempdir.path());
         assert_eq!(
@@ -462,7 +467,7 @@ mod tests {
             Some("responses")
         );
 
-        provision_codex_config(&config, tempdir.path(), None).expect("provision without");
+        provision_codex_config(&config, &workload, None).expect("provision without");
         let value = codex_config_value(tempdir.path());
         assert_eq!(
             value["model_providers"]["openrouter"]["base_url"].as_str(),
@@ -473,10 +478,11 @@ mod tests {
     #[test]
     fn codex_openrouter_effort_is_pinned_and_cleared_with_the_config_value() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let mut config = codex_openrouter_config();
         config.agent.effort = Some("high".to_owned());
 
-        provision_codex_config(&config, tempdir.path(), None).expect("provision with effort");
+        provision_codex_config(&config, &workload, None).expect("provision with effort");
         let value = codex_config_value(tempdir.path());
         assert_eq!(value["model_reasoning_effort"].as_str(), Some("high"));
         assert_eq!(
@@ -485,7 +491,7 @@ mod tests {
         );
 
         config.agent.effort = None;
-        provision_codex_config(&config, tempdir.path(), None).expect("provision without effort");
+        provision_codex_config(&config, &workload, None).expect("provision without effort");
         let value = codex_config_value(tempdir.path());
         assert!(value.get("model_reasoning_effort").is_none(), "{value}");
         assert!(
@@ -497,6 +503,7 @@ mod tests {
     #[test]
     fn codex_effort_pin_is_withheld_when_the_catalog_model_does_not_take_it() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let cache_path = crate::runtime::agent::provider_model_catalog::cache_path(tempdir.path());
         std::fs::create_dir_all(cache_path.parent().expect("cache parent")).expect("cache dir");
         std::fs::write(
@@ -514,14 +521,14 @@ mod tests {
         let mut config = codex_openrouter_config();
         config.agent.effort = Some("high".to_owned());
 
-        provision_codex_config(&config, tempdir.path(), None).expect("provision deepseek");
+        provision_codex_config(&config, &workload, None).expect("provision deepseek");
         let value = codex_config_value(tempdir.path());
         assert_eq!(value["model_reasoning_effort"].as_str(), Some("high"));
 
         // `agent provider use --model` re-provisions with the effort still in config.
         config.agent.provider.as_mut().expect("provider").model =
             Some("meta-llama/llama-3.1-8b-instruct".to_owned());
-        provision_codex_config(&config, tempdir.path(), None).expect("provision llama");
+        provision_codex_config(&config, &workload, None).expect("provision llama");
         let value = codex_config_value(tempdir.path());
         assert!(value.get("model_reasoning_effort").is_none(), "{value}");
         assert!(
@@ -532,7 +539,7 @@ mod tests {
         // A model the catalog does not know keeps the validated value.
         config.agent.provider.as_mut().expect("provider").model =
             Some("vendor/unlisted-model".to_owned());
-        provision_codex_config(&config, tempdir.path(), None).expect("provision unlisted");
+        provision_codex_config(&config, &workload, None).expect("provision unlisted");
         let value = codex_config_value(tempdir.path());
         assert_eq!(value["model_reasoning_effort"].as_str(), Some("high"));
     }
@@ -540,9 +547,10 @@ mod tests {
     #[test]
     fn switching_codex_to_openai_drops_the_openrouter_effort_pin() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let mut config = codex_openrouter_config();
         config.agent.effort = Some("high".to_owned());
-        provision_codex_config(&config, tempdir.path(), None).expect("provision openrouter");
+        provision_codex_config(&config, &workload, None).expect("provision openrouter");
 
         let mut config = config_with_agent("codex", &["OPENAI_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
@@ -553,7 +561,7 @@ mod tests {
         });
         // Effort on the openai lane is applied over ACP, so the disk pin must go.
         config.agent.effort = Some("high".to_owned());
-        provision_codex_config(&config, tempdir.path(), None).expect("provision openai");
+        provision_codex_config(&config, &workload, None).expect("provision openai");
         let value = codex_config_value(tempdir.path());
         assert_eq!(value["model_provider"].as_str(), Some("openai"));
         assert!(value.get("model_reasoning_effort").is_none(), "{value}");
@@ -566,11 +574,12 @@ mod tests {
     #[test]
     fn codex_cleanup_removes_the_effort_pin() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let mut config = codex_openrouter_config();
         config.agent.effort = Some("high".to_owned());
-        provision_codex_config(&config, tempdir.path(), None).expect("provision");
+        provision_codex_config(&config, &workload, None).expect("provision");
 
-        let cleaned = cleanup_codex_config(&config, tempdir.path()).expect("cleanup");
+        let cleaned = cleanup_codex_config(&config, &workload).expect("cleanup");
         assert_eq!(cleaned.len(), 1);
         // The pin was the only acps-owned content, so cleanup removes the whole file.
         let path = tempdir.path().join(".codex").join("config.toml");
@@ -589,6 +598,7 @@ mod tests {
     #[test]
     fn codex_refuses_an_endpoint_for_the_built_in_openai_provider() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let mut config = config_with_agent("codex", &["OPENAI_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "openai".to_owned(),
@@ -597,9 +607,8 @@ mod tests {
             custom: None,
         });
 
-        let error =
-            provision_codex_config(&config, tempdir.path(), Some(&codex_endpoint("openai")))
-                .expect_err("built-in openai endpoint must be refused");
+        let error = provision_codex_config(&config, &workload, Some(&codex_endpoint("openai")))
+            .expect_err("built-in openai endpoint must be refused");
 
         assert!(error.to_string().contains("openrouter"), "{error}");
     }
@@ -607,9 +616,10 @@ mod tests {
     #[test]
     fn codex_custom_provider_endpoint_overrides_the_declared_base_url() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let config = custom_provider_config("codex", crate::config::CustomProviderApi::Responses);
 
-        provision_codex_config(&config, tempdir.path(), Some(&codex_endpoint("myprovider")))
+        provision_codex_config(&config, &workload, Some(&codex_endpoint("myprovider")))
             .expect("provision");
 
         let value = codex_config_value(tempdir.path());
@@ -759,6 +769,46 @@ mod tests {
                 .contains("codex custom providers only support responses"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn codex_backup_skips_an_existing_destination_instead_of_overwriting_it() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside");
+        let codex_dir = tempdir.path().join(".codex");
+        std::fs::create_dir_all(&codex_dir).expect("create codex config dir");
+        std::fs::write(
+            codex_dir.join("config.toml"),
+            "model = \"m\"\nmodel_provider = \"openrouter\"\n\n[model_providers.openrouter]\nname = \"OpenRouter\"\n",
+        )
+        .expect("write existing codex config");
+        let outside_file = outside.path().join("target");
+        std::fs::write(&outside_file, "keep me\n").expect("outside file");
+        let planted = codex_dir.join("config.openrouter.toml");
+        std::os::unix::fs::symlink(&outside_file, &planted).expect("planted symlink");
+        let mut config = config_with_agent("codex", &[]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "openai".to_owned(),
+            model: Some("gpt-5.5".to_owned()),
+            api_key_ref: None,
+            custom: None,
+        });
+
+        provision_agent_headless_config(&config, tempdir.path()).expect("provision");
+
+        assert_eq!(
+            std::fs::read_to_string(&outside_file).expect("outside file"),
+            "keep me\n"
+        );
+        assert!(
+            std::fs::symlink_metadata(&planted)
+                .expect("planted link kept")
+                .file_type()
+                .is_symlink()
+        );
+        let backup = std::fs::read_to_string(codex_dir.join("config.openrouter-1.toml"))
+            .expect("backup written past the planted name");
+        assert!(backup.contains(r#"model_provider = "openrouter""#));
     }
 
     #[test]

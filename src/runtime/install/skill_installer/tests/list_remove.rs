@@ -7,7 +7,8 @@ fn list_installed_skills_empty_when_root_missing() {
     let catalog = RegistryCatalog::load_embedded().expect("registry");
     let home_path = canonical_temp_home(&home);
 
-    let skills = list_installed_skills(&home_path, opencode_entry(&catalog)).expect("list");
+    let skills =
+        list_installed_skills(&workload_at(&home_path), opencode_entry(&catalog)).expect("list");
 
     assert!(skills.is_empty());
 }
@@ -22,7 +23,8 @@ fn list_installed_skills_returns_sorted_flat_and_nested() {
     write_installed_skill(&install_root, "code-review", "# Code Review\n");
     write_installed_skill(&install_root, "contact-center/android", "# Android\n");
 
-    let skills = list_installed_skills(&home_path, opencode_entry(&catalog)).expect("list");
+    let skills =
+        list_installed_skills(&workload_at(&home_path), opencode_entry(&catalog)).expect("list");
 
     let names = skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>();
     assert_eq!(names, ["code-review", "contact-center/android", "repo-map"]);
@@ -53,7 +55,8 @@ fn list_installed_skills_source_absent_for_unmanaged_or_empty_marker() {
     .expect("blank marker");
     write_installed_skill(&install_root, "managed", "# Managed\n");
 
-    let skills = list_installed_skills(&home_path, opencode_entry(&catalog)).expect("list");
+    let skills =
+        list_installed_skills(&workload_at(&home_path), opencode_entry(&catalog)).expect("list");
 
     let sources = skills
         .iter()
@@ -80,7 +83,8 @@ fn list_installed_skills_follows_symlinked_root() {
     write_installed_skill(&real_agents.join("skills"), "repo-map", "# Repo Map\n");
     std::os::unix::fs::symlink(&real_agents, home_path.join(".agents")).expect("symlink");
 
-    let skills = list_installed_skills(&home_path, opencode_entry(&catalog)).expect("list");
+    let skills =
+        list_installed_skills(&workload_at(&home_path), opencode_entry(&catalog)).expect("list");
 
     let names = skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>();
     assert_eq!(names, ["repo-map"]);
@@ -95,8 +99,12 @@ fn remove_agent_skill_removes_flat_skill() {
     write_installed_skill(&install_root, "repo-map", "# Repo Map\n");
     write_installed_skill(&install_root, "code-review", "# Code Review\n");
 
-    let report =
-        remove_agent_skill(&home_path, opencode_entry(&catalog), "repo-map").expect("remove");
+    let report = remove_agent_skill(
+        &workload_at(&home_path),
+        opencode_entry(&catalog),
+        "repo-map",
+    )
+    .expect("remove");
 
     assert_eq!(report.removed.name, "repo-map");
     assert!(!install_root.join("repo-map").exists());
@@ -117,7 +125,7 @@ fn remove_agent_skill_cleans_emptied_group_parent() {
     write_installed_skill(&install_root, "contact-center/android", "# Android\n");
 
     remove_agent_skill(
-        &home_path,
+        &workload_at(&home_path),
         opencode_entry(&catalog),
         "contact-center/android",
     )
@@ -137,7 +145,12 @@ fn remove_agent_skill_keeps_group_dir_with_siblings() {
     write_installed_skill(&install_root, "zoom/android", "# Android\n");
     write_installed_skill(&install_root, "zoom/desktop", "# Desktop\n");
 
-    remove_agent_skill(&home_path, opencode_entry(&catalog), "zoom/android").expect("remove");
+    remove_agent_skill(
+        &workload_at(&home_path),
+        opencode_entry(&catalog),
+        "zoom/android",
+    )
+    .expect("remove");
 
     assert!(!install_root.join("zoom/android").exists());
     assert!(
@@ -155,8 +168,12 @@ fn remove_agent_skill_missing_is_not_installed() {
     let home_path = canonical_temp_home(&home);
     std::fs::create_dir_all(home_path.join(".agents/skills")).expect("root");
 
-    let err = remove_agent_skill(&home_path, opencode_entry(&catalog), "missing")
-        .expect_err("missing skill");
+    let err = remove_agent_skill(
+        &workload_at(&home_path),
+        opencode_entry(&catalog),
+        "missing",
+    )
+    .expect_err("missing skill");
 
     assert!(matches!(err, StackError::SkillNotInstalled { .. }));
 }
@@ -170,8 +187,12 @@ fn remove_agent_skill_conflicts_on_directory_without_descriptor() {
     let install_root = home_path.join(".agents/skills");
     std::fs::create_dir_all(install_root.join("scratch")).expect("scratch dir");
 
-    let err =
-        remove_agent_skill(&home_path, opencode_entry(&catalog), "scratch").expect_err("conflict");
+    let err = remove_agent_skill(
+        &workload_at(&home_path),
+        opencode_entry(&catalog),
+        "scratch",
+    )
+    .expect_err("conflict");
 
     assert!(matches!(err, StackError::SkillInstallTargetConflict { .. }));
     assert!(install_root.join("scratch").is_dir());
@@ -190,12 +211,38 @@ fn remove_agent_skill_refuses_skill_not_installed_by_acp_stack() {
     std::fs::write(skill_dir.join(SKILL_DESCRIPTOR), "# Mine\n").expect("descriptor");
     std::fs::write(skill_dir.join("notes.txt"), "user content\n").expect("notes");
 
-    let err = remove_agent_skill(&home_path, opencode_entry(&catalog), "my-skill")
-        .expect_err("unmanaged skill refused");
+    let err = remove_agent_skill(
+        &workload_at(&home_path),
+        opencode_entry(&catalog),
+        "my-skill",
+    )
+    .expect_err("unmanaged skill refused");
 
     assert!(matches!(err, StackError::SkillInstallTargetConflict { .. }));
     assert!(skill_dir.join(SKILL_DESCRIPTOR).is_file());
     assert!(skill_dir.join("notes.txt").is_file());
+}
+
+#[test]
+fn remove_agent_skill_conflicts_on_file_segment() {
+    let catalog = RegistryCatalog::load_embedded().expect("registry");
+    for (file_name, skill_name) in [("zoom", "zoom/android"), ("repo-map", "repo-map")] {
+        let home = tempfile::tempdir().expect("home");
+        let home_path = canonical_temp_home(&home);
+        let install_root = home_path.join(".agents/skills");
+        std::fs::create_dir_all(&install_root).expect("root");
+        std::fs::write(install_root.join(file_name), "user file\n").expect("file");
+
+        let err = remove_agent_skill(
+            &workload_at(&home_path),
+            opencode_entry(&catalog),
+            skill_name,
+        )
+        .expect_err("file segment");
+
+        assert!(matches!(err, StackError::SkillInstallTargetConflict { .. }));
+        assert!(install_root.join(file_name).is_file());
+    }
 }
 
 #[test]
@@ -206,29 +253,49 @@ fn remove_and_list_reject_agent_without_skills_support() {
     let mut entry = opencode_entry(&catalog).clone();
     entry.supports_agent_skills = false;
 
-    let skills = list_installed_skills(&home_path, &entry).expect("list");
+    let skills = list_installed_skills(&workload_at(&home_path), &entry).expect("list");
     assert!(skills.is_empty());
 
-    let err = remove_agent_skill(&home_path, &entry, "repo-map").expect_err("unsupported agent");
+    let err = remove_agent_skill(&workload_at(&home_path), &entry, "repo-map")
+        .expect_err("unsupported agent");
     assert!(matches!(err, StackError::SkillInstallFailed { .. }));
 }
 
 #[test]
 #[cfg(unix)]
-fn remove_agent_skill_rejects_symlinked_target() {
-    let home = tempfile::tempdir().expect("home");
+fn remove_agent_skill_rejects_symlinked_target_or_group() {
     let catalog = RegistryCatalog::load_embedded().expect("registry");
-    let home_path = canonical_temp_home(&home);
-    let install_root = home_path.join(".agents/skills");
-    std::fs::create_dir_all(&install_root).expect("root");
-    let external = tempfile::tempdir().expect("external");
-    std::fs::write(external.path().join(SKILL_DESCRIPTOR), "# Skill\n").expect("descriptor");
-    std::os::unix::fs::symlink(external.path(), install_root.join("repo-map")).expect("symlink");
+    for (link_name, skill_name, link_target) in [
+        ("repo-map", "repo-map", "android"),
+        ("zoom", "zoom/android", ""),
+    ] {
+        let home = tempfile::tempdir().expect("home");
+        let home_path = canonical_temp_home(&home);
+        let install_root = home_path.join(".agents/skills");
+        std::fs::create_dir_all(&install_root).expect("root");
+        let external = tempfile::tempdir().expect("external");
+        write_installed_skill(external.path(), "android", "# Android\n");
+        std::os::unix::fs::symlink(
+            external.path().join(link_target),
+            install_root.join(link_name),
+        )
+        .expect("symlink");
 
-    let err = remove_agent_skill(&home_path, opencode_entry(&catalog), "repo-map")
-        .expect_err("symlinked target");
+        let err = remove_agent_skill(
+            &workload_at(&home_path),
+            opencode_entry(&catalog),
+            skill_name,
+        )
+        .expect_err("symlinked segment");
 
-    assert!(matches!(err, StackError::SkillInstallTargetConflict { .. }));
-    // The symlink target's descriptor must be intact: nothing was deleted.
-    assert!(external.path().join(SKILL_DESCRIPTOR).is_file());
+        assert!(matches!(err, StackError::SkillInstallTargetConflict { .. }));
+        // The symlink target must be intact: nothing was deleted.
+        assert!(
+            external
+                .path()
+                .join("android")
+                .join(SKILL_DESCRIPTOR)
+                .is_file()
+        );
+    }
 }

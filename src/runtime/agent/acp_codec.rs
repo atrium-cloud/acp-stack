@@ -570,24 +570,61 @@ fn allow_kind_option(request: &RequestPermissionRequest) -> Option<&PermissionOp
 /// Byte cap on `fs/read_text_file`; ACP has no size field on the request.
 const ACP_FS_READ_MAX_BYTES: u64 = 10 * 1024 * 1024;
 
+/// Everything the `fs/*` handlers need.
+pub(crate) struct AcpFsContext {
+    /// Opened on the agent cwd once at bridge spawn, so swapping that path for
+    /// a symlink later cannot redirect fs requests.
+    pub(crate) anchor: Arc<crate::workload_fs::Anchor>,
+    /// The cwd as the bridge was given it; agents may echo this spelling back
+    /// instead of the anchor's canonical one.
+    pub(crate) cwd: PathBuf,
+    /// Reads and writes run with the workload identity's credentials when one
+    /// is declared.
+    pub(crate) sandbox: crate::runtime::sandbox::SandboxProfile,
+    /// `None` (e.g. discovery probes) means writes leave no `fs.write` audit
+    /// event behind.
+    pub(crate) state: Option<Arc<TokioMutex<StateStore>>>,
+    pub(crate) sink: Arc<dyn SessionEventSink>,
+}
+
+impl AcpFsContext {
+    fn relative_path(
+        &self,
+        requested: &Path,
+        intent: crate::workspace::PathIntent,
+    ) -> std::result::Result<PathBuf, AcpFsError> {
+        crate::workspace::anchored_relative_path(&self.anchor, &self.cwd, requested, intent)
+            .map_err(acp_fs_error)
+    }
+}
+
 /// `fs/read_text_file`: workspace-contained disk read with optional 1-based
 /// `line` offset and `limit` line count.
 pub(crate) async fn handle_read_text_file(
-    workspace_root: &Path,
-    sink: &Arc<dyn SessionEventSink>,
+    context: &AcpFsContext,
     request: ReadTextFileRequest,
 ) -> std::result::Result<ReadTextFileResponse, AcpFsError> {
     let agent_session_id = request.session_id.0.to_string();
-    if sink.local_session_id(&agent_session_id).await.is_none() {
+    if context
+        .sink
+        .local_session_id(&agent_session_id)
+        .await
+        .is_none()
+    {
         return Err(unknown_session_error(&agent_session_id));
     }
-    let path = crate::workspace::resolve_workspace_abs_path(
-        workspace_root,
-        &request.path,
-        crate::workspace::PathIntent::ReadExisting,
-    )
-    .map_err(acp_fs_error)?;
-    let read = crate::workspace::read_file(&path, ACP_FS_READ_MAX_BYTES).map_err(acp_fs_error)?;
+    let relative =
+        context.relative_path(&request.path, crate::workspace::PathIntent::ReadExisting)?;
+    let anchor = Arc::clone(&context.anchor);
+    let requested = request.path.to_string_lossy().into_owned();
+    let read = context
+        .sandbox
+        .executor()
+        .run_async(crate::workload_fs::DEFAULT_JOB_TIMEOUT, move || {
+            crate::workspace::read_file(&anchor, &relative, &requested, ACP_FS_READ_MAX_BYTES)
+        })
+        .await
+        .map_err(acp_fs_error)?;
     let content = String::from_utf8(read.content).map_err(|_| {
         AcpFsError::invalid_params().data(serde_json::json!({
             "reason": "file is not valid UTF-8 text",
@@ -603,24 +640,35 @@ pub(crate) async fn handle_read_text_file(
 /// `fs/write_text_file`: workspace-contained atomic write-through plus a
 /// durable `fs.write` audit event when state is attached.
 pub(crate) async fn handle_write_text_file(
-    workspace_root: &Path,
-    state: Option<&Arc<TokioMutex<StateStore>>>,
-    sink: &Arc<dyn SessionEventSink>,
+    context: &AcpFsContext,
     request: WriteTextFileRequest,
 ) -> std::result::Result<WriteTextFileResponse, AcpFsError> {
     let agent_session_id = request.session_id.0.to_string();
-    let Some(local_session_id) = sink.local_session_id(&agent_session_id).await else {
+    let Some(local_session_id) = context.sink.local_session_id(&agent_session_id).await else {
         return Err(unknown_session_error(&agent_session_id));
     };
-    let path = crate::workspace::resolve_workspace_abs_path(
-        workspace_root,
-        &request.path,
-        crate::workspace::PathIntent::WriteOrCreate,
-    )
-    .map_err(acp_fs_error)?;
-    let metadata = crate::workspace::write_file_atomic(&path, request.content.as_bytes())
+    let relative =
+        context.relative_path(&request.path, crate::workspace::PathIntent::WriteOrCreate)?;
+    let path = context.anchor.path().join(&relative);
+    let anchor = Arc::clone(&context.anchor);
+    let requested = request.path.to_string_lossy().into_owned();
+    let options = crate::workspace::workload_write_options(&context.sandbox);
+    let content = request.content;
+    let metadata = context
+        .sandbox
+        .executor()
+        .run_async(crate::workload_fs::DEFAULT_JOB_TIMEOUT, move || {
+            crate::workspace::write_file(
+                &anchor,
+                &relative,
+                &requested,
+                content.as_bytes(),
+                &options,
+            )
+        })
+        .await
         .map_err(acp_fs_error)?;
-    if let Some(state) = state {
+    if let Some(state) = &context.state {
         let payload = serde_json::json!({
             "session_id": local_session_id,
             "path": path.to_string_lossy(),

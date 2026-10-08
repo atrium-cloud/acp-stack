@@ -820,7 +820,7 @@ pub enum StackError {
     #[error("workspace path `{requested}` is invalid: {reason}")]
     WorkspacePathInvalid { reason: String, requested: String },
 
-    #[error("workspace path `{requested}` resolves outside the workspace root")]
+    #[error("workspace path `{requested}` goes through a symlink that is not allowed")]
     WorkspaceSymlinkEscape { requested: String },
 
     #[error("workspace path `{requested}` was not found")]

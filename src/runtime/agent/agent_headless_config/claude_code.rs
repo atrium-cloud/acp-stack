@@ -8,20 +8,21 @@ const ANTHROPIC_DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
 pub(super) fn provision_claude_code_config(
     config: &Config,
-    home: &Path,
+    workload: &WorkloadHome,
     endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
 ) -> Result<Vec<PathBuf>> {
+    let home = workload.home();
     let mut written = Vec::new();
     let Some(provider) = config.agent.provider.as_ref() else {
         // A provider-less config must not leave a previous provider's model allowlist behind; it
         // would silently constrain every session.
         let settings_path = home.join(".claude").join("settings.json");
-        if settings_path.exists() {
+        if workload.exists(&settings_path)? {
             // Unreadable settings degrade to "nothing to strip" rather than blocking provision.
-            match read_json_object(&settings_path) {
+            match read_json_object(workload, &settings_path) {
                 Ok(mut settings) => {
                     if settings.remove("availableModels").is_some() {
-                        write_json_object(&settings_path, settings)?;
+                        write_json_object(workload, &settings_path, settings)?;
                         written.push(settings_path);
                     }
                 }
@@ -34,7 +35,7 @@ pub(super) fn provision_claude_code_config(
     };
     let settings_path = home.join(".claude").join("settings.json");
     let onboarding_path = home.join(".claude.json");
-    let mut settings = read_json_object(&settings_path)?;
+    let mut settings = read_json_object(workload, &settings_path)?;
     let remove_env = {
         let env = ensure_object_field(&mut settings, "env", &settings_path)?;
         remove_claude_managed_env(env);
@@ -45,33 +46,33 @@ pub(super) fn provision_claude_code_config(
         settings.remove("env");
     }
     write_claude_api_key_helper(config, provider, &mut settings, &settings_path)?;
-    write_claude_available_models(provider, &mut settings, home);
-    write_json_object(&settings_path, settings)?;
+    write_claude_available_models(provider, &mut settings, workload.runtime_home());
+    write_json_object(workload, &settings_path, settings)?;
     written.push(settings_path);
 
-    let mut onboarding = read_json_object(&onboarding_path)?;
+    let mut onboarding = read_json_object(workload, &onboarding_path)?;
     onboarding.insert("hasCompletedOnboarding".to_owned(), json!(true));
-    write_json_object(&onboarding_path, onboarding)?;
+    write_json_object(workload, &onboarding_path, onboarding)?;
     written.push(onboarding_path);
     Ok(written)
 }
 
 pub(super) fn cleanup_claude_code_config(
     config: &Config,
-    home: &Path,
+    workload: &WorkloadHome,
     endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
 ) -> Result<Vec<CleanedAgentConfig>> {
     let mut cleaned = Vec::new();
     let Some(provider) = config.agent.provider.as_ref() else {
         return Ok(cleaned);
     };
-    let settings_path = home.join(".claude").join("settings.json");
+    let settings_path = workload.home().join(".claude").join("settings.json");
     // The expected env MUST be rendered with the same override that wrote it, or the endpoint key
     // fails the value match and survives cleanup.
     let expected_env = claude_provider_env_for_config(config, provider, &settings_path, endpoint)?;
     let expected_helper = claude_api_key_helper_for_provider(config, provider, &settings_path)?;
-    if settings_path.exists() {
-        let mut settings = read_json_object(&settings_path)?;
+    if workload.exists(&settings_path)? {
+        let mut settings = read_json_object(workload, &settings_path)?;
         let mut changed = false;
         let mut remove_env = false;
         if let Some(env) = settings
@@ -88,7 +89,7 @@ pub(super) fn cleanup_claude_code_config(
         changed |= remove_matching_claude_api_key_helper(&mut settings, expected_helper.as_deref());
         changed |= settings.remove("availableModels").is_some();
         if changed {
-            write_or_remove_json_object(&settings_path, settings)?;
+            write_or_remove_json_object(workload, &settings_path, settings)?;
             cleaned.push(CleanedAgentConfig {
                 label: "Claude Code config",
                 path: settings_path,
@@ -420,20 +421,17 @@ mod tests {
     #[test]
     fn claude_code_endpoint_keeps_the_profile_path_behind_the_override_origin_and_restores_it() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let config = claude_moonshot_config();
 
-        provision_claude_code_config(
-            &config,
-            tempdir.path(),
-            Some(&claude_endpoint("moonshotai")),
-        )
-        .expect("provision with override");
+        provision_claude_code_config(&config, &workload, Some(&claude_endpoint("moonshotai")))
+            .expect("provision with override");
         assert_eq!(
             claude_settings_value(tempdir.path())["env"]["ANTHROPIC_BASE_URL"],
             "http://127.0.0.1:3129/anthropic"
         );
 
-        provision_claude_code_config(&config, tempdir.path(), None).expect("provision without");
+        provision_claude_code_config(&config, &workload, None).expect("provision without");
         assert_eq!(
             claude_settings_value(tempdir.path())["env"]["ANTHROPIC_BASE_URL"],
             "https://api.moonshot.ai/anthropic"
@@ -443,6 +441,7 @@ mod tests {
     #[test]
     fn claude_code_endpoint_keeps_a_trailing_slash_profile_path() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let mut config = config_with_agent("claude", &["KIMI_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "kimi-coding-plan".to_owned(),
@@ -453,7 +452,7 @@ mod tests {
 
         provision_claude_code_config(
             &config,
-            tempdir.path(),
+            &workload,
             Some(&claude_endpoint("kimi-coding-plan")),
         )
         .expect("provision with override");
@@ -467,6 +466,7 @@ mod tests {
     #[test]
     fn claude_code_endpoint_for_the_anthropic_lane_is_the_bare_origin() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let mut config = config_with_agent("claude", &["ANTHROPIC_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "anthropic".to_owned(),
@@ -475,7 +475,7 @@ mod tests {
             custom: None,
         });
 
-        provision_claude_code_config(&config, tempdir.path(), Some(&claude_endpoint("anthropic")))
+        provision_claude_code_config(&config, &workload, Some(&claude_endpoint("anthropic")))
             .expect("provision with override");
 
         assert_eq!(
@@ -487,10 +487,11 @@ mod tests {
     #[test]
     fn claude_code_endpoint_for_another_provider_is_ignored() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
 
         provision_claude_code_config(
             &claude_moonshot_config(),
-            tempdir.path(),
+            &workload,
             Some(&claude_endpoint("anthropic")),
         )
         .expect("provision");
@@ -504,12 +505,13 @@ mod tests {
     #[test]
     fn claude_code_cleanup_removes_the_overridden_endpoint() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let config = claude_moonshot_config();
         let endpoint = claude_endpoint("moonshotai");
-        provision_claude_code_config(&config, tempdir.path(), Some(&endpoint))
+        provision_claude_code_config(&config, &workload, Some(&endpoint))
             .expect("provision with override");
 
-        cleanup_claude_code_config(&config, tempdir.path(), Some(&endpoint)).expect("cleanup");
+        cleanup_claude_code_config(&config, &workload, Some(&endpoint)).expect("cleanup");
 
         // The managed env was the file's only content, so cleanup removes the file outright.
         let settings_path = tempdir.path().join(".claude").join("settings.json");
@@ -767,6 +769,7 @@ mod tests {
     #[test]
     fn claude_code_cleanup_removes_available_models() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         seed_provider_model_cache(tempdir.path(), "moonshotai", &["kimi-k3"]);
         let mut config = config_with_agent("claude", &["MOONSHOT_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
@@ -777,7 +780,7 @@ mod tests {
         });
         provision_agent_headless_config(&config, tempdir.path()).expect("provision");
 
-        cleanup_claude_code_config(&config, tempdir.path(), None).expect("cleanup");
+        cleanup_claude_code_config(&config, &workload, None).expect("cleanup");
 
         let settings_path = tempdir.path().join(".claude").join("settings.json");
         if settings_path.exists() {

@@ -17,9 +17,12 @@ fn antigravity_settings_path(home: &Path) -> PathBuf {
 /// the interactive CLI's `antigravity-cli/settings.json` (`modelProvider`). Headless auth needs
 /// `auth.type = "gemini-api-key"` here plus `GEMINI_API_KEY` in the env; without both, `session/new`
 /// is rejected and the alternatives are browser OAuth or GCP credentials.
-pub(super) fn provision_antigravity_config(_config: &Config, home: &Path) -> Result<Vec<PathBuf>> {
-    let path = antigravity_settings_path(home);
-    let mut root = read_json_object(&path)?;
+pub(super) fn provision_antigravity_config(
+    _config: &Config,
+    workload: &WorkloadHome,
+) -> Result<Vec<PathBuf>> {
+    let path = antigravity_settings_path(workload.home());
+    let mut root = read_json_object(workload, &path)?;
     let auth = root
         .entry(ANTIGRAVITY_AUTH_KEY.to_owned())
         .or_insert_with(|| json!({}));
@@ -32,20 +35,20 @@ pub(super) fn provision_antigravity_config(_config: &Config, home: &Path) -> Res
             json!(ANTIGRAVITY_AUTH_TYPE_VALUE),
         );
     }
-    write_json_object(&path, root)?;
+    write_json_object(workload, &path, root)?;
     Ok(vec![path])
 }
 
 pub(super) fn cleanup_antigravity_config(
     _config: &Config,
-    home: &Path,
+    workload: &WorkloadHome,
 ) -> Result<Vec<CleanedAgentConfig>> {
     let mut cleaned = Vec::new();
-    let path = antigravity_settings_path(home);
-    if !path.exists() {
+    let path = antigravity_settings_path(workload.home());
+    if !workload.exists(&path)? {
         return Ok(cleaned);
     }
-    let mut root = read_json_object(&path)?;
+    let mut root = read_json_object(workload, &path)?;
     // Only the managed value is removed; an operator-set auth type is not acps state.
     let managed = root
         .get(ANTIGRAVITY_AUTH_KEY)
@@ -61,7 +64,7 @@ pub(super) fn cleanup_antigravity_config(
                 root.remove(ANTIGRAVITY_AUTH_KEY);
             }
         }
-        write_or_remove_json_object(&path, root)?;
+        write_or_remove_json_object(workload, &path, root)?;
         cleaned.push(CleanedAgentConfig {
             label: "Antigravity settings",
             path,

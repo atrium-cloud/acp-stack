@@ -121,6 +121,7 @@ pub(super) enum CollectPolicy {
 }
 
 fn collect_skill_directories(
+    workload: &WorkloadHome,
     policy: CollectPolicy,
     root: &Path,
     directory: &Path,
@@ -129,9 +130,9 @@ fn collect_skill_directories(
     let strict = policy == CollectPolicy::Port;
     let at_root = directory == root;
     let descriptor = directory.join(SKILL_DESCRIPTOR);
-    match std::fs::symlink_metadata(&descriptor) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
+    match workload.stat(&descriptor) {
+        Ok(Some(metadata)) => {
+            if metadata.kind != EntryKind::File {
                 if strict {
                     return Err(StackError::SkillInstallFailed {
                         reason: format!(
@@ -176,12 +177,12 @@ fn collect_skill_directories(
                 return Ok(());
             }
             if strict {
-                validate_skill_dir_for_port(directory)?;
+                validate_skill_dir_for_port(workload, directory)?;
             }
             candidates.push((skill_name, directory.to_path_buf()));
             return Ok(());
         }
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(None) => {}
         Err(source) => {
             if strict || at_root {
                 return Err(skill_io_err("stat skill descriptor", &descriptor, source));
@@ -195,7 +196,7 @@ fn collect_skill_directories(
         }
     }
 
-    let entries = match std::fs::read_dir(directory) {
+    let entries = match workload.list_dir(directory) {
         Ok(entries) => entries,
         Err(source) => {
             if strict || at_root {
@@ -213,41 +214,9 @@ fn collect_skill_directories(
             return Ok(());
         }
     };
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(source) => {
-                if strict {
-                    return Err(skill_io_err(
-                        "read source skills directory entry",
-                        directory,
-                        source,
-                    ));
-                }
-                tracing::warn!(
-                    path = %directory.display(),
-                    error = %source,
-                    "skipping unreadable skills directory entry"
-                );
-                continue;
-            }
-        };
-        let entry_path = entry.path();
-        let metadata = match std::fs::symlink_metadata(&entry_path) {
-            Ok(metadata) => metadata,
-            Err(source) => {
-                if strict {
-                    return Err(skill_io_err("stat source skill entry", &entry_path, source));
-                }
-                tracing::warn!(
-                    path = %entry_path.display(),
-                    error = %source,
-                    "skipping skills directory entry: could not stat"
-                );
-                continue;
-            }
-        };
-        if metadata.file_type().is_symlink() {
+    for (name, metadata) in entries {
+        let entry_path = directory.join(name);
+        if metadata.kind == EntryKind::Symlink {
             if strict {
                 return Err(StackError::SkillInstallFailed {
                     reason: format!("refusing to port symlink `{}`", entry_path.display()),
@@ -259,9 +228,9 @@ fn collect_skill_directories(
             );
             continue;
         }
-        if metadata.is_dir() {
-            collect_skill_directories(policy, root, &entry_path, candidates)?;
-        } else if !metadata.is_file() {
+        if metadata.kind == EntryKind::Dir {
+            collect_skill_directories(workload, policy, root, &entry_path, candidates)?;
+        } else if metadata.kind != EntryKind::File {
             if strict {
                 return Err(StackError::SkillInstallFailed {
                     reason: format!("refusing to port special file `{}`", entry_path.display()),
@@ -277,19 +246,33 @@ fn collect_skill_directories(
 }
 
 pub(super) fn collect_port_skill_directories(
+    workload: &WorkloadHome,
     source_root: &Path,
     directory: &Path,
     candidates: &mut Vec<(String, PathBuf)>,
 ) -> Result<()> {
-    collect_skill_directories(CollectPolicy::Port, source_root, directory, candidates)
+    collect_skill_directories(
+        workload,
+        CollectPolicy::Port,
+        source_root,
+        directory,
+        candidates,
+    )
 }
 
 pub(super) fn collect_link_skill_directories(
+    workload: &WorkloadHome,
     install_root: &Path,
     directory: &Path,
     candidates: &mut Vec<(String, PathBuf)>,
 ) -> Result<()> {
-    collect_skill_directories(CollectPolicy::Link, install_root, directory, candidates)
+    collect_skill_directories(
+        workload,
+        CollectPolicy::Link,
+        install_root,
+        directory,
+        candidates,
+    )
 }
 
 pub(super) fn find_skill_dir(

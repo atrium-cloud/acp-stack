@@ -5,7 +5,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::error::{Result, StackError};
+use crate::error::Result;
+use crate::runtime::agent::config_io::WorkloadHome;
+use crate::workload_fs::EntryKind;
 
 pub(in crate::cli) fn headless_config_candidate_paths(agent_id: &str, home: &Path) -> Vec<PathBuf> {
     match agent_id {
@@ -41,6 +43,7 @@ pub(in crate::cli) fn headless_config_side_dirs(agent_id: &str, home: &Path) -> 
 /// Capture existing file names per directory before provisioning, so anything
 /// new matching a known side-effect pattern can be removed on rejection.
 pub(in crate::cli) fn capture_dir_listings_for(
+    workload: &WorkloadHome,
     dirs: &[PathBuf],
 ) -> Result<Vec<(PathBuf, std::collections::HashSet<std::ffi::OsString>)>> {
     use std::collections::HashSet;
@@ -51,42 +54,34 @@ pub(in crate::cli) fn capture_dir_listings_for(
         if !seen_dirs.insert(dir.clone()) {
             continue;
         }
-        let mut names: HashSet<std::ffi::OsString> = HashSet::new();
-        if dir.is_dir() {
-            for entry in std::fs::read_dir(&dir).map_err(|source| StackError::ConfigRead {
-                path: dir.clone(),
-                source,
-            })? {
-                let entry = entry.map_err(|source| StackError::ConfigRead {
-                    path: dir.clone(),
-                    source,
-                })?;
-                names.insert(entry.file_name());
-            }
-        }
+        let names = workload
+            .list_dir_or_empty(&dir)?
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
         listings.push((dir, names));
     }
     Ok(listings)
 }
 
 pub(in crate::cli) fn remove_new_files_in_dirs(
+    workload: &WorkloadHome,
     listings: Vec<(PathBuf, std::collections::HashSet<std::ffi::OsString>)>,
 ) {
     for (dir, prior_names) in listings {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+        let Ok(entries) = workload.list_dir(&dir) else {
             continue;
         };
-        for entry in entries.flatten() {
-            let name = entry.file_name();
+        for (name, metadata) in entries {
             if prior_names.contains(&name) {
                 continue;
             }
-            let path = entry.path();
+            let path = dir.join(&name);
             // Only known side-effect patterns are removed, so a legitimate
             // sibling written during the discovery window survives.
-            if path.is_file()
+            if metadata.kind == EntryKind::File
                 && is_known_provisioner_side_artifact(&dir, &name)
-                && let Err(error) = std::fs::remove_file(&path)
+                && let Err(error) = workload.remove_file(&path)
             {
                 tracing::warn!(
                     path = %path.display(),
@@ -102,7 +97,7 @@ fn is_known_provisioner_side_artifact(dir: &Path, name: &std::ffi::OsStr) -> boo
     let Some(name) = name.to_str() else {
         return false;
     };
-    // Codex backup files, per `unique_codex_backup_path`.
+    // Codex backup files, per `backup_codex_config`.
     if name.starts_with("config.") && name.ends_with(".toml") && name != "config.toml" {
         return true;
     }
@@ -120,32 +115,26 @@ fn is_known_provisioner_side_artifact(dir: &Path, name: &std::ffi::OsStr) -> boo
 }
 
 pub(in crate::cli) fn capture_path_snapshots(
+    workload: &WorkloadHome,
     paths: &[PathBuf],
 ) -> Result<Vec<(PathBuf, Option<Vec<u8>>)>> {
     let mut snapshots = Vec::with_capacity(paths.len());
     for path in paths {
-        let prior = if path.exists() {
-            Some(
-                std::fs::read(path).map_err(|source| StackError::ConfigRead {
-                    path: path.clone(),
-                    source,
-                })?,
-            )
-        } else {
-            None
-        };
-        snapshots.push((path.clone(), prior));
+        snapshots.push((path.clone(), workload.read(path)?));
     }
     Ok(snapshots)
 }
 
 /// Best-effort restore of prior contents; a restore failure is logged rather
 /// than masking the real discovery/validation error.
-pub(in crate::cli) fn restore_headless_snapshots(snapshots: Vec<(PathBuf, Option<Vec<u8>>)>) {
+pub(in crate::cli) fn restore_headless_snapshots(
+    workload: &WorkloadHome,
+    snapshots: Vec<(PathBuf, Option<Vec<u8>>)>,
+) {
     for (path, prior) in snapshots {
         match prior {
             Some(bytes) => {
-                if let Err(error) = std::fs::write(&path, &bytes) {
+                if let Err(error) = workload.write_atomic(&path, bytes) {
                     tracing::warn!(
                         path = %path.display(),
                         error = %error,
@@ -154,9 +143,7 @@ pub(in crate::cli) fn restore_headless_snapshots(snapshots: Vec<(PathBuf, Option
                 }
             }
             None => {
-                if path.exists()
-                    && let Err(error) = std::fs::remove_file(&path)
-                {
+                if let Err(error) = workload.remove_file_if_present(&path) {
                     tracing::warn!(
                         path = %path.display(),
                         error = %error,

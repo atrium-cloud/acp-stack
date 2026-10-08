@@ -3,15 +3,16 @@ use std::path::Path;
 use crate::config::Config;
 use crate::error::{Result, StackError};
 use crate::runtime::agent::acp_bridge::AgentSessionConfigCategory;
+use crate::runtime::agent::config_io::WorkloadHome;
 use crate::runtime::agent::model_discovery::{
     fetch_session_config, model_value_is_explicit_without_discovery, validate_advertised_value,
 };
 use crate::runtime::agent::native_config_import::{
-    NativeConfigOperation, NativeConfigOperationError, NativeConfigOperationPhase,
-    NativeConfigOperationRecord, NativeConfigOperationStatus, NativeConfigRestartMetadata,
-    capture_native_config_file_digests, capture_native_config_snapshots,
-    load_native_config_operation_journal, native_config_projection,
-    native_config_transaction_paths, persist_native_config_operation,
+    NativeConfigFiles, NativeConfigOperation, NativeConfigOperationError,
+    NativeConfigOperationPhase, NativeConfigOperationRecord, NativeConfigOperationStatus,
+    NativeConfigRestartMetadata, capture_native_config_file_digests,
+    capture_native_config_snapshots, load_native_config_operation_journal,
+    native_config_projection, native_config_transaction_paths, persist_native_config_operation,
     prepare_native_config_file_paths, prepare_native_config_import,
     rebase_prepared_native_config_import, restore_native_config_snapshots, sha256_hex,
     validate_native_config_secret_refs, write_native_config_files,
@@ -24,11 +25,12 @@ pub(super) fn prepare_for_new_init(
     config: &Config,
     home: &Path,
 ) -> Result<()> {
+    let workload = WorkloadHome::resolve(config, home)?;
     pending.prepared = Some(prepare_native_config_import(
         &pending.inspected,
         &pending.selection,
         config,
-        home,
+        workload.home(),
     )?);
     Ok(())
 }
@@ -51,7 +53,8 @@ pub(super) fn stage_for_init(
         return Ok(None);
     };
     let operation_id = init_operation_id(init_run_id);
-    let records = load_native_config_operation_journal(state_path, config_path, home)?;
+    let workload = WorkloadHome::resolve(config, home)?;
+    let records = load_native_config_operation_journal(state_path, config_path, workload.home())?;
     if let Some(record) = records
         .into_iter()
         .find(|record| record.operation.operation_id == operation_id)
@@ -137,7 +140,7 @@ pub(super) fn stage_for_init(
         cancelled: false,
         phase: NativeConfigOperationPhase::Staged,
     };
-    persist_native_config_operation(state_path, config_path, home, &record)?;
+    persist_native_config_operation(state_path, config_path, workload.home(), &record)?;
     Ok(Some(record))
 }
 
@@ -145,7 +148,7 @@ pub(super) fn apply_for_init(
     record: &mut NativeConfigOperationRecord,
     config_path: &Path,
     state_path: &Path,
-    home: &Path,
+    workload: &WorkloadHome,
 ) -> Result<(Config, NativeConfigOperation)> {
     if record.phase == NativeConfigOperationPhase::Applied {
         return Ok((
@@ -153,10 +156,13 @@ pub(super) fn apply_for_init(
             record.operation.clone(),
         ));
     }
+    let home = workload.runtime_home();
+    let files = NativeConfigFiles::new(config_path, workload);
+    let workload_home = workload.home();
     if record.phase == NativeConfigOperationPhase::RollingBack {
-        restore_native_config_snapshots(&record.rollback_snapshots, home)?;
+        restore_native_config_snapshots(&record.rollback_snapshots, files)?;
         reset_for_retry(record);
-        persist_native_config_operation(state_path, config_path, home, record)?;
+        persist_native_config_operation(state_path, config_path, workload_home, record)?;
     }
     if !matches!(
         record.phase,
@@ -183,12 +189,12 @@ pub(super) fn apply_for_init(
                 code: "agent.native_config_base_config_changed",
             });
         }
-        let paths = prepare_native_config_file_paths(&prepared, config_path, home)?;
-        record.rollback_snapshots = capture_native_config_snapshots(&paths, home)?;
+        let paths = prepare_native_config_file_paths(&prepared, files)?;
+        record.rollback_snapshots = capture_native_config_snapshots(&paths, files)?;
         record.prior_config = Some(current);
         record.updated_at = chrono::Utc::now();
         record.phase = NativeConfigOperationPhase::Applying;
-        persist_native_config_operation(state_path, config_path, home, record)?;
+        persist_native_config_operation(state_path, config_path, workload_home, record)?;
     }
 
     let applying = record.clone();
@@ -196,10 +202,10 @@ pub(super) fn apply_for_init(
         config_path,
         &prepared.native_path,
         &prepared.harness,
-        home,
+        workload_home,
     );
     let apply_result = (|| -> Result<Vec<_>> {
-        write_native_config_files(&prepared, config_path, home)?;
+        write_native_config_files(&prepared, files)?;
         if prepared.imported_model
             && !model_value_is_explicit_without_discovery(&prepared.canonical_config.agent)
         {
@@ -217,7 +223,7 @@ pub(super) fn apply_for_init(
                 &model,
             )?;
         }
-        capture_native_config_file_digests(&paths, home)
+        capture_native_config_file_digests(&paths, files)
     })();
     let digests = match apply_result {
         Ok(digests) => digests,
@@ -229,19 +235,19 @@ pub(super) fn apply_for_init(
             });
             record.updated_at = chrono::Utc::now();
             record.phase = NativeConfigOperationPhase::RollingBack;
-            persist_native_config_operation(state_path, config_path, home, record)?;
-            if restore_native_config_snapshots(&record.rollback_snapshots, home).is_err() {
+            persist_native_config_operation(state_path, config_path, workload_home, record)?;
+            if restore_native_config_snapshots(&record.rollback_snapshots, files).is_err() {
                 record.operation.error = Some(NativeConfigOperationError {
                     code: "agent.native_config_rollback_failed".to_owned(),
                 });
                 record.updated_at = chrono::Utc::now();
-                persist_native_config_operation(state_path, config_path, home, record)?;
+                persist_native_config_operation(state_path, config_path, workload_home, record)?;
                 return Err(StackError::NativeAgentConfig {
                     code: "agent.native_config_rollback_failed",
                 });
             }
             reset_for_retry(record);
-            persist_native_config_operation(state_path, config_path, home, record)?;
+            persist_native_config_operation(state_path, config_path, workload_home, record)?;
             return Err(error);
         }
     };
@@ -259,7 +265,9 @@ pub(super) fn apply_for_init(
     record.applied_at = Some(chrono::Utc::now());
     record.updated_at = chrono::Utc::now();
     record.phase = NativeConfigOperationPhase::Applied;
-    if let Err(error) = persist_native_config_operation(state_path, config_path, home, record) {
+    if let Err(error) =
+        persist_native_config_operation(state_path, config_path, workload_home, record)
+    {
         *record = applying;
         return Err(error);
     }
@@ -274,14 +282,15 @@ pub(super) fn cancel_applied_for_init(
     revision: &str,
     config_path: &Path,
     state_path: &Path,
-    home: &Path,
+    workload: &WorkloadHome,
 ) -> Result<NativeConfigOperation> {
-    let mut record = load_native_config_operation_journal(state_path, config_path, home)?
-        .into_iter()
-        .find(|record| record.operation.operation_id == operation_id)
-        .ok_or(StackError::NativeAgentConfig {
-            code: "agent.native_config_operation_not_found",
-        })?;
+    let mut record =
+        load_native_config_operation_journal(state_path, config_path, workload.home())?
+            .into_iter()
+            .find(|record| record.operation.operation_id == operation_id)
+            .ok_or(StackError::NativeAgentConfig {
+                code: "agent.native_config_operation_not_found",
+            })?;
     if record.operation.revision != revision {
         return Err(StackError::NativeAgentConfig {
             code: "agent.native_config_revision_mismatch",
@@ -306,7 +315,10 @@ pub(super) fn cancel_applied_for_init(
         .ok_or(StackError::NativeAgentConfig {
             code: "agent.native_config_rollback_failed",
         })?;
-    restore_native_config_snapshots(&record.rollback_snapshots, home)?;
+    restore_native_config_snapshots(
+        &record.rollback_snapshots,
+        NativeConfigFiles::new(config_path, workload),
+    )?;
     record.operation.status = NativeConfigOperationStatus::Cancelled;
     record.operation.agent_config = native_config_projection(prior_config);
     record.operation.error = None;
@@ -324,7 +336,7 @@ pub(super) fn cancel_applied_for_init(
     record.applied_file_digests.clear();
     record.updated_at = chrono::Utc::now();
     record.phase = NativeConfigOperationPhase::Terminal;
-    persist_native_config_operation(state_path, config_path, home, &record)?;
+    persist_native_config_operation(state_path, config_path, workload.home(), &record)?;
     Ok(record.operation)
 }
 
@@ -348,7 +360,8 @@ pub(super) fn rebase_for_init(
     record.transaction_fingerprint = prepared.transaction_fingerprint.clone();
     record.operation.agent_config = native_config_projection(&prepared.canonical_config);
     record.updated_at = chrono::Utc::now();
-    persist_native_config_operation(state_path, config_path, home, record)
+    let workload = WorkloadHome::resolve(current, home)?;
+    persist_native_config_operation(state_path, config_path, workload.home(), record)
 }
 
 fn reset_for_retry(record: &mut NativeConfigOperationRecord) {
@@ -422,6 +435,7 @@ mod tests {
     #[test]
     fn onboarding_import_applies_without_restart_and_resumes_from_journal() {
         let home = tempfile::tempdir().expect("home");
+        let workload = WorkloadHome::with_process_credentials(home.path(), home.path());
         SecretStore::open_or_create(home.path()).expect("secret store");
         let config_path = home
             .path()
@@ -469,7 +483,7 @@ mod tests {
         .expect("stage")
         .expect("record");
         let (_, operation) =
-            apply_for_init(&mut record, &config_path, &state_path, home.path()).expect("apply");
+            apply_for_init(&mut record, &config_path, &state_path, &workload).expect("apply");
         assert_eq!(operation.status, NativeConfigOperationStatus::Applied);
         assert!(!operation.restart.required);
         assert!(!operation.restart.queued);
@@ -506,6 +520,7 @@ mod tests {
     #[test]
     fn cancel_applied_for_init_restores_snapshots_and_is_idempotent() {
         let home = tempfile::tempdir().expect("home");
+        let workload = WorkloadHome::with_process_credentials(home.path(), home.path());
         SecretStore::open_or_create(home.path()).expect("secret store");
         let config_path = home
             .path()
@@ -553,7 +568,7 @@ mod tests {
         .expect("stage")
         .expect("record");
         let (_, operation) =
-            apply_for_init(&mut record, &config_path, &state_path, home.path()).expect("apply");
+            apply_for_init(&mut record, &config_path, &state_path, &workload).expect("apply");
         let native_path = home
             .path()
             .join(".config")
@@ -566,7 +581,7 @@ mod tests {
             &"f".repeat(64),
             &config_path,
             &state_path,
-            home.path(),
+            &workload,
         )
         .expect_err("revision mismatch must fail");
         assert_eq!(
@@ -579,7 +594,7 @@ mod tests {
             &operation.revision,
             &config_path,
             &state_path,
-            home.path(),
+            &workload,
         )
         .expect("cancel");
         assert_eq!(cancelled.status, NativeConfigOperationStatus::Cancelled);
@@ -603,7 +618,7 @@ mod tests {
             &operation.revision,
             &config_path,
             &state_path,
-            home.path(),
+            &workload,
         )
         .expect("repeat cancel");
         assert_eq!(repeated.status, NativeConfigOperationStatus::Cancelled);
@@ -613,7 +628,7 @@ mod tests {
             &operation.revision,
             &config_path,
             &state_path,
-            home.path(),
+            &workload,
         )
         .expect_err("unknown operation must fail");
         assert_eq!(
@@ -625,6 +640,7 @@ mod tests {
     #[test]
     fn amp_mcp_only_import_stages_and_applies() {
         let home = tempfile::tempdir().expect("home");
+        let workload = WorkloadHome::with_process_credentials(home.path(), home.path());
         SecretStore::open_or_create(home.path()).expect("secret store");
         let config_path = home
             .path()
@@ -682,7 +698,7 @@ mod tests {
         .expect("stage")
         .expect("record");
         let (_, operation) =
-            apply_for_init(&mut record, &config_path, &state_path, home.path()).expect("apply");
+            apply_for_init(&mut record, &config_path, &state_path, &workload).expect("apply");
         assert_eq!(operation.status, NativeConfigOperationStatus::Applied);
         assert!(operation.agent_config.provider.is_none());
         let applied = Config::load_from_path(&config_path).expect("applied config");
@@ -706,6 +722,7 @@ mod tests {
         // Selecting the provider (not the model) keeps `imported_model` false so
         // apply does not trigger live model discovery.
         let home = tempfile::tempdir().expect("home");
+        let workload = WorkloadHome::with_process_credentials(home.path(), home.path());
         let mut secrets = SecretStore::open_or_create(home.path()).expect("secret store");
         secrets
             .set("ANTHROPIC_API_KEY", "test-key")
@@ -766,7 +783,7 @@ mod tests {
         .expect("stage")
         .expect("record");
         let (_, operation) =
-            apply_for_init(&mut record, &config_path, &state_path, home.path()).expect("apply");
+            apply_for_init(&mut record, &config_path, &state_path, &workload).expect("apply");
         assert_eq!(operation.status, NativeConfigOperationStatus::Applied);
         assert_eq!(
             operation.agent_config.provider.as_deref(),
@@ -803,6 +820,7 @@ mod tests {
         // Exercises the goose YAML composition: residual written first, then
         // `GOOSE_*` provisioning merged into the same `config.yaml`.
         let home = tempfile::tempdir().expect("home");
+        let workload = WorkloadHome::with_process_credentials(home.path(), home.path());
         let mut secrets = SecretStore::open_or_create(home.path()).expect("secret store");
         secrets
             .set("ANTHROPIC_API_KEY", "test-key")
@@ -863,7 +881,7 @@ mod tests {
         .expect("stage")
         .expect("record");
         let (_, operation) =
-            apply_for_init(&mut record, &config_path, &state_path, home.path()).expect("apply");
+            apply_for_init(&mut record, &config_path, &state_path, &workload).expect("apply");
         assert_eq!(operation.status, NativeConfigOperationStatus::Applied);
         assert_eq!(
             operation.agent_config.provider.as_deref(),

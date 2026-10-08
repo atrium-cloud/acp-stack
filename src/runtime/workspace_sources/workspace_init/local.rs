@@ -6,20 +6,26 @@ use std::path::Path;
 
 use crate::config::DataSourceConfig;
 use crate::error::{Result, StackError};
+use crate::workload_fs::{HandoffSummary, SymlinkPolicy};
 
 use super::common::{
-    Sentinel, SentinelBody, capture_error, cleanup_partial_destination, ensure_dest_or_fail,
-    ensure_destination_not_symlink, sentinel_if_present, write_operation_capture,
+    MaterializeContext, Sentinel, SentinelBody, StagingDir, capture_error, write_operation_capture,
 };
 use super::{CAPTURE_TAG_COPY, MaterializeOutcome, SourceReport};
+
+// CONSTANTS
+
+const PERMISSION_BITS: u32 = 0o777;
 
 pub(super) fn materialize_local(
     index: usize,
     source: &DataSourceConfig,
     name: &str,
-    dest: &Path,
+    relative: &Path,
+    context: &MaterializeContext,
     log_dir: Option<&Path>,
 ) -> Result<SourceReport> {
+    let dest = context.destination.display(relative);
     let path = source
         .path
         .as_deref()
@@ -52,7 +58,6 @@ pub(super) fn materialize_local(
 
     // A destination inside the source tree would loop or snapshot itself. `dest`
     // may not exist yet, so the check runs against its parent.
-    ensure_destination_not_symlink(dest)?;
     let dest_parent_canonical = dest
         .parent()
         .map(|parent| parent.canonicalize().ok())
@@ -69,7 +74,7 @@ pub(super) fn materialize_local(
         });
     }
 
-    if let Some(existing) = sentinel_if_present(dest)?
+    if let Some(existing) = context.destination.read_sentinel(relative)?
         && let SentinelBody::Local {
             path: existing_path,
             ..
@@ -78,158 +83,113 @@ pub(super) fn materialize_local(
     {
         return Ok(SourceReport {
             name: name.to_owned(),
-            destination: dest.to_path_buf(),
+            destination: dest,
             outcome: MaterializeOutcome::Verified,
             log_dir: None,
         });
     }
-    ensure_dest_or_fail(dest)?;
-    std::fs::create_dir_all(dest).map_err(|source_err| StackError::WorkspaceMaterializeFailed {
-        reason: format!("create dest `{}`: {source_err}", dest.display()),
-    })?;
+    context.destination.prepare(relative)?;
 
-    let copy = match copy_tree(&canonical_src, dest) {
-        Ok(copy) => copy,
+    let sentinel = |copied: &HandoffSummary| {
+        Sentinel::new(SentinelBody::Local {
+            path: canonical_src.display().to_string(),
+            bytes: copied.bytes,
+            entries: copied.files,
+        })
+    };
+    let copy_failed = |error: StackError| StackError::WorkspaceMaterializeFailed {
+        reason: format!("copy local source `{}`: {error}", canonical_src.display()),
+    };
+    let installed = if src_metadata.is_dir() {
+        context
+            .destination
+            .install(&canonical_src, relative, SymlinkPolicy::Reject, sentinel)
+            .map_err(copy_failed)
+    } else {
+        // The handoff walks a directory, so a single file is first copied into its own one.
+        StagingDir::create(context.host.home()).and_then(|staging| {
+            copy_single_file(
+                &canonical_src,
+                staging.path(),
+                context.destination.accepts_hard_links(),
+            )?;
+            context
+                .destination
+                .install(staging.path(), relative, SymlinkPolicy::Reject, sentinel)
+                .map_err(copy_failed)
+        })
+    };
+    let copied = match installed {
+        Ok(copied) => copied,
         Err(err) => {
             capture_error(log_dir, CAPTURE_TAG_COPY, &err);
-            return Err(cleanup_partial_destination(dest, err));
+            return Err(err);
         }
     };
-    write_operation_capture(
+    if let Err(error) = write_operation_capture(
         log_dir,
         CAPTURE_TAG_COPY,
         &format!(
             "source={}\ndestination={}\nbytes={}\nentries={}\n",
             canonical_src.display(),
             dest.display(),
-            copy.bytes,
-            copy.entries,
+            copied.bytes,
+            copied.files,
         ),
         "",
-    )
-    .map_err(|err| cleanup_partial_destination(dest, err))?;
-
-    let sentinel = Sentinel::new(SentinelBody::Local {
-        path: canonical_src.display().to_string(),
-        bytes: copy.bytes,
-        entries: copy.entries,
-    });
-    if let Err(err) = sentinel.write(dest) {
-        return Err(cleanup_partial_destination(dest, err));
+    ) {
+        return Err(context.destination.discard_after_failure(relative, error));
     }
 
     Ok(SourceReport {
         name: name.to_owned(),
-        destination: dest.to_path_buf(),
+        destination: dest,
         outcome: MaterializeOutcome::Created,
         log_dir: log_dir.map(Path::to_path_buf),
     })
 }
 
-#[derive(Debug, Default)]
-pub(super) struct CopyOutcome {
-    pub(super) bytes: u64,
-    pub(super) entries: u64,
-}
-
-pub(super) fn copy_tree(src: &Path, dest: &Path) -> Result<CopyOutcome> {
-    let mut outcome = CopyOutcome::default();
-    let metadata = std::fs::symlink_metadata(src).map_err(|source_err| {
-        StackError::WorkspaceMaterializeFailed {
-            reason: format!("stat `{}`: {source_err}", src.display()),
-        }
-    })?;
-    if metadata.file_type().is_symlink() {
+/// Copy a single-file source into `staging_dir` under its own name. A local source may be writable
+/// by the workload, so the file is opened `O_NOFOLLOW` and copied from that descriptor.
+fn copy_single_file(src: &Path, staging_dir: &Path, allow_hard_links: bool) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let failed =
+        |operation: &str, source_err: std::io::Error| StackError::WorkspaceMaterializeFailed {
+            reason: format!("{operation} `{}`: {source_err}", src.display()),
+        };
+    let file_name = src
+        .file_name()
+        .ok_or_else(|| StackError::WorkspaceMaterializeFailed {
+            reason: format!("local source `{}` has no file name", src.display()),
+        })?;
+    let mut source = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(src)
+        .map_err(|source_err| failed("open (symlinks are refused)", source_err))?;
+    let metadata = source
+        .metadata()
+        .map_err(|source_err| failed("stat", source_err))?;
+    if !metadata.is_file() {
+        return Err(StackError::WorkspaceMaterializeFailed {
+            reason: format!("local source `{}` must be a regular file", src.display()),
+        });
+    }
+    if !allow_hard_links && metadata.nlink() > 1 {
         return Err(StackError::WorkspaceMaterializeFailed {
             reason: format!(
-                "local source `{}` is a symlink; refusing to follow",
+                "local source `{}` is hard-linked; a workload identity requires a single link",
                 src.display()
             ),
         });
     }
-    if metadata.is_file() {
-        let target_name = src.file_name().map(|s| s.to_owned()).ok_or_else(|| {
-            StackError::WorkspaceMaterializeFailed {
-                reason: format!("local source `{}` has no file name", src.display()),
-            }
-        })?;
-        let target = dest.join(target_name);
-        let bytes = std::fs::copy(src, &target).map_err(|source_err| {
-            StackError::WorkspaceMaterializeFailed {
-                reason: format!(
-                    "copy `{}` -> `{}`: {source_err}",
-                    src.display(),
-                    target.display()
-                ),
-            }
-        })?;
-        outcome.bytes = bytes;
-        outcome.entries = 1;
-        return Ok(outcome);
-    }
-    if !metadata.is_dir() {
-        return Err(StackError::WorkspaceMaterializeFailed {
-            reason: format!(
-                "local source `{}` is neither a regular file nor a directory",
-                src.display()
-            ),
-        });
-    }
-    copy_dir_recursive(src, dest, &mut outcome)?;
-    Ok(outcome)
-}
-
-pub(super) fn copy_dir_recursive(src: &Path, dest: &Path, outcome: &mut CopyOutcome) -> Result<()> {
-    for entry in
-        std::fs::read_dir(src).map_err(|source_err| StackError::WorkspaceMaterializeFailed {
-            reason: format!("read_dir `{}`: {source_err}", src.display()),
-        })?
-    {
-        let entry = entry.map_err(|source_err| StackError::WorkspaceMaterializeFailed {
-            reason: format!("read_dir entry `{}`: {source_err}", src.display()),
-        })?;
-        let file_type =
-            entry
-                .file_type()
-                .map_err(|source_err| StackError::WorkspaceMaterializeFailed {
-                    reason: format!("file_type `{}`: {source_err}", entry.path().display()),
-                })?;
-        if file_type.is_symlink() {
-            return Err(StackError::WorkspaceMaterializeFailed {
-                reason: format!(
-                    "local source contains symlink `{}`; refusing to follow",
-                    entry.path().display()
-                ),
-            });
-        }
-        let target = dest.join(entry.file_name());
-        if file_type.is_dir() {
-            std::fs::create_dir_all(&target).map_err(|source_err| {
-                StackError::WorkspaceMaterializeFailed {
-                    reason: format!("create dir `{}`: {source_err}", target.display()),
-                }
-            })?;
-            copy_dir_recursive(&entry.path(), &target, outcome)?;
-        } else if file_type.is_file() {
-            let bytes = std::fs::copy(entry.path(), &target).map_err(|source_err| {
-                StackError::WorkspaceMaterializeFailed {
-                    reason: format!(
-                        "copy `{}` -> `{}`: {source_err}",
-                        entry.path().display(),
-                        target.display()
-                    ),
-                }
-            })?;
-            outcome.bytes = outcome.bytes.saturating_add(bytes);
-            outcome.entries = outcome.entries.saturating_add(1);
-        } else {
-            return Err(StackError::WorkspaceMaterializeFailed {
-                reason: format!(
-                    "local source entry `{}` has unsupported file type",
-                    entry.path().display()
-                ),
-            });
-        }
-    }
+    let mut destination = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(metadata.mode() & PERMISSION_BITS)
+        .open(staging_dir.join(file_name))
+        .map_err(|source_err| failed("create staging copy of", source_err))?;
+    std::io::copy(&mut source, &mut destination)
+        .map_err(|source_err| failed("copy", source_err))?;
     Ok(())
 }

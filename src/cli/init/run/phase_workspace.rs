@@ -29,6 +29,7 @@ pub(super) fn run_workspace_materialize_step(flow: &mut InitFlow) -> Result<()> 
     // Pre-computed so a mid-clone failure still records the log dir on the init_steps row.
     let log_dir_str = log_paths.run_dir.display().to_string();
     let config = &flow.config;
+    let home = &flow.home;
     let secret_store = flow.secret_store.clone();
     let materialize_report = &mut flow.materialize_report;
     let result = record_init_step_with_default_log_dir(
@@ -42,6 +43,7 @@ pub(super) fn run_workspace_materialize_step(flow: &mut InitFlow) -> Result<()> 
             let report = crate::runtime::workspace_sources::workspace_init::materialize_workspace(
                 &config.workspace,
                 &lock_shared_secret_store(&secret_store),
+                home,
                 Some(&log_paths),
             )?;
             let step_log_dir = report.log_dir.as_ref().map(|p| p.display().to_string());

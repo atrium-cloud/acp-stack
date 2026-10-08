@@ -1,7 +1,10 @@
 //! Seeds `<workspace.root>/usr/code/<repo>/` and `<workspace.root>/usr/data/<name>/` from the
-//! configured code and data sources during `acps init`. Materialization is not transactional across
-//! sources: each completed source drops a sentinel, and a non-empty destination without a matching
-//! sentinel is a hard failure rather than a best-effort merge.
+//! configured code and data sources during `acps init`. Each source is fetched as the runtime into
+//! a staging directory under the runtime state dir, then handed off into the workspace with the
+//! workload identity's credentials, so fetch credentials never reach the workload and the result
+//! is workload-owned. Materialization is not transactional across sources: each completed source
+//! drops a sentinel, and a non-empty destination without a matching sentinel is a hard failure
+//! rather than a best-effort merge.
 
 mod code_git;
 mod common;
@@ -15,11 +18,14 @@ use crate::config::{
     DataSourceConfig, WorkspaceConfig, derive_code_source_name, derive_data_source_name,
 };
 use crate::error::{Result, StackError};
+use crate::runtime::process_runner::HostExec;
+use crate::runtime::sandbox::SandboxProfile;
 use crate::secrets::SecretStore;
 
 use self::code_git::materialize_code_source;
 use self::common::{
-    ensure_lane_root, ensure_workspace_base_dir, ensure_workspace_log_dir, sanitize_segment,
+    MaterializeContext, WorkspaceDestination, ensure_workspace_base_dir, ensure_workspace_log_dir,
+    sanitize_segment,
 };
 use self::https::materialize_https;
 use self::local::materialize_local;
@@ -106,25 +112,29 @@ pub fn all_sources_have_sentinel(workspace: &WorkspaceConfig) -> Result<bool> {
     if !root.is_absolute() {
         return Ok(false);
     }
-    let code_root = root.join(CODE_LANE_DIR);
-    let data_root = root.join(DATA_LANE_DIR);
+    let mut sentinels = Vec::new();
     for source in &workspace.code_sources {
         let Ok(name) = derive_code_source_name(source) else {
             return Ok(false);
         };
-        if !code_root.join(&name).join(SOURCE_SENTINEL_FILE).is_file() {
-            return Ok(false);
-        }
+        sentinels.push(
+            Path::new(CODE_LANE_DIR)
+                .join(name)
+                .join(SOURCE_SENTINEL_FILE),
+        );
     }
     for source in &workspace.data_sources {
         let Ok(name) = derive_data_source_name(source) else {
             return Ok(false);
         };
-        if !data_root.join(&name).join(SOURCE_SENTINEL_FILE).is_file() {
-            return Ok(false);
-        }
+        sentinels.push(
+            Path::new(DATA_LANE_DIR)
+                .join(name)
+                .join(SOURCE_SENTINEL_FILE),
+        );
     }
-    Ok(true)
+    let profile = SandboxProfile::resolve(&workspace.sandbox)?;
+    WorkspaceDestination::new(root, &profile).sentinels_present(sentinels)
 }
 
 fn workspace_base_dirs_exist(workspace: &WorkspaceConfig) -> bool {
@@ -147,16 +157,16 @@ pub fn prepare_workspace_base_dirs(workspace: &WorkspaceConfig) -> Result<()> {
 }
 
 /// Prepare the workspace root/uploads directories and materialize every declared code and data source.
-/// With `log_paths`, each operation writes capture pairs under `run_dir/<source-tag>/`; without it,
+/// `home` is the runtime home whose state dir holds the staging directories and host-exec cwd. With
+/// `log_paths`, each operation writes capture pairs under `run_dir/<source-tag>/`; without it,
 /// failures only carry a stderr tail.
 pub fn materialize_workspace(
     workspace: &WorkspaceConfig,
     secrets: &SecretStore,
+    home: &Path,
     log_paths: Option<&WorkspaceLogPaths>,
 ) -> Result<MaterializeReport> {
     let root = Path::new(&workspace.root);
-    let code_root = root.join(CODE_LANE_DIR);
-    let data_root = root.join(DATA_LANE_DIR);
     let uploads = Path::new(&workspace.uploads);
 
     let mut report = MaterializeReport {
@@ -171,9 +181,18 @@ pub fn materialize_workspace(
     }
 
     prepare_workspace_base_dirs(workspace)?;
+    if workspace.code_sources.is_empty() && workspace.data_sources.is_empty() {
+        return Ok(report);
+    }
+
+    let host = HostExec::new(home, &workspace.sandbox)?;
+    let destination = WorkspaceDestination::new(root, host.sandbox());
+    let context = MaterializeContext { host, destination };
 
     for (index, source) in workspace.code_sources.iter().enumerate() {
-        ensure_lane_root(&code_root)?;
+        context
+            .destination
+            .ensure_lane_root(Path::new(CODE_LANE_DIR))?;
         let source_log_dir = log_paths
             .map(|p| p.run_dir.join(format!("code-{index:03}")))
             .map(|p| {
@@ -184,13 +203,15 @@ pub fn materialize_workspace(
         report.code.push(materialize_code_source(
             index,
             source,
-            &code_root,
+            &context,
             secrets,
             source_log_dir.as_deref(),
         )?);
     }
     for (index, source) in workspace.data_sources.iter().enumerate() {
-        ensure_lane_root(&data_root)?;
+        context
+            .destination
+            .ensure_lane_root(Path::new(DATA_LANE_DIR))?;
         let source_log_dir = log_paths
             .map(|p| p.run_dir.join(format!("data-{index:03}")))
             .map(|p| {
@@ -201,7 +222,7 @@ pub fn materialize_workspace(
         report.data.push(materialize_data_source(
             index,
             source,
-            &data_root,
+            &context,
             secrets,
             source_log_dir.as_deref(),
         )?);
@@ -213,18 +234,18 @@ pub fn materialize_workspace(
 fn materialize_data_source(
     index: usize,
     source: &DataSourceConfig,
-    data_root: &Path,
+    context: &MaterializeContext,
     secrets: &SecretStore,
     log_dir: Option<&Path>,
 ) -> Result<SourceReport> {
     let name = derive_data_source_name(source)
         .map_err(|reason| StackError::WorkspaceDataSourceInvalid { index, reason })?;
-    let dest = data_root.join(&name);
+    let relative = Path::new(DATA_LANE_DIR).join(&name);
 
     match source.source_type.as_str() {
-        "local" => materialize_local(index, source, &name, &dest, log_dir),
-        "https" => materialize_https(index, source, &name, &dest, log_dir),
-        "s3" => materialize_s3(index, source, &name, &dest, secrets, log_dir),
+        "local" => materialize_local(index, source, &name, &relative, context, log_dir),
+        "https" => materialize_https(index, source, &name, &relative, context, log_dir),
+        "s3" => materialize_s3(index, source, &name, &relative, context, secrets, log_dir),
         other => Err(StackError::WorkspaceDataSourceInvalid {
             index,
             reason: format!("unsupported type `{other}`"),

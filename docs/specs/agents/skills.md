@@ -27,6 +27,8 @@ Each supported agent declares a managed install directory in `data/agents.toml` 
 
 An agent whose harness discovers skills somewhere else also declares a link directory (`agent_skills_link_dir`). Claude Code links into `~/.claude/skills`; Hermes links into `~/.hermes/skills`. The link directory must differ from the install directory, and each must sit outside the other.
 
+With `[workspace.sandbox].workload_user` set, both directories resolve under that user's home and every path below it must be a real directory: a symlinked skills root is refused.
+
 ### The One-Way Mirror
 
 Linking is a one-way mirror:

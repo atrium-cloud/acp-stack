@@ -1,10 +1,9 @@
-//! Workspace file operations under `workspace.root`: path resolution rejecting traversal, NUL
-//! bytes, absolute prefixes, and symlink escapes, plus the sync list/read/write/delete primitives
-//! the HTTP handlers run in `spawn_blocking`. Residual TOCTOU is accepted: a local actor with
-//! write access to the root can swap entries between resolve and the following syscall.
+//! Workspace file operations for the HTTP and ACP `fs/*` surfaces. A request names a path that
+//! passes lexical validation (no NUL, `..`, or absolute prefix) and becomes a path relative to an
+//! [`Anchor`]; every operation then walks from that anchor with the no-follow walker, so a symlink
+//! anywhere below it and a hard-linked target are refused instead of followed. Callers run these
+//! synchronous primitives as [`crate::workload_fs::Executor`] jobs.
 
-use std::fs::Metadata;
-use std::io::{ErrorKind, Read};
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
@@ -12,7 +11,14 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::error::{Result, StackError};
-use crate::fs_util::atomic_write_owner_only;
+use crate::runtime::sandbox::SandboxProfile;
+use crate::workload_fs::{self, Anchor, LinkPolicy, WriteOptions};
+
+// === CONSTANTS ===
+
+const HARD_LINK_REASON: &str = "target has more than one hard link";
+const NOT_REGULAR_REASON: &str = "target is not a regular file";
+const OWNER_MISMATCH_REASON: &str = "target is owned by another user";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathIntent {
@@ -20,168 +26,91 @@ pub enum PathIntent {
     WriteOrCreate,
 }
 
-/// Resolve a workspace-relative `requested` path to an absolute filesystem path inside `root`,
-/// which must already exist.
-pub fn resolve_workspace_path(root: &Path, requested: &str, intent: PathIntent) -> Result<PathBuf> {
+/// Validate a workspace-relative `requested` path and return it relative to the workspace root.
+pub fn workspace_relative_path(requested: &str, intent: PathIntent) -> Result<PathBuf> {
+    let invalid = |reason: &str| StackError::WorkspacePathInvalid {
+        reason: reason.to_owned(),
+        requested: requested.to_owned(),
+    };
     if requested.contains('\0') {
-        return Err(StackError::WorkspacePathInvalid {
-            reason: "contains NUL byte".to_owned(),
-            requested: requested.to_owned(),
-        });
+        return Err(invalid("contains NUL byte"));
     }
-
-    let requested_path = Path::new(requested);
-    let mut normal_count = 0usize;
-    for component in requested_path.components() {
+    let mut relative = PathBuf::new();
+    for component in Path::new(requested).components() {
         match component {
-            Component::ParentDir => {
-                return Err(StackError::WorkspacePathInvalid {
-                    reason: "contains `..` segment".to_owned(),
-                    requested: requested.to_owned(),
-                });
-            }
+            Component::ParentDir => return Err(invalid("contains `..` segment")),
             Component::Prefix(_) | Component::RootDir => {
-                return Err(StackError::WorkspacePathInvalid {
-                    reason: "must be a workspace-relative path".to_owned(),
-                    requested: requested.to_owned(),
-                });
+                return Err(invalid("must be a workspace-relative path"));
             }
             Component::CurDir => {}
-            Component::Normal(_) => normal_count += 1,
+            Component::Normal(name) => relative.push(name),
         }
     }
-    // Rust's `Path` API silently retargets both of these: a path normalizing to the root itself
-    // resolves to a sibling of the root, and a trailing `.` (`subdir/.`) collapses to `subdir`,
-    // so the write would land somewhere other than the path the caller named.
-    if matches!(intent, PathIntent::WriteOrCreate) {
-        if normal_count == 0 {
-            return Err(StackError::WorkspacePathInvalid {
-                reason: "must name a specific file inside the workspace".to_owned(),
-                requested: requested.to_owned(),
-            });
+    // A path naming the root itself has no entry to write, and `Path` collapses a trailing `.`
+    // (`subdir/.`) to `subdir`, which would retarget the write at the directory.
+    if intent == PathIntent::WriteOrCreate {
+        if relative.as_os_str().is_empty() {
+            return Err(invalid("must name a specific file inside the workspace"));
         }
         let trimmed = requested.trim_end_matches('/');
         if trimmed == "." || trimmed.ends_with("/.") {
-            return Err(StackError::WorkspacePathInvalid {
-                reason: "path must end with a file name, not `.`".to_owned(),
-                requested: requested.to_owned(),
-            });
+            return Err(invalid("path must end with a file name, not `.`"));
         }
     }
-
-    let canonical_root = root.canonicalize().map_err(|source| {
-        if source.kind() == ErrorKind::NotFound {
-            StackError::WorkspaceNotFound {
-                requested: requested.to_owned(),
-            }
-        } else {
-            StackError::WorkspaceIo {
-                requested: requested.to_owned(),
-                source,
-            }
-        }
-    })?;
-    let joined = canonical_root.join(requested_path);
-
-    match intent {
-        PathIntent::ReadExisting => {
-            let canonical = canonicalize_or_translate(&joined, requested, intent)?;
-            if !canonical.starts_with(&canonical_root) {
-                return Err(StackError::WorkspaceSymlinkEscape {
-                    requested: requested.to_owned(),
-                });
-            }
-            Ok(canonical)
-        }
-        PathIntent::WriteOrCreate => {
-            let parent = joined
-                .parent()
-                .ok_or_else(|| StackError::WorkspacePathInvalid {
-                    reason: "has no parent directory".to_owned(),
-                    requested: requested.to_owned(),
-                })?;
-            let canonical_parent = canonicalize_or_translate(parent, requested, intent)?;
-            if !canonical_parent.starts_with(&canonical_root) {
-                return Err(StackError::WorkspaceSymlinkEscape {
-                    requested: requested.to_owned(),
-                });
-            }
-            // `canonicalize` resolves through a regular file, so the parent can canonicalize and
-            // still not be a directory.
-            let parent_metadata =
-                std::fs::metadata(&canonical_parent).map_err(|source| StackError::WorkspaceIo {
-                    requested: requested.to_owned(),
-                    source,
-                })?;
-            if !parent_metadata.is_dir() {
-                return Err(StackError::WorkspacePathInvalid {
-                    reason: "intermediate component is not a directory".to_owned(),
-                    requested: requested.to_owned(),
-                });
-            }
-            let final_name =
-                joined
-                    .file_name()
-                    .ok_or_else(|| StackError::WorkspacePathInvalid {
-                        reason: "has no file name".to_owned(),
-                        requested: requested.to_owned(),
-                    })?;
-            let resolved = canonical_parent.join(final_name);
-            // Refuse to overwrite an existing symlink; `symlink_metadata` sees the link itself.
-            if let Ok(metadata) = std::fs::symlink_metadata(&resolved)
-                && metadata.file_type().is_symlink()
-            {
-                return Err(StackError::WorkspaceSymlinkEscape {
-                    requested: requested.to_owned(),
-                });
-            }
-            Ok(resolved)
-        }
-    }
+    Ok(relative)
 }
 
-/// Resolve an ABSOLUTE path (as ACP `fs/*` methods send) to a verified path inside `root`. The
-/// remainder MUST route through `resolve_workspace_path`: this entry point must never be weaker.
-pub fn resolve_workspace_abs_path(
-    root: &Path,
+/// Relative form of an absolute ACP `requested` path below `anchor`. Both the anchor's canonical
+/// path and `configured_root`, the spelling the anchor was opened from, are accepted because agents
+/// echo back whichever cwd they were given. Only the remainder matters: the walk starts from the
+/// anchor's descriptor, so neither spelling can redirect it.
+pub fn anchored_relative_path(
+    anchor: &Anchor,
+    configured_root: &Path,
     requested: &Path,
     intent: PathIntent,
 ) -> Result<PathBuf> {
-    let display = requested.to_string_lossy().into_owned();
+    let invalid = |reason: &str| StackError::WorkspacePathInvalid {
+        reason: reason.to_owned(),
+        requested: requested.to_string_lossy().into_owned(),
+    };
     if !requested.is_absolute() {
-        return Err(StackError::WorkspacePathInvalid {
-            reason: "must be an absolute path".to_owned(),
-            requested: display,
-        });
+        return Err(invalid("must be an absolute path"));
     }
-    let canonical_root = root.canonicalize().map_err(|source| {
-        if source.kind() == ErrorKind::NotFound {
-            StackError::WorkspaceNotFound {
-                requested: display.clone(),
-            }
-        } else {
-            StackError::WorkspaceIo {
-                requested: display.clone(),
-                source,
-            }
-        }
-    })?;
-    // Accept both the canonical root and the configured (possibly symlinked)
-    // spelling: agents echo back whatever cwd they were given at session/new.
     let relative = requested
-        .strip_prefix(&canonical_root)
-        .or_else(|_| requested.strip_prefix(root))
-        .map_err(|_| StackError::WorkspacePathInvalid {
-            reason: "outside the session workspace".to_owned(),
-            requested: display.clone(),
-        })?;
-    let relative_str = relative
+        .strip_prefix(anchor.path())
+        .or_else(|_| requested.strip_prefix(configured_root))
+        .map_err(|_| invalid("outside the session workspace"))?;
+    let relative = relative
         .to_str()
-        .ok_or_else(|| StackError::WorkspacePathInvalid {
-            reason: "not valid UTF-8".to_owned(),
-            requested: display.clone(),
-        })?;
-    resolve_workspace_path(root, relative_str, intent)
+        .ok_or_else(|| invalid("not valid UTF-8"))?;
+    workspace_relative_path(relative, intent)
+}
+
+/// Open the anchor a request on `root` walks from. A missing root reads as a missing path whatever
+/// the operation.
+pub fn open_root(root: &Path, requested: &str, links: LinkPolicy) -> Result<Anchor> {
+    Anchor::open_with(root, links)
+        .map_err(|error| workspace_error(error, requested, PathIntent::ReadExisting))
+}
+
+/// Walker options for a write made on behalf of the workload: umask modes and an owner check
+/// against the identity when one is declared, otherwise the runtime's owner-only modes.
+pub fn workload_write_options(profile: &SandboxProfile) -> WriteOptions {
+    match &profile.identity {
+        Some(identity) => WriteOptions {
+            create_parents: false,
+            file_mode: workload_fs::UMASK_FILE_MODE,
+            dir_mode: workload_fs::UMASK_DIR_MODE,
+            require_existing_owner: Some(identity.uid),
+        },
+        None => WriteOptions {
+            create_parents: false,
+            file_mode: workload_fs::OWNER_ONLY_FILE_MODE,
+            dir_mode: workload_fs::OWNER_ONLY_DIR_MODE,
+            require_existing_owner: None,
+        },
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -219,275 +148,110 @@ pub struct FileMetadata {
     pub modified: DateTime<Utc>,
 }
 
-/// List the entries of an already-resolved `absolute_path`, sorted directories-first then by
-/// name. Symlinks are reported as `EntryKind::Symlink` and are not traversed.
-pub fn list_directory(absolute_path: &Path) -> Result<WorkspaceListing> {
-    let metadata = std::fs::metadata(absolute_path).map_err(|source| StackError::WorkspaceIo {
-        requested: display_relative(absolute_path),
-        source,
-    })?;
-    if !metadata.is_dir() {
-        return Err(StackError::WorkspacePathInvalid {
-            reason: "target is not a directory".to_owned(),
-            requested: display_relative(absolute_path),
-        });
-    }
-
-    let read_dir = std::fs::read_dir(absolute_path).map_err(|source| StackError::WorkspaceIo {
-        requested: display_relative(absolute_path),
-        source,
-    })?;
-
-    let mut entries = Vec::new();
-    for raw in read_dir {
-        let entry = raw.map_err(|source| StackError::WorkspaceIo {
-            requested: display_relative(absolute_path),
-            source,
-        })?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let symlink_meta =
-            entry
-                .path()
-                .symlink_metadata()
-                .map_err(|source| StackError::WorkspaceIo {
-                    requested: name.clone(),
-                    source,
-                })?;
-        let kind = classify(&symlink_meta);
-        let modified = system_time_to_utc(symlink_meta.modified().map_err(|source| {
-            StackError::WorkspaceIo {
-                requested: name.clone(),
-                source,
+/// List the directory at `relative`, sorted directories-first then by name. Symlinks are reported
+/// as `EntryKind::Symlink` and never traversed.
+pub fn list_directory(
+    anchor: &Anchor,
+    relative: &Path,
+    requested: &str,
+) -> Result<WorkspaceListing> {
+    let mut entries: Vec<WorkspaceEntry> = workload_fs::list_dir(anchor, relative)
+        .map_err(|error| workspace_error(error, requested, PathIntent::ReadExisting))?
+        .into_iter()
+        .map(|(name, info)| {
+            let kind = entry_kind(info.kind);
+            WorkspaceEntry {
+                name: name.to_string_lossy().into_owned(),
+                size: (kind == EntryKind::File).then_some(info.size),
+                kind,
+                modified: system_time_to_utc(info.modified),
             }
-        })?);
-        let size = match kind {
-            EntryKind::File => Some(symlink_meta.len()),
-            _ => None,
-        };
-        entries.push(WorkspaceEntry {
-            name,
-            kind,
-            size,
-            modified,
-        });
-    }
+        })
+        .collect();
     entries.sort_by_key(sort_key);
     Ok(WorkspaceListing { entries })
 }
 
-/// Read at most `max_bytes` of an existing regular file. The post-read size re-check defends
-/// against a concurrent writer growing the file after the metadata check.
-pub fn read_file(absolute_path: &Path, max_bytes: u64) -> Result<FileRead> {
-    // Stat first, open second: opening a FIFO/socket for read blocks indefinitely on Unix and
-    // would tie up a tokio blocking thread.
-    let metadata = std::fs::metadata(absolute_path).map_err(|source| {
-        if source.kind() == ErrorKind::NotFound {
-            StackError::WorkspaceNotFound {
-                requested: display_relative(absolute_path),
-            }
-        } else {
-            StackError::WorkspaceIo {
-                requested: display_relative(absolute_path),
-                source,
-            }
-        }
-    })?;
-    if !metadata.is_file() {
-        return Err(StackError::WorkspacePathInvalid {
-            reason: "target is not a regular file".to_owned(),
-            requested: display_relative(absolute_path),
-        });
-    }
-    if metadata.len() > max_bytes {
-        return Err(StackError::WorkspaceTooLarge { limit: max_bytes });
-    }
-    let mut file = open_no_follow(absolute_path).map_err(|source| {
-        // ELOOP from O_NOFOLLOW means a symlink appeared at the final component between the
-        // metadata check and the open.
-        if source.raw_os_error() == Some(libc::ELOOP) {
-            StackError::WorkspaceSymlinkEscape {
-                requested: display_relative(absolute_path),
-            }
-        } else {
-            StackError::WorkspaceIo {
-                requested: display_relative(absolute_path),
-                source,
-            }
-        }
-    })?;
-    let modified =
-        system_time_to_utc(
-            metadata
-                .modified()
-                .map_err(|source| StackError::WorkspaceIo {
-                    requested: display_relative(absolute_path),
-                    source,
-                })?,
-        );
-    let cap = usize::try_from(max_bytes.saturating_add(1)).unwrap_or(usize::MAX);
-    let mut buffer = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
-    file.by_ref()
-        .take(cap as u64)
-        .read_to_end(&mut buffer)
-        .map_err(|source| StackError::WorkspaceIo {
-            requested: display_relative(absolute_path),
-            source,
-        })?;
-    if buffer.len() as u64 > max_bytes {
-        return Err(StackError::WorkspaceTooLarge { limit: max_bytes });
-    }
-    let size = buffer.len() as u64;
+/// Read the single-link regular file at `relative`, at most `max_bytes` long.
+pub fn read_file(
+    anchor: &Anchor,
+    relative: &Path,
+    requested: &str,
+    max_bytes: u64,
+) -> Result<FileRead> {
+    // The opened file's own status, so a followed symlink reports its target's mtime.
+    let (content, info) = workload_fs::read_file_with_info(anchor, relative, max_bytes)
+        .map_err(|error| workspace_error(error, requested, PathIntent::ReadExisting))?;
     Ok(FileRead {
-        content: buffer,
-        size,
-        modified,
+        size: content.len() as u64,
+        content,
+        modified: system_time_to_utc(info.modified),
     })
 }
 
-/// Atomically write `content` to `absolute_path`, returning the post-write size and mtime.
-pub fn write_file_atomic(absolute_path: &Path, content: &[u8]) -> Result<FileMetadata> {
-    if let Ok(metadata) = std::fs::symlink_metadata(absolute_path)
-        && metadata.file_type().is_dir()
-    {
-        return Err(StackError::WorkspacePathInvalid {
-            reason: "target is a directory; refusing to write".to_owned(),
-            requested: display_relative(absolute_path),
-        });
-    }
-    if let Some(parent) = absolute_path.parent()
-        && !parent.is_dir()
-    {
-        return Err(StackError::WorkspaceParentNotFound {
-            requested: display_relative(absolute_path),
-        });
-    }
-    atomic_write_owner_only(absolute_path, content).map_err(translate_atomic_write_error)?;
-    let metadata = std::fs::metadata(absolute_path).map_err(|source| StackError::WorkspaceIo {
-        requested: display_relative(absolute_path),
-        source,
-    })?;
-    Ok(FileMetadata {
-        size: metadata.len(),
-        modified: system_time_to_utc(metadata.modified().map_err(|source| {
-            StackError::WorkspaceIo {
-                requested: display_relative(absolute_path),
-                source,
-            }
-        })?),
-    })
+/// Atomically replace or create the file at `relative`, returning its post-write size and mtime.
+pub fn write_file(
+    anchor: &Anchor,
+    relative: &Path,
+    requested: &str,
+    content: &[u8],
+    options: &WriteOptions,
+) -> Result<FileMetadata> {
+    workload_fs::write_file_atomic(anchor, relative, content, options)
+        .map_err(|error| workspace_error(error, requested, PathIntent::WriteOrCreate))?;
+    file_metadata(anchor, relative, requested)
 }
 
-/// Remove a regular file at `absolute_path`, refusing directories and symlinks.
-pub fn delete_file(absolute_path: &Path) -> Result<()> {
-    let metadata = std::fs::symlink_metadata(absolute_path).map_err(|source| {
-        if source.kind() == ErrorKind::NotFound {
-            StackError::WorkspaceNotFound {
-                requested: display_relative(absolute_path),
-            }
-        } else {
-            StackError::WorkspaceIo {
-                requested: display_relative(absolute_path),
-                source,
-            }
-        }
-    })?;
-    let file_type = metadata.file_type();
-    if file_type.is_dir() {
-        return Err(StackError::WorkspacePathInvalid {
-            reason: "target is a directory; refusing to remove recursively".to_owned(),
-            requested: display_relative(absolute_path),
-        });
-    }
-    if file_type.is_symlink() {
-        return Err(StackError::WorkspaceSymlinkEscape {
-            requested: display_relative(absolute_path),
-        });
-    }
-    if !file_type.is_file() {
-        return Err(StackError::WorkspacePathInvalid {
-            reason: "target is not a regular file".to_owned(),
-            requested: display_relative(absolute_path),
-        });
-    }
-    std::fs::remove_file(absolute_path).map_err(|source| StackError::WorkspaceIo {
-        requested: display_relative(absolute_path),
-        source,
-    })
+/// Remove the regular file at `relative`; directories and symlinks are refused.
+pub fn delete_file(anchor: &Anchor, relative: &Path, requested: &str) -> Result<()> {
+    workload_fs::remove_file(anchor, relative)
+        .map_err(|error| workspace_error(error, requested, PathIntent::ReadExisting))
 }
 
-/// Canonicalize a path, translating client-shaped `std::io` errors into 4xx workspace errors.
-fn canonicalize_or_translate(path: &Path, requested: &str, intent: PathIntent) -> Result<PathBuf> {
-    match path.canonicalize() {
-        Ok(canonical) => Ok(canonical),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if matches!(intent, PathIntent::WriteOrCreate) {
-                return Err(StackError::WorkspaceParentNotFound {
-                    requested: requested.to_owned(),
-                });
-            }
-            Err(StackError::WorkspaceNotFound {
-                requested: requested.to_owned(),
-            })
-        }
-        Err(error)
-            if matches!(error.kind(), std::io::ErrorKind::NotADirectory)
-                || error.raw_os_error() == Some(libc::ENOTDIR) =>
-        {
-            Err(StackError::WorkspacePathInvalid {
-                reason: "intermediate component is not a directory".to_owned(),
-                requested: requested.to_owned(),
-            })
-        }
-        Err(source) => Err(StackError::WorkspaceIo {
+fn file_metadata(anchor: &Anchor, relative: &Path, requested: &str) -> Result<FileMetadata> {
+    let info = workload_fs::stat(anchor, relative)
+        .map_err(|error| workspace_error(error, requested, PathIntent::ReadExisting))?
+        .ok_or_else(|| StackError::WorkspaceNotFound {
             requested: requested.to_owned(),
-            source,
-        }),
-    }
+        })?;
+    Ok(FileMetadata {
+        size: info.size,
+        modified: system_time_to_utc(info.modified),
+    })
 }
 
-/// Open with `O_NOFOLLOW | O_NONBLOCK` so a final-component swap between the resolve-time metadata
-/// check and this open is caught here: a symlink returns ELOOP, and a FIFO/socket returns
-/// immediately instead of blocking, to be rejected by the post-open `fstat`.
-fn open_no_follow(absolute_path: &Path) -> std::io::Result<std::fs::File> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(absolute_path)?;
-        // Re-stat through the open handle so a race-substituted non-regular file is rejected.
-        let metadata = file.metadata()?;
-        let mode = metadata.mode();
-        // libc exposes these constants with target-specific integer types.
-        #[allow(clippy::unnecessary_cast)]
-        let file_type_mask = libc::S_IFMT as u32;
-        #[allow(clippy::unnecessary_cast)]
-        let regular_file_mode = libc::S_IFREG as u32;
-        if mode & file_type_mask != regular_file_mode {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "workspace open refused non-regular file after race-check",
-            ));
+/// Translate walker errors into the `workspace.*` domain the HTTP and ACP callers report, keyed by
+/// the caller's own `requested` path rather than a host path.
+fn workspace_error(error: StackError, requested: &str, intent: PathIntent) -> StackError {
+    let requested = requested.to_owned();
+    let invalid = |reason: &str, requested: String| StackError::WorkspacePathInvalid {
+        reason: reason.to_owned(),
+        requested,
+    };
+    match error {
+        StackError::WorkloadFsInvalidPath { reason, .. } => invalid(reason, requested),
+        StackError::WorkloadFsSymlinkRefused { .. } => {
+            StackError::WorkspaceSymlinkEscape { requested }
         }
-        Ok(file)
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::File::open(absolute_path)
+        StackError::WorkloadFsHardLinkRefused { .. } => invalid(HARD_LINK_REASON, requested),
+        StackError::WorkloadFsNotRegular { .. } => invalid(NOT_REGULAR_REASON, requested),
+        StackError::WorkloadFsOwnerMismatch { .. } => invalid(OWNER_MISMATCH_REASON, requested),
+        // A write's own target may be missing, so a missing component is a missing parent.
+        StackError::WorkloadFsNotFound { .. } => match intent {
+            PathIntent::ReadExisting => StackError::WorkspaceNotFound { requested },
+            PathIntent::WriteOrCreate => StackError::WorkspaceParentNotFound { requested },
+        },
+        StackError::WorkloadFsIo { source, .. } => StackError::WorkspaceIo { requested, source },
+        other => other,
     }
 }
 
-fn classify(metadata: &Metadata) -> EntryKind {
-    let file_type = metadata.file_type();
-    if file_type.is_symlink() {
-        EntryKind::Symlink
-    } else if file_type.is_dir() {
-        EntryKind::Directory
-    } else if file_type.is_file() {
-        EntryKind::File
-    } else {
-        EntryKind::Other
+fn entry_kind(kind: workload_fs::EntryKind) -> EntryKind {
+    match kind {
+        workload_fs::EntryKind::File => EntryKind::File,
+        workload_fs::EntryKind::Dir => EntryKind::Directory,
+        workload_fs::EntryKind::Symlink => EntryKind::Symlink,
+        workload_fs::EntryKind::Other => EntryKind::Other,
     }
 }
 
@@ -505,346 +269,125 @@ fn system_time_to_utc(time: SystemTime) -> DateTime<Utc> {
     DateTime::<Utc>::from(time)
 }
 
-fn display_relative(path: &Path) -> String {
-    path.file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
-}
-
-/// Translate `atomic_write_owner_only` errors into workspace-domain `workspace.*` errors.
-fn translate_atomic_write_error(error: StackError) -> StackError {
-    let requested = "<workspace target>".to_owned();
-    match error {
-        StackError::FileCreate { source, .. } | StackError::PermissionSet { source, .. } => {
-            StackError::WorkspaceIo { requested, source }
-        }
-        StackError::MissingParentDir { .. } => StackError::WorkspaceNotFound { requested },
-        other => other,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
 
-    fn workspace_root() -> tempfile::TempDir {
-        tempfile::tempdir().expect("tempdir")
-    }
+    const MAX_READ: u64 = 1024;
 
-    #[test]
-    fn rejects_parent_traversal() {
-        let root = workspace_root();
-        let error = resolve_workspace_path(root.path(), "../etc/passwd", PathIntent::ReadExisting)
-            .expect_err("traversal should be rejected");
-        assert!(matches!(
-            error,
-            StackError::WorkspacePathInvalid { reason, .. } if reason.contains("..")
-        ));
-    }
-
-    #[test]
-    fn rejects_nul_byte_in_path() {
-        let root = workspace_root();
-        let error = resolve_workspace_path(root.path(), "a\0b", PathIntent::ReadExisting)
-            .expect_err("NUL byte should be rejected");
-        assert!(matches!(
-            error,
-            StackError::WorkspacePathInvalid { reason, .. } if reason.contains("NUL")
-        ));
-    }
-
-    #[test]
-    fn rejects_curdir_for_writes() {
-        let root = workspace_root();
-        let error = resolve_workspace_path(root.path(), ".", PathIntent::WriteOrCreate)
-            .expect_err("`.` for writes should be rejected");
-        assert!(matches!(
-            error,
-            StackError::WorkspacePathInvalid { reason, .. } if reason.contains("specific file")
-        ));
-    }
-
-    #[test]
-    fn write_atomic_refuses_directory_target() {
-        let root = workspace_root();
-        std::fs::create_dir(root.path().join("subdir")).expect("mkdir");
-        let target = root.path().join("subdir");
-        let error = write_file_atomic(&target, b"oops").expect_err("should refuse directory");
-        assert!(matches!(
-            error,
-            StackError::WorkspacePathInvalid { reason, .. }
-                if reason.contains("directory")
-        ));
-    }
-
-    #[test]
-    fn allows_curdir_for_reads_of_root() {
-        let root = workspace_root();
-        let resolved = resolve_workspace_path(root.path(), ".", PathIntent::ReadExisting)
-            .expect("listing the root via `.` should work");
-        assert_eq!(
-            resolved,
-            fs::canonicalize(root.path()).expect("canonicalize")
-        );
-    }
-
-    #[test]
-    fn rejects_absolute_paths() {
-        let root = workspace_root();
-        let error = resolve_workspace_path(root.path(), "/etc/passwd", PathIntent::ReadExisting)
-            .expect_err("absolute path should be rejected");
-        assert!(matches!(
-            error,
-            StackError::WorkspacePathInvalid { reason, .. }
-                if reason.contains("workspace-relative")
-        ));
-    }
-
-    #[test]
-    fn read_existing_returns_canonical_path() {
-        let root = workspace_root();
-        let file = root.path().join("hello.txt");
-        fs::write(&file, b"hi").expect("write");
-
-        let resolved = resolve_workspace_path(root.path(), "hello.txt", PathIntent::ReadExisting)
-            .expect("resolve");
-        assert_eq!(resolved, fs::canonicalize(&file).expect("canonicalize"));
-    }
-
-    #[test]
-    fn read_existing_with_file_as_intermediate_returns_path_invalid() {
-        let root = workspace_root();
-        fs::write(root.path().join("plain.txt"), b"data").expect("write");
-        let error =
-            resolve_workspace_path(root.path(), "plain.txt/child", PathIntent::ReadExisting)
-                .expect_err("intermediate file should not be treated as a directory");
-        assert!(matches!(
-            error,
-            StackError::WorkspacePathInvalid { reason, .. }
-                if reason.contains("not a directory")
-        ));
-    }
-
-    #[test]
-    fn write_or_create_with_file_as_intermediate_returns_path_invalid() {
-        let root = workspace_root();
-        fs::write(root.path().join("plain.txt"), b"data").expect("write");
-        let error =
-            resolve_workspace_path(root.path(), "plain.txt/child", PathIntent::WriteOrCreate)
-                .expect_err("intermediate file should not be treated as a directory");
-        assert!(matches!(
-            error,
-            StackError::WorkspacePathInvalid { reason, .. }
-                if reason.contains("not a directory")
-        ));
-    }
-
-    #[test]
-    fn write_or_create_rejects_trailing_dot_segment() {
-        let root = workspace_root();
-        fs::create_dir(root.path().join("subdir")).expect("mkdir");
-        let error = resolve_workspace_path(root.path(), "subdir/.", PathIntent::WriteOrCreate)
-            .expect_err("`subdir/.` should be rejected for writes");
-        assert!(matches!(
-            error,
-            StackError::WorkspacePathInvalid { reason, .. } if reason.contains("file name")
-        ));
-    }
-
-    #[test]
-    fn read_existing_missing_returns_not_found() {
-        let root = workspace_root();
-        let error = resolve_workspace_path(root.path(), "missing.txt", PathIntent::ReadExisting)
-            .expect_err("missing file should 404");
-        assert!(matches!(error, StackError::WorkspaceNotFound { .. }));
-    }
-
-    #[test]
-    fn write_or_create_requires_existing_parent() {
-        let root = workspace_root();
-        let error =
-            resolve_workspace_path(root.path(), "nested/new.txt", PathIntent::WriteOrCreate)
-                .expect_err("missing parent should 404");
-        assert!(matches!(error, StackError::WorkspaceParentNotFound { .. }));
-    }
-
-    #[test]
-    fn write_or_create_accepts_new_file_in_existing_dir() {
-        let root = workspace_root();
-        let resolved = resolve_workspace_path(root.path(), "new.txt", PathIntent::WriteOrCreate)
-            .expect("resolve");
-        assert_eq!(
-            resolved.parent().expect("parent"),
-            fs::canonicalize(root.path()).expect("canonicalize")
-        );
-        assert_eq!(resolved.file_name().expect("file_name"), "new.txt");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn read_existing_rejects_symlink_that_escapes_root() {
-        use std::os::unix::fs::symlink;
-        let root = workspace_root();
-        let outside = tempfile::tempdir().expect("outside tempdir");
-        let outside_target = outside.path().join("target");
-        fs::write(&outside_target, b"leak").expect("write outside");
-        symlink(&outside_target, root.path().join("link")).expect("symlink");
-
-        let error = resolve_workspace_path(root.path(), "link", PathIntent::ReadExisting)
-            .expect_err("escape should be rejected");
-        assert!(matches!(error, StackError::WorkspaceSymlinkEscape { .. }));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn write_or_create_refuses_existing_symlink_at_target() {
-        use std::os::unix::fs::symlink;
-        let root = workspace_root();
-        let outside = tempfile::tempdir().expect("outside tempdir");
-        let outside_target = outside.path().join("target");
-        fs::write(&outside_target, b"leak").expect("write outside");
-        symlink(&outside_target, root.path().join("link")).expect("symlink");
-
-        let error = resolve_workspace_path(root.path(), "link", PathIntent::WriteOrCreate)
-            .expect_err("symlink overwrite should be rejected");
-        assert!(matches!(error, StackError::WorkspaceSymlinkEscape { .. }));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn read_existing_allows_symlink_that_stays_inside_root() {
-        use std::os::unix::fs::symlink;
-        let root = workspace_root();
-        let target = root.path().join("real.txt");
-        fs::write(&target, b"ok").expect("write target");
-        symlink(&target, root.path().join("inner-link")).expect("symlink");
-
-        let resolved = resolve_workspace_path(root.path(), "inner-link", PathIntent::ReadExisting)
-            .expect("resolve");
-        assert_eq!(resolved, fs::canonicalize(&target).expect("canonicalize"));
-    }
-
-    #[test]
-    fn list_directory_sorts_directories_before_files_then_by_name() {
-        let root = workspace_root();
-        fs::write(root.path().join("zzz.txt"), b"").expect("write");
-        fs::write(root.path().join("aaa.txt"), b"").expect("write");
-        fs::create_dir(root.path().join("zdir")).expect("mkdir z");
-        fs::create_dir(root.path().join("adir")).expect("mkdir a");
-
-        let listing = list_directory(root.path()).expect("list");
-        let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
-        assert_eq!(names, vec!["adir", "zdir", "aaa.txt", "zzz.txt"]);
-    }
-
-    #[test]
-    fn list_directory_reports_file_sizes_but_not_directory_sizes() {
-        let root = workspace_root();
-        fs::write(root.path().join("a.bin"), b"hello").expect("write");
-        fs::create_dir(root.path().join("sub")).expect("mkdir");
-        let listing = list_directory(root.path()).expect("list");
-
-        let dir = listing
-            .entries
-            .iter()
-            .find(|e| e.name == "sub")
-            .expect("sub");
-        assert_eq!(dir.kind, EntryKind::Directory);
-        assert!(dir.size.is_none());
-
-        let file = listing
-            .entries
-            .iter()
-            .find(|e| e.name == "a.bin")
-            .expect("a.bin");
-        assert_eq!(file.kind, EntryKind::File);
-        assert_eq!(file.size, Some(5));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn list_directory_reports_symlinks_without_following_them() {
-        use std::os::unix::fs::symlink;
-        let root = workspace_root();
-        fs::write(root.path().join("real"), b"x").expect("write");
-        symlink(root.path().join("real"), root.path().join("alias")).expect("symlink");
-
-        let listing = list_directory(root.path()).expect("list");
-        let alias = listing
-            .entries
-            .iter()
-            .find(|e| e.name == "alias")
-            .expect("alias");
-        assert_eq!(alias.kind, EntryKind::Symlink);
-    }
-
-    #[test]
-    fn read_file_returns_content_and_size() {
-        let root = workspace_root();
-        let path = root.path().join("greeting.txt");
-        fs::write(&path, b"hello world").expect("write");
-
-        let result = read_file(&path, 1024).expect("read");
-        assert_eq!(result.content, b"hello world");
-        assert_eq!(result.size, 11);
-    }
-
-    #[test]
-    fn read_file_returns_too_large_when_metadata_exceeds_limit() {
-        let root = workspace_root();
-        let path = root.path().join("big.bin");
-        fs::write(&path, vec![0u8; 100]).expect("write");
-
-        let error = read_file(&path, 50).expect_err("over limit");
-        assert!(matches!(error, StackError::WorkspaceTooLarge { limit: 50 }));
-    }
-
-    #[test]
-    fn read_file_returns_not_found_for_missing_path() {
-        let root = workspace_root();
-        let error = read_file(&root.path().join("absent"), 1024).expect_err("missing");
-        assert!(matches!(error, StackError::WorkspaceNotFound { .. }));
-    }
-
-    #[test]
-    fn write_file_atomic_creates_and_overwrites_without_leaving_tempfiles() {
-        let root = workspace_root();
-        let target = root.path().join("note.md");
-
-        let first = write_file_atomic(&target, b"hello").expect("write 1");
-        assert_eq!(first.size, 5);
-        assert_eq!(fs::read(&target).expect("read"), b"hello");
-
-        let second = write_file_atomic(&target, b"updated content").expect("write 2");
-        assert_eq!(second.size, 15);
-        assert_eq!(fs::read(&target).expect("read"), b"updated content");
-
-        let leftover: Vec<_> = fs::read_dir(root.path())
-            .expect("read_dir")
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| entry.file_name() != "note.md")
-            .collect();
-        assert!(leftover.is_empty(), "leftover entries: {leftover:?}");
-    }
-
-    #[test]
-    fn write_file_atomic_reports_missing_parent() {
-        let root = workspace_root();
-        let target = root.path().join("missing").join("note.md");
-        let error = write_file_atomic(&target, b"hello").expect_err("missing parent");
-        assert!(matches!(
-            error,
-            StackError::WorkspaceParentNotFound { requested } if requested == "note.md"
-        ));
-    }
-
-    #[test]
-    fn resolve_workspace_path_reports_missing_root_as_not_found() {
+    fn workspace() -> (tempfile::TempDir, Anchor) {
         let root = tempfile::tempdir().expect("tempdir");
-        let missing_root = root.path().join("missing-root");
-        let error = resolve_workspace_path(&missing_root, "notes/x.txt", PathIntent::WriteOrCreate)
-            .expect_err("missing root");
+        let anchor = Anchor::open(root.path()).expect("anchor");
+        (root, anchor)
+    }
+
+    fn owner_only() -> WriteOptions {
+        workload_write_options(&SandboxProfile::default())
+    }
+
+    fn assert_invalid(error: StackError, fragment: &str) {
+        assert!(
+            matches!(
+                &error,
+                StackError::WorkspacePathInvalid { reason, .. } if reason.contains(fragment)
+            ),
+            "expected a path_invalid containing `{fragment}`, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn lexical_validation_refuses_traversal_nul_and_absolute_paths() {
+        for intent in [PathIntent::ReadExisting, PathIntent::WriteOrCreate] {
+            assert_invalid(
+                workspace_relative_path("../etc/passwd", intent).expect_err("traversal"),
+                "..",
+            );
+            assert_invalid(
+                workspace_relative_path("a\0b", intent).expect_err("NUL"),
+                "NUL",
+            );
+            assert_invalid(
+                workspace_relative_path("/etc/passwd", intent).expect_err("absolute"),
+                "workspace-relative",
+            );
+        }
+    }
+
+    #[test]
+    fn lexical_validation_refuses_writes_that_name_no_file() {
+        assert_invalid(
+            workspace_relative_path(".", PathIntent::WriteOrCreate).expect_err("root"),
+            "specific file",
+        );
+        assert_invalid(
+            workspace_relative_path("subdir/.", PathIntent::WriteOrCreate).expect_err("dot"),
+            "file name",
+        );
+        assert_eq!(
+            workspace_relative_path(".", PathIntent::ReadExisting).expect("root listing"),
+            PathBuf::new()
+        );
+        assert_eq!(
+            workspace_relative_path("./a//b/", PathIntent::WriteOrCreate).expect("normalized"),
+            PathBuf::from("a/b")
+        );
+    }
+
+    #[test]
+    fn anchored_paths_accept_canonical_and_configured_spellings_only() {
+        let (root, anchor) = workspace();
+        let canonical = anchor.path().join("notes/a.txt");
+        let configured = root.path().join("notes/a.txt");
+        for requested in [&canonical, &configured] {
+            assert_eq!(
+                anchored_relative_path(&anchor, root.path(), requested, PathIntent::WriteOrCreate)
+                    .expect("inside"),
+                PathBuf::from("notes/a.txt")
+            );
+        }
+        assert_invalid(
+            anchored_relative_path(
+                &anchor,
+                root.path(),
+                Path::new("/etc/passwd"),
+                PathIntent::ReadExisting,
+            )
+            .expect_err("outside"),
+            "outside the session workspace",
+        );
+        assert_invalid(
+            anchored_relative_path(
+                &anchor,
+                root.path(),
+                Path::new("relative.txt"),
+                PathIntent::ReadExisting,
+            )
+            .expect_err("relative"),
+            "absolute",
+        );
+        assert_invalid(
+            anchored_relative_path(
+                &anchor,
+                root.path(),
+                &anchor.path().join("../escape"),
+                PathIntent::ReadExisting,
+            )
+            .expect_err("traversal"),
+            "..",
+        );
+    }
+
+    #[test]
+    fn open_root_reports_a_missing_root_as_not_found() {
+        let parent = tempfile::tempdir().expect("tempdir");
+        let error = open_root(
+            &parent.path().join("missing-root"),
+            "notes/x.txt",
+            LinkPolicy::Refuse,
+        )
+        .expect_err("missing root");
         assert!(matches!(
             error,
             StackError::WorkspaceNotFound { requested } if requested == "notes/x.txt"
@@ -852,58 +395,285 @@ mod tests {
     }
 
     #[test]
-    fn list_directory_returns_path_invalid_for_regular_file() {
-        let root = workspace_root();
-        let file = root.path().join("plain.txt");
-        fs::write(&file, b"data").expect("write");
+    fn list_directory_sorts_directories_before_files_and_reports_symlinks() {
+        let (root, anchor) = workspace();
+        fs::write(root.path().join("zzz.txt"), b"").expect("write");
+        fs::write(root.path().join("aaa.txt"), b"hello").expect("write");
+        fs::create_dir(root.path().join("zdir")).expect("mkdir z");
+        fs::create_dir(root.path().join("adir")).expect("mkdir a");
+        symlink(root.path().join("aaa.txt"), root.path().join("alias")).expect("symlink");
 
-        let error = list_directory(&file).expect_err("should refuse listing a file");
+        let listing = list_directory(&anchor, Path::new(""), ".").expect("list");
+        let summary: Vec<(&str, &EntryKind, Option<u64>)> = listing
+            .entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), &entry.kind, entry.size))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("adir", &EntryKind::Directory, None),
+                ("zdir", &EntryKind::Directory, None),
+                ("aaa.txt", &EntryKind::File, Some(5)),
+                ("zzz.txt", &EntryKind::File, Some(0)),
+                ("alias", &EntryKind::Symlink, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn list_directory_refuses_a_file_and_a_symlinked_directory() {
+        let (root, anchor) = workspace();
+        let outside = tempfile::tempdir().expect("outside");
+        fs::write(root.path().join("plain.txt"), b"data").expect("write");
+        symlink(outside.path(), root.path().join("linked")).expect("symlink");
+
+        assert_invalid(
+            list_directory(&anchor, Path::new("plain.txt"), "plain.txt").expect_err("file"),
+            "not a directory",
+        );
         assert!(matches!(
-            error,
-            StackError::WorkspacePathInvalid { reason, .. }
-                if reason.contains("not a directory")
+            list_directory(&anchor, Path::new("linked"), "linked"),
+            Err(StackError::WorkspaceSymlinkEscape { .. })
         ));
     }
 
     #[test]
-    fn delete_file_removes_regular_file() {
-        let root = workspace_root();
-        let path = root.path().join("scratch.txt");
-        fs::write(&path, b"bye").expect("write");
+    fn read_file_returns_content_size_and_enforces_the_limit() {
+        let (root, anchor) = workspace();
+        fs::write(root.path().join("greeting.txt"), b"hello world").expect("write");
 
-        delete_file(&path).expect("delete");
-        assert!(!path.exists(), "file should be gone");
-    }
-
-    #[test]
-    fn delete_file_refuses_directory() {
-        let root = workspace_root();
-        let dir = root.path().join("subdir");
-        fs::create_dir(&dir).expect("mkdir");
-
-        let error = delete_file(&dir).expect_err("should refuse directory");
+        let read =
+            read_file(&anchor, Path::new("greeting.txt"), "greeting.txt", MAX_READ).expect("read");
+        assert_eq!(read.content, b"hello world");
+        assert_eq!(read.size, 11);
         assert!(matches!(
-            error,
-            StackError::WorkspacePathInvalid { reason, .. } if reason.contains("directory")
+            read_file(&anchor, Path::new("greeting.txt"), "greeting.txt", 5),
+            Err(StackError::WorkspaceTooLarge { limit: 5 })
+        ));
+        assert!(matches!(
+            read_file(&anchor, Path::new("absent"), "absent", MAX_READ),
+            Err(StackError::WorkspaceNotFound { .. })
         ));
     }
 
     #[test]
-    fn delete_file_returns_not_found_for_missing_path() {
-        let root = workspace_root();
-        let error = delete_file(&root.path().join("absent")).expect_err("missing");
-        assert!(matches!(error, StackError::WorkspaceNotFound { .. }));
+    fn read_file_refuses_symlinks_inside_and_outside_the_root() {
+        let (root, anchor) = workspace();
+        let outside = tempfile::tempdir().expect("outside");
+        fs::write(outside.path().join("secret"), b"leak").expect("secret");
+        fs::write(root.path().join("real.txt"), b"ok").expect("real");
+        symlink(outside.path().join("secret"), root.path().join("escape")).expect("escape");
+        symlink(root.path().join("real.txt"), root.path().join("inner")).expect("inner");
+        symlink(outside.path(), root.path().join("dir")).expect("dir");
+
+        for relative in ["escape", "inner", "dir/secret"] {
+            assert!(
+                matches!(
+                    read_file(&anchor, Path::new(relative), relative, MAX_READ),
+                    Err(StackError::WorkspaceSymlinkEscape { .. })
+                ),
+                "{relative} must be refused"
+            );
+        }
     }
 
-    #[cfg(unix)]
     #[test]
-    fn delete_file_refuses_symlink_at_target() {
-        use std::os::unix::fs::symlink;
-        let root = workspace_root();
-        fs::write(root.path().join("real"), b"x").expect("write");
-        symlink(root.path().join("real"), root.path().join("link")).expect("symlink");
+    fn without_an_identity_links_inside_the_root_are_followed() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let anchor =
+            Anchor::open_with(root.path(), LinkPolicy::Follow { contained: true }).expect("anchor");
+        let outside = tempfile::tempdir().expect("outside");
+        fs::write(outside.path().join("secret"), b"leak").expect("secret");
+        fs::create_dir(root.path().join("real")).expect("real dir");
+        fs::write(root.path().join("AGENTS.md"), b"rules").expect("agents");
+        symlink(root.path().join("AGENTS.md"), root.path().join("CLAUDE.md")).expect("inner");
+        symlink(root.path().join("real"), root.path().join("linked")).expect("dir link");
+        fs::hard_link(root.path().join("AGENTS.md"), root.path().join("pnpm")).expect("hard");
+        symlink(outside.path().join("secret"), root.path().join("escape")).expect("escape");
+        let target_modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        fs::File::options()
+            .write(true)
+            .open(root.path().join("AGENTS.md"))
+            .and_then(|file| file.set_modified(target_modified))
+            .expect("set target mtime");
 
-        let error = delete_file(&root.path().join("link")).expect_err("should refuse symlink");
-        assert!(matches!(error, StackError::WorkspaceSymlinkEscape { .. }));
+        for relative in ["CLAUDE.md", "pnpm"] {
+            let read = read_file(&anchor, Path::new(relative), relative, MAX_READ).expect(relative);
+            assert_eq!(read.content, b"rules");
+            assert_eq!(read.modified, system_time_to_utc(target_modified));
+        }
+        write_file(
+            &anchor,
+            Path::new("linked/new.txt"),
+            "linked/new.txt",
+            b"x",
+            &owner_only(),
+        )
+        .expect("write through a linked dir");
+        assert!(root.path().join("real/new.txt").exists());
+        assert!(matches!(
+            read_file(&anchor, Path::new("escape"), "escape", MAX_READ),
+            Err(StackError::WorkspaceSymlinkEscape { .. })
+        ));
+    }
+
+    #[test]
+    fn write_file_creates_and_overwrites_owner_only_without_tempfiles() {
+        let (root, anchor) = workspace();
+        let first = write_file(
+            &anchor,
+            Path::new("note.md"),
+            "note.md",
+            b"hello",
+            &owner_only(),
+        )
+        .expect("write 1");
+        assert_eq!(first.size, 5);
+        let second = write_file(
+            &anchor,
+            Path::new("note.md"),
+            "note.md",
+            b"updated content",
+            &owner_only(),
+        )
+        .expect("write 2");
+        assert_eq!(second.size, 15);
+        assert_eq!(
+            fs::read(root.path().join("note.md")).expect("read"),
+            b"updated content"
+        );
+        let mode = fs::metadata(root.path().join("note.md"))
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, workload_fs::OWNER_ONLY_FILE_MODE);
+        let names: Vec<_> = fs::read_dir(root.path())
+            .expect("read_dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("note.md")]);
+    }
+
+    #[test]
+    fn write_file_refuses_directories_symlinks_and_missing_parents() {
+        let (root, anchor) = workspace();
+        let outside = tempfile::tempdir().expect("outside");
+        let secret = outside.path().join("secret");
+        fs::write(&secret, b"outside").expect("secret");
+        fs::create_dir(root.path().join("subdir")).expect("mkdir");
+        fs::write(root.path().join("plain.txt"), b"data").expect("plain");
+        symlink(&secret, root.path().join("link")).expect("link");
+        symlink(outside.path(), root.path().join("dir")).expect("dir link");
+
+        assert_invalid(
+            write_file(&anchor, Path::new("subdir"), "subdir", b"x", &owner_only())
+                .expect_err("directory"),
+            "regular file",
+        );
+        assert_invalid(
+            write_file(
+                &anchor,
+                Path::new("plain.txt/child"),
+                "plain.txt/child",
+                b"x",
+                &owner_only(),
+            )
+            .expect_err("file as parent"),
+            "not a directory",
+        );
+        for relative in ["link", "dir/secret", "dir/new"] {
+            assert!(
+                matches!(
+                    write_file(&anchor, Path::new(relative), relative, b"x", &owner_only()),
+                    Err(StackError::WorkspaceSymlinkEscape { .. })
+                ),
+                "{relative} must be refused"
+            );
+        }
+        assert!(matches!(
+            write_file(
+                &anchor,
+                Path::new("missing/note.md"),
+                "missing/note.md",
+                b"x",
+                &owner_only()
+            ),
+            Err(StackError::WorkspaceParentNotFound { requested }) if requested == "missing/note.md"
+        ));
+        assert_eq!(fs::read(&secret).expect("secret"), b"outside");
+        assert!(!outside.path().join("new").exists());
+    }
+
+    #[test]
+    fn delete_file_removes_files_and_refuses_directories_symlinks_and_missing() {
+        let (root, anchor) = workspace();
+        let outside = tempfile::tempdir().expect("outside");
+        let secret = outside.path().join("secret");
+        fs::write(&secret, b"outside").expect("secret");
+        fs::write(root.path().join("scratch.txt"), b"bye").expect("scratch");
+        fs::create_dir(root.path().join("subdir")).expect("mkdir");
+        symlink(&secret, root.path().join("link")).expect("link");
+        symlink(outside.path(), root.path().join("dir")).expect("dir link");
+
+        delete_file(&anchor, Path::new("scratch.txt"), "scratch.txt").expect("delete");
+        assert!(!root.path().join("scratch.txt").exists());
+        assert_invalid(
+            delete_file(&anchor, Path::new("subdir"), "subdir").expect_err("directory"),
+            "regular file",
+        );
+        for relative in ["link", "dir/secret"] {
+            assert!(
+                matches!(
+                    delete_file(&anchor, Path::new(relative), relative),
+                    Err(StackError::WorkspaceSymlinkEscape { .. })
+                ),
+                "{relative} must be refused"
+            );
+        }
+        assert!(matches!(
+            delete_file(&anchor, Path::new("absent"), "absent"),
+            Err(StackError::WorkspaceNotFound { .. })
+        ));
+        assert_eq!(fs::read(&secret).expect("secret"), b"outside");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires CAP_SETUID/CAP_SETGID and ACPS_TEST_WORKLOAD_USER"]
+    fn workload_write_lands_owned_by_the_identity() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let user = std::env::var("ACPS_TEST_WORKLOAD_USER").expect("ACPS_TEST_WORKLOAD_USER");
+        let entry = crate::ownership::lookup_user(&user)
+            .expect("lookup")
+            .expect("workload user exists");
+        let profile = SandboxProfile {
+            config: Default::default(),
+            identity: Some(crate::runtime::sandbox::WorkloadIdentity {
+                name: user,
+                uid: entry.uid,
+                gid: entry.gid,
+                home: entry.home,
+            }),
+        };
+        let root = tempfile::tempdir().expect("tempdir");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o777))
+            .expect("open the root to the workload user");
+        let options = workload_write_options(&profile);
+        let root_path = root.path().to_path_buf();
+
+        let written = profile
+            .executor()
+            .run(workload_fs::DEFAULT_JOB_TIMEOUT, move || {
+                let anchor = open_root(&root_path, "note.md", LinkPolicy::Refuse)?;
+                write_file(&anchor, Path::new("note.md"), "note.md", b"hello", &options)
+            })
+            .expect("workload write");
+
+        assert_eq!(written.size, 5);
+        let metadata = fs::symlink_metadata(root.path().join("note.md")).expect("metadata");
+        assert_eq!((metadata.uid(), metadata.gid()), (entry.uid, entry.gid));
     }
 }

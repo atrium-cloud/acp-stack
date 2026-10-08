@@ -108,9 +108,11 @@ Pending requests expire according to config. Approval and denial decisions are d
 
 ## Workspace Boundary
 
-Workspace paths are resolved under `[workspace].root`. The runtime rejects absolute paths from API callers, `..` traversal, embedded NUL bytes, symlink escapes, writes through existing symlink targets, and files above `workspace.max_file_bytes`. Oversized reads/writes/uploads/downloads return `413 workspace.too_large`.
+Workspace paths are resolved under `[workspace].root`. The runtime rejects absolute paths from API callers, `..` traversal, embedded NUL bytes, and files above `workspace.max_file_bytes`. Oversized reads/writes/uploads/downloads return `413 workspace.too_large`.
 
-ACP `fs/read_text_file` and `fs/write_text_file` requests carry absolute paths by protocol. The runtime accepts them only when they resolve inside the session workspace through the same canonicalization and symlink refusal. Each write records a durable `fs.write` audit event.
+Without a workload identity, workspace reads, writes, uploads, and deletes follow symlinks that resolve inside the root and refuse symlink escapes and writes through an existing symlink target. With `[workspace.sandbox].workload_user` set, every operation walks the path one component at a time from the workspace root without following symlinks: a symlink at the target or at any parent, a hard-linked target, and a non-regular target are refused. Writes replace the target atomically.
+
+ACP `fs/read_text_file` and `fs/write_text_file` requests carry absolute paths by protocol. The runtime accepts them only when they resolve inside the session workspace through the same walk. Each write records a durable `fs.write` audit event.
 
 ## Local Interface
 
@@ -126,7 +128,7 @@ A selected import durably stages only the prepared canonical config and stripped
 
 Credentials, authentication state, permission and sandbox controls, and other `acps`-owned security fields are removed before an unmanaged residual can be written. Unmanaged hooks, notification commands, command helpers, plugins, or formatters require explicit acknowledgement for the inspected SHA-256 revision.
 
-Transaction targets are fixed under the runtime user's home, must pass ownership and regular-file checks, and reject symlinks and linked files; managed directories and files use owner-only permissions.
+Native transaction targets are fixed under the workload home, which is the runtime user's home when no workload identity is declared. They must be owned by the workload user and be regular files, and symlinks and linked files are refused. Without a workload identity, managed directories and files use owner-only permissions.
 
 ## Deployment Posture
 
@@ -192,6 +194,12 @@ Termination does not depend on signalling the identity's uid:
 - Under `unshare`, the workload re-arms its parent-death signal after the uid change, so stopping `unshare` tears down the whole pid namespace.
 - Under `off`, each spawn runs in its own cgroup under the runtime's cgroup and is stopped with `cgroup.kill`. `serve` kills and removes cgroups a previous run left behind.
 - A graceful SIGTERM reaches the workload only when the runtime holds `CAP_KILL`. Otherwise a cancel stops the workload when its grace window ends.
+
+Files the runtime reads or writes for the workload use the identity's filesystem credentials on a dedicated thread: ACP `fs/*` requests, workspace API reads and writes, native Agent config writes and imports, skill installs, and workspace source materialisation. The kernel marks the `acps` process non-dumpable on the first such credential switch.
+
+Results are owned by the identity. New files follow the runtime's umask, and copied workspace sources keep their source permissions. Every path follows the no-symlink walk described under Workspace Boundary.
+
+Workspace sources are cloned or downloaded by the runtime into a runtime-owned staging directory and then copied in as the identity, so clone credentials never reach it. A local data source containing a hard-linked file is refused.
 
 `acps` clears its ambient capability set at startup, so every process the runtime starts begins without capabilities. Only the sandbox wrapper chain gets them back, and it drops them before the workload runs.
 

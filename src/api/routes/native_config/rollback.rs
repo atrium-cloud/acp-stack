@@ -16,7 +16,9 @@ pub(super) async fn restore_transaction_and_agent(
             .stop(&target.target_id, &state.state, &state.event_hub)
             .await?;
     }
-    restore_native_config_snapshots(snapshots, home)?;
+    let workload = WorkloadHome::resolve(&state.config, home)?;
+    let files = NativeConfigFiles::new(&state.runtime_paths.config_path, &workload);
+    restore_native_config_snapshots(snapshots, files)?;
     state.refresh_array_runtime_from_disk().await?;
     if prior_was_running {
         start_agent_for_config(state, prior_config).await?;

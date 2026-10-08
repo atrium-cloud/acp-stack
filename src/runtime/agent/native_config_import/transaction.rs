@@ -2,6 +2,73 @@
 
 use super::*;
 
+/// The files a native config transaction spans: the acps config file stays on the runtime side,
+/// and every native target resolves below the workload home.
+#[derive(Clone, Copy)]
+pub struct NativeConfigFiles<'a> {
+    pub config_path: &'a Path,
+    pub workload: &'a WorkloadHome,
+}
+
+impl<'a> NativeConfigFiles<'a> {
+    pub fn new(config_path: &'a Path, workload: &'a WorkloadHome) -> Self {
+        Self {
+            config_path,
+            workload,
+        }
+    }
+
+    fn is_runtime_side(&self, path: &Path) -> bool {
+        path == self.config_path
+    }
+
+    fn claude_state_path(&self) -> PathBuf {
+        self.workload.home().join(".claude.json")
+    }
+
+    fn prepare(&self, path: &Path) -> Result<()> {
+        if self.is_runtime_side(path) {
+            return prepare_owner_managed_file_path(self.workload.runtime_home(), path);
+        }
+        self.workload.prepare_owned_file(path)
+    }
+
+    fn read(&self, path: &Path) -> Result<Option<Vec<u8>>> {
+        if !self.is_runtime_side(path) {
+            return self.workload.read(path);
+        }
+        match std::fs::read(path) {
+            Ok(content) => Ok(Some(content)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(StackError::ConfigRead {
+                path: path.to_path_buf(),
+                source,
+            }),
+        }
+    }
+
+    fn write(&self, path: &Path, content: &[u8]) -> Result<()> {
+        if self.is_runtime_side(path) {
+            return atomic_write_owner_only(path, content);
+        }
+        self.workload.write_atomic(path, content.to_vec())
+    }
+
+    fn remove_if_present(&self, path: &Path) -> Result<()> {
+        if !self.is_runtime_side(path) {
+            return self.workload.remove_file_if_present(path).map(drop);
+        }
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(StackError::FileRemove {
+                path: path.to_path_buf(),
+                source,
+            }),
+        }
+    }
+}
+
 pub fn native_config_projection(config: &Config) -> NativeConfigProjection {
     NativeConfigProjection {
         id: config.agent.id.clone(),
@@ -89,31 +156,31 @@ pub fn native_config_transaction_paths(
 
 pub fn prepare_native_config_file_paths(
     prepared: &PreparedNativeConfigImport,
-    config_path: &Path,
-    home: &Path,
+    files: NativeConfigFiles<'_>,
 ) -> Result<Vec<PathBuf>> {
     let paths = native_config_transaction_paths(
-        config_path,
+        files.config_path,
         &prepared.native_path,
         &prepared.harness,
-        home,
+        files.workload.home(),
     );
     for path in &paths {
-        prepare_owner_managed_file_path(home, path)?;
+        files.prepare(path)?;
     }
     Ok(paths)
 }
 
 pub fn capture_native_config_snapshots(
     paths: &[PathBuf],
-    home: &Path,
+    files: NativeConfigFiles<'_>,
 ) -> Result<Vec<NativeConfigPathSnapshot>> {
+    let claude_state_path = files.claude_state_path();
     let mut snapshots = Vec::with_capacity(paths.len());
     for path in paths {
-        prepare_owner_managed_file_path(home, path)?;
-        let content = if path == &home.join(".claude.json") {
-            match std::fs::read(path) {
-                Ok(content) => {
+        files.prepare(path)?;
+        let content = if path == &claude_state_path {
+            match files.read(path)? {
+                Some(content) => {
                     let root = match serde_json::from_slice::<JsonValue>(&content) {
                         Ok(JsonValue::Object(root)) => root,
                         _ => return Err(native_error("agent.native_config_claude_state_invalid")),
@@ -130,31 +197,13 @@ pub fn capture_native_config_snapshots(
                         value,
                     }
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    NativeConfigSnapshotContent::ClaudeOnboarding {
-                        file_existed: false,
-                        value: None,
-                    }
-                }
-                Err(source) => {
-                    return Err(StackError::ConfigRead {
-                        path: path.clone(),
-                        source,
-                    });
-                }
+                None => NativeConfigSnapshotContent::ClaudeOnboarding {
+                    file_existed: false,
+                    value: None,
+                },
             }
         } else {
-            let content = match std::fs::read(path) {
-                Ok(content) => Some(content),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                Err(source) => {
-                    return Err(StackError::ConfigRead {
-                        path: path.clone(),
-                        source,
-                    });
-                }
-            };
-            NativeConfigSnapshotContent::File(content)
+            NativeConfigSnapshotContent::File(files.read(path)?)
         };
         snapshots.push(NativeConfigPathSnapshot {
             path: path.clone(),
@@ -166,37 +215,30 @@ pub fn capture_native_config_snapshots(
 
 pub fn restore_native_config_snapshots(
     snapshots: &[NativeConfigPathSnapshot],
-    home: &Path,
+    files: NativeConfigFiles<'_>,
 ) -> Result<()> {
     for snapshot in snapshots {
-        prepare_owner_managed_file_path(home, &snapshot.path)?;
+        files.prepare(&snapshot.path)?;
         match &snapshot.content {
             NativeConfigSnapshotContent::File(Some(content)) => {
-                atomic_write_owner_only(&snapshot.path, content)?;
+                files.write(&snapshot.path, content)?;
             }
             NativeConfigSnapshotContent::File(None)
             | NativeConfigSnapshotContent::ClaudeOnboarding {
                 file_existed: false,
                 ..
-            } => match std::fs::remove_file(&snapshot.path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(source) => {
-                    return Err(StackError::FileRemove {
-                        path: snapshot.path.clone(),
-                        source,
-                    });
-                }
-            },
+            } => files.remove_if_present(&snapshot.path)?,
             NativeConfigSnapshotContent::ClaudeOnboarding {
                 file_existed: true,
                 value,
             } => {
                 let content =
-                    std::fs::read(&snapshot.path).map_err(|source| StackError::ConfigRead {
-                        path: snapshot.path.clone(),
-                        source,
-                    })?;
+                    files
+                        .read(&snapshot.path)?
+                        .ok_or_else(|| StackError::ConfigRead {
+                            path: snapshot.path.clone(),
+                            source: std::io::ErrorKind::NotFound.into(),
+                        })?;
                 let mut root = match serde_json::from_slice::<JsonValue>(&content) {
                     Ok(JsonValue::Object(root)) => root,
                     _ => return Err(native_error("agent.native_config_claude_state_invalid")),
@@ -209,7 +251,7 @@ pub fn restore_native_config_snapshots(
                         root.remove("hasCompletedOnboarding");
                     }
                 }
-                atomic_write_owner_only(&snapshot.path, &json_bytes(root)?)?;
+                files.write(&snapshot.path, &json_bytes(root)?)?;
             }
         }
     }
@@ -218,24 +260,23 @@ pub fn restore_native_config_snapshots(
 
 pub fn write_native_config_files(
     prepared: &PreparedNativeConfigImport,
-    config_path: &Path,
-    home: &Path,
+    files: NativeConfigFiles<'_>,
 ) -> Result<()> {
-    atomic_write_owner_only(config_path, prepared.canonical_toml.as_bytes())?;
-    atomic_write_owner_only(&prepared.native_path, &prepared.native_content)?;
-    provision_agent_headless_config(&prepared.canonical_config, home)?;
+    files.write(files.config_path, prepared.canonical_toml.as_bytes())?;
+    files.write(&prepared.native_path, &prepared.native_content)?;
+    provision_agent_headless_config_in(&prepared.canonical_config, files.workload)?;
     Ok(())
 }
 
 pub fn capture_native_config_file_digests(
     paths: &[PathBuf],
-    home: &Path,
+    files: NativeConfigFiles<'_>,
 ) -> Result<Vec<NativeConfigFileDigest>> {
     paths
         .iter()
         .map(|path| {
-            prepare_owner_managed_file_path(home, path)?;
-            let sha256 = native_config_file_digest(path, home)?;
+            files.prepare(path)?;
+            let sha256 = native_config_file_digest(path, files)?;
             Ok(NativeConfigFileDigest {
                 path: path.clone(),
                 sha256,
@@ -246,14 +287,14 @@ pub fn capture_native_config_file_digests(
 
 pub fn validate_native_config_file_digests(
     digests: &[NativeConfigFileDigest],
-    home: &Path,
+    files: NativeConfigFiles<'_>,
 ) -> Result<()> {
     if digests.is_empty() {
         return Err(native_error("agent.native_config_rollback_conflict"));
     }
     for expected in digests {
-        prepare_owner_managed_file_path(home, &expected.path)?;
-        let actual = native_config_file_digest(&expected.path, home)?;
+        files.prepare(&expected.path)?;
+        let actual = native_config_file_digest(&expected.path, files)?;
         if actual != expected.sha256 {
             return Err(native_error("agent.native_config_rollback_conflict"));
         }
@@ -261,18 +302,11 @@ pub fn validate_native_config_file_digests(
     Ok(())
 }
 
-fn native_config_file_digest(path: &Path, home: &Path) -> Result<Option<String>> {
-    let content = match std::fs::read(path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => {
-            return Err(StackError::ConfigRead {
-                path: path.to_path_buf(),
-                source,
-            });
-        }
+fn native_config_file_digest(path: &Path, files: NativeConfigFiles<'_>) -> Result<Option<String>> {
+    let Some(content) = files.read(path)? else {
+        return Ok(None);
     };
-    if path != home.join(".claude.json") {
+    if path != files.claude_state_path() {
         return Ok(Some(sha256_hex(&content)));
     }
     let root = match serde_json::from_slice::<JsonValue>(&content) {

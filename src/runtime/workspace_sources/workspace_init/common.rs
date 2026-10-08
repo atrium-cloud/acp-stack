@@ -1,14 +1,317 @@
-//! Cross-lane primitives shared by every workspace materializer: capture-file plumbing,
-//! destination/lane safety guards, and sentinel encoding.
+//! Cross-lane primitives shared by every workspace materializer: capture-file plumbing, the
+//! runtime-owned staging directory, the workload-side destination under `workspace.root`, and
+//! sentinel encoding.
 
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, StackError};
-use crate::fs_util::atomic_write_owner_only;
+use crate::runtime::process_runner::HostExec;
+use crate::runtime::sandbox::SandboxProfile;
+use crate::workload_fs::{
+    self, Anchor, DEFAULT_JOB_TIMEOUT, EntryKind, Executor, HandoffOptions, HandoffSummary,
+    SymlinkPolicy, WriteOptions,
+};
 
 use super::SOURCE_SENTINEL_FILE;
+
+// === CONSTANTS ===
+
+/// Subdirectory of the runtime state dir that sources materialize into before the handoff.
+const STAGING_DIR_NAME: &str = "staging";
+const STAGING_PREFIX: &str = "source-";
+const STAGING_DIR_MODE: u32 = 0o700;
+/// Bound for one handoff into the workspace; a large checkout or data set copies far longer than
+/// [`DEFAULT_JOB_TIMEOUT`].
+const HANDOFF_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+/// Sentinels are small JSON documents; anything larger is not one of ours.
+const SENTINEL_MAX_BYTES: u64 = 64 * 1024;
+/// Materialized files keep their source permissions and directories follow the umask, with or
+/// without a workload identity; only the sentinel keeps the owner-only mode the workspace writes use.
+const MATERIALIZED_FILE_MODE_MASK: u32 = 0o777;
+const MATERIALIZED_DIR_MODE: u32 = workload_fs::UMASK_DIR_MODE;
+
+/// What every lane materializer shares: the runtime side that fetches into staging and the
+/// workload side that receives the result.
+pub(super) struct MaterializeContext {
+    pub(super) host: HostExec,
+    pub(super) destination: WorkspaceDestination,
+}
+
+/// A fresh owner-only directory under the runtime state dir that one source materializes into, as
+/// the runtime, before [`WorkspaceDestination::install`] moves it into the workspace. Removed on
+/// drop, so every exit path cleans it up.
+pub(super) struct StagingDir {
+    path: PathBuf,
+}
+
+impl StagingDir {
+    pub(super) fn create(home: &Path) -> Result<Self> {
+        let parent = crate::secrets::state_dir(home).join(STAGING_DIR_NAME);
+        crate::fs_util::create_dir_owner_only(&parent)?;
+        let directory = tempfile::Builder::new()
+            .prefix(STAGING_PREFIX)
+            .permissions(std::fs::Permissions::from_mode(STAGING_DIR_MODE))
+            .tempdir_in(&parent)
+            .map_err(|source| StackError::WorkspaceMaterializeFailed {
+                reason: format!("create staging dir under `{}`: {source}", parent.display()),
+            })?;
+        Ok(Self {
+            path: directory.keep(),
+        })
+    }
+
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for StagingDir {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.path) {
+            tracing::warn!(
+                %error,
+                path = %self.path.display(),
+                "failed to remove a workspace staging directory"
+            );
+        }
+    }
+}
+
+/// The workload side of materialization. Every operation walks from an anchor on
+/// `workspace.root` without following symlinks, under the workload identity's credentials when one
+/// is declared; paths are relative to the root.
+pub(super) struct WorkspaceDestination {
+    root: PathBuf,
+    executor: Executor,
+    write_options: WriteOptions,
+    hard_links: bool,
+}
+
+impl WorkspaceDestination {
+    pub(super) fn new(root: &Path, profile: &SandboxProfile) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            executor: profile.executor(),
+            write_options: crate::workspace::workload_write_options(profile),
+            hard_links: profile.accepts_hard_links(),
+        }
+    }
+
+    /// Whether sources may contain hard-linked files; see [`SandboxProfile::accepts_hard_links`].
+    pub(super) fn accepts_hard_links(&self) -> bool {
+        self.hard_links
+    }
+
+    /// Absolute path of `relative`, for reports and messages.
+    pub(super) fn display(&self, relative: &Path) -> PathBuf {
+        self.root.join(relative)
+    }
+
+    fn run<T: Send + 'static>(
+        &self,
+        job: impl FnOnce(&Anchor) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let root = self.root.clone();
+        self.executor.run(DEFAULT_JOB_TIMEOUT, move || {
+            let anchor = Anchor::open(&root)?;
+            job(&anchor)
+        })
+    }
+
+    /// Create the lane root (`usr/code` or `usr/data`) and any missing parent below the root.
+    pub(super) fn ensure_lane_root(&self, lane: &Path) -> Result<()> {
+        let relative = lane.to_path_buf();
+        let display = self.display(lane);
+        let dir_mode = MATERIALIZED_DIR_MODE;
+        self.run(move |anchor| match workload_fs::stat(anchor, &relative) {
+            Ok(None) => workload_fs::create_dir_all(anchor, &relative, dir_mode),
+            Ok(Some(info)) => match info.kind {
+                EntryKind::Dir => Ok(()),
+                EntryKind::Symlink => Err(outside_root_error(&display)),
+                EntryKind::File | EntryKind::Other => Err(StackError::WorkspaceMaterializeFailed {
+                    reason: format!(
+                        "lane root `{}` exists and is not a directory",
+                        display.display()
+                    ),
+                }),
+            },
+            Err(StackError::WorkloadFsSymlinkRefused { .. }) => Err(outside_root_error(&display)),
+            Err(error) => Err(error),
+        })
+    }
+
+    /// The sentinel in the destination at `relative`; `None` when the destination or its
+    /// sentinel is missing. A symlinked destination is refused.
+    pub(super) fn read_sentinel(&self, relative: &Path) -> Result<Option<Sentinel>> {
+        let destination = relative.to_path_buf();
+        let display = self.display(relative);
+        let sentinel_path = display.join(SOURCE_SENTINEL_FILE);
+        let content = self.run(move |anchor| {
+            if destination_kind(anchor, &destination, &display)?.is_none() {
+                return Ok(None);
+            }
+            match workload_fs::read_file(
+                anchor,
+                &destination.join(SOURCE_SENTINEL_FILE),
+                SENTINEL_MAX_BYTES,
+            ) {
+                Ok(content) => Ok(Some(content)),
+                Err(StackError::WorkloadFsNotFound { .. }) => Ok(None),
+                Err(error) => Err(error),
+            }
+        })?;
+        content
+            .map(|bytes| {
+                serde_json::from_slice(&bytes).map_err(|source| {
+                    StackError::WorkspaceMaterializeFailed {
+                        reason: format!(
+                            "sentinel `{}` is corrupted: {source}",
+                            sentinel_path.display()
+                        ),
+                    }
+                })
+            })
+            .transpose()
+    }
+
+    /// Make the destination at `relative` ready for a handoff: absent, or an empty directory. A
+    /// stale sentinel left alone in it is removed; any other content refuses.
+    pub(super) fn prepare(&self, relative: &Path) -> Result<()> {
+        let destination = relative.to_path_buf();
+        let display = self.display(relative);
+        self.run(move |anchor| {
+            match destination_kind(anchor, &destination, &display)? {
+                None => return Ok(()),
+                Some(EntryKind::Dir) => {}
+                Some(_) => return Err(not_empty_error(&display)),
+            }
+            let mut stale_sentinel = false;
+            for (name, info) in workload_fs::list_dir(anchor, &destination)? {
+                if name == SOURCE_SENTINEL_FILE && info.kind == EntryKind::File {
+                    stale_sentinel = true;
+                } else {
+                    return Err(not_empty_error(&display));
+                }
+            }
+            if stale_sentinel {
+                workload_fs::remove_file(anchor, &destination.join(SOURCE_SENTINEL_FILE))?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Remove the destination at `relative` and everything below it, never following a symlink.
+    pub(super) fn remove(&self, relative: &Path) -> Result<()> {
+        let destination = relative.to_path_buf();
+        self.run(
+            move |anchor| match workload_fs::remove_tree(anchor, &destination) {
+                Err(StackError::WorkloadFsNotFound { .. }) => Ok(()),
+                removed => removed,
+            },
+        )
+    }
+
+    /// Hand the tree at `source` off into the destination at `relative`, then stamp the sentinel
+    /// built from what was copied. A failed stamp removes the handed-off tree so the next run does
+    /// not refuse it as non-empty.
+    pub(super) fn install(
+        &self,
+        source: &Path,
+        relative: &Path,
+        symlinks: SymlinkPolicy,
+        sentinel: impl FnOnce(&HandoffSummary) -> Sentinel,
+    ) -> Result<HandoffSummary> {
+        let summary = workload_fs::handoff_tree(
+            &self.executor,
+            source,
+            &self.root,
+            relative,
+            &HandoffOptions {
+                symlinks,
+                hard_links: self.hard_links,
+                file_mode: MATERIALIZED_FILE_MODE_MASK,
+                dir_mode: MATERIALIZED_DIR_MODE,
+                timeout: HANDOFF_TIMEOUT,
+            },
+        )?;
+        match self.write_sentinel(relative, &sentinel(&summary)) {
+            Ok(()) => Ok(summary),
+            Err(error) => Err(self.discard_after_failure(relative, error)),
+        }
+    }
+
+    /// Whether every path in `sentinels` is a regular file, checked without following symlinks.
+    pub(super) fn sentinels_present(&self, sentinels: Vec<PathBuf>) -> Result<bool> {
+        self.run(move |anchor| {
+            for sentinel in &sentinels {
+                match workload_fs::stat(anchor, sentinel)? {
+                    Some(info) if info.kind == EntryKind::File => {}
+                    _ => return Ok(false),
+                }
+            }
+            Ok(true)
+        })
+    }
+
+    fn write_sentinel(&self, relative: &Path, sentinel: &Sentinel) -> Result<()> {
+        let payload = serde_json::to_vec_pretty(sentinel).map_err(|source| {
+            StackError::WorkspaceMaterializeFailed {
+                reason: format!("serialize sentinel: {source}"),
+            }
+        })?;
+        let target = relative.join(SOURCE_SENTINEL_FILE);
+        let options = self.write_options;
+        self.run(move |anchor| workload_fs::write_file_atomic(anchor, &target, &payload, &options))
+    }
+
+    pub(super) fn discard_after_failure(
+        &self,
+        relative: &Path,
+        original: StackError,
+    ) -> StackError {
+        match self.remove(relative) {
+            Ok(()) => original,
+            Err(error) => StackError::WorkspaceMaterializeFailed {
+                reason: format!(
+                    "{original}; additionally failed to clean partial destination `{}`: {error}",
+                    self.display(relative).display()
+                ),
+            },
+        }
+    }
+}
+
+/// Kind of the destination entry at `relative`, `None` when it is missing. A symlink at the
+/// destination or along its parents is refused as leaving the workspace.
+fn destination_kind(anchor: &Anchor, relative: &Path, display: &Path) -> Result<Option<EntryKind>> {
+    match workload_fs::stat(anchor, relative) {
+        Ok(None) => Ok(None),
+        Ok(Some(info)) if info.kind == EntryKind::Symlink => Err(outside_root_error(display)),
+        Ok(Some(info)) => Ok(Some(info.kind)),
+        Err(StackError::WorkloadFsSymlinkRefused { .. }) => Err(outside_root_error(display)),
+        Err(error) => Err(error),
+    }
+}
+
+fn outside_root_error(dest: &Path) -> StackError {
+    StackError::WorkspaceDestinationOutsideRoot {
+        dest: dest.display().to_string(),
+        root: dest
+            .parent()
+            .map(|parent| parent.display().to_string())
+            .unwrap_or_default(),
+    }
+}
+
+fn not_empty_error(dest: &Path) -> StackError {
+    StackError::WorkspaceDestinationNotEmpty {
+        dest: dest.display().to_string(),
+    }
+}
 
 pub(super) fn sanitize_segment(value: &str) -> String {
     value
@@ -206,57 +509,6 @@ pub(super) fn create_new_owner_only(
     }
 }
 
-pub(super) fn ensure_lane_root(path: &Path) -> Result<()> {
-    // Probe with `symlink_metadata` so a swapped-in lane-root symlink cannot redirect every
-    // materialization out of the workspace.
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            return Err(StackError::WorkspaceDestinationOutsideRoot {
-                dest: path.display().to_string(),
-                root: path
-                    .parent()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_default(),
-            });
-        }
-        Ok(metadata) if !metadata.is_dir() => {
-            return Err(StackError::WorkspaceMaterializeFailed {
-                reason: format!(
-                    "lane root `{}` exists and is not a directory",
-                    path.display()
-                ),
-            });
-        }
-        Ok(_) => return Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Err(source) => {
-            return Err(StackError::WorkspaceMaterializeFailed {
-                reason: format!("stat `{}`: {source}", path.display()),
-            });
-        }
-    }
-    std::fs::create_dir_all(path).map_err(|source| StackError::WorkspaceMaterializeFailed {
-        reason: format!("could not create `{}`: {source}", path.display()),
-    })
-}
-
-pub(super) fn ensure_destination_not_symlink(dest: &Path) -> Result<()> {
-    // Per-source guard: reject a symlinked destination before any `create_dir_all` / `git clone` /
-    // `std::fs::copy` could follow it outside the workspace.
-    match std::fs::symlink_metadata(dest) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            Err(StackError::WorkspaceDestinationOutsideRoot {
-                dest: dest.display().to_string(),
-                root: dest
-                    .parent()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_default(),
-            })
-        }
-        Ok(_) | Err(_) => Ok(()),
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub(super) enum SentinelBody {
@@ -301,82 +553,5 @@ pub(super) struct Sentinel {
 impl Sentinel {
     pub(super) fn new(body: SentinelBody) -> Self {
         Self { schema: 1, body }
-    }
-
-    pub(super) fn read(dest: &Path) -> Result<Option<Self>> {
-        let path = dest.join(SOURCE_SENTINEL_FILE);
-        match std::fs::read_to_string(&path) {
-            Ok(text) => Ok(Some(serde_json::from_str(&text).map_err(|source| {
-                StackError::WorkspaceMaterializeFailed {
-                    reason: format!("sentinel `{}` is corrupted: {source}", path.display()),
-                }
-            })?)),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(source) => Err(StackError::WorkspaceMaterializeFailed {
-                reason: format!("read sentinel `{}`: {source}", path.display()),
-            }),
-        }
-    }
-
-    pub(super) fn write(&self, dest: &Path) -> Result<()> {
-        let payload = serde_json::to_string_pretty(self).map_err(|source| {
-            StackError::WorkspaceMaterializeFailed {
-                reason: format!("serialize sentinel: {source}"),
-            }
-        })?;
-        atomic_write_owner_only(&dest.join(SOURCE_SENTINEL_FILE), payload.as_bytes())
-    }
-}
-
-pub(super) fn sentinel_if_present(dest: &Path) -> Result<Option<Sentinel>> {
-    if !dest.exists() {
-        return Ok(None);
-    }
-    Sentinel::read(dest)
-}
-
-pub(super) fn destination_is_empty_except_sentinel(dest: &Path) -> Result<bool> {
-    let read_dir = match std::fs::read_dir(dest) {
-        Ok(rd) => rd,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(true),
-        Err(source) => {
-            return Err(StackError::WorkspaceMaterializeFailed {
-                reason: format!("read_dir `{}`: {source}", dest.display()),
-            });
-        }
-    };
-    for entry in read_dir {
-        let entry = entry.map_err(|source| StackError::WorkspaceMaterializeFailed {
-            reason: format!("read_dir entry `{}`: {source}", dest.display()),
-        })?;
-        if entry.file_name() != SOURCE_SENTINEL_FILE {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
-pub(super) fn ensure_dest_or_fail(dest: &Path) -> Result<()> {
-    if !dest.exists() {
-        return Ok(());
-    }
-    if destination_is_empty_except_sentinel(dest)? {
-        return Ok(());
-    }
-    Err(StackError::WorkspaceDestinationNotEmpty {
-        dest: dest.display().to_string(),
-    })
-}
-
-pub(super) fn cleanup_partial_destination(dest: &Path, original: StackError) -> StackError {
-    match std::fs::remove_dir_all(dest) {
-        Ok(()) => original,
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => original,
-        Err(source) => StackError::WorkspaceMaterializeFailed {
-            reason: format!(
-                "{original}; additionally failed to clean partial destination `{}`: {source}",
-                dest.display()
-            ),
-        },
     }
 }

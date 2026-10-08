@@ -20,7 +20,7 @@ use crate::fs_util::{
     atomic_write_owner_only, create_dir_owner_only, parent_dir, prepare_owner_managed_file_path,
 };
 use crate::runtime::agent::acp_bridge::KIMI_CODE_AGENT_ID;
-use crate::runtime::agent::agent_headless_config::provision_agent_headless_config;
+use crate::runtime::agent::agent_headless_config::provision_agent_headless_config_in;
 use crate::runtime::agent::agent_headless_config::{
     AMP_PERMISSION_ROOTS, AMP_POLICY_ROOTS, CLAUDE_CODE_AUTH_ROOTS,
     CLAUDE_CODE_CREDENTIAL_ENV_KEYS, CLAUDE_CODE_CREDENTIAL_ROOTS,
@@ -37,6 +37,7 @@ use crate::runtime::agent::agent_headless_config::{
     OPENCODE_MANAGED_UNSUPPORTED_ROOTS, OPENCODE_PERMISSION_ROOTS, OPENCODE_POLICY_ROOTS,
     PI_EXECUTABLE_COMMAND_ROOTS, PI_EXECUTABLE_PLUGIN_ROOTS, PI_PERMISSION_ROOTS,
 };
+use crate::runtime::agent::config_io::WorkloadHome;
 use crate::runtime::agent::mcp::validate_mcp_secret_refs;
 use crate::runtime::agent::provider_keys::{
     agent_provider_id_for_provider_id, apply_catalog_mapped_agent_provider,
@@ -410,11 +411,12 @@ pub use self::journal::{
     persist_native_config_operation, remove_native_config_operation_journal,
 };
 pub use self::transaction::{
-    capture_native_config_file_digests, capture_native_config_snapshots, native_config_path,
-    native_config_projection, native_config_transaction_paths, prepare_native_config_file_paths,
-    restore_native_config_snapshots, validate_native_config_file_digests,
-    validate_native_config_mcp_secret_refs, validate_native_config_secret_refs,
-    validate_native_config_secret_refs_read_only, write_native_config_files,
+    NativeConfigFiles, capture_native_config_file_digests, capture_native_config_snapshots,
+    native_config_path, native_config_projection, native_config_transaction_paths,
+    prepare_native_config_file_paths, restore_native_config_snapshots,
+    validate_native_config_file_digests, validate_native_config_mcp_secret_refs,
+    validate_native_config_secret_refs, validate_native_config_secret_refs_read_only,
+    write_native_config_files,
 };
 
 pub fn inspect_native_config(

@@ -6,7 +6,7 @@ fn port_skill_directories_shared_path_is_noop() {
     let home = tempfile::tempdir().expect("home");
     let source = canonical_temp_home(&home).join(".agents/skills");
 
-    let report = port_skill_directories(&source, &source).expect("port");
+    let report = port_skill_directories(&home_workload(&home), &source, &source).expect("port");
 
     assert_eq!(report.status, SkillPortStatus::Shared);
     assert!(report.copied.is_empty());
@@ -22,7 +22,7 @@ fn port_skill_directories_copies_valid_skills() {
     write_installed_skill(&source, "repo-map", "# Repo Map\n");
     write_installed_skill(&source, "code-review", "# Code Review\n");
 
-    let report = port_skill_directories(&source, &target).expect("port");
+    let report = port_skill_directories(&workload_at(&home), &source, &target).expect("port");
 
     assert_eq!(report.status, SkillPortStatus::Copied);
     assert_eq!(report.copied.len(), 2);
@@ -42,7 +42,7 @@ fn port_skill_directories_preserves_namespaced_skill_paths() {
         "---\nname: contact-center/android\n---\n",
     );
 
-    let report = port_skill_directories(&source, &target).expect("port");
+    let report = port_skill_directories(&workload_at(&home), &source, &target).expect("port");
 
     assert_eq!(report.copied[0].name, "contact-center/android");
     assert!(
@@ -63,7 +63,7 @@ fn port_skill_directories_overwrites_valid_target_skill() {
     write_installed_skill(&target, "repo-map", "# Old\n");
     std::fs::write(target.join("repo-map").join("old.txt"), "old\n").expect("old file");
 
-    let report = port_skill_directories(&source, &target).expect("port");
+    let report = port_skill_directories(&workload_at(&home), &source, &target).expect("port");
 
     assert_eq!(report.status, SkillPortStatus::Copied);
     assert!(report.copied.is_empty());
@@ -88,7 +88,7 @@ fn port_skill_directories_skips_target_skill_not_installed_by_acp_stack() {
     std::fs::create_dir_all(&user_skill).expect("user skill dir");
     std::fs::write(user_skill.join(SKILL_DESCRIPTOR), "# User's Own\n").expect("descriptor");
 
-    let report = port_skill_directories(&source, &target).expect("port");
+    let report = port_skill_directories(&workload_at(&home), &source, &target).expect("port");
 
     assert!(report.copied.is_empty());
     assert!(report.overwritten.is_empty());
@@ -115,13 +115,63 @@ fn port_skill_directories_preflight_rejects_nested_symlink_before_target_mutatio
     std::os::unix::fs::symlink(external.path(), source.join("b-skill/nested/symlinked-dir"))
         .expect("symlink");
 
-    let err = port_skill_directories(&source, &target).expect_err("nested symlink");
+    let err =
+        port_skill_directories(&workload_at(&home), &source, &target).expect_err("nested symlink");
 
     assert!(matches!(err, StackError::SkillInstallFailed { .. }));
     assert_eq!(
         std::fs::read_to_string(target.join("a-skill").join(SKILL_DESCRIPTOR)).expect("descriptor"),
         "# Old\n"
     );
+}
+
+#[test]
+#[cfg(unix)]
+fn port_skill_directories_refuses_a_symlinked_source_root() {
+    let home = tempfile::tempdir().expect("home");
+    let home = canonical_temp_home(&home);
+    let outside = tempfile::tempdir().expect("outside");
+    write_installed_skill(outside.path(), "repo-map", "# Outside\n");
+    std::fs::create_dir(home.join(".agents")).expect("agents dir");
+    std::os::unix::fs::symlink(outside.path(), home.join(".agents/skills")).expect("symlink");
+    let target = home.join(".config/agents/skills");
+
+    let err = port_skill_directories(&workload_at(&home), &home.join(".agents/skills"), &target)
+        .expect_err("symlinked source root");
+
+    assert!(matches!(err, StackError::SkillInstallTargetConflict { .. }));
+    assert!(!target.exists());
+    assert!(
+        outside
+            .path()
+            .join("repo-map")
+            .join(SKILL_DESCRIPTOR)
+            .is_file()
+    );
+}
+
+#[test]
+fn port_skill_directories_overwrite_keeps_the_source_marker_and_drops_the_backup() {
+    let home = tempfile::tempdir().expect("home");
+    let home = canonical_temp_home(&home);
+    let source = home.join(".agents/skills");
+    let target = home.join(".config/agents/skills");
+    write_installed_skill(&source, "repo-map", "# New\n");
+    write_installed_skill(&target, "repo-map", "# Old\n");
+
+    port_skill_directories(&workload_at(&home), &source, &target).expect("port");
+
+    assert_eq!(
+        std::fs::read_to_string(target.join("repo-map").join(MANAGED_SKILL_MARKER))
+            .expect("marker"),
+        "test-source\n"
+    );
+    let leftovers = std::fs::read_dir(&target)
+        .expect("target listing")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(leftovers, [std::ffi::OsString::from("repo-map")]);
 }
 
 #[test]
@@ -133,7 +183,7 @@ fn port_skill_directories_rejects_target_conflict() {
     write_installed_skill(&source, "repo-map", "# Repo Map\n");
     std::fs::create_dir_all(target.join("repo-map")).expect("target");
 
-    let err = port_skill_directories(&source, &target).expect_err("conflict");
+    let err = port_skill_directories(&workload_at(&home), &source, &target).expect_err("conflict");
 
     assert!(matches!(err, StackError::SkillInstallTargetConflict { .. }));
 }
@@ -150,7 +200,7 @@ fn port_skill_directories_rejects_source_symlink() {
     std::fs::write(external.path().join(SKILL_DESCRIPTOR), "# Skill\n").expect("descriptor");
     std::os::unix::fs::symlink(external.path(), source.join("repo-map")).expect("symlink");
 
-    let err = port_skill_directories(&source, &target).expect_err("symlink");
+    let err = port_skill_directories(&workload_at(&home), &source, &target).expect_err("symlink");
 
     assert!(matches!(err, StackError::SkillInstallFailed { .. }));
 }
@@ -165,7 +215,7 @@ fn port_skill_directories_skips_non_skill_directories() {
     std::fs::create_dir_all(source.join("BadName")).expect("bad name");
     std::fs::write(source.join("README.md"), "readme\n").expect("readme");
 
-    let report = port_skill_directories(&source, &target).expect("port");
+    let report = port_skill_directories(&workload_at(&home), &source, &target).expect("port");
 
     assert_eq!(report.status, SkillPortStatus::NoneFound);
     assert!(!target.exists());
@@ -180,7 +230,8 @@ fn port_skill_directories_rejects_root_skill_descriptor() {
     std::fs::create_dir_all(&source).expect("source root");
     std::fs::write(source.join(SKILL_DESCRIPTOR), "# Root\n").expect("descriptor");
 
-    let err = port_skill_directories(&source, &target).expect_err("root descriptor");
+    let err =
+        port_skill_directories(&workload_at(&home), &source, &target).expect_err("root descriptor");
 
     assert!(matches!(err, StackError::SkillInstallFailed { .. }));
     assert!(!target.exists());
@@ -194,7 +245,8 @@ fn port_skill_directories_rejects_unportable_skill_name() {
     let target = home.join(".config/agents/skills");
     write_installed_skill(&source, "_bad", "# Bad\n");
 
-    let err = port_skill_directories(&source, &target).expect_err("unportable name");
+    let err =
+        port_skill_directories(&workload_at(&home), &source, &target).expect_err("unportable name");
 
     assert!(matches!(err, StackError::SkillInstallFailed { .. }));
     assert!(!target.exists());
@@ -206,6 +258,7 @@ fn port_skill_directories_missing_source_is_none_found() {
     let home = canonical_temp_home(&home);
 
     let report = port_skill_directories(
+        &workload_at(&home),
         &home.join(".agents/skills"),
         &home.join(".config/agents/skills"),
     )
@@ -221,8 +274,8 @@ fn port_agent_skills_treats_unknown_source_agent_as_noop() {
     let home = tempfile::tempdir().expect("home");
     let catalog = RegistryCatalog::load_embedded().expect("registry");
 
-    let report =
-        port_agent_skills(home.path(), &catalog, "removed-agent", "opencode").expect("port");
+    let report = port_agent_skills(&home_workload(&home), &catalog, "removed-agent", "opencode")
+        .expect("port");
 
     assert_eq!(report, None);
 }

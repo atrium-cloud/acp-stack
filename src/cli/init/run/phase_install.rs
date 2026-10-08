@@ -405,7 +405,11 @@ pub(super) fn run_native_config_import_step(flow: &mut InitFlow) -> Result<()> {
         == crate::runtime::agent::native_config_import::NativeConfigOperationPhase::Applied;
     let config_path = &flow.config_path;
     let state_path = &flow.state_path;
-    let home = &flow.home;
+    let workload =
+        match crate::runtime::agent::config_io::WorkloadHome::resolve(&flow.config, &flow.home) {
+            Ok(workload) => workload,
+            Err(error) => return finalize_with_error(&flow.store, &flow.init_run, error),
+        };
     let config = &mut flow.config;
     let handoff_context = &mut flow.handoff_context;
     let key_handover = &mut flow.key_handover;
@@ -417,7 +421,7 @@ pub(super) fn run_native_config_import_step(flow: &mut InitFlow) -> Result<()> {
         || Ok(already_applied),
         || {
             let (updated, operation) =
-                native_config::apply_for_init(record, config_path, state_path, home)?;
+                native_config::apply_for_init(record, config_path, state_path, &workload)?;
             *config = updated;
             prompt::emit_state_signal(|| InitStateSignal::CategorySettled {
                 category: InitCategory::NativeConfig,
@@ -479,7 +483,6 @@ pub(super) fn run_agent_skills_install_step(flow: &mut InitFlow) -> Result<()> {
     };
     let verify_plan = plan.clone();
     let prior_init_steps = &flow.prior_init_steps;
-    let home = &flow.home;
     let config = &flow.config;
     let registry = &flow.registry;
     let skill_install_reports = &mut flow.skill_install_reports;
@@ -495,7 +498,7 @@ pub(super) fn run_agent_skills_install_step(flow: &mut InitFlow) -> Result<()> {
             ))
         },
         || {
-            let (reports, link_outcome) = install_init_skills(&plan, home, config, registry)?;
+            let (reports, link_outcome) = install_init_skills(&plan, config, registry)?;
             if let Some(link_error) = &link_outcome.error {
                 init_println!(
                     output_mode,

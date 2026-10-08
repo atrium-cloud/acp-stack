@@ -60,6 +60,8 @@ Session-tier HTTP routes are also mounted on the local socket and serve only whi
         - Semantic validation (name shape, per-type field discipline, the network-provider/unshare pairing) runs in-session with the rest of config validation, matching the deferred-validation note below.
         - `sandbox_mask_paths`: array of absolute paths unioned into the starter config's `[workspace.sandbox].mask_paths`. A network-provider declared here needs its egress config and state dirs masked from the first sandboxed spawn, so the caller declares them alongside. Entries must be non-blank absolute paths, validated in-session like the extension declarations; duplicates collapse. Applies only when creating a starter config, with the same rejection discipline as `extensions`.
         - `sandbox_mask_files`: array of absolute non-directory paths unioned into the starter config's `[workspace.sandbox].mask_files`, masked with an empty read-only file rather than a tmpfs, for a host control socket or a plain file the sandboxed agent must not reach. Same entry rules, duplicate collapse, and starter-config-only discipline as `sandbox_mask_paths`.
+        - `sandbox_workload_user`: the starter config's `[workspace.sandbox].workload_user`, the local user every sandboxed spawn runs as (see [security.md](../security.md#workload-identity)). Validated in-session; starter-config-only like `extensions`.
+        - `sandbox_require_network_provider` (boolean, default `false`): the starter config's `[workspace.sandbox].require_network_provider`. Validated in-session; starter-config-only like `extensions`.
     - Update policies (mirror the `--stack-update`/`--agent-update` flags; declared up-front, never streamed):
         - `stack_update` (`on` | `security` | `off`) with optional `stack_update_frequency` (day/week units, e.g. `1d`, `3w`).
         - `agent_update` (`on` | `off`) with optional `agent_update_frequency` (hour/day/week units, e.g. `12h`, `1d`).
@@ -76,7 +78,7 @@ Session-tier HTTP routes are also mounted on the local socket and serve only whi
     - `400` is returned when a cross-field rule is violated. The error names the offending field and never echoes its value.
     - `400` is returned for MCP secret-value position violations: env entries and header `value_ref`/`value` carrying pasted-credential shapes (rejected without echoing the value), ref-name or template syntax failures, or headers violating the exactly-one rule.
     - `400` is returned for a `*_frequency` with no matching policy.
-    - `400` is returned when a starter-only declaration (`extensions`, `sandbox_mask_paths`, `sandbox_mask_files`, `data_sources`, `data_from`, `deps`, `deps_system`, `standard_agent_work_deps`, or `browser_use`) arrives while a config already exists and `resume` is not set. MCP declarations (`mcp_preset`, `mcp_stdio`, `mcp_http`) against an existing config get the same `400`, with `resume` set or not. The message names the offending field, or the matching `acps init` flag where the field mirrors one. No session is created, so the caller adapts the body and retries without acknowledging an errored session.
+    - `400` is returned when a starter-only declaration (`extensions`, `sandbox_mask_paths`, `sandbox_mask_files`, `sandbox_workload_user`, `sandbox_require_network_provider`, `data_sources`, `data_from`, `deps`, `deps_system`, `standard_agent_work_deps`, or `browser_use`) arrives while a config already exists and `resume` is not set. MCP declarations (`mcp_preset`, `mcp_stdio`, `mcp_http`) against an existing config get the same `400`, with `resume` set or not. The message names the offending field, or the matching `acps init` flag where the field mirrors one. No session is created, so the caller adapts the body and retries without acknowledging an errored session.
 - Notes:
     - The route validates request shape, the cross-field rules, and the MCP secret-value positions in full at the boundary. Remaining semantic validation of field values (MCP URL scheme rules, data-source paths, and the enumerated values of `stack_update`, `agent_update`, `sandbox`, and `provider_api`) happens in-session. A declaration invalid only in those ways returns `200` with `"status": "running"` and then fails the init session.
     - Secret values referenced by these declarations (MCP `env`/`value_ref` entries, refs inside `${}` templates, S3 key refs) are never carried in the request body. Init collects any refs missing from the secret store over the prompt stream as `password` inputs with `required: false`.
@@ -1007,6 +1009,14 @@ Workspace routes are session-tier. Paths are workspace-relative. The runtime rej
 
 `workspace.max_file_bytes` caps reads, writes, uploads, and downloads. Oversized files return `413 workspace.too_large`.
 
+#### Workload Identity Errors
+
+With `[workspace.sandbox].workload_user` set, file operations run under the identity's credentials and can also return `500` with:
+
+- `workload_fs.timeout`: the operation exceeded its time bound.
+- `workload_fs.credentials_failed`: switching to the identity's credentials failed.
+- `workload_fs.executor_failed`: the worker thread running the operation failed.
+
 ## Commands
 
 Commands are session-tier and mediated by policy.
@@ -1162,7 +1172,7 @@ A `running` row is reconciled to `failed` with `error.code = "deps.apply_abandon
 ```json
 {
   "version": "0.1.9",
-  "features": ["network-provider-workload-env", "agent-test-json", "managed-credential-base-url", "sandbox-mask-files", "managed-node-runtime"]
+  "features": ["network-provider-workload-env", "agent-test-json", "managed-credential-base-url", "sandbox-mask-files", "managed-node-runtime", "sandbox-workload-user", "sandbox-capability-drop", "sandbox-workload-termination", "workload-io-identity", "host-exec-trusted-inputs", "install-workload-reachability", "sandbox-require-network-provider", "sandbox-off-identity"]
 }
 ```
 
@@ -1174,6 +1184,14 @@ A `running` row is reconciled to `failed` with `error.code = "deps.apply_abandon
     - `managed-credential-base-url` covers `base_url` on a managed-state credential selection
     - `sandbox-mask-files` covers `sandbox_mask_files` on the init create body and `[workspace.sandbox].mask_files` masking
     - `managed-node-runtime` covers the runtime-installed Node.js 26 that agents, installers, and dependency install actions run on (see [runtime.md](../runtime.md#managed-node-runtime))
+    - `sandbox-workload-user` covers `[workspace.sandbox].workload_user`, its separate workload home, and `sandbox_workload_user` on the init create body (see [security.md](../security.md#workload-identity))
+    - `sandbox-capability-drop` covers empty effective, permitted, and bounding capability sets for a workload identity under `unshare` and `off`
+    - `sandbox-workload-termination` covers stopping a workload identity's whole process tree without same-uid signals
+    - `workload-io-identity` covers workload file I/O under the identity's filesystem credentials and the no-symlink, no-hard-link walk
+    - `host-exec-trusted-inputs` covers probes, installs, and updates running from a runtime-owned cwd and an identity-safe `PATH` and executable chain
+    - `install-workload-reachability` covers the post-install check that the Agent's binary chain is reachable and not writable by the identity
+    - `sandbox-require-network-provider` covers `[workspace.sandbox].require_network_provider` and `sandbox_require_network_provider` on the init create body
+    - `sandbox-off-identity` covers `off` with a workload identity: the privilege drop without namespaces or masks
 
 ### `GET /v1/status/agent`
 

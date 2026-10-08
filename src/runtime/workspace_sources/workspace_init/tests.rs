@@ -3,7 +3,7 @@ use crate::config::{CodeSourceConfig, DataSourceConfig, WorkspaceConfig};
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
-use tempfile::tempdir;
+use tempfile::{TempDir, tempdir};
 
 use super::code_git::{run_git_clone, run_git_rev_parse, write_askpass_helper};
 use super::common::write_command_capture;
@@ -13,6 +13,59 @@ use super::local::materialize_local;
 fn empty_secret_store() -> SecretStore {
     let home = tempdir().expect("tempdir");
     SecretStore::open_or_create(home.path()).expect("secret store")
+}
+
+fn runtime_home() -> TempDir {
+    tempdir().expect("runtime home")
+}
+
+fn host_exec(home: &Path) -> HostExec {
+    HostExec::with_profile(home, SandboxProfile::default()).expect("host exec")
+}
+
+fn context(home: &Path, root: &Path) -> MaterializeContext {
+    MaterializeContext {
+        host: host_exec(home),
+        destination: WorkspaceDestination::new(root, &SandboxProfile::default()),
+    }
+}
+
+/// Entries left under the runtime staging parent; every source must remove its own.
+fn staging_leftovers(home: &Path) -> Vec<String> {
+    let parent = crate::secrets::state_dir(home).join("staging");
+    match std::fs::read_dir(&parent) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("read staging parent: {error}"),
+    }
+}
+
+fn local_source(path: &Path) -> DataSourceConfig {
+    DataSourceConfig {
+        source_type: "local".to_owned(),
+        name: Some("dataset".to_owned()),
+        path: Some(path.display().to_string()),
+        url: None,
+        expected_sha256: None,
+        max_download_bytes: None,
+        max_extracted_bytes: None,
+        bucket: None,
+        prefix: None,
+        region: None,
+        access_key_ref: None,
+        secret_key_ref: None,
+    }
+}
+
+fn mode_of(path: &Path) -> u32 {
+    std::fs::symlink_metadata(path)
+        .expect("metadata")
+        .permissions()
+        .mode()
+        & 0o777
 }
 
 fn workspace_with(root: &Path) -> WorkspaceConfig {
@@ -137,7 +190,8 @@ fn no_op_when_both_lanes_empty() {
     let root = root_dir.path().join("workspace");
     let workspace = workspace_with(&root);
     let secrets = empty_secret_store();
-    let report = materialize_workspace(&workspace, &secrets, None).expect("ok");
+    let home = runtime_home();
+    let report = materialize_workspace(&workspace, &secrets, home.path(), None).expect("ok");
     assert_eq!(report.root, root);
     assert_eq!(report.uploads, root.join("uploads"));
     assert!(report.code.is_empty());
@@ -167,7 +221,8 @@ fn clones_git_source_and_records_sentinel() {
         name: Some("upstream".to_owned()),
     });
     let secrets = empty_secret_store();
-    let report = materialize_workspace(&workspace, &secrets, None).expect("ok");
+    let home = runtime_home();
+    let report = materialize_workspace(&workspace, &secrets, home.path(), None).expect("ok");
     let entry = &report.code[0];
     assert_eq!(entry.name, "upstream");
     assert_eq!(entry.outcome, MaterializeOutcome::Created);
@@ -175,9 +230,51 @@ fn clones_git_source_and_records_sentinel() {
     assert!(dest.join(".git").is_dir());
     assert!(dest.join("README.md").is_file());
     assert!(dest.join(SOURCE_SENTINEL_FILE).is_file());
+    assert!(all_sources_have_sentinel(&workspace).expect("verifier"));
 
-    let report2 = materialize_workspace(&workspace, &secrets, None).expect("rerun");
+    let report2 = materialize_workspace(&workspace, &secrets, home.path(), None).expect("rerun");
     assert_eq!(report2.code[0].outcome, MaterializeOutcome::Verified);
+}
+
+#[test]
+fn git_handoff_preserves_symlinks_and_removes_the_staging_dir() {
+    if !git_available() {
+        eprintln!("skipping: git not on PATH");
+        return;
+    }
+    let upstream = tempdir().expect("upstream");
+    run_git_init(upstream.path());
+    git_commit_in(upstream.path(), "README.md", "hello\n", "init");
+    std::os::unix::fs::symlink("README.md", upstream.path().join("readme-link")).expect("link");
+    run_fixture_git(upstream.path(), &["add", "readme-link"]);
+    run_fixture_git(upstream.path(), &["commit", "-q", "-m", "link"]);
+    let root_dir = tempdir().expect("root");
+    let mut workspace = workspace_with(root_dir.path());
+    workspace.code_sources.push(CodeSourceConfig {
+        source_type: "git".to_owned(),
+        repo: Some(upstream.path().display().to_string()),
+        branch: None,
+        credential_ref: None,
+        name: Some("upstream".to_owned()),
+    });
+    let home = runtime_home();
+
+    materialize_workspace(&workspace, &empty_secret_store(), home.path(), None).expect("ok");
+
+    let dest = root_dir.path().join(CODE_LANE_DIR).join("upstream");
+    assert_eq!(
+        std::fs::read_link(dest.join("readme-link")).expect("symlink kept"),
+        Path::new("README.md")
+    );
+    // A freshly created file carries exactly the umask-narrowed mode the tree should follow.
+    let umask_probe = root_dir.path().join("umask-probe");
+    std::fs::write(&umask_probe, b"").expect("umask probe");
+    assert_eq!(mode_of(&dest.join("README.md")), mode_of(&umask_probe));
+    assert_eq!(
+        mode_of(&dest.join(SOURCE_SENTINEL_FILE)),
+        crate::workload_fs::OWNER_ONLY_FILE_MODE
+    );
+    assert!(staging_leftovers(home.path()).is_empty());
 }
 
 #[test]
@@ -195,19 +292,22 @@ fn git_materialization_ignores_inherited_repo_scope_env() {
     // Bogus paths make any leak of the hook's GIT_DIR/GIT_INDEX_FILE fail loudly.
     // SAFETY: tests in this binary share env; other tests spawning git
     // scrub these vars, and we remove them before asserting.
+    let home = runtime_home();
+    let host = host_exec(home.path());
     let [git_dir, git_index_file] = REPO_SCOPE_GIT_VARS;
     unsafe {
         std::env::set_var(git_dir, "/nonexistent/repo-scope-git-dir");
         std::env::set_var(git_index_file, "/nonexistent/repo-scope-index");
     }
     let clone = run_git_clone(
+        &host,
         &upstream.path().display().to_string(),
         None,
         None,
         &dest,
         None,
     );
-    let rev_parse = run_git_rev_parse(&dest, None);
+    let rev_parse = run_git_rev_parse(&host, &dest, None);
     unsafe {
         std::env::remove_var(git_dir);
         std::env::remove_var(git_index_file);
@@ -237,8 +337,9 @@ fn captures_git_clone_stdout_and_stderr_to_log_dir() {
         name: Some("upstream".to_owned()),
     });
     let secrets = empty_secret_store();
+    let home = runtime_home();
     let log_paths = WorkspaceLogPaths::for_run(log_root.path(), "irun_test_run_001");
-    let report = materialize_workspace(&workspace, &secrets, Some(&log_paths))
+    let report = materialize_workspace(&workspace, &secrets, home.path(), Some(&log_paths))
         .expect("clone with log capture");
 
     let report_log_dir = report
@@ -360,11 +461,17 @@ fn rejects_existing_non_empty_destination_without_sentinel() {
     std::fs::create_dir_all(&dest).expect("create");
     std::fs::write(dest.join("stowed.bin"), b"existing").expect("write");
     let secrets = empty_secret_store();
-    let err = materialize_workspace(&workspace, &secrets, None).expect_err("non-empty");
+    let home = runtime_home();
+    let err =
+        materialize_workspace(&workspace, &secrets, home.path(), None).expect_err("non-empty");
     assert!(matches!(
         err,
         StackError::WorkspaceDestinationNotEmpty { .. }
     ));
+    assert_eq!(
+        std::fs::read(dest.join("stowed.bin")).expect("kept"),
+        b"existing"
+    );
 }
 
 #[test]
@@ -373,35 +480,92 @@ fn copies_local_data_source_and_skips_on_rerun() {
     let nested = upstream.path().join("inner");
     std::fs::create_dir(&nested).expect("inner");
     std::fs::write(upstream.path().join("a.txt"), b"alpha").expect("a");
+    std::fs::set_permissions(
+        upstream.path().join("a.txt"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .expect("chmod a");
     std::fs::write(nested.join("b.txt"), b"beta").expect("b");
     let root_dir = tempdir().expect("root");
     let mut workspace = workspace_with(root_dir.path());
-    workspace.data_sources.push(DataSourceConfig {
-        source_type: "local".to_owned(),
-        name: Some("dataset".to_owned()),
-        path: Some(upstream.path().display().to_string()),
-        url: None,
-        expected_sha256: None,
-        max_download_bytes: None,
-        max_extracted_bytes: None,
-        bucket: None,
-        prefix: None,
-        region: None,
-        access_key_ref: None,
-        secret_key_ref: None,
-    });
+    workspace.data_sources.push(local_source(upstream.path()));
     let secrets = empty_secret_store();
-    let report = materialize_workspace(&workspace, &secrets, None).expect("ok");
+    let home = runtime_home();
+    let report = materialize_workspace(&workspace, &secrets, home.path(), None).expect("ok");
     assert_eq!(report.data[0].outcome, MaterializeOutcome::Created);
     let dest = root_dir.path().join(DATA_LANE_DIR).join("dataset");
     assert_eq!(std::fs::read(dest.join("a.txt")).expect("a"), b"alpha");
+    assert_eq!(mode_of(&dest.join("a.txt")), 0o600);
     assert_eq!(
         std::fs::read(dest.join("inner").join("b.txt")).expect("b"),
         b"beta"
     );
     assert!(dest.join(SOURCE_SENTINEL_FILE).is_file());
-    let rerun = materialize_workspace(&workspace, &secrets, None).expect("rerun");
+    let umask_probe = root_dir.path().join("umask-probe");
+    std::fs::create_dir(&umask_probe).expect("umask probe");
+    assert_eq!(mode_of(&dest.join("inner")), mode_of(&umask_probe));
+    assert!(staging_leftovers(home.path()).is_empty());
+    let rerun = materialize_workspace(&workspace, &secrets, home.path(), None).expect("rerun");
     assert_eq!(rerun.data[0].outcome, MaterializeOutcome::Verified);
+}
+
+#[test]
+fn local_source_replaces_a_lone_stale_sentinel() {
+    let upstream = tempdir().expect("upstream");
+    std::fs::write(upstream.path().join("a.txt"), b"alpha").expect("a");
+    let root_dir = tempdir().expect("root");
+    let dest = root_dir.path().join(DATA_LANE_DIR).join("dataset");
+    std::fs::create_dir_all(&dest).expect("dest");
+    std::fs::write(
+        dest.join(SOURCE_SENTINEL_FILE),
+        r#"{"schema":1,"type":"local","path":"/elsewhere","bytes":0,"entries":0}"#,
+    )
+    .expect("stale sentinel");
+    let mut workspace = workspace_with(root_dir.path());
+    workspace.data_sources.push(local_source(upstream.path()));
+    let home = runtime_home();
+
+    let report = materialize_workspace(&workspace, &empty_secret_store(), home.path(), None)
+        .expect("stale sentinel replaced");
+
+    assert_eq!(report.data[0].outcome, MaterializeOutcome::Created);
+    assert_eq!(std::fs::read(dest.join("a.txt")).expect("a"), b"alpha");
+    let sentinel = std::fs::read_to_string(dest.join(SOURCE_SENTINEL_FILE)).expect("sentinel");
+    assert!(!sentinel.contains("/elsewhere"), "sentinel: {sentinel}");
+}
+
+#[test]
+fn symlinked_destination_or_lane_root_is_refused_and_left_untouched() {
+    let upstream = tempdir().expect("upstream");
+    std::fs::write(upstream.path().join("a.txt"), b"alpha").expect("a");
+    let outside = tempdir().expect("outside");
+    let home = runtime_home();
+    for planted in [
+        Path::new(DATA_LANE_DIR).join("dataset"),
+        PathBuf::from(DATA_LANE_DIR),
+    ] {
+        let workspace_root = tempdir().expect("root");
+        let link = workspace_root.path().join(&planted);
+        std::fs::create_dir_all(link.parent().expect("parent")).expect("link parent");
+        std::os::unix::fs::symlink(outside.path(), &link).expect("symlink");
+        let mut workspace = workspace_with(workspace_root.path());
+        workspace.data_sources.push(local_source(upstream.path()));
+
+        let err = materialize_workspace(&workspace, &empty_secret_store(), home.path(), None)
+            .expect_err("symlinked destination");
+
+        assert!(
+            matches!(err, StackError::WorkspaceDestinationOutsideRoot { .. }),
+            "{}: {err:?}",
+            planted.display()
+        );
+        assert_eq!(
+            std::fs::read_dir(outside.path()).expect("outside").count(),
+            0,
+            "nothing may land outside the workspace"
+        );
+    }
+    assert!(staging_leftovers(home.path()).is_empty());
 }
 
 #[test]
@@ -411,24 +575,12 @@ fn captures_local_data_copy_to_log_dir() {
     let root_dir = tempdir().expect("root");
     let log_root = tempdir().expect("log root");
     let mut workspace = workspace_with(root_dir.path());
-    workspace.data_sources.push(DataSourceConfig {
-        source_type: "local".to_owned(),
-        name: Some("dataset".to_owned()),
-        path: Some(upstream.path().display().to_string()),
-        url: None,
-        expected_sha256: None,
-        max_download_bytes: None,
-        max_extracted_bytes: None,
-        bucket: None,
-        prefix: None,
-        region: None,
-        access_key_ref: None,
-        secret_key_ref: None,
-    });
+    workspace.data_sources.push(local_source(upstream.path()));
     let secrets = empty_secret_store();
+    let home = runtime_home();
     let log_paths = WorkspaceLogPaths::for_run(log_root.path(), "irun_data_local");
-    let report =
-        materialize_workspace(&workspace, &secrets, Some(&log_paths)).expect("materialize");
+    let report = materialize_workspace(&workspace, &secrets, home.path(), Some(&log_paths))
+        .expect("materialize");
     let source_log_dir = report.data[0].log_dir.as_ref().expect("data log dir");
     assert!(source_log_dir.starts_with(&log_paths.run_dir));
     let captures = capture_names(source_log_dir);
@@ -464,8 +616,9 @@ fn captures_https_download_failure_to_log_dir() {
         secret_key_ref: None,
     });
     let secrets = empty_secret_store();
+    let home = runtime_home();
     let log_paths = WorkspaceLogPaths::for_run(log_root.path(), "irun_data_https_fail");
-    let err = materialize_workspace(&workspace, &secrets, Some(&log_paths))
+    let err = materialize_workspace(&workspace, &secrets, home.path(), Some(&log_paths))
         .expect_err("download should fail");
     assert!(
         matches!(err, StackError::SafeDownloadFailed { .. }),
@@ -474,50 +627,49 @@ fn captures_https_download_failure_to_log_dir() {
     let data_log_dir = log_paths.run_dir.join("data-000");
     let captures = capture_names(&data_log_dir);
     assert!(has_capture(&captures, CAPTURE_TAG_DOWNLOAD, ".stderr"));
+    assert!(!root_dir.path().join(DATA_LANE_DIR).join("dataset").exists());
 }
 
 #[test]
-fn capture_failure_after_local_copy_cleans_partial_destination() {
+fn capture_failure_after_local_copy_leaves_no_destination_or_staging() {
     let upstream = tempdir().expect("upstream");
     std::fs::write(upstream.path().join("dataset.txt"), b"alpha").expect("write");
     let root_dir = tempdir().expect("root");
-    let data_root = root_dir.path().join(DATA_LANE_DIR);
-    std::fs::create_dir_all(&data_root).expect("data root");
-    let dest = data_root.join("dataset");
+    let home = runtime_home();
+    let context = context(home.path(), root_dir.path());
+    context
+        .destination
+        .ensure_lane_root(Path::new(DATA_LANE_DIR))
+        .expect("lane root");
+    let relative = Path::new(DATA_LANE_DIR).join("dataset");
     let log_file = tempfile::NamedTempFile::new().expect("log file");
-    let source = DataSourceConfig {
-        source_type: "local".to_owned(),
-        name: Some("dataset".to_owned()),
-        path: Some(upstream.path().display().to_string()),
-        url: None,
-        expected_sha256: None,
-        max_download_bytes: None,
-        max_extracted_bytes: None,
-        bucket: None,
-        prefix: None,
-        region: None,
-        access_key_ref: None,
-        secret_key_ref: None,
-    };
 
-    let err = materialize_local(0, &source, "dataset", &dest, Some(log_file.path()))
-        .expect_err("capture write should fail");
+    let err = materialize_local(
+        0,
+        &local_source(upstream.path()),
+        "dataset",
+        &relative,
+        &context,
+        Some(log_file.path()),
+    )
+    .expect_err("capture write should fail");
     assert!(
         matches!(err, StackError::WorkspaceMaterializeFailed { .. }),
         "got: {err:?}",
     );
     assert!(
-        !dest.exists(),
-        "partial destination must be removed after post-copy capture failure",
+        !root_dir.path().join(&relative).exists(),
+        "a failed source must not leave a partial destination",
     );
+    assert!(staging_leftovers(home.path()).is_empty());
 }
 
 #[test]
 fn failed_error_capture_does_not_mask_download_error() {
     let root_dir = tempdir().expect("root");
-    let data_root = root_dir.path().join(DATA_LANE_DIR);
-    std::fs::create_dir_all(&data_root).expect("data root");
-    let dest = data_root.join("dataset");
+    let home = runtime_home();
+    let context = context(home.path(), root_dir.path());
+    let relative = Path::new(DATA_LANE_DIR).join("dataset");
     let log_file = tempfile::NamedTempFile::new().expect("log file");
     let source = DataSourceConfig {
         source_type: "https".to_owned(),
@@ -534,8 +686,15 @@ fn failed_error_capture_does_not_mask_download_error() {
         secret_key_ref: None,
     };
 
-    let err = materialize_https(0, &source, "dataset", &dest, Some(log_file.path()))
-        .expect_err("download should fail");
+    let err = materialize_https(
+        0,
+        &source,
+        "dataset",
+        &relative,
+        &context,
+        Some(log_file.path()),
+    )
+    .expect_err("download should fail");
     assert!(
         matches!(err, StackError::SafeDownloadFailed { .. }),
         "got: {err:?}",
@@ -559,7 +718,8 @@ fn git_clone_against_nonexistent_path_surfaces_typed_command_failure() {
         name: Some("bogus".to_owned()),
     });
     let secrets = empty_secret_store();
-    let err = materialize_workspace(&workspace, &secrets, None)
+    let home = runtime_home();
+    let err = materialize_workspace(&workspace, &secrets, home.path(), None)
         .expect_err("git clone of missing local repo must fail");
     match err {
         StackError::WorkspaceCommandFailed {
@@ -573,6 +733,38 @@ fn git_clone_against_nonexistent_path_surfaces_typed_command_failure() {
         }
         other => panic!("expected WorkspaceCommandFailed, got {other:?}"),
     }
+    assert!(!root_dir.path().join(CODE_LANE_DIR).join("bogus").exists());
+    assert!(staging_leftovers(home.path()).is_empty());
+}
+
+#[test]
+fn local_source_with_hard_links_copies_without_a_workload_identity() {
+    let upstream = tempdir().expect("upstream");
+    std::fs::write(upstream.path().join("original.txt"), b"shared").expect("original");
+    std::fs::hard_link(
+        upstream.path().join("original.txt"),
+        upstream.path().join("deduped.txt"),
+    )
+    .expect("hard link");
+    let secrets = empty_secret_store();
+    let home = runtime_home();
+
+    for source in [
+        upstream.path().to_path_buf(),
+        upstream.path().join("deduped.txt"),
+    ] {
+        let root_dir = tempdir().expect("root");
+        let mut workspace = workspace_with(root_dir.path());
+        workspace.data_sources.push(local_source(&source));
+        let report = materialize_workspace(&workspace, &secrets, home.path(), None)
+            .expect("hard-linked source copies");
+        assert_eq!(report.data[0].outcome, MaterializeOutcome::Created);
+        let dest = root_dir.path().join(DATA_LANE_DIR).join("dataset");
+        assert_eq!(
+            std::fs::read(dest.join("deduped.txt")).expect("deduped"),
+            b"shared"
+        );
+    }
 }
 
 #[test]
@@ -582,22 +774,10 @@ fn rejects_local_source_containing_symlink() {
     std::os::unix::fs::symlink("real.txt", upstream.path().join("link.txt")).expect("symlink");
     let root_dir = tempdir().expect("root");
     let mut workspace = workspace_with(root_dir.path());
-    workspace.data_sources.push(DataSourceConfig {
-        source_type: "local".to_owned(),
-        name: Some("dataset".to_owned()),
-        path: Some(upstream.path().display().to_string()),
-        url: None,
-        expected_sha256: None,
-        max_download_bytes: None,
-        max_extracted_bytes: None,
-        bucket: None,
-        prefix: None,
-        region: None,
-        access_key_ref: None,
-        secret_key_ref: None,
-    });
+    workspace.data_sources.push(local_source(upstream.path()));
     let secrets = empty_secret_store();
-    let err = materialize_workspace(&workspace, &secrets, None).expect_err("symlink");
+    let home = runtime_home();
+    let err = materialize_workspace(&workspace, &secrets, home.path(), None).expect_err("symlink");
     assert!(
         matches!(
             err,
@@ -605,6 +785,8 @@ fn rejects_local_source_containing_symlink() {
         ),
         "got: {err:?}"
     );
+    assert!(!root_dir.path().join(DATA_LANE_DIR).join("dataset").exists());
+    assert!(staging_leftovers(home.path()).is_empty());
 }
 
 #[test]
@@ -738,7 +920,7 @@ fn s3_source_materializes_against_mock_endpoint() {
     unsafe {
         std::env::set_var("ACP_STACK_S3_ENDPOINT_OVERRIDE", format!("http://{addr}"));
     }
-    let result = materialize_workspace(&workspace, &secrets, Some(&log_paths));
+    let result = materialize_workspace(&workspace, &secrets, home.path(), Some(&log_paths));
     unsafe {
         std::env::remove_var("ACP_STACK_S3_ENDPOINT_OVERRIDE");
     }
@@ -764,7 +946,7 @@ fn s3_source_materializes_against_mock_endpoint() {
     unsafe {
         std::env::set_var("ACP_STACK_S3_ENDPOINT_OVERRIDE", format!("http://{addr}"));
     }
-    let rerun = materialize_workspace(&workspace, &secrets, None);
+    let rerun = materialize_workspace(&workspace, &secrets, home.path(), None);
     unsafe {
         std::env::remove_var("ACP_STACK_S3_ENDPOINT_OVERRIDE");
     }
@@ -778,8 +960,8 @@ fn s3_source_materializes_against_mock_endpoint() {
 
 #[test]
 fn s3_source_fails_when_secret_refs_missing() {
-    // Locks in the gating order sentinel-check → ensure_dest_or_fail →
-    // create_dir → resolve creds, so a missing secret means no network IO.
+    // Locks in the gating order sentinel-check → destination prepare →
+    // resolve creds, so a missing secret means no network IO.
     let root_dir = tempdir().expect("root");
     let mut workspace = workspace_with(root_dir.path());
     workspace.data_sources.push(DataSourceConfig {
@@ -797,7 +979,9 @@ fn s3_source_fails_when_secret_refs_missing() {
         secret_key_ref: Some("AWS_SECRET_ACCESS_KEY".to_owned()),
     });
     let secrets = empty_secret_store();
-    let err = materialize_workspace(&workspace, &secrets, None).expect_err("missing secrets");
+    let home = runtime_home();
+    let err = materialize_workspace(&workspace, &secrets, home.path(), None)
+        .expect_err("missing secrets");
     assert!(
         matches!(err, StackError::SecretNotFound { .. }),
         "got: {err:?}"

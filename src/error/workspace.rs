@@ -38,7 +38,7 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
     Some(match err {
         WorkspacePathInvalid { reason, .. } => format!("workspace path is invalid: {reason}"),
         WorkspaceSymlinkEscape { .. } => {
-            "workspace path resolves outside the workspace root".to_owned()
+            "workspace path goes through a symlink that is not allowed".to_owned()
         }
         // `requested` is the caller's own workspace-relative input (or the
         // relative rendering of a resolved target), never a host path.

@@ -12,6 +12,7 @@ use crate::error::{Result, StackError};
 use crate::fs_util::{atomic_write_owner_only, home_dir};
 use crate::runtime::agent::acp_bridge::AgentSessionConfigCategory;
 use crate::runtime::agent::agent_headless_config::provision_agent_headless_config_transition;
+use crate::runtime::agent::config_io::WorkloadHome;
 use crate::runtime::agent::model_discovery::{
     effort_value_is_explicit_without_discovery, validate_catalog_effort_value,
 };
@@ -676,14 +677,20 @@ fn run_array_set(args: ArraySetArgs, output: OutputFormat) -> Result<()> {
         .effort
         .as_deref()
         .map(|_| {
-            let candidate_paths = headless_config_candidate_paths(&target_config.agent.id, &home);
-            let snapshots = capture_path_snapshots(&candidate_paths)?;
+            let workload = WorkloadHome::resolve(&target_config, &home)?;
+            let candidate_paths =
+                headless_config_candidate_paths(&target_config.agent.id, workload.home());
+            let snapshots = capture_path_snapshots(&workload, &candidate_paths)?;
             let mut dir_scan = candidate_paths
                 .iter()
                 .filter_map(|path| path.parent().map(Path::to_path_buf))
                 .collect::<Vec<_>>();
-            dir_scan.extend(headless_config_side_dirs(&target_config.agent.id, &home));
-            Ok::<_, StackError>((snapshots, capture_dir_listings_for(&dir_scan)?))
+            dir_scan.extend(headless_config_side_dirs(
+                &target_config.agent.id,
+                workload.home(),
+            ));
+            let dir_listings = capture_dir_listings_for(&workload, &dir_scan)?;
+            Ok::<_, StackError>((workload, snapshots, dir_listings))
         })
         .transpose()?;
     let provisioned_and_validated =
@@ -706,9 +713,9 @@ fn run_array_set(args: ArraySetArgs, output: OutputFormat) -> Result<()> {
     let provisioned = match provisioned_and_validated {
         Ok(provisioned) => provisioned,
         Err(error) => {
-            if let Some((snapshots, dir_listings)) = effort_rollback {
-                restore_headless_snapshots(snapshots);
-                remove_new_files_in_dirs(dir_listings);
+            if let Some((workload, snapshots, dir_listings)) = effort_rollback {
+                restore_headless_snapshots(&workload, snapshots);
+                remove_new_files_in_dirs(&workload, dir_listings);
             }
             return Err(error);
         }

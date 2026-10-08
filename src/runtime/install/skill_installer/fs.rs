@@ -1,28 +1,43 @@
-//! Filesystem primitives for skill installs and ports. Skill trees arrive
-//! untrusted, so every traversal here refuses symlinks and special files rather
-//! than following them, and directory swaps stage in a sibling tempdir.
+//! Filesystem primitives for skill installs and ports. Installed skills live below the workload
+//! home and every access there goes through [`WorkloadHome`]. Skill trees arrive untrusted, so
+//! every copy refuses symlinks and special files rather than following them, and directory swaps
+//! stage in a sibling directory.
 
 use super::*;
+
+use rand::RngExt as _;
+
+use std::time::Duration;
+
+use crate::workload_fs::{
+    Anchor, HandoffOptions, SymlinkPolicy, WriteOptions, copy_file, create_dir_all, handoff_tree,
+    list_dir, remove_tree, rename, stat,
+};
+
+// === CONSTANTS ===
+
+const STAGING_RANDOM_BYTES: usize = 8;
+/// Bound for copying one skill tree into place; skill archives run up to
+/// `GITHUB_ARCHIVE_MAX_BYTES`, far more than a config-sized workload job moves.
+const SKILL_TREE_COPY_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 /// Marker proving a skill directory was installed by acp-stack; `remove` and
 /// overwrite refuse directories without it, so hand-placed skills are never
 /// deleted. It lives inside the skill dir so it cannot diverge from the files.
-pub(super) fn write_managed_marker(target_dir: &Path, source_id: &str) -> Result<()> {
+pub(super) fn write_managed_marker(
+    workload: &WorkloadHome,
+    target_dir: &Path,
+    source_id: &str,
+) -> Result<()> {
     let marker = target_dir.join(MANAGED_SKILL_MARKER);
-    std::fs::write(&marker, format!("{source_id}\n")).map_err(|source| {
-        StackError::SkillInstallFailed {
-            reason: format!("write managed marker `{}`: {source}", marker.display()),
-        }
-    })?;
-    set_owner_only_file(&marker)?;
-    Ok(())
+    workload.write_atomic(&marker, format!("{source_id}\n").into_bytes())
 }
 
-pub(super) fn has_managed_marker(target_dir: &Path) -> bool {
+pub(super) fn has_managed_marker(workload: &WorkloadHome, target_dir: &Path) -> bool {
     let marker = target_dir.join(MANAGED_SKILL_MARKER);
-    match std::fs::symlink_metadata(&marker) {
-        Ok(metadata) => metadata.is_file() && !metadata.file_type().is_symlink(),
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => false,
+    match workload.stat(&marker) {
+        Ok(Some(metadata)) => metadata.kind == EntryKind::File,
+        Ok(None) => false,
         Err(source) => {
             // Unreadable reads as unmanaged so nothing gets deleted, but the
             // operator must see why removal suddenly refuses.
@@ -38,12 +53,19 @@ pub(super) fn has_managed_marker(target_dir: &Path) -> bool {
 
 /// Source id recorded in the managed marker, or `None` for hand-placed skills;
 /// a bad marker degrades to `None` rather than failing the whole listing.
-pub(super) fn read_managed_marker_source(target_dir: &Path) -> Option<String> {
-    if !has_managed_marker(target_dir) {
+pub(super) fn read_managed_marker_source(
+    workload: &WorkloadHome,
+    target_dir: &Path,
+) -> Option<String> {
+    if !has_managed_marker(workload, target_dir) {
         return None;
     }
     let marker = target_dir.join(MANAGED_SKILL_MARKER);
-    match std::fs::read_to_string(&marker) {
+    let content = workload.read(&marker).and_then(|content| {
+        String::from_utf8(content.unwrap_or_default())
+            .map_err(|source| skill_io_err("decode managed marker", &marker, source))
+    });
+    match content {
         Ok(content) => {
             let source_id = content.trim();
             if source_id.is_empty() {
@@ -64,6 +86,7 @@ pub(super) fn read_managed_marker_source(target_dir: &Path) -> Option<String> {
 }
 
 pub(super) fn ensure_no_installed_skill_ancestor(
+    workload: &WorkloadHome,
     destination_root: &Path,
     skill_name: &str,
 ) -> Result<()> {
@@ -75,20 +98,20 @@ pub(super) fn ensure_no_installed_skill_ancestor(
         }
         ancestor.push(component);
         let descriptor = ancestor.join(SKILL_DESCRIPTOR);
-        match std::fs::symlink_metadata(&descriptor) {
-            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+        match workload.stat(&descriptor) {
+            Ok(Some(metadata)) if metadata.kind == EntryKind::File => {
                 return Err(StackError::SkillInstallTargetConflict {
                     path: ancestor,
                     reason: "nested target would modify an already-installed skill".to_owned(),
                 });
             }
-            Ok(_) => {
+            Ok(Some(_)) => {
                 return Err(StackError::SkillInstallTargetConflict {
                     path: descriptor,
                     reason: "ancestor SKILL.md is not a regular file".to_owned(),
                 });
             }
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(None) => {}
             Err(source) => {
                 return Err(StackError::SkillInstallFailed {
                     reason: format!("stat skill ancestor `{}`: {source}", descriptor.display()),
@@ -99,10 +122,13 @@ pub(super) fn ensure_no_installed_skill_ancestor(
     Ok(())
 }
 
-pub(super) fn existing_target_state(target_dir: &Path) -> Result<ExistingTargetState> {
-    let metadata = match std::fs::symlink_metadata(target_dir) {
-        Ok(metadata) => metadata,
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+pub(super) fn existing_target_state(
+    workload: &WorkloadHome,
+    target_dir: &Path,
+) -> Result<ExistingTargetState> {
+    let metadata = match workload.stat(target_dir) {
+        Ok(Some(metadata)) => metadata,
+        Ok(None) => {
             return Ok(ExistingTargetState::Missing);
         }
         Err(source) => {
@@ -111,16 +137,16 @@ pub(super) fn existing_target_state(target_dir: &Path) -> Result<ExistingTargetS
             });
         }
     };
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+    if metadata.kind != EntryKind::Dir {
         return Err(StackError::SkillInstallTargetConflict {
             path: target_dir.to_path_buf(),
             reason: "target exists but is not a directory".to_owned(),
         });
     }
     let descriptor = target_dir.join(SKILL_DESCRIPTOR);
-    let descriptor_metadata = match std::fs::symlink_metadata(&descriptor) {
-        Ok(metadata) => metadata,
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+    let descriptor_metadata = match workload.stat(&descriptor) {
+        Ok(Some(metadata)) => metadata,
+        Ok(None) => {
             return Err(StackError::SkillInstallTargetConflict {
                 path: target_dir.to_path_buf(),
                 reason: "target directory exists without SKILL.md".to_owned(),
@@ -135,7 +161,7 @@ pub(super) fn existing_target_state(target_dir: &Path) -> Result<ExistingTargetS
             });
         }
     };
-    if descriptor_metadata.file_type().is_symlink() || !descriptor_metadata.is_file() {
+    if descriptor_metadata.kind != EntryKind::File {
         return Err(StackError::SkillInstallTargetConflict {
             path: target_dir.to_path_buf(),
             reason: "target SKILL.md is not a regular file".to_owned(),
@@ -144,198 +170,174 @@ pub(super) fn existing_target_state(target_dir: &Path) -> Result<ExistingTargetS
     Ok(ExistingTargetState::AlreadyInstalled)
 }
 
-/// Copy a skill tree into place via a sibling tempdir and rename. The managed
-/// marker is written INSIDE the staged tempdir, so a skill can never reach the
-/// target without it.
+/// Copy a skill tree into place via a sibling staging directory and rename. An install
+/// (`managed_source` set) hands a runtime-staged archive tree in, and the managed marker is
+/// written INSIDE the staging directory, so a skill can never reach the target without it. A
+/// port copies between roots below the workload home and keeps the source dir's marker.
 pub(super) fn copy_skill_dir_atomically(
+    workload: &WorkloadHome,
     source_dir: &Path,
     target_dir: &Path,
     skill_name: &str,
     managed_source: Option<&str>,
 ) -> Result<()> {
-    let parent = target_dir
-        .parent()
-        .ok_or_else(|| StackError::SkillInstallFailed {
-            reason: format!("skill target `{}` has no parent", target_dir.display()),
-        })?;
-    let tempdir = tempfile::Builder::new()
-        .prefix(&format!(".{}.", skill_temp_prefix(skill_name)))
-        .tempdir_in(parent)
-        .map_err(|source| StackError::SkillInstallFailed {
-            reason: format!(
-                "create temporary skill target in `{}`: {source}",
-                parent.display()
-            ),
-        })?;
-    copy_dir_recursive(source_dir, tempdir.path())?;
-    if let Some(source_id) = managed_source {
-        write_managed_marker(tempdir.path(), source_id)?;
-    }
-    std::fs::rename(tempdir.path(), target_dir).map_err(|source| {
-        StackError::SkillInstallFailed {
-            reason: format!(
-                "move installed skill to `{}`: {source}",
-                target_dir.display()
-            ),
+    let staging = staging_path(target_dir, skill_name, "")?;
+    let staged = match managed_source {
+        // The handoff walks the destination without following symlinks, so it refuses a
+        // symlinked install directory before creating anything.
+        Some(source_id) => handoff_tree(
+            workload.executor(),
+            source_dir,
+            workload.home(),
+            &workload.relative(&staging)?,
+            &HandoffOptions {
+                symlinks: SymlinkPolicy::Reject,
+                hard_links: workload.accepts_hard_links(),
+                file_mode: workload.file_mode(),
+                dir_mode: workload.dir_mode(),
+                timeout: SKILL_TREE_COPY_TIMEOUT,
+            },
+        )
+        .and_then(|_| write_managed_marker(workload, &staging, source_id)),
+        None => copy_dir_recursive(workload, source_dir, &staging),
+    };
+    let staging = workload.relative(&staging)?;
+    let target = workload.relative(target_dir)?;
+    let target_display = target_dir.to_path_buf();
+    workload.run(move |anchor, _| {
+        let moved = staged.and_then(|()| {
+            rename(anchor, &staging, &target)
+                .map_err(|source| skill_io_err("move installed skill to", &target_display, source))
+        });
+        if moved.is_err() {
+            discard_staging(anchor, &staging);
         }
-    })?;
-    std::mem::forget(tempdir);
-    Ok(())
+        moved
+    })
 }
 
 pub(super) fn replace_skill_dir_atomically(
+    workload: &WorkloadHome,
     source_dir: &Path,
     target_dir: &Path,
     skill_name: &str,
 ) -> Result<()> {
-    let parent = target_dir
-        .parent()
-        .ok_or_else(|| StackError::SkillInstallFailed {
-            reason: format!("skill target `{}` has no parent", target_dir.display()),
-        })?;
-    let tempdir = tempfile::Builder::new()
-        .prefix(&format!(".{}.", skill_temp_prefix(skill_name)))
-        .tempdir_in(parent)
-        .map_err(|source| StackError::SkillInstallFailed {
-            reason: format!(
-                "create temporary skill target in `{}`: {source}",
-                parent.display()
-            ),
-        })?;
-    copy_dir_recursive(source_dir, tempdir.path())?;
-
-    let backup = tempfile::Builder::new()
-        .prefix(&format!(".{}.backup.", skill_temp_prefix(skill_name)))
-        .tempdir_in(parent)
-        .map_err(|source| StackError::SkillInstallFailed {
-            reason: format!(
-                "create temporary skill backup in `{}`: {source}",
-                parent.display()
-            ),
-        })?;
-    let backup_path = backup.path().to_path_buf();
-    std::fs::remove_dir(&backup_path).map_err(|source| StackError::SkillInstallFailed {
-        reason: format!("prepare skill backup `{}`: {source}", backup_path.display()),
-    })?;
-    std::fs::rename(target_dir, &backup_path).map_err(|source| StackError::SkillInstallFailed {
-        reason: format!(
-            "move existing skill `{}` to backup `{}`: {source}",
-            target_dir.display(),
-            backup_path.display()
-        ),
-    })?;
-    if let Err(source) = std::fs::rename(tempdir.path(), target_dir) {
-        let restore = std::fs::rename(&backup_path, target_dir);
-        let restore_message = restore
-            .err()
-            .map(|err| format!("; restore failed: {err}"))
-            .unwrap_or_default();
-        return Err(StackError::SkillInstallFailed {
-            reason: format!(
-                "replace installed skill at `{}`: {source}{restore_message}",
-                target_dir.display()
-            ),
-        });
-    }
-    std::mem::forget(tempdir);
-    Ok(())
+    let staging = staging_path(target_dir, skill_name, "")?;
+    let backup = staging_path(target_dir, skill_name, ".backup")?;
+    let copied = copy_dir_recursive(workload, source_dir, &staging);
+    let staging = workload.relative(&staging)?;
+    let backup = workload.relative(&backup)?;
+    let target = workload.relative(target_dir)?;
+    let target_display = target_dir.to_path_buf();
+    workload.run(move |anchor, _| {
+        if let Err(error) = copied.and_then(|()| rename(anchor, &target, &backup)) {
+            discard_staging(anchor, &staging);
+            return Err(error);
+        }
+        if let Err(source) = rename(anchor, &staging, &target) {
+            let restore_message = rename(anchor, &backup, &target)
+                .err()
+                .map(|err| format!("; restore failed: {err}"))
+                .unwrap_or_default();
+            discard_staging(anchor, &staging);
+            return Err(StackError::SkillInstallFailed {
+                reason: format!(
+                    "replace installed skill at `{}`: {source}{restore_message}",
+                    target_display.display()
+                ),
+            });
+        }
+        discard_staging(anchor, &backup);
+        Ok(())
+    })
 }
 
 fn skill_temp_prefix(skill_name: &str) -> &str {
     skill_name.rsplit('/').next().unwrap_or("skill")
 }
 
-pub(super) fn copy_dir_recursive(source_dir: &Path, target_dir: &Path) -> Result<()> {
-    let metadata =
-        std::fs::symlink_metadata(source_dir).map_err(|source| StackError::SkillInstallFailed {
-            reason: format!("stat source `{}`: {source}", source_dir.display()),
+/// A fresh hidden sibling of `target_dir` to stage a copy or a backup in.
+fn staging_path(target_dir: &Path, skill_name: &str, label: &str) -> Result<PathBuf> {
+    let parent = target_dir
+        .parent()
+        .ok_or_else(|| StackError::SkillInstallFailed {
+            reason: format!("skill target `{}` has no parent", target_dir.display()),
         })?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(StackError::SkillInstallFailed {
-            reason: format!("source `{}` is not a directory", source_dir.display()),
-        });
-    }
-    create_dir_owner_only(target_dir)?;
-    for entry in std::fs::read_dir(source_dir).map_err(|source| StackError::SkillInstallFailed {
-        reason: format!("read source directory `{}`: {source}", source_dir.display()),
-    })? {
-        let entry = entry.map_err(|source| StackError::SkillInstallFailed {
-            reason: format!(
-                "read source directory entry `{}`: {source}",
-                source_dir.display()
-            ),
-        })?;
-        let entry_path = entry.path();
-        let entry_name = entry.file_name();
-        let target_path = target_dir.join(entry_name);
-        let entry_metadata = std::fs::symlink_metadata(&entry_path).map_err(|source| {
-            StackError::SkillInstallFailed {
-                reason: format!("stat source entry `{}`: {source}", entry_path.display()),
-            }
-        })?;
-        if entry_metadata.file_type().is_symlink() {
-            return Err(StackError::SkillInstallFailed {
-                reason: format!("refusing to install symlink `{}`", entry_path.display()),
-            });
-        }
-        if entry_metadata.is_dir() {
-            copy_dir_recursive(&entry_path, &target_path)?;
-        } else if entry_metadata.is_file() {
-            std::fs::copy(&entry_path, &target_path).map_err(|source| {
-                StackError::SkillInstallFailed {
-                    reason: format!(
-                        "copy skill file `{}` -> `{}`: {source}",
-                        entry_path.display(),
-                        target_path.display()
-                    ),
-                }
-            })?;
-            set_owner_only_file(&target_path)?;
-        } else {
-            return Err(StackError::SkillInstallFailed {
-                reason: format!(
-                    "refusing to install special file `{}`",
-                    entry_path.display()
-                ),
-            });
-        }
-    }
-    set_owner_only_dir(target_dir)
+    let mut random = [0u8; STAGING_RANDOM_BYTES];
+    rand::rng().fill(&mut random);
+    let suffix: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+    Ok(parent.join(format!(
+        ".{}{label}.{suffix}",
+        skill_temp_prefix(skill_name)
+    )))
 }
 
-pub(super) fn validate_skill_dir_for_port(source_dir: &Path) -> Result<()> {
-    let metadata =
-        std::fs::symlink_metadata(source_dir).map_err(|source| StackError::SkillInstallFailed {
-            reason: format!("stat source `{}`: {source}", source_dir.display()),
-        })?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(StackError::SkillInstallFailed {
-            reason: format!("source `{}` is not a directory", source_dir.display()),
-        });
+fn discard_staging(anchor: &Anchor, staging: &Path) {
+    match remove_tree(anchor, staging) {
+        Ok(()) | Err(StackError::WorkloadFsNotFound { .. }) => {}
+        Err(error) => {
+            tracing::warn!(
+                staging = %staging.display(),
+                %error,
+                "failed to remove a skill staging directory"
+            );
+        }
     }
-    for entry in std::fs::read_dir(source_dir).map_err(|source| StackError::SkillInstallFailed {
-        reason: format!("read source directory `{}`: {source}", source_dir.display()),
-    })? {
-        let entry = entry.map_err(|source| StackError::SkillInstallFailed {
-            reason: format!(
-                "read source directory entry `{}`: {source}",
-                source_dir.display()
-            ),
-        })?;
-        let entry_path = entry.path();
-        let entry_metadata = std::fs::symlink_metadata(&entry_path).map_err(|source| {
-            StackError::SkillInstallFailed {
-                reason: format!("stat source entry `{}`: {source}", entry_path.display()),
+}
+
+/// Copy a tree between two places below the workload home as one workload job; the source is
+/// workload-controlled, so it is never read with the runtime's own credentials.
+fn copy_dir_recursive(workload: &WorkloadHome, source_dir: &Path, target_dir: &Path) -> Result<()> {
+    let source = workload.relative(source_dir)?;
+    let target = workload.relative(target_dir)?;
+    workload.run_with_timeout(SKILL_TREE_COPY_TIMEOUT, move |anchor, options| {
+        copy_tree(anchor, &source, &target, options)
+    })
+}
+
+fn copy_tree(anchor: &Anchor, source: &Path, target: &Path, options: &WriteOptions) -> Result<()> {
+    create_dir_all(anchor, target, options.dir_mode)?;
+    for (name, metadata) in list_dir(anchor, source)? {
+        let entry_path = source.join(&name);
+        let target_path = target.join(&name);
+        match metadata.kind {
+            EntryKind::Dir => copy_tree(anchor, &entry_path, &target_path, options)?,
+            EntryKind::File => copy_file(anchor, &entry_path, &target_path, options)?,
+            EntryKind::Symlink => {
+                return Err(StackError::SkillInstallFailed {
+                    reason: format!(
+                        "refusing to port symlink `{}`",
+                        anchor.path().join(&entry_path).display()
+                    ),
+                });
             }
-        })?;
-        if entry_metadata.file_type().is_symlink() {
+            EntryKind::Other => {
+                return Err(StackError::SkillInstallFailed {
+                    reason: format!(
+                        "refusing to port special file `{}`",
+                        anchor.path().join(&entry_path).display()
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_skill_dir_for_port(
+    workload: &WorkloadHome,
+    source_dir: &Path,
+) -> Result<()> {
+    for (name, metadata) in workload.list_dir(source_dir)? {
+        let entry_path = source_dir.join(name);
+        if metadata.kind == EntryKind::Symlink {
             return Err(StackError::SkillInstallFailed {
                 reason: format!("refusing to port symlink `{}`", entry_path.display()),
             });
         }
-        if entry_metadata.is_dir() {
-            validate_skill_dir_for_port(&entry_path)?;
-        } else if !entry_metadata.is_file() {
+        if metadata.kind == EntryKind::Dir {
+            validate_skill_dir_for_port(workload, &entry_path)?;
+        } else if metadata.kind != EntryKind::File {
             return Err(StackError::SkillInstallFailed {
                 reason: format!("refusing to port special file `{}`", entry_path.display()),
             });
@@ -344,138 +346,42 @@ pub(super) fn validate_skill_dir_for_port(source_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Walk `path` below the workload home one component at a time: every existing component must
+/// be a real directory, and missing ones are created when `create_missing` is set. Returns
+/// whether `path` exists.
 pub(super) fn ensure_directory_no_symlink_ancestors(
+    workload: &WorkloadHome,
     path: &Path,
     create_missing: bool,
-) -> Result<()> {
-    let mut current = PathBuf::new();
-    let mut normal_components = 0usize;
-    for component in path.components() {
-        match component {
-            Component::Prefix(prefix) => current.push(prefix.as_os_str()),
-            Component::RootDir => current.push(component.as_os_str()),
-            Component::Normal(part) => {
-                normal_components += 1;
-                current.push(part);
-            }
-            Component::CurDir | Component::ParentDir => {
-                return Err(StackError::SkillInstallFailed {
-                    reason: format!(
-                        "skill install directory `{}` contains an unsafe path segment",
-                        path.display()
-                    ),
-                });
-            }
-        }
-        if current.as_os_str().is_empty() || matches!(component, Component::RootDir) {
-            continue;
-        }
-        match std::fs::symlink_metadata(&current) {
-            Ok(metadata) => {
-                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+) -> Result<bool> {
+    let relative = workload.relative(path)?;
+    workload.run(move |anchor, options| {
+        let mut current = PathBuf::new();
+        for component in relative.components() {
+            current.push(component);
+            match stat(anchor, &current)? {
+                Some(metadata) if metadata.kind == EntryKind::Dir => {}
+                Some(_) => {
                     return Err(StackError::SkillInstallTargetConflict {
-                        path: current.clone(),
-                        reason: "install directory path segment is not a real directory".to_owned(),
+                        path: anchor.path().join(&current),
+                        reason: "skill directory path segment is not a real directory".to_owned(),
                     });
                 }
-            }
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound && create_missing => {
-                create_single_owner_only_dir(&current)?;
-            }
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
-                return Err(StackError::SkillInstallFailed {
-                    reason: format!("skill install directory `{}` is missing", current.display()),
-                });
-            }
-            Err(source) => {
-                return Err(StackError::SkillInstallFailed {
-                    reason: format!(
-                        "stat skill install directory `{}`: {source}",
-                        current.display()
-                    ),
-                });
+                None if create_missing => create_dir_all(anchor, &current, options.dir_mode)?,
+                None => return Ok(false),
             }
         }
-    }
-    if normal_components == 0 {
-        return Err(StackError::SkillInstallFailed {
-            reason: format!("skill install directory `{}` is not valid", path.display()),
-        });
-    }
-    set_owner_only_dir(path)
+        Ok(true)
+    })
 }
 
-pub(super) fn source_root_exists_without_symlink_ancestors(path: &Path) -> Result<bool> {
-    let mut current = PathBuf::new();
-    let mut normal_components = 0usize;
-    for component in path.components() {
-        match component {
-            Component::Prefix(prefix) => current.push(prefix.as_os_str()),
-            Component::RootDir => current.push(component.as_os_str()),
-            Component::Normal(part) => {
-                normal_components += 1;
-                current.push(part);
-            }
-            Component::CurDir | Component::ParentDir => {
-                return Err(StackError::SkillInstallFailed {
-                    reason: format!(
-                        "skill source directory `{}` contains an unsafe path segment",
-                        path.display()
-                    ),
-                });
-            }
-        }
-        if current.as_os_str().is_empty() || matches!(component, Component::RootDir) {
-            continue;
-        }
-        match std::fs::symlink_metadata(&current) {
-            Ok(metadata) => {
-                if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                    return Err(StackError::SkillInstallTargetConflict {
-                        path: current.clone(),
-                        reason: "source skills path segment is not a real directory".to_owned(),
-                    });
-                }
-            }
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(source) => {
-                return Err(StackError::SkillInstallFailed {
-                    reason: format!(
-                        "stat skill source directory `{}`: {source}",
-                        current.display()
-                    ),
-                });
-            }
-        }
-    }
-    if normal_components == 0 {
-        return Err(StackError::SkillInstallFailed {
-            reason: format!("skill source directory `{}` is not valid", path.display()),
-        });
-    }
-    Ok(true)
-}
-
-fn create_single_owner_only_dir(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt as _;
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(path)
-            .map_err(|source| StackError::DirectoryCreate {
-                path: path.to_path_buf(),
-                source,
-            })
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::DirBuilder::new()
-            .create(path)
-            .map_err(|source| StackError::DirectoryCreate {
-                path: path.to_path_buf(),
-                source,
-            })
+/// Whether the skills directory at `path` exists, following symlinks as the workload home's
+/// link policy allows.
+pub(super) fn skill_directory_exists(workload: &WorkloadHome, path: &Path) -> Result<bool> {
+    match workload.list_dir(path) {
+        Ok(_) => Ok(true),
+        Err(StackError::WorkloadFsNotFound { .. }) => Ok(false),
+        Err(error) => Err(error),
     }
 }
 

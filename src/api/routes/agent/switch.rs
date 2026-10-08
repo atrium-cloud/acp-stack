@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::api::routes::providers::ModelJson;
+use crate::runtime::agent::config_io::WorkloadHome;
 use crate::runtime::agent::model_discovery::{
     discovery_is_blocked_without_a_model, model_value_is_explicit_without_discovery,
 };
@@ -276,13 +277,14 @@ pub(crate) async fn agent_switch_handler(
         candidate_config = reload_candidate_config(&canonical, target_entry)?;
         provisioned = provision_agent_config_for_response(&candidate_config, &home)?;
     }
+    let workload = WorkloadHome::resolve(&candidate_config, &home)?;
     let skills_port = port_agent_skills(
-        &home,
+        &workload,
         &registry,
         &fresh_config.agent.id,
         &candidate_config.agent.id,
     )?;
-    let link_outcome = link_agent_skills_best_effort(&home, target_entry);
+    let link_outcome = link_agent_skills_best_effort(&workload, target_entry);
 
     let old_target_id = fresh_config.array.primary_target.clone();
     let old_target = state.agent_target(&old_target_id)?;
@@ -427,13 +429,14 @@ async fn switch_to_existing_array_target(
     )
     .await;
     let provisioned = provision_agent_config_for_response(&candidate_config, home)?;
+    let workload = WorkloadHome::resolve(&candidate_config, home)?;
     let skills_port = port_agent_skills(
-        home,
+        &workload,
         registry,
         &fresh_config.agent.id,
         &candidate_config.agent.id,
     )?;
-    let link_outcome = link_agent_skills_best_effort(home, target_entry);
+    let link_outcome = link_agent_skills_best_effort(&workload, target_entry);
 
     let old_target_id = fresh_config.array.primary_target.clone();
     let old_target = state.agent_target(&old_target_id)?;

@@ -17,13 +17,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{DEFAULT_SKILL_SOURCE_BRANCH, UserSkillSource};
 use crate::error::{Result, StackError};
-use crate::fs_util::{create_dir_owner_only, set_owner_only_dir, set_owner_only_file};
+use crate::runtime::agent::config_io::WorkloadHome;
 use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry};
 use crate::runtime::install::skill_registry::{
     CatalogSkill, SkillCatalog, SkillDirectory, SkillSource,
 };
 use crate::runtime::workspace_sources::safe_download::{DownloadOpts, download_to_file};
 use crate::runtime::workspace_sources::safe_extract::{ExtractOpts, extract_archive};
+use crate::workload_fs::EntryKind;
 
 pub use self::discover::*;
 use self::fs::*;

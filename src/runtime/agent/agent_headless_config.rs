@@ -12,8 +12,9 @@ use crate::config::{AgentCustomProviderConfig, AgentProviderConfig, Config, Cust
 use crate::error::{Result, StackError};
 use crate::fs_util::parent_dir;
 use crate::runtime::agent::config_io::{
-    ensure_object_field, ensure_toml_table_field, insert_if_missing, read_json_object,
-    read_toml_table, read_yaml_mapping, write_json_object, write_toml_table, write_yaml_mapping,
+    WorkloadHome, ensure_object_field, ensure_toml_table_field, insert_if_missing,
+    read_json_object, read_toml_table, read_yaml_mapping, write_json_object, write_toml_table,
+    write_yaml_mapping,
 };
 use crate::runtime::agent::model_wire::{ModelWire, model_wire};
 use crate::runtime::agent::provider_keys::{
@@ -253,7 +254,15 @@ pub fn provision_agent_headless_config(
     config: &Config,
     home: &Path,
 ) -> Result<Vec<ProvisionedAgentConfig>> {
-    provision_agent_headless_config_with_previous_pi_model(config, home, None)
+    provision_agent_headless_config_in(config, &WorkloadHome::resolve(config, home)?)
+}
+
+/// [`provision_agent_headless_config`] against an already resolved workload home.
+pub fn provision_agent_headless_config_in(
+    config: &Config,
+    workload: &WorkloadHome,
+) -> Result<Vec<ProvisionedAgentConfig>> {
+    provision_agent_headless_config_with_previous_pi_model(config, workload, None)
 }
 
 pub fn provision_agent_headless_config_transition(
@@ -264,7 +273,8 @@ pub fn provision_agent_headless_config_transition(
     let previous_pi_model = (previous.agent.id == "pi")
         .then(|| configured_provider_model(previous))
         .flatten();
-    provision_agent_headless_config_with_previous_pi_model(config, home, previous_pi_model)
+    let workload = WorkloadHome::resolve(config, home)?;
+    provision_agent_headless_config_with_previous_pi_model(config, &workload, previous_pi_model)
 }
 
 /// The provider endpoint override in force for `home`, resolved from the secret store here so
@@ -377,13 +387,13 @@ fn rerouted_mapped_base_url_for(
 
 fn provision_agent_headless_config_with_previous_pi_model(
     config: &Config,
-    home: &Path,
+    workload: &WorkloadHome,
     previous_pi_model: Option<&str>,
 ) -> Result<Vec<ProvisionedAgentConfig>> {
-    let endpoint = resolved_endpoint_override(home)?;
+    let endpoint = resolved_endpoint_override(workload.runtime_home())?;
     let endpoint = endpoint.as_ref();
     match config.agent.id.as_str() {
-        "goose" => provision_goose_config(config, home, endpoint).map(|paths| {
+        "goose" => provision_goose_config(config, workload, endpoint).map(|paths| {
             paths
                 .into_iter()
                 .map(|path| ProvisionedAgentConfig {
@@ -392,7 +402,7 @@ fn provision_agent_headless_config_with_previous_pi_model(
                 })
                 .collect()
         }),
-        KILO_AGENT_ID => provision_kilo_config(home, endpoint).map(|paths| {
+        KILO_AGENT_ID => provision_kilo_config(workload, endpoint).map(|paths| {
             paths
                 .into_iter()
                 .map(|path| ProvisionedAgentConfig {
@@ -401,7 +411,7 @@ fn provision_agent_headless_config_with_previous_pi_model(
                 })
                 .collect()
         }),
-        OPENCODE_AGENT_ID => provision_opencode_config(config, home, endpoint).map(|path| {
+        OPENCODE_AGENT_ID => provision_opencode_config(config, workload, endpoint).map(|path| {
             path.into_iter()
                 .map(|path| ProvisionedAgentConfig {
                     label: "OpenCode config",
@@ -409,7 +419,7 @@ fn provision_agent_headless_config_with_previous_pi_model(
                 })
                 .collect()
         }),
-        "codex" => provision_codex_config(config, home, endpoint).map(|paths| {
+        "codex" => provision_codex_config(config, workload, endpoint).map(|paths| {
             paths
                 .into_iter()
                 .map(|path| ProvisionedAgentConfig {
@@ -418,16 +428,18 @@ fn provision_agent_headless_config_with_previous_pi_model(
                 })
                 .collect()
         }),
-        CLAUDE_CODE_AGENT_ID => provision_claude_code_config(config, home, endpoint).map(|paths| {
-            paths
-                .into_iter()
-                .map(|path| ProvisionedAgentConfig {
-                    label: "Claude Code config",
-                    path,
-                })
-                .collect()
-        }),
-        "pi" => provision_pi_config(config, home, previous_pi_model, endpoint).map(|path| {
+        CLAUDE_CODE_AGENT_ID => {
+            provision_claude_code_config(config, workload, endpoint).map(|paths| {
+                paths
+                    .into_iter()
+                    .map(|path| ProvisionedAgentConfig {
+                        label: "Claude Code config",
+                        path,
+                    })
+                    .collect()
+            })
+        }
+        "pi" => provision_pi_config(config, workload, previous_pi_model, endpoint).map(|path| {
             path.into_iter()
                 .map(|path| ProvisionedAgentConfig {
                     label: "Pi settings",
@@ -435,7 +447,7 @@ fn provision_agent_headless_config_with_previous_pi_model(
                 })
                 .collect()
         }),
-        HERMES_AGENT_ID => provision_hermes_config(config, home, endpoint).map(|paths| {
+        HERMES_AGENT_ID => provision_hermes_config(config, workload, endpoint).map(|paths| {
             paths
                 .into_iter()
                 .map(|path| ProvisionedAgentConfig {
@@ -444,7 +456,7 @@ fn provision_agent_headless_config_with_previous_pi_model(
                 })
                 .collect()
         }),
-        ANTIGRAVITY_AGENT_ID => provision_antigravity_config(config, home).map(|paths| {
+        ANTIGRAVITY_AGENT_ID => provision_antigravity_config(config, workload).map(|paths| {
             paths
                 .into_iter()
                 .map(|path| ProvisionedAgentConfig {
@@ -461,61 +473,59 @@ pub fn cleanup_agent_headless_config(
     config: &Config,
     home: &Path,
 ) -> Result<Vec<CleanedAgentConfig>> {
+    let workload = &WorkloadHome::resolve(config, home)?;
     let endpoint = resolved_endpoint_override(home)?;
     let endpoint = endpoint.as_ref();
     match config.agent.id.as_str() {
-        "goose" => cleanup_goose_config(config, home),
-        KILO_AGENT_ID => cleanup_kilo_config(home),
-        OPENCODE_AGENT_ID => cleanup_opencode_config(config, home),
-        "codex" => cleanup_codex_config(config, home),
-        CLAUDE_CODE_AGENT_ID => cleanup_claude_code_config(config, home, endpoint),
-        "pi" => cleanup_pi_config(config, home, endpoint),
-        HERMES_AGENT_ID => cleanup_hermes_config(config, home),
-        ANTIGRAVITY_AGENT_ID => cleanup_antigravity_config(config, home),
+        "goose" => cleanup_goose_config(config, workload),
+        KILO_AGENT_ID => cleanup_kilo_config(workload),
+        OPENCODE_AGENT_ID => cleanup_opencode_config(config, workload),
+        "codex" => cleanup_codex_config(config, workload),
+        CLAUDE_CODE_AGENT_ID => cleanup_claude_code_config(config, workload, endpoint),
+        "pi" => cleanup_pi_config(config, workload, endpoint),
+        HERMES_AGENT_ID => cleanup_hermes_config(config, workload),
+        ANTIGRAVITY_AGENT_ID => cleanup_antigravity_config(config, workload),
         _ => Ok(Vec::new()),
     }
 }
 
-fn write_or_remove_json_object(path: &Path, root: Map<String, serde_json::Value>) -> Result<()> {
+fn write_or_remove_json_object(
+    workload: &WorkloadHome,
+    path: &Path,
+    root: Map<String, serde_json::Value>,
+) -> Result<()> {
     if root.is_empty() {
-        remove_file(path)?;
+        workload.remove_file(path)?;
     } else {
-        write_json_object(path, root)?;
+        write_json_object(workload, path, root)?;
     }
     Ok(())
 }
 
-fn write_or_remove_yaml_mapping(path: &Path, root: serde_norway::Mapping) -> Result<()> {
+fn write_or_remove_yaml_mapping(
+    workload: &WorkloadHome,
+    path: &Path,
+    root: serde_norway::Mapping,
+) -> Result<()> {
     if root.is_empty() {
-        remove_file(path)?;
+        workload.remove_file(path)?;
     } else {
-        write_yaml_mapping(path, root)?;
+        write_yaml_mapping(workload, path, root)?;
     }
     Ok(())
 }
 
-fn write_or_remove_toml_table(path: &Path, root: TomlMap<String, TomlValue>) -> Result<()> {
+fn write_or_remove_toml_table(
+    workload: &WorkloadHome,
+    path: &Path,
+    root: TomlMap<String, TomlValue>,
+) -> Result<()> {
     if root.is_empty() {
-        remove_file(path)?;
+        workload.remove_file(path)?;
     } else {
-        write_toml_table(path, root)?;
+        write_toml_table(workload, path, root)?;
     }
     Ok(())
-}
-
-fn remove_file_if_exists(path: &Path) -> Result<bool> {
-    if !path.exists() {
-        return Ok(false);
-    }
-    remove_file(path)?;
-    Ok(true)
-}
-
-fn remove_file(path: &Path) -> Result<()> {
-    std::fs::remove_file(path).map_err(|source| StackError::FileRemove {
-        path: path.to_path_buf(),
-        source,
-    })
 }
 
 fn configured_provider_model(config: &Config) -> Option<&str> {
@@ -757,5 +767,114 @@ mod tests {
             provision_agent_headless_config(&config, tempdir.path()).expect("provision");
 
         assert!(provisioned.is_empty());
+    }
+
+    fn codex_openrouter_config() -> Config {
+        let mut config = config_with_agent("codex", &["OPENROUTER_API_KEY"]);
+        config.agent.provider = Some(AgentProviderConfig {
+            id: "openrouter".to_owned(),
+            model: Some("deepseek/deepseek-v4-flash".to_owned()),
+            api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
+            custom: None,
+        });
+        config
+    }
+
+    fn codex_config_path(home: &Path) -> PathBuf {
+        home.join(".codex").join("config.toml")
+    }
+
+    #[test]
+    fn runtime_inputs_come_from_the_runtime_home_and_files_land_in_the_workload_home() {
+        let runtime_home = tempfile::tempdir().expect("runtime home");
+        let workload_home = tempfile::tempdir().expect("workload home");
+        let mut store =
+            crate::secrets::SecretStore::open_or_create(runtime_home.path()).expect("store");
+        store
+            .apply_managed_state_credential(
+                "platform-state",
+                "provider-credential",
+                1,
+                Some(crate::secrets::ManagedCredentialSelection {
+                    provider_id: "openrouter".to_owned(),
+                    values: std::collections::BTreeMap::from([(
+                        "OPENROUTER_API_KEY".to_owned(),
+                        "sk-test".to_owned(),
+                    )]),
+                    source_refs: std::collections::BTreeMap::new(),
+                    base_url: Some("http://127.0.0.1:3129".to_owned()),
+                }),
+            )
+            .expect("stage endpoint override");
+        // Only the runtime home's catalog says the model takes no `high` effort; reading the
+        // workload home instead would find no catalog and keep the pin.
+        let cache_path =
+            crate::runtime::agent::provider_model_catalog::cache_path(runtime_home.path());
+        std::fs::create_dir_all(cache_path.parent().expect("cache parent")).expect("cache dir");
+        std::fs::write(
+            &cache_path,
+            json!({
+                "version": 2,
+                "providers": { "openrouter": { "fetched_at": 100, "models": [
+                    { "value": "deepseek/deepseek-v4-flash", "efforts": ["xhigh"] }
+                ] } }
+            })
+            .to_string(),
+        )
+        .expect("write catalog cache");
+        let mut config = codex_openrouter_config();
+        config.agent.effort = Some("high".to_owned());
+        let workload =
+            WorkloadHome::with_process_credentials(runtime_home.path(), workload_home.path());
+
+        let provisioned =
+            provision_agent_headless_config_in(&config, &workload).expect("provision");
+
+        assert_eq!(provisioned[0].path, codex_config_path(workload_home.path()));
+        let value: toml::Value = toml::from_str(
+            &std::fs::read_to_string(codex_config_path(workload_home.path()))
+                .expect("workload codex config"),
+        )
+        .expect("codex config toml parses");
+        assert_eq!(
+            value["model_providers"]["openrouter"]["base_url"].as_str(),
+            Some("http://127.0.0.1:3129/api/v1")
+        );
+        assert!(value.get("model_reasoning_effort").is_none(), "{value}");
+        assert!(!runtime_home.path().join(".codex").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires CAP_SETUID/CAP_SETGID and ACPS_TEST_WORKLOAD_USER"]
+    fn workload_identity_provisions_native_config_owned_by_the_workload_user() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let user = std::env::var("ACPS_TEST_WORKLOAD_USER").expect("ACPS_TEST_WORKLOAD_USER");
+        let entry = crate::ownership::lookup_user(&user)
+            .expect("passwd lookup")
+            .expect("workload user exists");
+        let runtime_home = tempfile::tempdir().expect("runtime home");
+        let workload_home = tempfile::tempdir().expect("workload home");
+        std::fs::set_permissions(workload_home.path(), std::fs::Permissions::from_mode(0o777))
+            .expect("open the workload home to the workload user");
+        let profile = crate::runtime::sandbox::SandboxProfile {
+            identity: Some(crate::runtime::sandbox::WorkloadIdentity {
+                name: user,
+                uid: entry.uid,
+                gid: entry.gid,
+                home: workload_home.path().to_path_buf(),
+            }),
+            ..crate::runtime::sandbox::SandboxProfile::default()
+        };
+        let workload = WorkloadHome::for_profile(&profile, runtime_home.path());
+        let config = config_with_agent("antigravity", &["GEMINI_API_KEY"]);
+
+        let provisioned =
+            provision_agent_headless_config_in(&config, &workload).expect("provision");
+
+        let metadata = std::fs::symlink_metadata(&provisioned[0].path).expect("written file");
+        assert!(provisioned[0].path.starts_with(workload_home.path()));
+        assert_eq!((metadata.uid(), metadata.gid()), (entry.uid, entry.gid));
     }
 }

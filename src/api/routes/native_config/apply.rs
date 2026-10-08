@@ -60,11 +60,13 @@ pub(super) async fn apply_stored_operation_locked(
     let target_id = prior_config.array.primary_target.clone();
     ensure_array_process_start_allowed(&prepared.canonical_config, &target_id)?;
     let target = state.agent_target(&target_id)?;
+    let workload = native_workload_home(state)?;
+    let files = NativeConfigFiles::new(&state.runtime_paths.config_path, &workload);
     let paths = native_config_transaction_paths(
         &state.runtime_paths.config_path,
         &prepared.native_path,
         &prepared.harness,
-        &home,
+        workload.home(),
     );
     let (snapshots, prior_was_running) = if resuming_apply {
         if stored_snapshots.is_empty() {
@@ -96,7 +98,7 @@ pub(super) async fn apply_stored_operation_locked(
             return Ok(ApplyStoredOutcome::Blocked(operation));
         }
         let prior_was_running = supervisor_state == AgentStateLabel::Running;
-        let snapshots = capture_native_config_snapshots(&paths, &home)?;
+        let snapshots = capture_native_config_snapshots(&paths, files)?;
         let mut applying_marker = operation_record(state, operation_id).await?;
         applying_marker.rollback_snapshots = snapshots.clone();
         applying_marker.prior_config = Some(prior_config.clone());
@@ -107,7 +109,7 @@ pub(super) async fn apply_stored_operation_locked(
         replace_operation_record(state, applying_marker).await?;
         (snapshots, prior_was_running)
     };
-    prepare_native_config_file_paths(&prepared, &state.runtime_paths.config_path, &home)?;
+    prepare_native_config_file_paths(&prepared, files)?;
     let applying_record = operation_record(state, operation_id).await?;
 
     let live_state = target.supervisor.snapshot().await.state;
@@ -200,7 +202,7 @@ pub(super) async fn apply_stored_operation_locked(
         .await;
     }
 
-    let applied_file_digests = match capture_native_config_file_digests(&paths, &home) {
+    let applied_file_digests = match capture_native_config_file_digests(&paths, files) {
         Ok(digests) => digests,
         Err(error) => {
             return rollback_failed_apply(
@@ -255,10 +257,10 @@ pub(super) async fn apply_files_and_runtime(
     prepared: &PreparedNativeConfigImport,
     restart: bool,
 ) -> Result<()> {
+    let workload = native_workload_home(state)?;
     write_native_config_files(
         prepared,
-        &state.runtime_paths.config_path,
-        &state.runtime_paths.home,
+        NativeConfigFiles::new(&state.runtime_paths.config_path, &workload),
     )?;
     if prepared.imported_model
         && !model_value_is_explicit_without_discovery(&prepared.canonical_config.agent)

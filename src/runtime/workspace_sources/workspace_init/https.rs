@@ -1,5 +1,5 @@
-//! Data lane: HTTPS download plus archive extraction, with a file-copy fallback
-//! for non-archive payloads.
+//! Data lane: HTTPS download plus archive extraction into staging, with a
+//! file-copy fallback for non-archive payloads, then a symlink-refusing handoff.
 
 use std::path::Path;
 
@@ -7,10 +7,10 @@ use crate::config::DataSourceConfig;
 use crate::error::{Result, StackError};
 use crate::runtime::workspace_sources::safe_download::{DownloadOpts, download_to_file};
 use crate::runtime::workspace_sources::safe_extract::{ExtractOpts, extract_archive};
+use crate::workload_fs::SymlinkPolicy;
 
 use super::common::{
-    Sentinel, SentinelBody, capture_error, cleanup_partial_destination, ensure_dest_or_fail,
-    ensure_destination_not_symlink, sentinel_if_present, write_operation_capture,
+    MaterializeContext, Sentinel, SentinelBody, StagingDir, capture_error, write_operation_capture,
 };
 use super::{
     CAPTURE_TAG_COPY, CAPTURE_TAG_DOWNLOAD, CAPTURE_TAG_EXTRACT, MaterializeOutcome, SourceReport,
@@ -20,7 +20,8 @@ pub(super) fn materialize_https(
     index: usize,
     source: &DataSourceConfig,
     name: &str,
-    dest: &Path,
+    relative: &Path,
+    context: &MaterializeContext,
     log_dir: Option<&Path>,
 ) -> Result<SourceReport> {
     let url = source
@@ -30,10 +31,10 @@ pub(super) fn materialize_https(
             index,
             reason: "url is required".to_owned(),
         })?;
+    let dest = context.destination.display(relative);
 
-    ensure_destination_not_symlink(dest)?;
     let mut existing_sentinel_diverged = false;
-    if let Some(existing) = sentinel_if_present(dest)?
+    if let Some(existing) = context.destination.read_sentinel(relative)?
         && let SentinelBody::Https {
             url: existing_url,
             sha256: existing_sha,
@@ -51,7 +52,7 @@ pub(super) fn materialize_https(
         if pin_matches {
             return Ok(SourceReport {
                 name: name.to_owned(),
-                destination: dest.to_path_buf(),
+                destination: dest,
                 outcome: MaterializeOutcome::Verified,
                 log_dir: None,
             });
@@ -60,19 +61,9 @@ pub(super) fn materialize_https(
     }
     if existing_sentinel_diverged {
         // The sentinel was self-stamped, so wiping the directory is safe.
-        std::fs::remove_dir_all(dest).map_err(|source_err| {
-            StackError::WorkspaceMaterializeFailed {
-                reason: format!(
-                    "remove stale destination `{}`: {source_err}",
-                    dest.display()
-                ),
-            }
-        })?;
+        context.destination.remove(relative)?;
     }
-    ensure_dest_or_fail(dest)?;
-    std::fs::create_dir_all(dest).map_err(|source_err| StackError::WorkspaceMaterializeFailed {
-        reason: format!("create dest `{}`: {source_err}", dest.display()),
-    })?;
+    context.destination.prepare(relative)?;
 
     let mut opts = DownloadOpts::default();
     if let Some(limit) = source.max_download_bytes {
@@ -111,7 +102,8 @@ pub(super) fn materialize_https(
     if let Some(limit) = source.max_extracted_bytes {
         extract_opts.max_total_bytes = limit;
     }
-    let extracted = match extract_archive(tmp.path(), dest, &extract_opts) {
+    let staging = StagingDir::create(context.host.home())?;
+    let extracted = match extract_archive(tmp.path(), staging.path(), &extract_opts) {
         Ok(report) => {
             write_operation_capture(
                 log_dir,
@@ -125,8 +117,7 @@ pub(super) fn materialize_https(
                     report.top_level_dir.as_deref().unwrap_or(""),
                 ),
                 "",
-            )
-            .map_err(|err| cleanup_partial_destination(dest, err))?;
+            )?;
             true
         }
         Err(StackError::ArchiveUnsupportedFormat) => {
@@ -142,7 +133,7 @@ pub(super) fn materialize_https(
             )?;
             // Not an archive: place the file at <dest>/<basename> instead.
             let leaf = derive_leaf_from_url(url);
-            let target = dest.join(leaf);
+            let target = staging.path().join(&leaf);
             let copied = match std::fs::copy(tmp.path(), &target) {
                 Ok(bytes) => bytes,
                 Err(source_err) => {
@@ -153,7 +144,7 @@ pub(super) fn materialize_https(
                         ),
                     };
                     capture_error(log_dir, CAPTURE_TAG_COPY, &err);
-                    return Err(cleanup_partial_destination(dest, err));
+                    return Err(err);
                 }
             };
             write_operation_capture(
@@ -162,16 +153,15 @@ pub(super) fn materialize_https(
                 &format!(
                     "source={}\ndestination={}\nbytes={copied}\nentries=1\n",
                     tmp.path().display(),
-                    target.display(),
+                    dest.join(&leaf).display(),
                 ),
                 "",
-            )
-            .map_err(|err| cleanup_partial_destination(dest, err))?;
+            )?;
             false
         }
         Err(err) => {
             capture_error(log_dir, CAPTURE_TAG_EXTRACT, &err);
-            return Err(cleanup_partial_destination(dest, err));
+            return Err(err);
         }
     };
 
@@ -181,13 +171,15 @@ pub(super) fn materialize_https(
         bytes,
         extracted,
     });
-    if let Err(err) = sentinel.write(dest) {
-        return Err(cleanup_partial_destination(dest, err));
-    }
+    context
+        .destination
+        .install(staging.path(), relative, SymlinkPolicy::Reject, |_| {
+            sentinel
+        })?;
 
     Ok(SourceReport {
         name: name.to_owned(),
-        destination: dest.to_path_buf(),
+        destination: dest,
         outcome: MaterializeOutcome::Created,
         log_dir: log_dir.map(Path::to_path_buf),
     })

@@ -15,6 +15,7 @@ use crate::runtime::agent::acp_bridge::{KIMI_CODE_AGENT_ID, kimi_lane_for_provid
 use crate::runtime::agent::agent_headless_config::{
     HERMES_AGENT_ID, provision_agent_headless_config,
 };
+use crate::runtime::agent::config_io::WorkloadHome;
 use crate::runtime::agent::config_options::{SessionConfigOptionSnapshot, project_config_options};
 use crate::runtime::agent::model_discovery::{
     DiscoveredSessionConfig, advertised_values_for_category, catalog_effort_values,
@@ -441,8 +442,9 @@ pub(super) fn configure_model_and_mode_for_init(
     // candidate file's prior contents BEFORE that runs is what keeps the
     // "rejection writes nothing" guarantee: a discovery or validation failure
     // rolls back to true prior state.
-    let candidate_paths = headless_config_candidate_paths(&config.agent.id, home);
-    let snapshots = capture_path_snapshots(&candidate_paths)?;
+    let workload = WorkloadHome::resolve(config, home)?;
+    let candidate_paths = headless_config_candidate_paths(&config.agent.id, workload.home());
+    let snapshots = capture_path_snapshots(&workload, &candidate_paths)?;
     // Directory listings let rollback also remove side files the provisioners
     // write out-of-band under operator-supplied names `candidate_paths` cannot
     // enumerate.
@@ -450,8 +452,8 @@ pub(super) fn configure_model_and_mode_for_init(
         .iter()
         .filter_map(|path| path.parent().map(Path::to_path_buf))
         .collect::<Vec<_>>();
-    dir_scan.extend(headless_config_side_dirs(&config.agent.id, home));
-    let dir_listings = capture_dir_listings_for(&dir_scan)?;
+    dir_scan.extend(headless_config_side_dirs(&config.agent.id, workload.home()));
+    let dir_listings = capture_dir_listings_for(&workload, &dir_scan)?;
     let discovery_outcome = (|| {
         // The pre-spawn catalog lane is part of the phase, so the flag is armed
         // before it, not before the loop.
@@ -640,8 +642,8 @@ pub(super) fn configure_model_and_mode_for_init(
     match discovery_outcome {
         Ok(outcome) => Ok(outcome),
         Err(err) => {
-            restore_headless_snapshots(snapshots);
-            remove_new_files_in_dirs(dir_listings);
+            restore_headless_snapshots(&workload, snapshots);
+            remove_new_files_in_dirs(&workload, dir_listings);
             Err(err)
         }
     }

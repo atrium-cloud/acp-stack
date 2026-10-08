@@ -7,16 +7,17 @@ pub(crate) const OPENCODE_DISABLED_SMALL_MODEL: &str = "invalid/model";
 
 pub(super) fn provision_opencode_config(
     config: &Config,
-    home: &Path,
+    workload: &WorkloadHome,
     endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
 ) -> Result<Option<PathBuf>> {
+    let home = workload.home();
     let path = home.join(".config").join("opencode").join("opencode.json");
     let active_providers = configured_active_provider_configs(config);
     if active_providers.is_empty() {
         return Ok(None);
     }
     let subagent_disabled = configured_subagent_disabled(config);
-    let mut root = read_json_object(&path)?;
+    let mut root = read_json_object(workload, &path)?;
     insert_if_missing(
         &mut root,
         "$schema",
@@ -52,7 +53,7 @@ pub(super) fn provision_opencode_config(
     let providers = ensure_object_field(&mut root, "provider", &path)?;
     for provider in &active_providers {
         let provider_key =
-            write_opencode_provider_config(config, home, providers, provider, &path, endpoint)?;
+            write_opencode_provider_config(config, workload, providers, provider, &path, endpoint)?;
         enabled_providers.insert(provider_key);
     }
     if enabled_providers.is_empty() {
@@ -64,19 +65,20 @@ pub(super) fn provision_opencode_config(
         );
     }
 
-    write_json_object(&path, root)?;
+    write_json_object(workload, &path, root)?;
     Ok(Some(path))
 }
 
 pub(super) fn cleanup_opencode_config(
     config: &Config,
-    home: &Path,
+    workload: &WorkloadHome,
 ) -> Result<Vec<CleanedAgentConfig>> {
+    let home = workload.home();
     let path = home.join(".config").join("opencode").join("opencode.json");
-    if !path.exists() {
+    if !workload.exists(&path)? {
         return Ok(Vec::new());
     }
-    let mut root = read_json_object(&path)?;
+    let mut root = read_json_object(workload, &path)?;
     let mut changed = false;
     for key in ["$schema", "model", "small_model", "enabled_providers"] {
         changed |= root.remove(key).is_some();
@@ -101,7 +103,7 @@ pub(super) fn cleanup_opencode_config(
     if !changed {
         return Ok(Vec::new());
     }
-    write_or_remove_json_object(&path, root)?;
+    write_or_remove_json_object(workload, &path, root)?;
     Ok(vec![CleanedAgentConfig {
         label: "OpenCode config",
         path,
@@ -122,7 +124,7 @@ fn opencode_provider_config_key<'a>(
 
 fn write_opencode_provider_config(
     config: &Config,
-    home: &Path,
+    workload: &WorkloadHome,
     providers: &mut Map<String, serde_json::Value>,
     provider: &AgentProviderConfig,
     path: &Path,
@@ -179,7 +181,7 @@ fn write_opencode_provider_config(
         super::rerouted_mapped_base_url_for(endpoint, &config.agent.id, &provider.id, path)?;
     let provider_config = ensure_object_field(providers, agent_provider_id, path)?;
     let models = ensure_object_field(provider_config, "models", path)?;
-    write_opencode_effort_variants(home, provider, agent_provider_id, models);
+    write_opencode_effort_variants(workload.runtime_home(), provider, agent_provider_id, models);
     let options = ensure_object_field(provider_config, "options", path)?;
     options.insert("apiKey".to_owned(), json!(format!("{{env:{api_key_ref}}}")));
     // acps owns `options.baseURL` for a mapped provider: removing it on a
@@ -448,9 +450,10 @@ mod tests {
     #[test]
     fn opencode_mapped_provider_endpoint_keeps_the_vendor_path_and_is_restored() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let config = opencode_openai_config();
 
-        provision_opencode_config(&config, tempdir.path(), Some(&endpoint("openai")))
+        provision_opencode_config(&config, &workload, Some(&endpoint("openai")))
             .expect("provision with override");
         let value = opencode_config_value(tempdir.path());
         assert_eq!(
@@ -462,7 +465,7 @@ mod tests {
             "{env:OPENAI_API_KEY}"
         );
 
-        provision_opencode_config(&config, tempdir.path(), None).expect("provision without");
+        provision_opencode_config(&config, &workload, None).expect("provision without");
         let value = opencode_config_value(tempdir.path());
         assert!(
             value["provider"]["openai"]["options"]["baseURL"].is_null(),
@@ -473,9 +476,10 @@ mod tests {
     #[test]
     fn opencode_endpoint_for_another_provider_is_ignored() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let config = opencode_openai_config();
 
-        provision_opencode_config(&config, tempdir.path(), Some(&endpoint("anthropic")))
+        provision_opencode_config(&config, &workload, Some(&endpoint("anthropic")))
             .expect("provision");
 
         let value = opencode_config_value(tempdir.path());
@@ -488,10 +492,11 @@ mod tests {
     #[test]
     fn opencode_custom_provider_endpoint_overrides_the_declared_base_url() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let config =
             custom_provider_config("opencode", crate::config::CustomProviderApi::Responses);
 
-        provision_opencode_config(&config, tempdir.path(), Some(&endpoint("myprovider")))
+        provision_opencode_config(&config, &workload, Some(&endpoint("myprovider")))
             .expect("provision");
 
         let value = opencode_config_value(tempdir.path());
@@ -504,6 +509,7 @@ mod tests {
     #[test]
     fn opencode_mapped_provider_without_a_vendor_base_refuses_the_override() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let mut config = config_with_agent("opencode", &["DEEPINFRA_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "deepinfra".to_owned(),
@@ -512,9 +518,8 @@ mod tests {
             custom: None,
         });
 
-        let error =
-            provision_opencode_config(&config, tempdir.path(), Some(&endpoint("deepinfra")))
-                .expect_err("no vendor base must refuse");
+        let error = provision_opencode_config(&config, &workload, Some(&endpoint("deepinfra")))
+            .expect_err("no vendor base must refuse");
 
         assert!(error.to_string().contains("vendor base URL"), "{error}");
     }
@@ -522,6 +527,7 @@ mod tests {
     #[test]
     fn opencode_templated_vendor_base_composes_from_stored_companions() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let mut config = config_with_agent("opencode", &["CLOUDFLARE_API_TOKEN"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "cloudflare-ai-gateway".to_owned(),
@@ -535,7 +541,7 @@ mod tests {
             ("CLOUDFLARE_GATEWAY_ID".to_owned(), "gw".to_owned()),
         ]);
 
-        provision_opencode_config(&config, tempdir.path(), Some(&override_)).expect("provision");
+        provision_opencode_config(&config, &workload, Some(&override_)).expect("provision");
 
         let value = opencode_config_value(tempdir.path());
         assert_eq!(
@@ -543,12 +549,9 @@ mod tests {
             "http://127.0.0.1:3129/v1/acct/gw/compat"
         );
 
-        let error = provision_opencode_config(
-            &config,
-            tempdir.path(),
-            Some(&endpoint("cloudflare-ai-gateway")),
-        )
-        .expect_err("missing companions must refuse");
+        let error =
+            provision_opencode_config(&config, &workload, Some(&endpoint("cloudflare-ai-gateway")))
+                .expect_err("missing companions must refuse");
         assert!(
             error.to_string().contains("CLOUDFLARE_ACCOUNT_ID"),
             "{error}"

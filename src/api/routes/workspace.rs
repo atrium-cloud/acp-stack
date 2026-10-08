@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use axum::Extension;
 use axum::Json;
 use axum::body::Body;
@@ -10,9 +12,9 @@ use super::super::core::AppState;
 use crate::auth::KeyKind;
 use crate::envelope::ApiSuccess;
 use crate::error::StackError;
-use crate::workspace::{
-    self, FileMetadata, FileRead, PathIntent, WorkspaceListing, resolve_workspace_path,
-};
+use crate::runtime::sandbox::SandboxProfile;
+use crate::workload_fs::{Anchor, DEFAULT_JOB_TIMEOUT};
+use crate::workspace::{self, FileMetadata, FileRead, PathIntent, WorkspaceListing};
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct WorkspaceMetadataResponse {
@@ -60,18 +62,15 @@ pub(crate) async fn files_list_handler(
     State(state): State<AppState>,
     Query(params): Query<FilesPathParams>,
 ) -> std::result::Result<ApiSuccess<FilesListResponse>, StackError> {
-    let root = state.config.workspace.root.clone();
-    let requested = params.path.clone();
-    let listing: WorkspaceListing = tokio::task::spawn_blocking(move || {
-        let absolute = resolve_workspace_path(
-            std::path::Path::new(&root),
-            &requested,
-            PathIntent::ReadExisting,
-        )?;
-        workspace::list_directory(&absolute)
-    })
-    .await
-    .map_err(spawn_blocking_to_io)??;
+    let profile = SandboxProfile::resolve(&state.config.workspace.sandbox)?;
+    let listing: WorkspaceListing = run_in_workspace(
+        &profile,
+        &state.config.workspace.root,
+        &params.path,
+        PathIntent::ReadExisting,
+        workspace::list_directory,
+    )
+    .await?;
     Ok(ApiSuccess::new(FilesListResponse {
         path: params.path,
         entries: listing
@@ -101,19 +100,7 @@ pub(crate) async fn files_content_get_handler(
     State(state): State<AppState>,
     Query(params): Query<FilesPathParams>,
 ) -> std::result::Result<ApiSuccess<FilesContentResponse>, StackError> {
-    let root = state.config.workspace.root.clone();
-    let requested = params.path.clone();
-    let max_bytes = state.config.workspace.max_file_bytes;
-    let read: FileRead = tokio::task::spawn_blocking(move || {
-        let absolute = resolve_workspace_path(
-            std::path::Path::new(&root),
-            &requested,
-            PathIntent::ReadExisting,
-        )?;
-        workspace::read_file(&absolute, max_bytes)
-    })
-    .await
-    .map_err(spawn_blocking_to_io)??;
+    let read = read_workspace_file(&state, &params.path).await?;
     let (encoding, content) = encode_file_content(&read.content);
     Ok(ApiSuccess::new(FilesContentResponse {
         path: params.path,
@@ -128,20 +115,8 @@ pub(crate) async fn files_download_handler(
     State(state): State<AppState>,
     Query(params): Query<FilesPathParams>,
 ) -> std::result::Result<Response, StackError> {
-    let root = state.config.workspace.root.clone();
-    let requested = params.path.clone();
-    let max_bytes = state.config.workspace.max_file_bytes;
-    let read: FileRead = tokio::task::spawn_blocking(move || {
-        let absolute = resolve_workspace_path(
-            std::path::Path::new(&root),
-            &requested,
-            PathIntent::ReadExisting,
-        )?;
-        workspace::read_file(&absolute, max_bytes)
-    })
-    .await
-    .map_err(spawn_blocking_to_io)??;
-    let filename = std::path::Path::new(&params.path)
+    let read = read_workspace_file(&state, &params.path).await?;
+    let filename = Path::new(&params.path)
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "download".to_owned());
@@ -179,18 +154,7 @@ pub(crate) async fn files_content_put_handler(
     if bytes.len() as u64 > max_bytes {
         return Err(StackError::WorkspaceTooLarge { limit: max_bytes });
     }
-    let root = state.config.workspace.root.clone();
-    let requested = body.path.clone();
-    let metadata: FileMetadata = tokio::task::spawn_blocking(move || {
-        let absolute = resolve_workspace_path(
-            std::path::Path::new(&root),
-            &requested,
-            PathIntent::WriteOrCreate,
-        )?;
-        workspace::write_file_atomic(&absolute, &bytes)
-    })
-    .await
-    .map_err(spawn_blocking_to_io)??;
+    let metadata = write_workspace_file(&state, &body.path, bytes).await?;
 
     publish_workspace_mutation(
         &state,
@@ -280,11 +244,10 @@ pub(crate) async fn files_upload_handler(
         return Err(StackError::WorkspaceTooLarge { limit: max_bytes });
     }
 
-    // Resolve against `workspace.root`, never `workspace.uploads`, even though
-    // the request path is uploads-relative: resolving under `uploads` would
-    // treat it as its own containment root, so a symlink there pointing
-    // outside the root would escape the canonicalize-and-starts_with check.
-    if std::path::Path::new(&path).is_absolute() {
+    // Walk from `workspace.root`, never `workspace.uploads`, even though the
+    // request path is uploads-relative: anchoring at `uploads` would trust
+    // whatever `uploads` itself resolves to, symlink included.
+    if Path::new(&path).is_absolute() {
         return Err(StackError::WorkspacePathInvalid {
             reason: "upload `path` must be relative to workspace.uploads".to_owned(),
             requested: path,
@@ -295,19 +258,7 @@ pub(crate) async fn files_upload_handler(
         &state.config.workspace.uploads,
         &path,
     );
-    let workspace_root = state.config.workspace.root.clone();
-    let target_relative = workspace_relative_path.clone();
-    let bytes = content;
-    let metadata: FileMetadata = tokio::task::spawn_blocking(move || {
-        let absolute = resolve_workspace_path(
-            std::path::Path::new(&workspace_root),
-            &target_relative,
-            PathIntent::WriteOrCreate,
-        )?;
-        workspace::write_file_atomic(&absolute, &bytes)
-    })
-    .await
-    .map_err(spawn_blocking_to_io)??;
+    let metadata = write_workspace_file(&state, &workspace_relative_path, content).await?;
 
     publish_workspace_mutation(
         &state,
@@ -331,18 +282,15 @@ pub(crate) async fn files_delete_handler(
     Extension(kind): Extension<KeyKind>,
     Query(params): Query<FilesPathParams>,
 ) -> std::result::Result<ApiSuccess<FileDeleteResponse>, StackError> {
-    let root = state.config.workspace.root.clone();
-    let requested = params.path.clone();
-    tokio::task::spawn_blocking(move || {
-        let absolute = resolve_workspace_path(
-            std::path::Path::new(&root),
-            &requested,
-            PathIntent::WriteOrCreate,
-        )?;
-        workspace::delete_file(&absolute)
-    })
-    .await
-    .map_err(spawn_blocking_to_io)??;
+    let profile = SandboxProfile::resolve(&state.config.workspace.sandbox)?;
+    run_in_workspace(
+        &profile,
+        &state.config.workspace.root,
+        &params.path,
+        PathIntent::WriteOrCreate,
+        workspace::delete_file,
+    )
+    .await?;
 
     publish_workspace_mutation(&state, kind, "workspace.delete", &params.path, None).await?;
 
@@ -499,12 +447,67 @@ fn sanitize_disposition_filename(name: &str) -> String {
     out
 }
 
-/// A panic in `spawn_blocking` should propagate as a 500; the join failure is
-/// strictly an internal fault, so we surface a generic `WorkspaceIo` rather
-/// than a path-specific code.
-fn spawn_blocking_to_io(error: tokio::task::JoinError) -> StackError {
-    StackError::WorkspaceIo {
-        requested: "<background task>".to_owned(),
-        source: std::io::Error::other(error.to_string()),
-    }
+/// Validate `requested` and run `job` on it under `profile`'s executor, walking from an anchor on
+/// `root` opened inside the job so a workload executor opens it with the workload's own
+/// credentials.
+async fn run_in_workspace<T: Send + 'static>(
+    profile: &SandboxProfile,
+    root: &str,
+    requested: &str,
+    intent: PathIntent,
+    job: impl FnOnce(&Anchor, &Path, &str) -> crate::error::Result<T> + Send + 'static,
+) -> std::result::Result<T, StackError> {
+    let relative = workspace::workspace_relative_path(requested, intent)?;
+    let root = PathBuf::from(root);
+    let requested = requested.to_owned();
+    let links = profile.link_policy(true);
+    profile
+        .executor()
+        .run_async(DEFAULT_JOB_TIMEOUT, move || {
+            let anchor = workspace::open_root(&root, &requested, links)?;
+            job(&anchor, &relative, &requested)
+        })
+        .await
+}
+
+/// Reads run with the workload identity's credentials when one is declared: the root's own path
+/// may sit in a workload-writable directory, and a swapped root must expose nothing the workload
+/// could not read itself.
+async fn read_workspace_file(
+    state: &AppState,
+    requested: &str,
+) -> std::result::Result<FileRead, StackError> {
+    let max_bytes = state.config.workspace.max_file_bytes;
+    let profile = SandboxProfile::resolve(&state.config.workspace.sandbox)?;
+    run_in_workspace(
+        &profile,
+        &state.config.workspace.root,
+        requested,
+        PathIntent::ReadExisting,
+        move |anchor, relative, requested| {
+            workspace::read_file(anchor, relative, requested, max_bytes)
+        },
+    )
+    .await
+}
+
+/// Writes run with the workload identity's credentials when one is declared,
+/// so the file lands owned by the workload.
+async fn write_workspace_file(
+    state: &AppState,
+    requested: &str,
+    content: Vec<u8>,
+) -> std::result::Result<FileMetadata, StackError> {
+    let profile = SandboxProfile::resolve(&state.config.workspace.sandbox)?;
+    let options = workspace::workload_write_options(&profile);
+    run_in_workspace(
+        &profile,
+        &state.config.workspace.root,
+        requested,
+        PathIntent::WriteOrCreate,
+        move |anchor, relative, requested| {
+            workspace::write_file(anchor, relative, requested, &content, &options)
+        },
+    )
+    .await
 }

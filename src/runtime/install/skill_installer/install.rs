@@ -28,12 +28,19 @@ pub fn parse_skill_names(values: &[String]) -> Result<Vec<String>> {
 
 pub fn install_from_github(
     source: &ResolvedSkillSource,
+    workload: &WorkloadHome,
     destination_root: &Path,
     skill_names: &[String],
 ) -> Result<SkillInstallReport> {
     validate_requested_skills(source, skill_names)?;
     let (_tempdir, archive_root) = fetch_and_extract_source(source)?;
-    install_from_extracted_root(source, &archive_root, destination_root, skill_names)
+    install_from_extracted_root(
+        source,
+        &archive_root,
+        workload,
+        destination_root,
+        skill_names,
+    )
 }
 
 /// Download and extract a source's GitHub archive into a temporary directory,
@@ -72,6 +79,7 @@ pub fn fetch_and_extract_source(
 pub fn install_from_extracted_root(
     source: &ResolvedSkillSource,
     archive_root: &Path,
+    workload: &WorkloadHome,
     destination_root: &Path,
     skill_names: &[String],
 ) -> Result<SkillInstallReport> {
@@ -94,7 +102,7 @@ pub fn install_from_extracted_root(
         let (name, source_dir) = find_skill_dir(source, archive_root, &selector)?;
         resolved.push((name, source_dir));
     }
-    install_resolved_skill_dirs(&source.id, destination_root, resolved)
+    install_resolved_skill_dirs(&source.id, workload, destination_root, resolved)
 }
 
 pub fn validate_requested_skills(
@@ -146,22 +154,16 @@ pub(crate) fn install_target_names_overlap(left: &str, right: &str) -> bool {
 
 fn install_resolved_skill_dirs(
     source_id: &str,
+    workload: &WorkloadHome,
     destination_root: &Path,
     resolved_skills: Vec<(String, PathBuf)>,
 ) -> Result<SkillInstallReport> {
-    ensure_directory_no_symlink_ancestors(destination_root, true)?;
     let mut resolved = Vec::with_capacity(resolved_skills.len());
     for (name, source_dir) in resolved_skills {
         validate_install_target_name(&name)?;
-        ensure_no_installed_skill_ancestor(destination_root, &name)?;
+        ensure_no_installed_skill_ancestor(workload, destination_root, &name)?;
         let target_dir = destination_root.join(&name);
-        let target_parent = target_dir
-            .parent()
-            .ok_or_else(|| StackError::SkillInstallFailed {
-                reason: format!("skill target `{}` has no parent", target_dir.display()),
-            })?;
-        ensure_directory_no_symlink_ancestors(target_parent, true)?;
-        match existing_target_state(&target_dir)? {
+        match existing_target_state(workload, &target_dir)? {
             ExistingTargetState::AlreadyInstalled => {
                 resolved.push(ResolvedInstall {
                     name,
@@ -193,6 +195,7 @@ fn install_resolved_skill_dirs(
                 InstallAction::Copy => {
                     handles.push(scope.spawn(move || {
                         copy_skill_dir_atomically(
+                            workload,
                             &install.source_dir,
                             &install.target_dir,
                             &install.name,
@@ -227,10 +230,14 @@ fn install_resolved_skill_dirs(
 
 pub fn all_skills_installed(
     source: &ResolvedSkillSource,
+    workload: &WorkloadHome,
     destination_root: &Path,
     skill_names: &[String],
 ) -> bool {
-    if ensure_directory_no_symlink_ancestors(destination_root, false).is_err() {
+    if !matches!(
+        ensure_directory_no_symlink_ancestors(workload, destination_root, false),
+        Ok(true)
+    ) {
         return false;
     }
     parse_skill_names(skill_names).is_ok_and(|names| {
@@ -239,7 +246,7 @@ pub fn all_skills_installed(
                 return false;
             };
             matches!(
-                existing_target_state(&destination_root.join(name)),
+                existing_target_state(workload, &destination_root.join(name)),
                 Ok(ExistingTargetState::AlreadyInstalled)
             )
         })

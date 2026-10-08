@@ -1,25 +1,54 @@
-//! Code lane: Git-based materialization (`git clone` + `git rev-parse`), capturing
-//! every subprocess and stamping a Git sentinel onto the destination on success.
+//! Code lane: Git-based materialization. `git clone` and `git rev-parse` run as the runtime in a
+//! staging directory, capturing every subprocess, and the checkout is handed off into the workspace
+//! with its symlinks preserved and a Git sentinel stamped on success.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::config::{CodeSourceConfig, derive_code_source_name};
 use crate::error::{Result, StackError};
+use crate::runtime::process_runner::{HostExec, forward_host_env};
 use crate::secrets::SecretStore;
+use crate::workload_fs::SymlinkPolicy;
 
 use super::common::{
-    Sentinel, SentinelBody, cleanup_partial_destination, destination_is_empty_except_sentinel,
-    ensure_destination_not_symlink, write_command_capture,
+    MaterializeContext, Sentinel, SentinelBody, StagingDir, write_command_capture,
 };
 use super::{
-    CAPTURE_TAG_GIT_CLONE, CAPTURE_TAG_GIT_REV_PARSE, MaterializeOutcome, SourceReport,
-    WORKSPACE_STDERR_TAIL_BYTES,
+    CAPTURE_TAG_GIT_CLONE, CAPTURE_TAG_GIT_REV_PARSE, CODE_LANE_DIR, MaterializeOutcome,
+    SourceReport, WORKSPACE_STDERR_TAIL_BYTES,
 };
+
+// === CONSTANTS ===
+
+const GIT_PROGRAM: &str = "git";
+const GIT_HTTP_LOW_SPEED_LIMIT: &str = "1000";
+const GIT_HTTP_LOW_SPEED_TIME_SECS: &str = "60";
+/// Host variables a clone keeps despite the host-exec cleared env, so SSH remotes still
+/// authenticate through the operator's agent or a custom SSH command and HTTPS remotes still
+/// reach the network through the host's proxy and trust store.
+const GIT_FORWARDED_HOST_ENV: &[&str] = &[
+    "SSH_AUTH_SOCK",
+    "GIT_SSH_COMMAND",
+    "GIT_SSH",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+    "NO_PROXY",
+    "no_proxy",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "GIT_SSL_CAINFO",
+    "GIT_SSL_CAPATH",
+];
 
 // Every spawned git MUST drop these: an inherited GIT_DIR or GIT_INDEX_FILE (observed
 // under a pre-commit hook) silently redirects clone/rev-parse at the launcher's
-// repository. Enumerated rather than a GIT_* sweep so GIT_SSH_COMMAND still works.
+// repository. HostExec already clears the env; removing them by name keeps that true
+// whatever the forwarded list grows to.
 const GIT_REPO_SCOPE_ENV_VARS: &[&str] = &[
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -40,14 +69,14 @@ fn scrub_repo_scope_env(cmd: &mut Command) {
 pub(super) fn materialize_code_source(
     index: usize,
     source: &CodeSourceConfig,
-    code_root: &Path,
+    context: &MaterializeContext,
     secrets: &SecretStore,
     log_dir: Option<&Path>,
 ) -> Result<SourceReport> {
     let name = derive_code_source_name(source)
         .map_err(|reason| StackError::WorkspaceCodeSourceInvalid { index, reason })?;
-    let dest = code_root.join(&name);
-    ensure_destination_not_symlink(&dest)?;
+    let relative = Path::new(CODE_LANE_DIR).join(&name);
+    let dest = context.destination.display(&relative);
     let repo = source
         .repo
         .as_deref()
@@ -56,71 +85,53 @@ pub(super) fn materialize_code_source(
             reason: "repo is required".to_owned(),
         })?;
 
-    if dest.exists() {
-        if let Some(existing) = Sentinel::read(&dest)? {
-            if let SentinelBody::Git {
-                repo: existing_repo,
-                branch: existing_branch,
-                ..
-            } = &existing.body
-                && existing_repo == repo
-                && existing_branch.as_deref() == source.branch.as_deref()
-            {
-                return Ok(SourceReport {
-                    name,
-                    destination: dest,
-                    outcome: MaterializeOutcome::Verified,
-                    log_dir: None,
-                });
-            }
-            return Err(StackError::WorkspaceDestinationNotEmpty {
-                dest: dest.display().to_string(),
+    if let Some(existing) = context.destination.read_sentinel(&relative)? {
+        if let SentinelBody::Git {
+            repo: existing_repo,
+            branch: existing_branch,
+            ..
+        } = &existing.body
+            && existing_repo == repo
+            && existing_branch.as_deref() == source.branch.as_deref()
+        {
+            return Ok(SourceReport {
+                name,
+                destination: dest,
+                outcome: MaterializeOutcome::Verified,
+                log_dir: None,
             });
         }
-        if !destination_is_empty_except_sentinel(&dest)? {
-            return Err(StackError::WorkspaceDestinationNotEmpty {
-                dest: dest.display().to_string(),
-            });
-        }
+        return Err(StackError::WorkspaceDestinationNotEmpty {
+            dest: dest.display().to_string(),
+        });
     }
-
-    std::fs::create_dir_all(&dest).map_err(|source_err| {
-        StackError::WorkspaceMaterializeFailed {
-            reason: format!("create dest `{}`: {source_err}", dest.display()),
-        }
-    })?;
+    context.destination.prepare(&relative)?;
 
     let credential = match source.credential_ref.as_deref() {
         Some(name) => Some(secrets.get(name)?.to_owned()),
         None => None,
     };
 
-    let outcome = run_git_clone(
+    let staging = StagingDir::create(context.host.home())?;
+    run_git_clone(
+        &context.host,
         repo,
         source.branch.as_deref(),
         credential.as_deref(),
-        &dest,
+        staging.path(),
         log_dir,
-    );
-    if let Err(err) = outcome {
-        return Err(cleanup_partial_destination(&dest, err));
-    }
-
-    // Between a successful clone and the sentinel write, EVERY failure must funnel
-    // through `cleanup_partial_destination`: a populated destination with no sentinel
-    // is rejected by the next `acps init` under the non-empty destination guard.
-    let commit = match run_git_rev_parse(&dest, log_dir) {
-        Ok(commit) => commit,
-        Err(err) => return Err(cleanup_partial_destination(&dest, err)),
-    };
+    )?;
+    let commit = run_git_rev_parse(&context.host, staging.path(), log_dir)?;
     let sentinel = Sentinel::new(SentinelBody::Git {
         repo: repo.to_owned(),
         branch: source.branch.clone(),
         commit,
     });
-    if let Err(err) = sentinel.write(&dest) {
-        return Err(cleanup_partial_destination(&dest, err));
-    }
+    context
+        .destination
+        .install(staging.path(), &relative, SymlinkPolicy::Preserve, |_| {
+            sentinel
+        })?;
 
     Ok(SourceReport {
         name,
@@ -144,34 +155,17 @@ pub(super) fn tail_stderr_bytes(stderr: &[u8]) -> String {
     trimmed[cutoff..].to_owned()
 }
 
-pub(super) fn run_git_clone(
-    repo: &str,
-    branch: Option<&str>,
-    credential: Option<&str>,
-    dest: &Path,
-    log_dir: Option<&Path>,
-) -> Result<()> {
-    let mut cmd = Command::new("git");
-    cmd.arg("clone").arg("--depth").arg("1");
-    if let Some(branch) = branch {
-        cmd.arg("--branch").arg(branch);
-    }
-    cmd.arg("--").arg(repo).arg(dest);
+/// A git command on the host-exec env: runtime HOME, managed PATH, host-exec cwd.
+fn git_command(host: &HostExec) -> Result<Command> {
+    let git = host.resolve_program(GIT_PROGRAM, &[])?;
+    let mut cmd = host.command(&git, &[]);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     scrub_repo_scope_env(&mut cmd);
-
-    // Clone inherits the daemon env, so pin HOME through the fixture guard: in a test build on
-    // a developer machine the real ~/.gitconfig (url.insteadOf rewrites) and ~/.ssh must not
-    // steer or serve a fixture clone. On refusal, omit HOME rather than inherit it.
-    match crate::fs_util::home_dir() {
-        Ok(home) => {
-            cmd.env("HOME", home);
-        }
-        Err(error) => {
-            tracing::warn!(error = %error, "HOME omitted from git clone env");
-            cmd.env_remove("HOME");
-        }
+    for name in GIT_FORWARDED_HOST_ENV {
+        forward_host_env(&mut cmd, name);
     }
+    // In a test build on a developer machine the system and global git config (url.insteadOf
+    // rewrites) must not steer or serve a fixture clone.
     if crate::dev_gates::fixture_guards_active() {
         cmd.env("GIT_CONFIG_NOSYSTEM", "1");
         cmd.env(
@@ -179,12 +173,32 @@ pub(super) fn run_git_clone(
             if cfg!(windows) { "NUL" } else { "/dev/null" },
         );
     }
+    Ok(cmd)
+}
+
+pub(super) fn run_git_clone(
+    host: &HostExec,
+    repo: &str,
+    branch: Option<&str>,
+    credential: Option<&str>,
+    dest: &Path,
+    log_dir: Option<&Path>,
+) -> Result<()> {
+    let mut cmd = git_command(host)?;
+    // The handoff refuses hard-linked files, and a clone from a local path hardlinks its objects.
+    cmd.arg("clone")
+        .arg("--depth")
+        .arg("1")
+        .arg("--no-hardlinks");
+    if let Some(branch) = branch {
+        cmd.arg("--branch").arg(branch);
+    }
+    cmd.arg("--").arg(repo).arg(dest);
+    cmd.env("GIT_HTTP_LOW_SPEED_LIMIT", GIT_HTTP_LOW_SPEED_LIMIT);
+    cmd.env("GIT_HTTP_LOW_SPEED_TIME", GIT_HTTP_LOW_SPEED_TIME_SECS);
 
     // A credential travels via GIT_ASKPASS so the token never lands in process args,
     // where ps and audit logs would expose it.
-    cmd.env("GIT_TERMINAL_PROMPT", "0");
-    cmd.env("GIT_HTTP_LOW_SPEED_LIMIT", "1000");
-    cmd.env("GIT_HTTP_LOW_SPEED_TIME", "60");
     if let Some(token) = credential {
         cmd.env("ACP_STACK_GIT_TOKEN", token);
         let helper_path = write_askpass_helper()?;
@@ -214,14 +228,13 @@ pub(super) fn run_git_clone(
     Ok(())
 }
 
-pub(super) fn run_git_rev_parse(dest: &Path, log_dir: Option<&Path>) -> Result<String> {
-    let mut cmd = Command::new("git");
-    cmd.arg("rev-parse")
-        .arg("HEAD")
-        .current_dir(dest)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    scrub_repo_scope_env(&mut cmd);
+pub(super) fn run_git_rev_parse(
+    host: &HostExec,
+    repo_dir: &Path,
+    log_dir: Option<&Path>,
+) -> Result<String> {
+    let mut cmd = git_command(host)?;
+    cmd.arg("rev-parse").arg("HEAD").current_dir(repo_dir);
     let output = cmd
         .output()
         .map_err(|source| StackError::WorkspaceMaterializeFailed {

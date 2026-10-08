@@ -8,10 +8,10 @@ use crate::config::DataSourceConfig;
 use crate::dev_gates::{S3_ENDPOINT_OVERRIDE_ENV, fixture_string};
 use crate::error::{Result, StackError};
 use crate::secrets::SecretStore;
+use crate::workload_fs::SymlinkPolicy;
 
 use super::common::{
-    Sentinel, SentinelBody, capture_error, cleanup_partial_destination, ensure_dest_or_fail,
-    ensure_destination_not_symlink, sentinel_if_present, write_operation_capture,
+    MaterializeContext, Sentinel, SentinelBody, StagingDir, capture_error, write_operation_capture,
 };
 use super::{CAPTURE_TAG_S3_DOWNLOAD, MaterializeOutcome, SourceReport};
 
@@ -19,7 +19,8 @@ pub(super) fn materialize_s3(
     index: usize,
     source: &DataSourceConfig,
     name: &str,
-    dest: &Path,
+    relative: &Path,
+    context: &MaterializeContext,
     secrets: &SecretStore,
     log_dir: Option<&Path>,
 ) -> Result<SourceReport> {
@@ -62,8 +63,8 @@ pub(super) fn materialize_s3(
         .max_download_bytes
         .unwrap_or(crate::runtime::workspace_sources::safe_download::DEFAULT_MAX_DOWNLOAD_BYTES);
 
-    ensure_destination_not_symlink(dest)?;
-    if let Some(existing) = sentinel_if_present(dest)?
+    let dest = context.destination.display(relative);
+    if let Some(existing) = context.destination.read_sentinel(relative)?
         && let SentinelBody::S3 {
             bucket: existing_bucket,
             prefix: existing_prefix,
@@ -76,15 +77,12 @@ pub(super) fn materialize_s3(
     {
         return Ok(SourceReport {
             name: name.to_owned(),
-            destination: dest.to_path_buf(),
+            destination: dest,
             outcome: MaterializeOutcome::Verified,
             log_dir: None,
         });
     }
-    ensure_dest_or_fail(dest)?;
-    std::fs::create_dir_all(dest).map_err(|source_err| StackError::WorkspaceMaterializeFailed {
-        reason: format!("create dest `{}`: {source_err}", dest.display()),
-    })?;
+    context.destination.prepare(relative)?;
 
     let access_key = secrets.get(access_ref)?.to_owned();
     let secret_key = secrets.get(secret_ref)?.to_owned();
@@ -99,7 +97,14 @@ pub(super) fn materialize_s3(
         client = client.with_endpoint_base(endpoint);
     }
 
-    let outcome = download_s3_objects(&client, bucket, prefix.as_deref(), dest, max_total_bytes);
+    let staging = StagingDir::create(context.host.home())?;
+    let outcome = download_s3_objects(
+        &client,
+        bucket,
+        prefix.as_deref(),
+        staging.path(),
+        max_total_bytes,
+    );
     let (bytes, objects) = match outcome {
         Ok(value) => {
             write_operation_capture(
@@ -113,13 +118,12 @@ pub(super) fn materialize_s3(
                     value.1,
                 ),
                 "",
-            )
-            .map_err(|err| cleanup_partial_destination(dest, err))?;
+            )?;
             value
         }
         Err(err) => {
             capture_error(log_dir, CAPTURE_TAG_S3_DOWNLOAD, &err);
-            return Err(cleanup_partial_destination(dest, err));
+            return Err(err);
         }
     };
 
@@ -130,13 +134,15 @@ pub(super) fn materialize_s3(
         bytes,
         objects,
     });
-    if let Err(err) = sentinel.write(dest) {
-        return Err(cleanup_partial_destination(dest, err));
-    }
+    context
+        .destination
+        .install(staging.path(), relative, SymlinkPolicy::Reject, |_| {
+            sentinel
+        })?;
 
     Ok(SourceReport {
         name: name.to_owned(),
-        destination: dest.to_path_buf(),
+        destination: dest,
         outcome: MaterializeOutcome::Created,
         log_dir: log_dir.map(Path::to_path_buf),
     })

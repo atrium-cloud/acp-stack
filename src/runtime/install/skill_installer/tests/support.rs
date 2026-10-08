@@ -84,6 +84,14 @@ pub(crate) fn canonical_temp_home(tempdir: &tempfile::TempDir) -> PathBuf {
     tempdir.path().canonicalize().expect("canonical temp home")
 }
 
+pub(crate) fn home_workload(tempdir: &tempfile::TempDir) -> WorkloadHome {
+    workload_at(&canonical_temp_home(tempdir))
+}
+
+pub(crate) fn workload_at(home: &Path) -> WorkloadHome {
+    WorkloadHome::with_process_credentials(home, home)
+}
+
 pub(crate) fn claude_code_entry(
     catalog: &RegistryCatalog,
 ) -> &crate::runtime::install::agent_registry::RegistryEntry {

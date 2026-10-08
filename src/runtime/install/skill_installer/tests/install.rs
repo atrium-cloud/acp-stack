@@ -52,6 +52,7 @@ fn install_from_extracted_root_copies_multiple_skills() {
     let report = install_from_extracted_root(
         &source(),
         archive.path(),
+        &home_workload(&home),
         &destination,
         &["repo-map,code-review".to_owned()],
     )
@@ -88,6 +89,7 @@ fn catalog_install_uses_exact_path_and_frontmatter_install_name() {
     let report = install_from_extracted_root(
         &source,
         archive.path(),
+        &home_workload(&home),
         &destination,
         &["zoom-plugin/contact-center/android".to_owned()],
     )
@@ -117,6 +119,7 @@ fn catalog_install_rejects_changed_frontmatter_name() {
     let error = install_from_extracted_root(
         &source,
         archive.path(),
+        &home_workload(&home),
         &canonical_temp_home(&home).join(".agents/skills"),
         &["zoom-general".to_owned()],
     )
@@ -148,6 +151,7 @@ fn catalog_install_rejects_two_variants_with_same_target() {
     let error = install_from_extracted_root(
         &source,
         archive.path(),
+        &home_workload(&home),
         &canonical_temp_home(&home).join(".agents/skills"),
         &["one/customize,two/customize".to_owned()],
     )
@@ -199,6 +203,7 @@ fn catalog_install_rejects_nested_target_inside_installed_skill() {
     let error = install_from_extracted_root(
         &source,
         archive.path(),
+        &home_workload(&home),
         &destination,
         &["ui-toolkit/web".to_owned()],
     )
@@ -221,6 +226,7 @@ fn install_from_extracted_root_ignores_noninstallable_system_directory() {
     let err = install_from_extracted_root(
         &source(),
         archive.path(),
+        &home_workload(&home),
         &destination,
         &["internal-only".to_owned()],
     )
@@ -237,6 +243,7 @@ fn install_from_extracted_root_rejects_missing_skill() {
     let err = install_from_extracted_root(
         &source(),
         archive.path(),
+        &home_workload(&home),
         &canonical_temp_home(&home).join(".agents/skills"),
         &["missing-skill".to_owned()],
     )
@@ -261,6 +268,7 @@ fn install_from_extracted_root_rejects_descriptor_symlink() {
         let err = install_from_extracted_root(
             &source(),
             archive.path(),
+            &home_workload(&home),
             &canonical_temp_home(&home).join(".agents/skills"),
             &["linked-skill".to_owned()],
         )
@@ -280,6 +288,7 @@ fn install_from_extracted_root_rejects_target_conflict() {
     let err = install_from_extracted_root(
         &source(),
         archive.path(),
+        &home_workload(&home),
         &destination,
         &["repo-map".to_owned()],
     )
@@ -304,6 +313,7 @@ fn install_from_extracted_root_skips_existing_skill() {
     let report = install_from_extracted_root(
         &source(),
         archive.path(),
+        &home_workload(&home),
         &destination,
         &["repo-map".to_owned()],
     )
@@ -325,6 +335,7 @@ fn all_skills_installed_rejects_symlinked_target() {
 
     assert!(!all_skills_installed(
         &source(),
+        &home_workload(&home),
         &destination,
         &["repo-map".to_owned()]
     ));
@@ -344,12 +355,22 @@ fn install_from_extracted_root_rejects_symlinked_destination_ancestor() {
     let err = install_from_extracted_root(
         &source(),
         archive.path(),
+        &home_workload(&home),
         &destination,
         &["repo-map".to_owned()],
     )
     .expect_err("symlinked ancestor rejected");
 
-    assert!(matches!(err, StackError::SkillInstallTargetConflict { .. }));
+    assert!(
+        matches!(err, StackError::WorkloadFsSymlinkRefused { .. }),
+        "{err:?}"
+    );
+    assert_eq!(
+        std::fs::read_dir(external.path())
+            .expect("external listing")
+            .count(),
+        0
+    );
 }
 
 #[test]

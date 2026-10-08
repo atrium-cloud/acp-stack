@@ -534,12 +534,16 @@ async fn session_native_config_cancel_handler(
         let config_path = config::default_config_path()?;
         let state_path = default_state_path(&home);
         let _lock = acquire_agent_config_mutation_file_lock(&config_path)?;
+        let workload = crate::runtime::agent::config_io::WorkloadHome::resolve(
+            &config::Config::load_from_path(&config_path)?,
+            &home,
+        )?;
         super::super::native_config::cancel_applied_for_init(
             &request.operation_id,
             &request.revision,
             &config_path,
             &state_path,
-            &home,
+            &workload,
         )
     })
     .await;

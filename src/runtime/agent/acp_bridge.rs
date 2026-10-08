@@ -33,7 +33,7 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use crate::config::AgentConfig;
 use crate::error::{Result, StackError};
 use crate::runtime::agent::acp_codec::{
-    auto_approve_acp_permission, enqueue_session_notification, handle_read_text_file,
+    AcpFsContext, auto_approve_acp_permission, enqueue_session_notification, handle_read_text_file,
     handle_write_text_file, resolve_acp_permission, spawn_session_notification_queue,
 };
 use crate::runtime::agent::acp_terminal::{

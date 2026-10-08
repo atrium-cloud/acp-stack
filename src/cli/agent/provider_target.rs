@@ -8,10 +8,13 @@ use crate::config::{self, AgentProvidersConfig, Config};
 use crate::error::{Result, StackError};
 use crate::fs_util::{acquire_agent_config_mutation_file_lock, home_dir};
 use crate::runtime::agent::agent_headless_config::{
-    OPENCODE_AGENT_ID, provision_agent_headless_config, provision_agent_headless_config_transition,
+    OPENCODE_AGENT_ID, provision_agent_headless_config, provision_agent_headless_config_in,
+    provision_agent_headless_config_transition,
 };
+use crate::runtime::agent::config_io::WorkloadHome;
 use crate::runtime::agent::native_config_import::{
-    NativeConfigPathSnapshot, capture_native_config_snapshots, restore_native_config_snapshots,
+    NativeConfigFiles, NativeConfigPathSnapshot, capture_native_config_snapshots,
+    restore_native_config_snapshots,
 };
 use crate::runtime::agent::provider_keys::{
     agent_provider_id_for_provider_id, apply_catalog_mapped_agent_provider,
@@ -93,12 +96,14 @@ pub(in crate::cli) fn run_target_provider_use(
     if let Some(model) = model {
         let mut target_config = config_for_target(&config, target_position);
         let discovery_snapshots = if agent_id == OPENCODE_AGENT_ID {
-            let path = home.join(".config").join("opencode").join("opencode.json");
-            let snapshots = capture_native_config_snapshots(&[path], &home)?;
-            if let Err(error) = provision_agent_headless_config(&target_config, &home) {
-                return restore_after_model_discovery_failure(snapshots, &home, error);
+            let workload = WorkloadHome::resolve(&target_config, &home)?;
+            let files = NativeConfigFiles::new(&config_path, &workload);
+            let path = opencode_config_path(&workload);
+            let snapshots = capture_native_config_snapshots(&[path], files)?;
+            if let Err(error) = provision_agent_headless_config_in(&target_config, &workload) {
+                return restore_after_model_discovery_failure(snapshots, files, error);
             }
-            Some(snapshots)
+            Some((snapshots, workload))
         } else {
             None
         };
@@ -107,8 +112,9 @@ pub(in crate::cli) fn run_target_provider_use(
             match resolve_agent_model_value(&home, &target_config, native_provider, model) {
                 Ok(resolved) => resolved,
                 Err(error) => {
-                    if let Some(snapshots) = discovery_snapshots {
-                        return restore_after_model_discovery_failure(snapshots, &home, error);
+                    if let Some((snapshots, workload)) = discovery_snapshots {
+                        let files = NativeConfigFiles::new(&config_path, &workload);
+                        return restore_after_model_discovery_failure(snapshots, files, error);
                     }
                     return Err(error);
                 }
@@ -532,14 +538,22 @@ fn query_provider_status(
         .map_err(|error| error.public_message())
 }
 
+fn opencode_config_path(workload: &WorkloadHome) -> std::path::PathBuf {
+    workload
+        .home()
+        .join(".config")
+        .join("opencode")
+        .join("opencode.json")
+}
+
 fn restore_after_model_discovery_failure<T>(
     snapshots: Vec<NativeConfigPathSnapshot>,
-    home: &std::path::Path,
+    files: NativeConfigFiles<'_>,
     original: StackError,
 ) -> Result<T> {
-    if let Err(restore_error) = restore_native_config_snapshots(&snapshots, home) {
+    if let Err(restore_error) = restore_native_config_snapshots(&snapshots, files) {
         return Err(StackError::AgentConfigProvision {
-            path: home.join(".config").join("opencode").join("opencode.json"),
+            path: opencode_config_path(files.workload),
             reason: format!(
                 "model discovery failed: {original}; restoring OpenCode config also failed: {restore_error}"
             ),

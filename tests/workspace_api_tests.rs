@@ -663,6 +663,99 @@ async fn delete_missing_returns_not_found() {
     assert_eq!(body["error"]["code"], "workspace.not_found");
 }
 
+async fn put_content(harness: &Harness, path: &str) -> reqwest::Response {
+    auth(session_client().put(format!("{}/v1/files/content", harness.base_url)))
+        .json(&serde_json::json!({
+            "path": path,
+            "encoding": "utf8",
+            "content": "changed"
+        }))
+        .send()
+        .await
+        .expect("send")
+}
+
+async fn upload(harness: &Harness, path: &str) -> reqwest::Response {
+    let form = reqwest::multipart::Form::new()
+        .text("path", path.to_owned())
+        .part(
+            "file",
+            reqwest::multipart::Part::bytes(b"changed".to_vec()).file_name("payload"),
+        );
+    auth(session_client().post(format!("{}/v1/files/upload", harness.base_url)))
+        .multipart(form)
+        .send()
+        .await
+        .expect("send")
+}
+
+async fn delete(harness: &Harness, path: &str) -> reqwest::Response {
+    let url = reqwest::Url::parse_with_params(
+        &format!("{}/v1/files", harness.base_url),
+        &[("path", path)],
+    )
+    .expect("delete url");
+    auth(session_client().delete(url))
+        .send()
+        .await
+        .expect("send")
+}
+
+async fn assert_refused(response: reqwest::Response, code: &str, context: &str) {
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{context}");
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], code, "{context}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn mutations_refuse_symlinks_at_the_target_and_a_parent() {
+    use std::os::unix::fs::symlink;
+
+    let harness = Harness::spawn().await;
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    let secret = outside.path().join("secret");
+    std::fs::write(&secret, b"outside").expect("write outside");
+    for base in [&harness.workspace_root, &harness.uploads_root] {
+        symlink(&secret, base.join("link")).expect("target symlink");
+        symlink(outside.path(), base.join("dir")).expect("parent symlink");
+    }
+
+    for path in ["link", "dir/secret", "dir/new"] {
+        assert_refused(
+            put_content(&harness, path).await,
+            "workspace.symlink_escape",
+            &format!("PUT {path}"),
+        )
+        .await;
+        assert_refused(
+            upload(&harness, path).await,
+            "workspace.symlink_escape",
+            &format!("upload {path}"),
+        )
+        .await;
+    }
+    for path in ["link", "dir/secret", "uploads/link", "uploads/dir/secret"] {
+        assert_refused(
+            delete(&harness, path).await,
+            "workspace.symlink_escape",
+            &format!("DELETE {path}"),
+        )
+        .await;
+    }
+
+    assert_eq!(std::fs::read(&secret).expect("secret"), b"outside");
+    assert!(!outside.path().join("new").exists());
+    for base in [&harness.workspace_root, &harness.uploads_root] {
+        assert!(
+            std::fs::symlink_metadata(base.join("link"))
+                .expect("link kept")
+                .file_type()
+                .is_symlink()
+        );
+    }
+}
+
 // ----- WebSocket -------------------------------------------------------------
 
 async fn open_ws(

@@ -20,28 +20,30 @@ pub(super) fn run_agent_headless_config_step(flow: &mut InitFlow) -> Result<()> 
             Ok(false)
         },
         || {
-            let candidate_paths = headless_config_candidate_paths(&config.agent.id, home);
-            let snapshots = capture_path_snapshots(&candidate_paths)?;
+            let workload = crate::runtime::agent::config_io::WorkloadHome::resolve(config, home)?;
+            let candidate_paths =
+                headless_config_candidate_paths(&config.agent.id, workload.home());
+            let snapshots = capture_path_snapshots(&workload, &candidate_paths)?;
             let mut dir_scan = candidate_paths
                 .iter()
                 .filter_map(|path| path.parent().map(Path::to_path_buf))
                 .collect::<Vec<_>>();
-            dir_scan.extend(headless_config_side_dirs(&config.agent.id, home));
-            let dir_listings = capture_dir_listings_for(&dir_scan)?;
+            dir_scan.extend(headless_config_side_dirs(&config.agent.id, workload.home()));
+            let dir_listings = capture_dir_listings_for(&workload, &dir_scan)?;
 
             crate::runtime::agent::provider_model_catalog::refresh_provider_models_best_effort_blocking(
                 home, config,
             );
-            match crate::runtime::agent::agent_headless_config::provision_agent_headless_config(
-                config, home,
+            match crate::runtime::agent::agent_headless_config::provision_agent_headless_config_in(
+                config, &workload,
             ) {
                 Ok(paths) => {
                     *provisioned_agent_configs = paths;
                     Ok(StepOutcome::empty())
                 }
                 Err(error) => {
-                    restore_headless_snapshots(snapshots);
-                    remove_new_files_in_dirs(dir_listings);
+                    restore_headless_snapshots(&workload, snapshots);
+                    remove_new_files_in_dirs(&workload, dir_listings);
                     Err(error)
                 }
             }
