@@ -134,10 +134,15 @@ pub(crate) async fn security_check_handler(
     );
     let sandbox = &state.config.workspace.sandbox;
     let network_provider = crate::extensions::resolve_network_provider(&state.config);
-    let sandbox_unavailable_reason = if sandbox.mode != crate::config::SandboxMode::Off {
-        crate::runtime::sandbox::preflight(sandbox, network_provider.as_ref()).err()
-    } else {
-        None
+    let sandbox_unavailable_reason = match crate::runtime::sandbox::SandboxProfile::resolve(sandbox)
+    {
+        Ok(profile)
+            if sandbox.mode != crate::config::SandboxMode::Off || profile.identity.is_some() =>
+        {
+            crate::runtime::sandbox::preflight(&profile, network_provider.as_ref()).err()
+        }
+        Ok(_) => None,
+        Err(error) => Some(error.to_string()),
     };
     let sandbox_off_but_capable = sandbox.mode == crate::config::SandboxMode::Off
         && crate::runtime::sandbox::host_supports_unshare();

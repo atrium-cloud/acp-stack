@@ -36,6 +36,11 @@ async fn status_returns_200_with_session_key() {
         "managed-credential-base-url",
         "sandbox-mask-files",
         "managed-node-runtime",
+        "sandbox-workload-user",
+        "sandbox-capability-drop",
+        "sandbox-workload-termination",
+        "sandbox-require-network-provider",
+        "sandbox-off-identity",
     ] {
         assert!(
             features.iter().any(|entry| entry == feature),

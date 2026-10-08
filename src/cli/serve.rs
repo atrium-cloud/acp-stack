@@ -105,15 +105,24 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
     let loaded_config = config::load_for_serve(&config_path)?;
     let config = loaded_config.config;
 
-    // Fail closed: a configured sandbox backend that cannot run on this host must refuse to serve
-    // rather than silently lose the security posture at the first agent spawn.
-    if config.workspace.sandbox.mode != config::SandboxMode::Off
-        && let Err(reason) = crate::runtime::sandbox::preflight(
-            &config.workspace.sandbox,
-            crate::extensions::resolve_network_provider(&config).as_ref(),
-        )
+    // Fail closed: a configured sandbox backend or workload identity that cannot run on this host
+    // must refuse to serve rather than silently lose the security posture at the first agent spawn.
+    let sandbox_profile =
+        crate::runtime::sandbox::SandboxProfile::resolve(&config.workspace.sandbox)?;
+    let network_provider = crate::extensions::resolve_network_provider(&config);
+    if (config.workspace.sandbox.mode != config::SandboxMode::Off
+        || sandbox_profile.identity.is_some())
+        && let Err(reason) =
+            crate::runtime::sandbox::preflight(&sandbox_profile, network_provider.as_ref())
     {
         return Err(crate::error::StackError::SandboxFailed { reason });
+    }
+    // A previous daemon that died uncleanly leaves its workload cgroups, and their processes, behind.
+    if crate::runtime::sandbox::cgroup::uses_workload_cgroups(&sandbox_profile) {
+        let removed = crate::runtime::sandbox::cgroup::sweep_stale();
+        if removed > 0 {
+            tracing::info!(removed, "killed and removed stale workload cgroups");
+        }
     }
 
     let state_path = default_state_path(&home);

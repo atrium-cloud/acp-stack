@@ -59,8 +59,8 @@ pub use self::capabilities::{
 };
 pub(crate) use self::process_env::{KIMI_CODE_AGENT_ID, kimi_lane_for_provider_id};
 pub use self::sessions::ForkPoint;
-pub(super) use self::spawn::agent_process_path;
 pub(crate) use self::spawn::resolve_command_path;
+pub(super) use self::spawn::workload_process_path;
 
 pub use crate::runtime::agent::acp_codec::{
     air_fork_point_message_id, air_fork_point_meta, meta_message_id, prompt_message_id_meta,
@@ -159,6 +159,9 @@ impl AgentSessionConfigCategory {
 /// once, hold while the agent should run, then `shutdown()` exactly once.
 pub struct AcpBridge {
     child: Arc<TokioMutex<Option<Child>>>,
+    /// Present under `off` with a workload identity: the only way to stop a different-uid
+    /// agent tree there. Dropping the bridge kills and removes it.
+    cgroup: Option<crate::runtime::sandbox::WorkloadCgroup>,
     capabilities: AgentCapabilitiesDto,
     /// Cloneable handle for dispatching to the agent; `None` once `shutdown()`
     /// has cleared it.
@@ -348,7 +351,7 @@ impl AcpBridge {
                 // grandchildren the agent forked (MCP servers, tool
                 // subprocesses) die with it.
                 if kill_first {
-                    kill_tokio_process_group(&mut child);
+                    self.kill_tree(&mut child);
                 }
                 match timeout(SHUTDOWN_GRACE, child.wait()).await {
                     Ok(Ok(status)) => Some(status),
@@ -357,14 +360,16 @@ impl AcpBridge {
                             tracing::warn!(error = ?err, "acp bridge: wait failed after probe kill");
                         } else {
                             tracing::warn!(error = ?err, "acp bridge: wait failed");
-                            kill_tokio_process_group(&mut child);
+                            self.kill_tree(&mut child);
                         }
                         None
                     }
                     Err(_) => {
                         if !kill_first {
-                            kill_tokio_process_group(&mut child);
-                            let _ = child.wait().await.ok();
+                            self.kill_tree(&mut child);
+                            if let Err(error) = child.wait().await {
+                                tracing::warn!(error = ?error, "acp bridge: wait after kill failed");
+                            }
                         }
                         None
                     }
@@ -372,12 +377,25 @@ impl AcpBridge {
             }
             None => None,
         };
+        // The agent is gone; anything left in its cgroup is an orphaned descendant.
+        if let Some(cgroup) = &self.cgroup {
+            cgroup.kill();
+        }
 
         if kill_first {
             self.stop_connection_task().await;
         }
 
         Ok(status.and_then(|s| s.code()))
+    }
+
+    /// Process-group SIGKILL plus `cgroup.kill`, which reaches a different-uid agent the
+    /// group signal cannot.
+    fn kill_tree(&self, child: &mut Child) {
+        kill_tokio_process_group(child);
+        if let Some(cgroup) = &self.cgroup {
+            cgroup.kill();
+        }
     }
 
     async fn stop_connection_task(&self) {

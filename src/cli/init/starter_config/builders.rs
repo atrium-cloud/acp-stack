@@ -76,7 +76,24 @@ pub(crate) fn reject_starter_only_args_for_existing_config(
     reject_data_source_args_for_existing_config(args)?;
     reject_extensions_args_for_existing_config(args)?;
     reject_sandbox_mask_paths_args_for_existing_config(args)?;
-    reject_sandbox_mask_files_args_for_existing_config(args)
+    reject_sandbox_mask_files_args_for_existing_config(args)?;
+    reject_sandbox_identity_args_for_existing_config(args)
+}
+
+/// The workload identity and network requirement stage into a fresh starter
+/// config only, for the same reason as extension declarations.
+pub(crate) fn reject_sandbox_identity_args_for_existing_config(args: &InitArgs) -> Result<()> {
+    let field = if args.prompt_sandbox_workload_user.is_some() {
+        "sandbox_workload_user"
+    } else if args.prompt_sandbox_require_network_provider {
+        "sandbox_require_network_provider"
+    } else {
+        return Ok(());
+    };
+    Err(StackError::InvalidParam {
+        field,
+        reason: "sandbox declarations apply only when creating a starter config".to_owned(),
+    })
 }
 
 /// Data-source declarations seed a fresh starter config only; reject them when a
@@ -228,6 +245,8 @@ fn sandbox_from_args(args: &InitArgs) -> Result<SandboxConfig> {
         mode,
         mask_paths: union_sandbox_mask_paths(Vec::new(), &args.prompt_sandbox_mask_paths)?,
         mask_files: union_sandbox_mask_files(Vec::new(), &args.prompt_sandbox_mask_files)?,
+        workload_user: args.prompt_sandbox_workload_user.clone(),
+        require_network_provider: args.prompt_sandbox_require_network_provider,
         ..SandboxConfig::default()
     })
 }

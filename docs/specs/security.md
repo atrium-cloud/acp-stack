@@ -153,18 +153,62 @@ Masking comes in two keys, matched to the filesystem object being hidden. `mask_
 
 Backends are selected by `[workspace.sandbox].mode`:
 
-- `off` applies no wrapping.
+- `off` runs the command verbatim. With a workload identity declared it adds only the privilege drop described under Workload Identity.
 - `unshare` runs the workload in fresh mount, pid, ipc, and uts namespaces with a private `/proc`, the sensitive directories masked with `tmpfs` and every declared `mask_files` entry masked with an empty read-only file, then all capabilities and `no_new_privs` dropped before exec. Requires the daemon to hold `CAP_SYS_ADMIN`, as in a privileged container.
 - `bwrap` applies the same directory masking through `bubblewrap`, for hosts with unprivileged user namespaces.
 - `custom` takes an operator-supplied wrapper argv in `[workspace.sandbox].wrapper`, for any other mechanism such as `systemd-run` or `firejail`.
 
 Secrets referenced in `[agent].env` are still delivered to the harness through its environment under every backend; only on-disk secrets and the control socket are masked. The same wrapping applies to mediated shell commands, so a shell command the agent runs cannot read the daemon's secrets either.
 
+### Workload Identity
+
+`[workspace.sandbox].workload_user` names a local user the agent harness, ACP terminals, and mediated commands run as, so the workload cannot rewrite anything the runtime owns. It resolves at load to a uid, gid, and home. `unshare` and `off` honor it.
+
+```toml
+[workspace.sandbox]
+mode = "unshare"
+workload_user = "agent"
+```
+
+`serve` refuses to start with a named error when the declaration cannot hold:
+
+- `sandbox.workload_user_unresolved`: the user does not exist.
+- `sandbox.workload_user_lookup_failed`: the passwd lookup itself failed.
+- `sandbox.workload_user_is_root`: the user is uid 0.
+- `sandbox.workload_user_is_runtime`: the user is the runtime's own uid.
+- `sandbox.workload_user_shares_group`: the user's primary gid is 0 or the runtime's own gid.
+- `sandbox.workload_user_mode_unsupported`: the mode is `bwrap` or `custom`.
+- `serve.sandbox_failed`: a host prerequisite below is missing.
+
+The workload process:
+
+- Runs with the identity's uid and primary gid, no supplementary groups, `no_new_privs`, and empty inheritable, ambient, and bounding capability sets, so its effective and permitted sets are empty.
+- Sees the identity's home as `HOME`. Native Agent config and skills live there. Installs, the managed `PATH`, masks, config, and state stay under the runtime home.
+- Gets a `PATH` with every directory the identity can write removed.
+- Under `off`, gets the privilege drop with no namespaces and no masks.
+
+Termination does not depend on signalling the identity's uid:
+
+- Under `unshare`, the workload re-arms its parent-death signal after the uid change, so stopping `unshare` tears down the whole pid namespace.
+- Under `off`, each spawn runs in its own cgroup under the runtime's cgroup and is stopped with `cgroup.kill`. `serve` kills and removes cgroups a previous run left behind.
+- A graceful SIGTERM reaches the workload only when the runtime holds `CAP_KILL`. Otherwise a cancel stops the workload when its grace window ends.
+
+`acps` clears its ambient capability set at startup, so every process the runtime starts begins without capabilities. Only the sandbox wrapper chain gets them back, and it drops them before the workload runs.
+
+The integrator provisions:
+
+- The workload user with a primary group of its own, and a workspace it can write.
+- A runtime home the workload user can traverse, so installed Agents stay reachable.
+- Ambient `CAP_SETUID`, `CAP_SETGID`, and `CAP_SETPCAP` for the runtime, plus `CAP_SYS_ADMIN` under `unshare`. `CAP_KILL` is optional.
+- Under `unshare`, util-linux 2.33 or newer for `setpriv --pdeathsig`.
+- Under `off`, a cgroup v2 hierarchy on Linux 5.14 or newer with the runtime's cgroup delegated to the runtime user, for example systemd `Delegate=yes`. The packaged systemd unit grants neither ambient capabilities nor delegation.
+
 ### Network isolation (`unshare` only)
 
 Per-spawn network-namespace isolation is declared through a `network-provider` extension instance. Declaration rules and fields, covering the one-instance limit, the unshare requirement, and TOML-only configuration, are specified in [extensions.md](extensions.md) under Type `network-provider`. The constraints that shape the security model:
 
 - No declared instance means host networking: the workload shares the host network stack and the wrapper is unchanged byte for byte.
+- `[workspace.sandbox].require_network_provider = true` makes a missing instance fail the spawn with `sandbox.network_provider_required` instead. Config load rejects the key under any mode other than `unshare`.
 - A declared instance with a backend other than `unshare` is rejected at config load. In particular `bwrap` network isolation is not implemented, and configuring it would imply an unenforced guarantee.
 - Isolated networking requires working Linux `pidfd_open` and `pidfd_send_signal` syscalls. Startup fails closed when the kernel or seccomp policy blocks them.
 - `acps workspace sandbox set` refuses, without writing, a mode change that would conflict with a declared network-provider extension.

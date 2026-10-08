@@ -908,6 +908,77 @@ fn rejects_sandbox_mask_files_under_bwrap_and_custom() {
 }
 
 #[test]
+fn accepts_a_workload_user_under_unshare_and_off() {
+    for mode in ["unshare", "off"] {
+        let config_text = format!(
+            "{VALID_CONFIG}\n\
+             [workspace.sandbox]\n\
+             mode = \"{mode}\"\n\
+             workload_user = \"agent\"\n"
+        );
+        let config = load_config_from_str(&config_text).expect("a workload user loads");
+        assert_eq!(
+            config.workspace.sandbox.workload_user.as_deref(),
+            Some("agent")
+        );
+    }
+}
+
+#[test]
+fn rejects_a_workload_user_under_bwrap_and_custom() {
+    for (mode, extra) in [("bwrap", ""), ("custom", "wrapper = [\"systemd-run\"]\n")] {
+        let config_text = format!(
+            "{VALID_CONFIG}\n\
+             [workspace.sandbox]\n\
+             mode = \"{mode}\"\n\
+             workload_user = \"agent\"\n\
+             {extra}"
+        );
+        let err = load_config_from_str(&config_text)
+            .expect_err("a backend that cannot re-uid must refuse a workload user");
+        assert_eq!(err.error_code(), "sandbox.workload_user_mode_unsupported");
+    }
+}
+
+#[test]
+fn rejects_a_blank_workload_user() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [workspace.sandbox]\n\
+         mode = \"off\"\n\
+         workload_user = \" \"\n"
+    );
+    let err = load_config_from_str(&config_text).expect_err("a blank user is refused");
+    assert!(err.to_string().contains("workload_user"), "got: {err}");
+}
+
+#[test]
+fn require_network_provider_needs_unshare() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [workspace.sandbox]\n\
+         mode = \"unshare\"\n\
+         require_network_provider = true\n"
+    );
+    let config = load_config_from_str(&config_text).expect("unshare accepts the requirement");
+    assert!(config.workspace.sandbox.require_network_provider);
+    for mode in ["off", "bwrap"] {
+        let config_text = format!(
+            "{VALID_CONFIG}\n\
+             [workspace.sandbox]\n\
+             mode = \"{mode}\"\n\
+             require_network_provider = true\n"
+        );
+        let err = load_config_from_str(&config_text)
+            .expect_err("the requirement can only be met under unshare");
+        assert!(
+            err.to_string().contains("require_network_provider"),
+            "got: {err}"
+        );
+    }
+}
+
+#[test]
 fn rejects_network_provider_extension_outside_unshare() {
     for mode in ["off", "bwrap"] {
         let config_text = format!(

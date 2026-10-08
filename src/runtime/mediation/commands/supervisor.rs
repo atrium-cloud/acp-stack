@@ -33,7 +33,9 @@ pub(super) struct SupervisorTask {
     pub(super) command_id: String,
     pub(super) shell: String,
     pub(super) command: String,
-    pub(super) sandbox: crate::config::SandboxConfig,
+    pub(super) sandbox: crate::runtime::sandbox::SandboxProfile,
+    /// Set once the child spawns under `off` with a workload identity; dropped with the task.
+    pub(super) cgroup: Option<crate::runtime::sandbox::WorkloadCgroup>,
     pub(super) network_provider: Option<crate::extensions::NetworkProviderExtension>,
     pub(super) workspace_root: std::path::PathBuf,
     pub(super) home: std::path::PathBuf,
@@ -112,7 +114,10 @@ impl SupervisorTask {
         }
         let spawn_result = self.spawn_child();
         let mut child = match spawn_result {
-            Ok(child) => child,
+            Ok((child, cgroup)) => {
+                self.cgroup = cgroup;
+                child
+            }
             Err(error) => {
                 self.record_spawn_failure(error).await;
                 self.deregister(super::PERMISSION_REASON_SPAWN_FAILED).await;
@@ -128,7 +133,7 @@ impl SupervisorTask {
             .await
         {
             tracing::warn!(error = %error, command_id = %self.command_id, "failed to persist command started event");
-            break_for_persistence_error(&mut child).await;
+            break_for_persistence_error(&mut child, self.cgroup.as_ref()).await;
             self.finish_after_persistence_error(started).await;
             self.deregister(super::PERMISSION_REASON_PERSISTENCE_FAILED)
                 .await;
@@ -143,7 +148,7 @@ impl SupervisorTask {
                 .await
         {
             tracing::warn!(error = %error, command_id = %self.command_id, "failed to persist command review event");
-            break_for_persistence_error(&mut child).await;
+            break_for_persistence_error(&mut child, self.cgroup.as_ref()).await;
             self.finish_after_persistence_error(started).await;
             self.deregister(super::PERMISSION_REASON_PERSISTENCE_FAILED)
                 .await;
@@ -217,6 +222,9 @@ impl SupervisorTask {
         // the readers alive through pipe inheritance and would wedge the row in `running` forever.
         if let Some(pid) = pid {
             kill_process_group_pid(pid);
+        }
+        if let Some(cgroup) = &self.cgroup {
+            cgroup.kill();
         }
 
         // Drain BEFORE awaiting the reader join handles: joining first deadlocks, because a reader
@@ -316,7 +324,15 @@ impl SupervisorTask {
             .await;
     }
 
-    fn spawn_child(&self) -> std::result::Result<tokio::process::Child, std::io::Error> {
+    fn spawn_child(
+        &self,
+    ) -> std::result::Result<
+        (
+            tokio::process::Child,
+            Option<crate::runtime::sandbox::WorkloadCgroup>,
+        ),
+        std::io::Error,
+    > {
         let shell_args = vec!["-c".to_owned(), self.command.clone()];
         let (program, args) = sandboxed_program(
             std::path::Path::new(&self.shell),
@@ -412,7 +428,7 @@ impl SupervisorTask {
     }
 
     async fn handle_cancel(&self, child: &mut tokio::process::Child) -> Outcome {
-        match kill_with_grace(child, self.cancel_grace).await {
+        match kill_with_grace(child, self.cancel_grace, self.cgroup.as_ref()).await {
             GraceKillOutcome::ExitedWithinGrace(Ok(_)) | GraceKillOutcome::KilledAfterGrace => {
                 Outcome::Canceled
             }
@@ -421,12 +437,12 @@ impl SupervisorTask {
     }
 
     async fn handle_timeout(&self, child: &mut tokio::process::Child) -> Outcome {
-        kill_with_grace(child, self.cancel_grace).await;
+        kill_with_grace(child, self.cancel_grace, self.cgroup.as_ref()).await;
         Outcome::TimedOut
     }
 
     async fn handle_persistence_error(&self, child: &mut tokio::process::Child) -> Outcome {
-        break_for_persistence_error(child).await;
+        break_for_persistence_error(child, self.cgroup.as_ref()).await;
         Outcome::PersistenceError
     }
 
@@ -566,8 +582,11 @@ async fn sleep_until(deadline: Instant) {
     sleep(deadline - now).await;
 }
 
-async fn break_for_persistence_error(child: &mut tokio::process::Child) {
-    kill_with_grace(child, Duration::from_millis(250)).await;
+async fn break_for_persistence_error(
+    child: &mut tokio::process::Child,
+    cgroup: Option<&crate::runtime::sandbox::WorkloadCgroup>,
+) {
+    kill_with_grace(child, Duration::from_millis(250), cgroup).await;
 }
 
 #[cfg(test)]
@@ -622,6 +641,7 @@ mod tests {
             shell: "/bin/sh".to_owned(),
             command: command.to_owned(),
             sandbox: Default::default(),
+            cgroup: None,
             network_provider: None,
             workspace_root: fixture.tempdir.path().to_path_buf(),
             home: fixture.tempdir.path().to_path_buf(),

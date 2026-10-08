@@ -186,10 +186,7 @@ fn run_workspace_status(output: OutputFormat) -> Result<()> {
     println!("default_shell: {}", config.workspace.default_shell);
     println!("runtime_user: {}", config.workspace.runtime_user);
     println!("max_file_bytes: {}", config.workspace.max_file_bytes);
-    println!(
-        "sandbox: {}",
-        sandbox_mode_label(config.workspace.sandbox.mode)
-    );
+    println!("sandbox: {}", config.workspace.sandbox.mode.as_str());
     println!("code_sources: {}", config.workspace.code_sources.len());
     println!("data_sources: {}", config.workspace.data_sources.len());
     Ok(())
@@ -353,7 +350,7 @@ fn apply_sandbox_set(config: &mut Config, args: &SandboxSetArgs) -> Result<()> {
             reason: format!(
                 "cannot set sandbox mode `{}` while network-provider extension `{}` is \
                  declared; remove or change the [extensions.{}] table in the config TOML first",
-                sandbox_mode_label(args.mode.to_config()),
+                args.mode.to_config().as_str(),
                 network.name,
                 network.name
             ),
@@ -367,7 +364,24 @@ fn apply_sandbox_set(config: &mut Config, args: &SandboxSetArgs) -> Result<()> {
             reason: format!(
                 "cannot set sandbox mode `{}` while [workspace.sandbox].mask_files is non-empty; \
                  clear mask_files in the config TOML first",
-                sandbox_mode_label(args.mode.to_config())
+                args.mode.to_config().as_str()
+            ),
+        });
+    }
+    if config.workspace.sandbox.workload_user.is_some()
+        && matches!(args.mode, SandboxModeArg::Bwrap | SandboxModeArg::Custom)
+    {
+        return Err(StackError::WorkloadUserModeUnsupported {
+            mode: args.mode.to_config().as_str(),
+        });
+    }
+    if config.workspace.sandbox.require_network_provider && args.mode != SandboxModeArg::Unshare {
+        return Err(StackError::InvalidParam {
+            field: "workspace.sandbox.require_network_provider",
+            reason: format!(
+                "cannot set sandbox mode `{}` while require_network_provider is set; clear it in \
+                 the config TOML first",
+                args.mode.to_config().as_str()
             ),
         });
     }
@@ -378,8 +392,9 @@ fn apply_sandbox_set(config: &mut Config, args: &SandboxSetArgs) -> Result<()> {
     } else {
         Vec::new()
     };
-    if sandbox_config.mode != SandboxMode::Off {
-        sandbox::preflight(&sandbox_config, network_provider.as_ref())
+    let profile = sandbox::SandboxProfile::resolve(&sandbox_config)?;
+    if sandbox_config.mode != SandboxMode::Off || profile.identity.is_some() {
+        sandbox::preflight(&profile, network_provider.as_ref())
             .map_err(|reason| StackError::SandboxFailed { reason })?;
     }
     config.workspace.sandbox = sandbox_config;
@@ -557,7 +572,7 @@ fn print_sandbox_status(config: &Config, output: OutputFormat) -> Result<()> {
     }
     println!(
         "workspace sandbox: {}",
-        sandbox_mode_label(config.workspace.sandbox.mode)
+        config.workspace.sandbox.mode.as_str()
     );
     if !config.workspace.sandbox.wrapper.is_empty() {
         println!(
@@ -598,10 +613,7 @@ fn print_sandbox_set_result(config: &Config, output: OutputFormat) -> Result<()>
         return Ok(());
     }
     println!("workspace sandbox updated");
-    println!(
-        "mode: {}",
-        sandbox_mode_label(config.workspace.sandbox.mode)
-    );
+    println!("mode: {}", config.workspace.sandbox.mode.as_str());
     if !config.workspace.sandbox.wrapper.is_empty() {
         println!(
             "wrapper: {}",
@@ -671,7 +683,7 @@ fn source_reports_json(
 
 fn sandbox_config_json(config: &Config) -> Value {
     let mut value = json!({
-        "mode": sandbox_mode_label(config.workspace.sandbox.mode),
+        "mode": config.workspace.sandbox.mode.as_str(),
         "wrapper": config.workspace.sandbox.wrapper,
         "restart_required_for_changes": "supervised-agent",
     });
@@ -696,15 +708,6 @@ fn outcome_label(outcome: &MaterializeOutcome) -> &'static str {
     match outcome {
         MaterializeOutcome::Created => "created",
         MaterializeOutcome::Verified => "verified",
-    }
-}
-
-fn sandbox_mode_label(mode: SandboxMode) -> &'static str {
-    match mode {
-        SandboxMode::Off => "off",
-        SandboxMode::Unshare => "unshare",
-        SandboxMode::Bwrap => "bwrap",
-        SandboxMode::Custom => "custom",
     }
 }
 

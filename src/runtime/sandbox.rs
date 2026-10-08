@@ -9,11 +9,19 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(target_os = "linux")]
+use rustix::thread::{CapabilitySet, CapabilitySets};
+
 use crate::config::{SandboxConfig, SandboxMode};
 use crate::error::{Result, StackError};
 use crate::extensions::NetworkProviderExtension;
 
+pub mod cgroup;
+mod identity;
 pub mod supervise;
+
+pub use cgroup::WorkloadCgroup;
+pub use identity::{SandboxProfile, WorkloadIdentity};
 
 // CONSTANTS
 
@@ -25,6 +33,13 @@ pub const SANDBOX_SUPERVISE_SUBCOMMAND: &str = "__sandbox-supervise";
 
 /// Internal subcommand that keeps a provider and its descendants in a liveness-monitored process group.
 pub const SANDBOX_PROVIDER_SUPERVISE_SUBCOMMAND: &str = "__sandbox-provider-supervise";
+
+/// The wrapped chain's own helpers, which keep the capabilities the runtime hands them.
+const SANDBOX_HELPER_SUBCOMMANDS: [&str; 3] = [
+    SANDBOX_EXEC_SUBCOMMAND,
+    SANDBOX_SUPERVISE_SUBCOMMAND,
+    SANDBOX_PROVIDER_SUPERVISE_SUBCOMMAND,
+];
 
 /// Fixed child fd the spawn sites dup the daemon's stderr onto, so supervisor diagnostics reach the operator even when the workload's stderr is a captured pipe.
 pub const SANDBOX_DIAG_FD: i32 = 3;
@@ -57,6 +72,20 @@ const SETPRIV_DROP_FLAGS: &[&str] = &[
     "--no-new-privs",
 ];
 
+/// Re-arms SIGKILL-on-parent-death after the uid change: the kernel clears the
+/// death signal `unshare --kill-child` set as soon as the effective uid changes,
+/// which would let a re-uid'd workload outlive its namespace's `unshare`.
+const SETPRIV_PARENT_DEATH_FLAGS: &[&str] = &["--pdeathsig", "KILL"];
+
+/// Capabilities a re-uid'ing chain needs: `--regid`/`--clear-groups`, `--reuid`, and
+/// `--bounding-set`.
+#[cfg(target_os = "linux")]
+const IDENTITY_CAPABILITIES: [(CapabilitySet, &str); 3] = [
+    (CapabilitySet::SETUID, "CAP_SETUID"),
+    (CapabilitySet::SETGID, "CAP_SETGID"),
+    (CapabilitySet::SETPCAP, "CAP_SETPCAP"),
+];
+
 const BWRAP_BASE_FLAGS: &[&str] = &[
     "--ro-bind",
     "/",
@@ -73,9 +102,6 @@ const BWRAP_BASE_FLAGS: &[&str] = &[
 ];
 
 const STANDARD_BIN_DIRS: &[&str] = &["/usr/bin", "/bin", "/usr/local/bin", "/usr/sbin", "/sbin"];
-
-#[cfg(target_os = "linux")]
-const CAP_SYS_ADMIN_BIT: u32 = 21;
 
 /// A spawn command after sandbox wrapping: the program to exec and its full argv.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,46 +120,81 @@ pub fn sensitive_mask_paths(home: &Path, sandbox: &SandboxConfig) -> Vec<PathBuf
     paths
 }
 
-/// Wrap `program`/`args` according to `sandbox`; a declared `network` extension (`unshare` only) also moves the spawn into an isolated network namespace.
-#[allow(clippy::too_many_arguments)]
+/// Wrap `program`/`args` according to `profile`; a declared `network` extension (`unshare` only) also moves the spawn into an isolated network namespace.
+/// `home` is the runtime home whose config and state directories get masked.
 pub fn wrap(
-    sandbox: &SandboxConfig,
+    profile: &SandboxProfile,
     network: Option<&NetworkProviderExtension>,
     program: &Path,
     args: &[String],
     home: &Path,
     workspace_root: &Path,
-    uid: u32,
-    gid: u32,
 ) -> Result<WrappedCommand> {
+    let sandbox = &profile.config;
     match sandbox.mode {
-        SandboxMode::Off => Ok(WrappedCommand {
-            program: program.to_path_buf(),
-            args: args.to_vec(),
-        }),
-        SandboxMode::Unshare => wrap_unshare(sandbox, network, program, args, home, uid, gid),
+        SandboxMode::Off => Ok(wrap_off(profile, program, args)),
+        SandboxMode::Unshare => wrap_unshare(profile, network, program, args, home),
         SandboxMode::Bwrap => Ok(wrap_bwrap(sandbox, program, args, home, workspace_root)),
         SandboxMode::Custom => wrap_custom(sandbox, program, args),
     }
 }
 
+/// `off` is a verbatim passthrough unless an identity is declared, which adds only the
+/// privilege drop: no namespaces, no masks.
+fn wrap_off(profile: &SandboxProfile, program: &Path, args: &[String]) -> WrappedCommand {
+    let Some(identity) = &profile.identity else {
+        return WrappedCommand {
+            program: program.to_path_buf(),
+            args: args.to_vec(),
+        };
+    };
+    // No parent-death signal here: the parent is a runtime thread, and the death
+    // signal fires when that thread exits.
+    let mut argv = setpriv_drop_argv(identity.uid, identity.gid, false);
+    let setpriv = PathBuf::from(argv.remove(0));
+    argv.push(program.to_string_lossy().into_owned());
+    argv.extend(args.iter().cloned());
+    WrappedCommand {
+        program: setpriv,
+        args: argv,
+    }
+}
+
+/// `setpriv` argv, program first and ending in `--`, that drops to `uid`/`gid` with
+/// every capability set cleared and `no_new_privs` set.
+fn setpriv_drop_argv(uid: u32, gid: u32, parent_death_kill: bool) -> Vec<String> {
+    let mut out = vec![
+        resolve_bin("setpriv").to_string_lossy().into_owned(),
+        format!("--reuid={uid}"),
+        format!("--regid={gid}"),
+    ];
+    out.extend(SETPRIV_DROP_FLAGS.iter().map(|s| s.to_string()));
+    if parent_death_kill {
+        out.extend(SETPRIV_PARENT_DEATH_FLAGS.iter().map(|s| s.to_string()));
+    }
+    out.push("--".to_owned());
+    out
+}
+
 fn wrap_unshare(
-    sandbox: &SandboxConfig,
+    profile: &SandboxProfile,
     network: Option<&NetworkProviderExtension>,
     program: &Path,
     args: &[String],
     home: &Path,
-    uid: u32,
-    gid: u32,
 ) -> Result<WrappedCommand> {
+    let sandbox = &profile.config;
     let self_exe = std::env::current_exe().map_err(|source| StackError::SandboxFailed {
         reason: format!("cannot resolve the acps executable for the sandbox helper: {source}"),
     })?;
     let Some(network) = network else {
+        if sandbox.require_network_provider {
+            return Err(StackError::NetworkProviderRequired);
+        }
         // Host networking: the pre-network wrapper, byte for byte.
         return Ok(WrappedCommand {
             program: resolve_bin("unshare"),
-            args: unshare_chain_args(sandbox, program, args, home, uid, gid, &self_exe, false),
+            args: unshare_chain_args(profile, program, args, home, &self_exe, false),
         });
     };
     let mut out: Vec<String> = vec![
@@ -145,7 +206,7 @@ fn wrap_unshare(
     out.push("--".to_owned());
     out.push(resolve_bin("unshare").to_string_lossy().into_owned());
     out.extend(unshare_chain_args(
-        sandbox, program, args, home, uid, gid, &self_exe, true,
+        profile, program, args, home, &self_exe, true,
     ));
     Ok(WrappedCommand {
         program: self_exe,
@@ -155,17 +216,16 @@ fn wrap_unshare(
 
 /// The argv passed to `unshare`: namespace flags, masking helper, privilege-drop chain, workload.
 /// `--sync-fd` is absent here and injected by the supervisor at runtime, because the fd number does not exist yet.
-#[allow(clippy::too_many_arguments)]
 fn unshare_chain_args(
-    sandbox: &SandboxConfig,
+    profile: &SandboxProfile,
     program: &Path,
     args: &[String],
     home: &Path,
-    uid: u32,
-    gid: u32,
     self_exe: &Path,
     isolated_network: bool,
 ) -> Vec<String> {
+    let sandbox = &profile.config;
+    let (uid, gid) = profile.drop_ids();
     let mut out: Vec<String> = Vec::new();
     if isolated_network {
         out.push("--net".to_owned());
@@ -184,11 +244,7 @@ fn unshare_chain_args(
         out.push(path.clone());
     }
     out.push("--".to_owned());
-    out.push(resolve_bin("setpriv").to_string_lossy().into_owned());
-    out.push(format!("--reuid={uid}"));
-    out.push(format!("--regid={gid}"));
-    out.extend(SETPRIV_DROP_FLAGS.iter().map(|s| s.to_string()));
-    out.push("--".to_owned());
+    out.extend(setpriv_drop_argv(uid, gid, profile.identity.is_some()));
     out.push(program.to_string_lossy().into_owned());
     out.extend(args.iter().cloned());
     out
@@ -305,11 +361,18 @@ fn resolve_bin(name: &str) -> PathBuf {
     find_bin(name).unwrap_or_else(|| PathBuf::from(name))
 }
 
-/// Whether the configured backend can run on this host; `serve` startup is fail-closed on `Err(reason)`.
+/// Whether the configured backend and workload identity can run on this host; `serve` startup is fail-closed on `Err(reason)`.
 pub fn preflight(
-    sandbox: &SandboxConfig,
+    profile: &SandboxProfile,
     network: Option<&NetworkProviderExtension>,
 ) -> std::result::Result<(), String> {
+    let sandbox = &profile.config;
+    if profile.identity.is_some() {
+        preflight_identity(sandbox.mode)?;
+    }
+    if cgroup::uses_workload_cgroups(profile) {
+        cgroup::preflight()?;
+    }
     match sandbox.mode {
         SandboxMode::Off => Ok(()),
         SandboxMode::Unshare => {
@@ -358,6 +421,63 @@ pub fn preflight(
     }
 }
 
+/// Re-uid'ing the workload needs `setpriv`, the capabilities its drop chain uses, and under
+/// `unshare` a `setpriv` that can re-arm the parent-death signal.
+fn preflight_identity(mode: SandboxMode) -> std::result::Result<(), String> {
+    let setpriv = find_bin("setpriv").ok_or_else(|| {
+        "a workload identity requires `setpriv`, not found in standard bin dirs or PATH".to_owned()
+    })?;
+    crate::workload_fs::preflight_access_checks()?;
+    let missing = missing_identity_capabilities();
+    if !missing.is_empty() {
+        return Err(format!(
+            "a workload identity requires {} in the runtime's permitted and inheritable sets; \
+             grant them as ambient capabilities or remove [workspace.sandbox].workload_user",
+            missing.join(", ")
+        ));
+    }
+    if mode == SandboxMode::Unshare && !setpriv_supports_parent_death_signal(&setpriv) {
+        return Err(format!(
+            "`{}` does not support --pdeathsig (util-linux 2.33 or newer is required)",
+            setpriv.display()
+        ));
+    }
+    Ok(())
+}
+
+fn setpriv_supports_parent_death_signal(setpriv: &Path) -> bool {
+    match Command::new(setpriv).arg("--help").output() {
+        Ok(output) => {
+            String::from_utf8_lossy(&output.stdout).contains(SETPRIV_PARENT_DEATH_FLAGS[0])
+        }
+        Err(error) => {
+            tracing::warn!(%error, setpriv = %setpriv.display(), "probing setpriv --help failed");
+            false
+        }
+    }
+}
+
+/// The drop runs in an exec'd `setpriv`, which a non-root runtime only hands capabilities to by
+/// raising them into the ambient set, and that needs each one permitted and inheritable.
+#[cfg(target_os = "linux")]
+fn missing_identity_capabilities() -> Vec<&'static str> {
+    let held = if crate::ownership::process_euid() == 0 {
+        host_capabilities().effective
+    } else {
+        raisable_capabilities()
+    };
+    IDENTITY_CAPABILITIES
+        .into_iter()
+        .filter(|(capability, _)| !held.contains(*capability))
+        .map(|(_, name)| name)
+        .collect()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn missing_identity_capabilities() -> Vec<&'static str> {
+    vec!["CAP_SETUID", "CAP_SETGID", "CAP_SETPCAP (Linux only)"]
+}
+
 /// Whether this host could run the `unshare` backend (binaries present and `CAP_SYS_ADMIN` held).
 pub fn host_supports_unshare() -> bool {
     find_bin("unshare").is_some() && find_bin("setpriv").is_some() && host_has_cap_sys_admin()
@@ -375,23 +495,112 @@ fn require_bin(name: &str) -> std::result::Result<(), String> {
 
 #[cfg(target_os = "linux")]
 fn host_has_cap_sys_admin() -> bool {
-    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
-        return false;
-    };
-    for line in status.lines() {
-        if let Some(hex) = line.strip_prefix("CapEff:")
-            && let Ok(bits) = u64::from_str_radix(hex.trim(), 16)
-        {
-            return (bits >> CAP_SYS_ADMIN_BIT) & 1 == 1;
+    host_capabilities()
+        .effective
+        .contains(CapabilitySet::SYS_ADMIN)
+}
+
+/// The calling thread's capability sets, which every runtime thread shares; unreadable sets read
+/// as empty.
+#[cfg(target_os = "linux")]
+fn host_capabilities() -> CapabilitySets {
+    rustix::thread::capabilities(None).unwrap_or_else(|error| {
+        tracing::warn!(%error, "reading the capability sets failed");
+        CapabilitySets {
+            effective: CapabilitySet::empty(),
+            permitted: CapabilitySet::empty(),
+            inheritable: CapabilitySet::empty(),
         }
-    }
-    false
+    })
 }
 
 #[cfg(not(target_os = "linux"))]
 fn host_has_cap_sys_admin() -> bool {
     false
 }
+
+/// Clear the ambient capability set before any thread exists. Ambient capabilities survive exec,
+/// so otherwise every installer, probe and script the runtime runs would inherit what a non-root
+/// runtime holds for its sandbox; [`prepare_workload_spawn`] hands them to the wrapped spawns
+/// only. The `__sandbox-*` helpers are that wrapped chain and keep theirs.
+pub fn clear_ambient_capabilities_at_startup() -> Result<()> {
+    let subcommand = std::env::args_os().nth(1);
+    if subcommand.is_some_and(|name| {
+        SANDBOX_HELPER_SUBCOMMANDS
+            .iter()
+            .any(|helper| name == *helper)
+    }) {
+        return Ok(());
+    }
+    clear_ambient_capabilities()
+}
+
+#[cfg(target_os = "linux")]
+fn clear_ambient_capabilities() -> Result<()> {
+    match rustix::thread::clear_ambient_capability_set() {
+        // A kernel without ambient capabilities has none to clear.
+        Ok(()) | Err(rustix::io::Errno::INVAL) => Ok(()),
+        Err(source) => Err(StackError::SandboxFailed {
+            reason: format!("clearing the ambient capability set failed: {source}"),
+        }),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn clear_ambient_capabilities() -> Result<()> {
+    Ok(())
+}
+
+/// Ready a wrapped workload spawn for exec. Every mode but an `off` passthrough gets the
+/// capabilities cleared at startup back, because its wrapper chain needs them and drops them
+/// before the workload runs; `off` with a workload identity also joins a fresh cgroup. The
+/// returned guard must stay with the child.
+pub fn prepare_workload_spawn(
+    profile: &SandboxProfile,
+    command: &mut tokio::process::Command,
+) -> std::io::Result<Option<WorkloadCgroup>> {
+    if profile.config.mode != SandboxMode::Off || profile.identity.is_some() {
+        raise_ambient_capabilities(command);
+    }
+    let cgroup = WorkloadCgroup::for_profile(profile)?;
+    #[cfg(unix)]
+    if let Some(cgroup) = &cgroup {
+        cgroup.enter_before_exec(command);
+    }
+    Ok(cgroup)
+}
+
+/// Every capability the runtime may hand to a child through the ambient set.
+#[cfg(target_os = "linux")]
+fn raisable_capabilities() -> CapabilitySet {
+    let held = host_capabilities();
+    held.permitted & held.inheritable
+}
+
+#[cfg(target_os = "linux")]
+fn raise_ambient_capabilities(command: &mut tokio::process::Command) {
+    let raisable = raisable_capabilities().bits();
+    if raisable == 0 {
+        return;
+    }
+    // SAFETY: the prctl raises are raw syscalls, async-signal-safe, and change only the forked
+    // child's ambient set.
+    unsafe {
+        command.pre_exec(move || {
+            // One bit at a time: kernels may report capabilities rustix has no name for.
+            for bit in (0..u64::BITS).filter(|bit| (raisable >> bit) & 1 == 1) {
+                rustix::thread::configure_capability_in_ambient_set(
+                    CapabilitySet::from_bits_retain(1 << bit),
+                    true,
+                )?;
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn raise_ambient_capabilities(_command: &mut tokio::process::Command) {}
 
 /// `acps __sandbox-exec --mask <dir>… --mask-file <path>… -- <cmd> <args…>`: masks each directory with a fresh `tmpfs` and each non-directory path with an empty read-only file inside the `unshare` namespaces, then execs the privilege-drop chain. Never returns on success.
 pub fn run_exec(raw_args: Vec<String>) -> Result<()> {
@@ -691,11 +900,44 @@ fn mask_with_empty_file(_path: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    const WORKLOAD_UID: u32 = 2001;
+    const WORKLOAD_GID: u32 = 2002;
+
     fn cfg(mode: SandboxMode) -> SandboxConfig {
         SandboxConfig {
             mode,
             ..Default::default()
         }
+    }
+
+    fn of(sandbox: &SandboxConfig) -> SandboxProfile {
+        SandboxProfile {
+            config: sandbox.clone(),
+            identity: None,
+        }
+    }
+
+    fn profile(mode: SandboxMode) -> SandboxProfile {
+        of(&cfg(mode))
+    }
+
+    fn identity_profile(mode: SandboxMode) -> SandboxProfile {
+        SandboxProfile {
+            config: SandboxConfig {
+                workload_user: Some("agent".to_owned()),
+                ..cfg(mode)
+            },
+            identity: Some(WorkloadIdentity {
+                name: "agent".to_owned(),
+                uid: WORKLOAD_UID,
+                gid: WORKLOAD_GID,
+                home: PathBuf::from("/home/agent"),
+            }),
+        }
+    }
+
+    fn runtime_reuid() -> String {
+        format!("--reuid={}", crate::ownership::process_euid())
     }
 
     fn network_extension(
@@ -720,14 +962,12 @@ mod tests {
     #[test]
     fn off_is_passthrough() {
         let w = wrap(
-            &cfg(SandboxMode::Off),
+            &profile(SandboxMode::Off),
             None,
             Path::new("/home/u/.local/bin/claude"),
             &["acp".to_owned()],
             Path::new("/home/u"),
             Path::new("/home/u/ws"),
-            1001,
-            1001,
         )
         .unwrap();
         assert_eq!(w.program, PathBuf::from("/home/u/.local/bin/claude"));
@@ -737,14 +977,12 @@ mod tests {
     #[test]
     fn unshare_masks_sensitive_dirs_and_drops_privs() {
         let w = wrap(
-            &cfg(SandboxMode::Unshare),
+            &profile(SandboxMode::Unshare),
             None,
             Path::new("/home/u/.local/bin/claude"),
             &["acp".to_owned()],
             Path::new("/home/u"),
             Path::new("/home/u/ws"),
-            1001,
-            1001,
         )
         .unwrap();
         let line = run(&w);
@@ -753,9 +991,79 @@ mod tests {
         assert!(line.contains(SANDBOX_EXEC_SUBCOMMAND));
         assert!(line.contains("--mask /home/u/.config/acp-stack"));
         assert!(line.contains("--mask /home/u/.local/share/acp-stack"));
-        assert!(line.contains("--reuid=1001"));
+        assert!(line.contains(&runtime_reuid()));
         assert!(line.contains("--no-new-privs"));
+        assert!(!line.contains("--pdeathsig"));
         assert!(line.trim_end().ends_with("/home/u/.local/bin/claude acp"));
+    }
+
+    #[test]
+    fn unshare_with_identity_drops_to_the_workload_and_rearms_parent_death() {
+        let w = wrap(
+            &identity_profile(SandboxMode::Unshare),
+            None,
+            Path::new("/home/u/.local/bin/claude"),
+            &["acp".to_owned()],
+            Path::new("/home/u"),
+            Path::new("/home/u/ws"),
+        )
+        .unwrap();
+        let line = run(&w);
+        assert!(w.program.ends_with("unshare"));
+        assert!(line.contains(&format!("--reuid={WORKLOAD_UID} --regid={WORKLOAD_GID}")));
+        // Masks derive from the runtime home, never the workload home.
+        assert!(line.contains("--mask /home/u/.config/acp-stack"));
+        assert!(!line.contains("/home/agent"));
+        assert!(line.contains("--no-new-privs --pdeathsig KILL -- /home/u/.local/bin/claude acp"));
+    }
+
+    #[test]
+    fn off_with_identity_drops_privileges_without_namespaces() {
+        let w = wrap(
+            &identity_profile(SandboxMode::Off),
+            None,
+            Path::new("/home/u/.local/bin/claude"),
+            &["acp".to_owned()],
+            Path::new("/home/u"),
+            Path::new("/home/u/ws"),
+        )
+        .unwrap();
+        assert_eq!(w.program, resolve_bin("setpriv"));
+        let mut expected = vec![
+            format!("--reuid={WORKLOAD_UID}"),
+            format!("--regid={WORKLOAD_GID}"),
+        ];
+        expected.extend(SETPRIV_DROP_FLAGS.iter().map(|s| s.to_string()));
+        expected.extend(["--", "/home/u/.local/bin/claude", "acp"].map(str::to_owned));
+        assert_eq!(w.args, expected);
+    }
+
+    #[test]
+    fn required_network_provider_refuses_a_host_network_spawn() {
+        let mut sandbox = cfg(SandboxMode::Unshare);
+        sandbox.require_network_provider = true;
+        let error = wrap(
+            &of(&sandbox),
+            None,
+            Path::new("/home/u/.local/bin/claude"),
+            &["acp".to_owned()],
+            Path::new("/home/u"),
+            Path::new("/home/u/ws"),
+        )
+        .expect_err("no provider declared");
+        assert_eq!(error.error_code(), "sandbox.network_provider_required");
+
+        let network = network_extension(Vec::new(), None);
+        let w = wrap(
+            &of(&sandbox),
+            Some(&network),
+            Path::new("/home/u/.local/bin/claude"),
+            &["acp".to_owned()],
+            Path::new("/home/u"),
+            Path::new("/home/u/ws"),
+        )
+        .expect("a declared provider satisfies the requirement");
+        assert_eq!(w.args[0], SANDBOX_SUPERVISE_SUBCOMMAND);
     }
 
     #[test]
@@ -764,14 +1072,12 @@ mod tests {
         sandbox.mask_paths = vec!["/var/lib/network-egress".to_owned()];
         sandbox.mask_files = vec!["/run/host-control.sock".to_owned()];
         let w = wrap(
-            &sandbox,
+            &of(&sandbox),
             None,
             Path::new("/home/u/.local/bin/claude"),
             &["acp".to_owned()],
             Path::new("/home/u"),
             Path::new("/home/u/ws"),
-            1001,
-            1001,
         )
         .unwrap();
         let line = run(&w);
@@ -786,7 +1092,7 @@ mod tests {
         let setpriv_index = w
             .args
             .iter()
-            .position(|arg| arg == "--reuid=1001")
+            .position(|arg| *arg == runtime_reuid())
             .expect("the privilege drop follows");
         assert!(
             mask_file_index < setpriv_index,
@@ -801,14 +1107,12 @@ mod tests {
         let mut off = cfg(SandboxMode::Off);
         off.mask_files = vec!["/run/host-control.sock".to_owned()];
         let w = wrap(
-            &off,
+            &of(&off),
             None,
             Path::new("/home/u/.local/bin/claude"),
             &["acp".to_owned()],
             Path::new("/home/u"),
             Path::new("/home/u/ws"),
-            1001,
-            1001,
         )
         .unwrap();
         assert!(!run(&w).contains("/run/host-control.sock"));
@@ -836,14 +1140,12 @@ mod tests {
     #[test]
     fn bwrap_masks_with_tmpfs_and_binds_workspace() {
         let w = wrap(
-            &cfg(SandboxMode::Bwrap),
+            &profile(SandboxMode::Bwrap),
             None,
             Path::new("/home/u/.local/bin/claude"),
             &["acp".to_owned()],
             Path::new("/home/u"),
             Path::new("/home/u/ws"),
-            1001,
-            1001,
         )
         .unwrap();
         let line = run(&w);
@@ -859,28 +1161,24 @@ mod tests {
         let mut c = cfg(SandboxMode::Custom);
         c.wrapper = vec!["systemd-run".to_owned(), "--scope".to_owned()];
         let w = wrap(
-            &c,
+            &of(&c),
             None,
             Path::new("/bin/claude"),
             &["acp".to_owned()],
             Path::new("/home/u"),
             Path::new("/home/u/ws"),
-            1001,
-            1001,
         )
         .unwrap();
         assert_eq!(w.program, PathBuf::from("systemd-run"));
         assert_eq!(w.args, vec!["--scope", "/bin/claude", "acp"]);
 
         let err = wrap(
-            &cfg(SandboxMode::Custom),
+            &profile(SandboxMode::Custom),
             None,
             Path::new("/bin/claude"),
             &[],
             Path::new("/home/u"),
             Path::new("/home/u/ws"),
-            1001,
-            1001,
         );
         assert!(err.is_err());
     }
@@ -890,14 +1188,12 @@ mod tests {
         // Frozen argv: drift here is a regression for every existing unshare deployment.
         let sandbox = cfg(SandboxMode::Unshare);
         let w = wrap(
-            &sandbox,
+            &of(&sandbox),
             None,
             Path::new("/home/u/.local/bin/claude"),
             &["acp".to_owned()],
             Path::new("/home/u"),
             Path::new("/home/u/ws"),
-            1001,
-            1001,
         )
         .unwrap();
         let self_exe = std::env::current_exe().unwrap();
@@ -913,8 +1209,8 @@ mod tests {
                 "/home/u/.local/share/acp-stack",
                 "--",
                 &resolve_bin("setpriv").to_string_lossy(),
-                "--reuid=1001",
-                "--regid=1001",
+                &runtime_reuid(),
+                &format!("--regid={}", crate::ownership::process_egid()),
             ]
             .map(str::to_owned),
         );
@@ -937,14 +1233,12 @@ mod tests {
             Some("45s"),
         );
         let w = wrap(
-            &sandbox,
+            &of(&sandbox),
             Some(&network),
             Path::new("/home/u/.local/bin/claude"),
             &["acp".to_owned()],
             Path::new("/home/u"),
             Path::new("/home/u/ws"),
-            1001,
-            1001,
         )
         .unwrap();
         let line = run(&w);
@@ -959,7 +1253,7 @@ mod tests {
         assert!(line.contains("--net --mount"));
         assert!(line.contains(SANDBOX_EXEC_SUBCOMMAND));
         assert!(line.contains("--mask /home/u/.config/acp-stack"));
-        assert!(line.contains("--reuid=1001"));
+        assert!(line.contains(&runtime_reuid()));
         assert!(line.trim_end().ends_with("/home/u/.local/bin/claude acp"));
         // The sync fd is injected by the supervisor at runtime, never baked into the wrapper argv.
         assert!(!line.contains("--sync-fd"));
@@ -970,14 +1264,12 @@ mod tests {
         let sandbox = cfg(SandboxMode::Unshare);
         let network = network_extension(Vec::new(), None);
         let w = wrap(
-            &sandbox,
+            &of(&sandbox),
             Some(&network),
             Path::new("/home/u/.local/bin/claude"),
             &["acp".to_owned()],
             Path::new("/home/u"),
             Path::new("/home/u/ws"),
-            1001,
-            1001,
         )
         .unwrap();
         let line = run(&w);
@@ -1006,7 +1298,7 @@ mod tests {
 
     #[test]
     fn preflight_off_is_ok_custom_requires_wrapper() {
-        assert!(preflight(&cfg(SandboxMode::Off), None).is_ok());
-        assert!(preflight(&cfg(SandboxMode::Custom), None).is_err());
+        assert!(preflight(&profile(SandboxMode::Off), None).is_ok());
+        assert!(preflight(&profile(SandboxMode::Custom), None).is_err());
     }
 }

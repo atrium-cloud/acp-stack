@@ -641,7 +641,10 @@ fn execute_agent_test(
                 format!("build agent test runtime failed: {source}"),
             )
         })?;
-    let sandbox = config.workspace.sandbox.clone();
+    let sandbox = crate::runtime::sandbox::SandboxProfile::resolve(&config.workspace.sandbox)
+        .map_err(|error| {
+            AgentTestFailure::new("spawn/start", CODE_CONFIG_INVALID, error.to_string())
+        })?;
     let shell = config.workspace.default_shell.clone();
     let network_provider = crate::extensions::resolve_network_provider(config);
 
@@ -1169,7 +1172,7 @@ async fn run_agent_test_inner(
     prompt: String,
     prompt_timeout: Duration,
     progress_timeout: Duration,
-    sandbox: crate::config::SandboxConfig,
+    sandbox: crate::runtime::sandbox::SandboxProfile,
     shell: String,
     network_provider: Option<crate::extensions::NetworkProviderExtension>,
     mode_override: Option<&str>,

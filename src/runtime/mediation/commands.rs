@@ -154,6 +154,9 @@ impl CommandGateway {
                 field: "commands.progress_interval",
             })?;
 
+        // Resolved before the row exists, so an unresolvable identity never strands a pending command.
+        let sandbox =
+            crate::runtime::sandbox::SandboxProfile::resolve(&self.config.workspace.sandbox)?;
         let cwd_owned = request.cwd.as_ref().map(|_| execution_cwd.display_path());
         let record = {
             let store = self.state.lock().await;
@@ -222,7 +225,8 @@ impl CommandGateway {
             command_id: record.id.clone(),
             shell: self.config.workspace.default_shell.clone(),
             command: request.command.clone(),
-            sandbox: self.config.workspace.sandbox.clone(),
+            sandbox,
+            cgroup: None,
             network_provider: crate::extensions::resolve_network_provider(&self.config),
             workspace_root: std::path::PathBuf::from(&self.config.workspace.root),
             home: self.home.clone(),

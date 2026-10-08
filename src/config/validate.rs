@@ -124,6 +124,30 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
                 .to_owned(),
         });
     }
+    // Only `unshare` and `off` re-uid the workload; the other backends would run it as the runtime.
+    if let Some(workload_user) = &sandbox.workload_user {
+        if workload_user.trim().is_empty() || workload_user.len() != workload_user.trim().len() {
+            return Err(StackError::InvalidParam {
+                field: "workspace.sandbox.workload_user",
+                reason: "must be a non-blank user name without surrounding whitespace".to_owned(),
+            });
+        }
+        if matches!(
+            sandbox.mode,
+            crate::config::SandboxMode::Bwrap | crate::config::SandboxMode::Custom
+        ) {
+            return Err(StackError::WorkloadUserModeUnsupported {
+                mode: sandbox.mode.as_str(),
+            });
+        }
+    }
+    // Network providers are `unshare`-only, so the requirement could never be met elsewhere.
+    if sandbox.require_network_provider && sandbox.mode != crate::config::SandboxMode::Unshare {
+        return Err(StackError::InvalidParam {
+            field: "workspace.sandbox.require_network_provider",
+            reason: "requires mode = \"unshare\"".to_owned(),
+        });
+    }
     for path in sandbox
         .mask_paths
         .iter()

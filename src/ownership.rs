@@ -108,9 +108,24 @@ pub fn process_egid() -> u32 {
     0
 }
 
+/// The passwd fields a local user resolves to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PasswdEntry {
+    pub uid: u32,
+    pub gid: u32,
+    pub home: PathBuf,
+}
+
 /// Resolve a username to a uid via `getpwnam_r`; `Ok(None)` means no such user.
-#[cfg(unix)]
 pub fn resolve_runtime_user_uid(name: &str) -> std::io::Result<Option<u32>> {
+    Ok(lookup_user(name)?.map(|entry| entry.uid))
+}
+
+/// Resolve a username to its uid, primary gid and home via `getpwnam_r`; `Ok(None)` means no such user.
+#[cfg(unix)]
+pub fn lookup_user(name: &str) -> std::io::Result<Option<PasswdEntry>> {
+    use std::os::unix::ffi::OsStrExt;
+
     let cstr = CString::new(name)
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
     let mut buf: Vec<u8> = vec![0; 1024];
@@ -131,7 +146,13 @@ pub fn resolve_runtime_user_uid(name: &str) -> std::io::Result<Option<u32>> {
                 if result.is_null() {
                     return Ok(None);
                 }
-                return Ok(Some(pwd.pw_uid));
+                // SAFETY: on success `pw_dir` points into `buf`, which outlives this borrow.
+                let home = unsafe { std::ffi::CStr::from_ptr(pwd.pw_dir) };
+                return Ok(Some(PasswdEntry {
+                    uid: pwd.pw_uid,
+                    gid: pwd.pw_gid,
+                    home: PathBuf::from(std::ffi::OsStr::from_bytes(home.to_bytes())),
+                }));
             }
             libc::ERANGE => {
                 // Capped at 1 MiB so a pathological NSS plugin cannot drive
@@ -149,7 +170,7 @@ pub fn resolve_runtime_user_uid(name: &str) -> std::io::Result<Option<u32>> {
 }
 
 #[cfg(not(unix))]
-pub fn resolve_runtime_user_uid(_name: &str) -> std::io::Result<Option<u32>> {
+pub fn lookup_user(_name: &str) -> std::io::Result<Option<PasswdEntry>> {
     Ok(None)
 }
 
@@ -311,6 +332,17 @@ mod tests {
     fn resolve_runtime_user_uid_for_root_is_zero() {
         let uid = resolve_runtime_user_uid("root").expect("getpwnam_r");
         assert_eq!(uid, Some(0));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lookup_user_for_root_reports_gid_and_home() {
+        let entry = lookup_user("root")
+            .expect("getpwnam_r")
+            .expect("root exists");
+        assert_eq!(entry.uid, 0);
+        assert_eq!(entry.gid, 0);
+        assert!(entry.home.is_absolute());
     }
 
     #[test]

@@ -27,12 +27,13 @@ use crate::runtime::mediation::commands::output::{
 };
 use crate::runtime::mediation::commands::policy::resolve_cwd_under_workspace;
 use crate::runtime::mediation::commands::process::kill_process_group_pid;
+use crate::runtime::sandbox::WorkloadCgroup;
 use crate::state::{
     CommandOrigin, CommandStatus, EVENT_KIND_TERMINAL_FINISHED, EVENT_SOURCE_ACP,
     EVENT_SOURCE_COMMAND, NewCommandRecord, StateStore,
 };
 
-use super::acp_bridge::agent_process_path;
+use super::acp_bridge::workload_process_path;
 use super::session_sink::SessionEventSink;
 
 type AcpError = agent_client_protocol::Error;
@@ -188,13 +189,14 @@ impl TerminalRegistry {
         session_id: &str,
         terminal_id: &str,
         mut child: Child,
+        cgroup: Option<WorkloadCgroup>,
         output_byte_limit: u64,
         persistence: Option<TerminalPersistence>,
     ) -> bool {
         let mut entries = self.entries.lock().await;
         if entries.closed {
             drop(entries);
-            kill_with_grace(&mut child, Duration::ZERO).await;
+            kill_with_grace(&mut child, Duration::ZERO, cgroup.as_ref()).await;
             return false;
         }
 
@@ -216,6 +218,7 @@ impl TerminalRegistry {
 
         tokio::spawn(own_terminal(
             child,
+            cgroup,
             chunk_rx,
             reader_handles,
             Arc::clone(&buffer),
@@ -287,6 +290,7 @@ impl TerminalRegistry {
 #[allow(clippy::too_many_arguments)]
 async fn own_terminal(
     mut child: Child,
+    cgroup: Option<WorkloadCgroup>,
     mut chunk_rx: mpsc::Receiver<OutputChunk>,
     reader_handles: Vec<tokio::task::JoinHandle<()>>,
     buffer: Arc<TokioMutex<TerminalBuffer>>,
@@ -314,7 +318,7 @@ async fn own_terminal(
                 }
             },
             Some(grace) = kill_rx.recv() => {
-                break match kill_with_grace(&mut child, grace).await {
+                break match kill_with_grace(&mut child, grace, cgroup.as_ref()).await {
                     GraceKillOutcome::ExitedWithinGrace(Ok(status)) => {
                         canceled = true;
                         exit_status_of(status)
@@ -344,6 +348,9 @@ async fn own_terminal(
     // Reap descendants that inherited the pipes.
     if let Some(pid) = pid {
         kill_process_group_pid(pid);
+    }
+    if let Some(cgroup) = &cgroup {
+        cgroup.kill();
     }
 
     // Drain the remaining chunks BEFORE finalizing, so the exit status is
@@ -587,11 +594,11 @@ async fn publish_lifecycle_event(
 pub(crate) struct TerminalHandlerContext {
     pub(crate) registry: Arc<TerminalRegistry>,
     pub(crate) workspace_root: PathBuf,
-    /// Boot-time home captured at bridge spawn: terminal children must see the
-    /// daemon's resolved HOME, not whatever the process env holds at request
-    /// time.
+    /// Boot-time runtime home captured at bridge spawn, never the process env at
+    /// request time: the managed PATH and the sandbox masks derive from it, and
+    /// terminal children see it as HOME unless a workload identity declares its own.
     pub(crate) home: PathBuf,
-    pub(crate) sandbox: crate::config::SandboxConfig,
+    pub(crate) sandbox: crate::runtime::sandbox::SandboxProfile,
     /// `[workspace].default_shell`, the same interpreter the command gateway
     /// runs operator commands under.
     pub(crate) shell: String,
@@ -604,8 +611,9 @@ pub(crate) struct TerminalHandlerContext {
 
 /// `terminal/create`: spawn the requested program in a clean session env
 /// under the agent's sandbox profile and hand the child to an owning task.
-/// Executes directly by design: the VM is the security boundary, and agents
-/// send `session/request_permission` separately when their policy needs it.
+/// Executes directly by design: the sandbox profile and workload identity
+/// bound what it can reach, and agents send `session/request_permission`
+/// separately when their policy needs it.
 pub(crate) async fn handle_create_terminal(
     context: &TerminalHandlerContext,
     request: CreateTerminalRequest,
@@ -644,7 +652,7 @@ pub(crate) async fn handle_create_terminal(
         })));
     }
 
-    let env = terminal_environment(&context.home, &request.env);
+    let env = terminal_environment(&context.home, &context.sandbox, &request.env);
     let (requested_program, requested_args) =
         terminal_invocation(&context.shell, &request.command, &request.args);
     let (program, args) = sandboxed_program(
@@ -728,8 +736,8 @@ pub(crate) async fn handle_create_terminal(
         &context.sandbox,
         context.network_provider.as_ref(),
     );
-    let child = match spawn_result {
-        Ok(child) => child,
+    let (child, cgroup) = match spawn_result {
+        Ok(spawned) => spawned,
         Err(error) => {
             mark_failed("spawn failure").await;
             return Err(AcpError::into_internal_error(error));
@@ -766,6 +774,7 @@ pub(crate) async fn handle_create_terminal(
             &agent_session_id,
             &terminal_id,
             child,
+            cgroup,
             output_byte_limit,
             persistence,
         )
@@ -886,16 +895,17 @@ fn env_names_json(env: &[EnvVariable]) -> Option<String> {
     serde_json::to_string(&names).ok()
 }
 
-/// Clean session environment for a terminal child: managed PATH, HOME, and
-/// the vars the agent supplied. Never the `[agent].env` secrets injected into
-/// the agent process itself, because a client terminal must not expose provider
-/// API keys to arbitrary shell commands.
+/// Clean session environment for a terminal child: managed PATH, the workload
+/// HOME, and the vars the agent supplied. Never the `[agent].env` secrets
+/// injected into the agent process itself, because a client terminal must not
+/// expose provider API keys to arbitrary shell commands.
 pub(crate) fn terminal_environment(
     home: &Path,
+    sandbox: &crate::runtime::sandbox::SandboxProfile,
     agent_env: &[EnvVariable],
 ) -> HashMap<String, String> {
     let mut env = HashMap::new();
-    if let Some(path) = agent_process_path(home) {
+    if let Some(path) = workload_process_path(home, sandbox) {
         match path.into_string() {
             Ok(path) => {
                 env.insert("PATH".to_owned(), path);
@@ -905,7 +915,10 @@ pub(crate) fn terminal_environment(
             }
         }
     }
-    env.insert("HOME".to_owned(), home.to_string_lossy().into_owned());
+    env.insert(
+        "HOME".to_owned(),
+        sandbox.workload_home(home).to_string_lossy().into_owned(),
+    );
     // Agent-provided vars win over the managed defaults; the spec gives the
     // agent control of the child env.
     for variable in agent_env {

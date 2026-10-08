@@ -36,7 +36,7 @@ impl AcpBridge {
         cwd: PathBuf,
         sink: Arc<dyn SessionEventSink>,
         permissions: AcpPermissionPolicy,
-        sandbox: &crate::config::SandboxConfig,
+        sandbox: &crate::runtime::sandbox::SandboxProfile,
         shell: &str,
         network_provider: Option<&crate::extensions::NetworkProviderExtension>,
         command_log: Option<TerminalCommandLog>,
@@ -47,8 +47,8 @@ impl AcpBridge {
         // `[agent].env` and the runtime-managed rewrites above it.
         crate::extensions::apply_workload_env(&mut env, network_provider);
         let wrapped = wrap_agent_command(agent, &cwd, sandbox, network_provider, home)?;
-        let command = build_agent_command(&wrapped, &cwd, &env, home);
-        let (mut child, stdin, stdout) =
+        let command = build_agent_command(&wrapped, &cwd, &env, home, sandbox);
+        let (mut child, cgroup, stdin, stdout) =
             spawn_agent_child(command, &wrapped, sandbox, network_provider)?;
 
         let (exit_tx, exit_rx) = watch::channel(None);
@@ -86,13 +86,14 @@ impl AcpBridge {
         );
 
         let (capabilities, connection, task) =
-            complete_initialize(&mut child, task, connection_rx).await?;
+            complete_initialize(&mut child, cgroup.as_ref(), task, connection_rx).await?;
 
         let child = Arc::new(TokioMutex::new(Some(child)));
         spawn_child_exit_watcher(Arc::clone(&child), exit.clone());
 
         Ok(Self {
             child,
+            cgroup,
             capabilities,
             connection: TokioMutex::new(Some(connection)),
             shutdown_tx: TokioMutex::new(Some(shutdown_tx)),
@@ -128,7 +129,7 @@ async fn wait_for_managed_node(home: &Path) {
 fn wrap_agent_command(
     agent: &AgentConfig,
     cwd: &Path,
-    sandbox: &crate::config::SandboxConfig,
+    sandbox: &crate::runtime::sandbox::SandboxProfile,
     network_provider: Option<&crate::extensions::NetworkProviderExtension>,
     home: &Path,
 ) -> Result<crate::runtime::sandbox::WrappedCommand> {
@@ -137,25 +138,14 @@ fn wrap_agent_command(
             reason: format!("agent command `{}` not found on PATH", agent.command),
         }
     })?;
-    // `off` is a verbatim passthrough so single-process behavior is unchanged;
-    // other modes wrap the spawn.
-    if matches!(sandbox.mode, crate::config::SandboxMode::Off) {
-        Ok(crate::runtime::sandbox::WrappedCommand {
-            program: command_path,
-            args: agent.args.clone(),
-        })
-    } else {
-        crate::runtime::sandbox::wrap(
-            sandbox,
-            network_provider,
-            &command_path,
-            &agent.args,
-            home,
-            cwd,
-            crate::ownership::process_euid(),
-            crate::ownership::process_egid(),
-        )
-    }
+    crate::runtime::sandbox::wrap(
+        sandbox,
+        network_provider,
+        &command_path,
+        &agent.args,
+        home,
+        cwd,
+    )
 }
 
 fn build_agent_command(
@@ -163,6 +153,7 @@ fn build_agent_command(
     cwd: &Path,
     env: &HashMap<String, String>,
     home: &Path,
+    sandbox: &crate::runtime::sandbox::SandboxProfile,
 ) -> Command {
     let mut command = Command::new(&wrapped.program);
     command
@@ -177,11 +168,11 @@ fn build_agent_command(
     // Runtime context is deliberately narrow: managed PATH for
     // registry-installed harnesses, HOME for agent config/cache directories.
     // Both derive from the caller's boot-time home, never the process env at
-    // spawn time.
-    if let Some(path) = agent_process_path(home) {
+    // spawn time; HOME is the workload identity's own when one is declared.
+    if let Some(path) = workload_process_path(home, sandbox) {
         command.env("PATH", path);
     }
-    command.env("HOME", home);
+    command.env("HOME", sandbox.workload_home(home));
     for (name, value) in env {
         if matches!(name.as_str(), "PATH" | "HOME") {
             tracing::warn!(
@@ -203,14 +194,21 @@ fn build_agent_command(
 fn spawn_agent_child(
     mut command: Command,
     wrapped: &crate::runtime::sandbox::WrappedCommand,
-    sandbox: &crate::config::SandboxConfig,
+    sandbox: &crate::runtime::sandbox::SandboxProfile,
     network_provider: Option<&crate::extensions::NetworkProviderExtension>,
-) -> Result<(Child, ChildStdin, ChildStdout)> {
+) -> Result<(
+    Child,
+    Option<crate::runtime::sandbox::WorkloadCgroup>,
+    ChildStdin,
+    ChildStdout,
+)> {
+    let cgroup = crate::runtime::sandbox::prepare_workload_spawn(sandbox, &mut command)
+        .map_err(|source| StackError::AgentSpawnFailed { source })?;
     // Network-isolated spawns get the daemon's stderr at the supervisor's
     // diagnostic fd; a no-op for every other mode.
     #[cfg(unix)]
     let diag_handle = crate::runtime::sandbox::wire_supervise_diag_fd(
-        sandbox,
+        &sandbox.config,
         network_provider,
         &mut command,
         &wrapped.args,
@@ -233,7 +231,7 @@ fn spawn_agent_child(
         .ok_or_else(|| StackError::AgentInitializeFailed {
             reason: "agent stdout was not piped".to_owned(),
         })?;
-    Ok((child, stdin, stdout))
+    Ok((child, cgroup, stdin, stdout))
 }
 
 /// Register the client-side ACP handlers and drive the connection.
@@ -483,23 +481,24 @@ fn spawn_connection_task(
 /// and consume `connection_task`; only the success path hands it back.
 async fn complete_initialize(
     child: &mut Child,
+    cgroup: Option<&crate::runtime::sandbox::WorkloadCgroup>,
     connection_task: JoinHandle<()>,
     connection_rx: oneshot::Receiver<InitializeOutcome>,
 ) -> Result<(AgentCapabilitiesDto, ConnectionTo<Agent>, JoinHandle<()>)> {
     let (init_response, connection) = match timeout(INITIALIZE_TIMEOUT, connection_rx).await {
         Ok(Ok(Ok((response, connection)))) => (response, connection),
         Ok(Ok(Err(reason))) => {
-            fail_spawn(child, connection_task).await;
+            fail_spawn(child, cgroup, connection_task).await;
             return Err(StackError::AgentInitializeFailed { reason });
         }
         Ok(Err(_)) => {
-            fail_spawn(child, connection_task).await;
+            fail_spawn(child, cgroup, connection_task).await;
             return Err(StackError::AgentInitializeFailed {
                 reason: "connection ended before initialize completed".to_owned(),
             });
         }
         Err(_) => {
-            fail_spawn(child, connection_task).await;
+            fail_spawn(child, cgroup, connection_task).await;
             return Err(StackError::AgentInitializeFailed {
                 reason: format!(
                     "initialize did not return within {}s",
@@ -511,7 +510,7 @@ async fn complete_initialize(
 
     if init_response.protocol_version != ProtocolVersion::V1 {
         let returned = init_response.protocol_version.as_u16();
-        fail_spawn(child, connection_task).await;
+        fail_spawn(child, cgroup, connection_task).await;
         return Err(StackError::AgentInitializeFailed {
             reason: format!(
                 "requested ACP protocol version {} but agent returned {returned}",
@@ -522,7 +521,7 @@ async fn complete_initialize(
     let capabilities = match AgentCapabilitiesDto::from_initialize_response(&init_response) {
         Ok(capabilities) => capabilities,
         Err(error) => {
-            fail_spawn(child, connection_task).await;
+            fail_spawn(child, cgroup, connection_task).await;
             return Err(error);
         }
     };
@@ -583,10 +582,17 @@ fn spawn_child_exit_watcher(child: Arc<TokioMutex<Option<Child>>>, exit: ExitRep
 /// Spawn-error cleanup: abort the SDK task, kill the whole process group, then
 /// reap. The pgroup kill is required, because without it grandchildren forked
 /// between spawn and initialize-failure survive.
-async fn fail_spawn(child: &mut Child, connection_task: JoinHandle<()>) {
+async fn fail_spawn(
+    child: &mut Child,
+    cgroup: Option<&crate::runtime::sandbox::WorkloadCgroup>,
+    connection_task: JoinHandle<()>,
+) {
     connection_task.abort();
     let _ = connection_task.await;
     kill_tokio_process_group(child);
+    if let Some(cgroup) = cgroup {
+        cgroup.kill();
+    }
     let _ = child.wait().await;
 }
 
@@ -620,8 +626,13 @@ pub(crate) fn resolve_command_path(command: &str, cwd: &Path, home: &Path) -> Op
     None
 }
 
-pub(crate) fn agent_process_path(home: &Path) -> Option<std::ffi::OsString> {
-    let paths = command_search_paths(home);
+/// PATH for a workload process: the managed search dirs under the runtime `home`, minus any the
+/// workload identity can write.
+pub(crate) fn workload_process_path(
+    home: &Path,
+    sandbox: &crate::runtime::sandbox::SandboxProfile,
+) -> Option<std::ffi::OsString> {
+    let paths = sandbox.without_workload_writable(command_search_paths(home));
     if paths.is_empty() {
         None
     } else {

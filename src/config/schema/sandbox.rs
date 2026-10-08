@@ -29,6 +29,15 @@ pub struct SandboxConfig {
     /// beyond the workspace root.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow_paths: Vec<String>,
+    /// Local user the agent, ACP terminals and mediated commands run as,
+    /// resolved at load to a uid, gid and home distinct from the runtime's.
+    /// `unshare` and `off` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload_user: Option<String>,
+    /// Refuse an `unshare` spawn when no network-provider extension is
+    /// declared, instead of falling back to host networking.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_network_provider: bool,
 }
 
 impl SandboxConfig {
@@ -50,6 +59,17 @@ pub enum SandboxMode {
     Unshare,
     Bwrap,
     Custom,
+}
+
+impl SandboxMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SandboxMode::Off => "off",
+            SandboxMode::Unshare => "unshare",
+            SandboxMode::Bwrap => "bwrap",
+            SandboxMode::Custom => "custom",
+        }
+    }
 }
 
 pub const DEFAULT_NETWORK_PROVIDER_TIMEOUT: &str = "30s";

@@ -12,6 +12,7 @@ use tokio::process::{Child, Command};
 use tokio::time::timeout;
 
 use crate::runtime::process_runner::kill_tokio_process_group;
+use crate::runtime::sandbox::WorkloadCgroup;
 
 use super::policy::ResolvedCommandCwd;
 use super::process::send_terminate;
@@ -21,38 +22,30 @@ use super::process::send_terminate;
 pub(crate) fn sandboxed_program(
     program: &Path,
     args: &[String],
-    sandbox: &crate::config::SandboxConfig,
+    sandbox: &crate::runtime::sandbox::SandboxProfile,
     network: Option<&crate::extensions::NetworkProviderExtension>,
     workspace_root: &Path,
     home: &Path,
 ) -> std::io::Result<(PathBuf, Vec<String>)> {
-    if matches!(sandbox.mode, crate::config::SandboxMode::Off) {
-        return Ok((program.to_path_buf(), args.to_vec()));
-    }
-    let wrapped = crate::runtime::sandbox::wrap(
-        sandbox,
-        network,
-        program,
-        args,
-        home,
-        workspace_root,
-        crate::ownership::process_euid(),
-        crate::ownership::process_egid(),
-    )
-    .map_err(std::io::Error::other)?;
+    let wrapped =
+        crate::runtime::sandbox::wrap(sandbox, network, program, args, home, workspace_root)
+            .map_err(std::io::Error::other)?;
     Ok((wrapped.program, wrapped.args))
 }
 
+/// Spawn a workload child. The returned cgroup guard, present under `off` with a workload
+/// identity, must stay with the child: it is how the runtime stops the tree.
 pub(crate) fn spawn_child(
     program: &Path,
     args: &[String],
     cwd: &ResolvedCommandCwd,
     env: Option<&HashMap<String, String>>,
-    sandbox: &crate::config::SandboxConfig,
+    sandbox: &crate::runtime::sandbox::SandboxProfile,
     network: Option<&crate::extensions::NetworkProviderExtension>,
-) -> std::io::Result<Child> {
+) -> std::io::Result<(Child, Option<WorkloadCgroup>)> {
     let mut cmd = Command::new(program);
     cmd.args(args);
+    let cgroup = crate::runtime::sandbox::prepare_workload_spawn(sandbox, &mut cmd)?;
     #[cfg(unix)]
     let cwd_handle = cwd.open_verified()?;
     #[cfg(unix)]
@@ -76,7 +69,7 @@ pub(crate) fn spawn_child(
     // supervisor may write to.
     #[cfg(unix)]
     let diag_handle =
-        crate::runtime::sandbox::wire_supervise_diag_fd(sandbox, network, &mut cmd, args)?;
+        crate::runtime::sandbox::wire_supervise_diag_fd(&sandbox.config, network, &mut cmd, args)?;
     cmd.env_clear();
     // The network provider's declaration must land after the caller's env so
     // it wins on conflict.
@@ -97,7 +90,7 @@ pub(crate) fn spawn_child(
     drop(cwd_handle);
     #[cfg(unix)]
     drop(diag_handle);
-    child
+    Ok((child?, cgroup))
 }
 
 pub(crate) enum GraceKillOutcome {
@@ -143,10 +136,11 @@ mod tests {
             ],
             &cwd,
             env,
-            &crate::config::SandboxConfig::default(),
+            &crate::runtime::sandbox::SandboxProfile::default(),
             network,
         )
-        .expect("spawn workload");
+        .expect("spawn workload")
+        .0;
         let output = child.wait_with_output().await.expect("workload output");
         String::from_utf8(output.stdout).expect("utf8 stdout")
     }
@@ -188,13 +182,21 @@ mod tests {
 }
 
 /// SIGTERM the child's process group, wait up to `grace`, then escalate to a
-/// process-group SIGKILL and reap.
-pub(crate) async fn kill_with_grace(child: &mut Child, grace: Duration) -> GraceKillOutcome {
+/// process-group SIGKILL plus `cgroup.kill` when the child has a cgroup, and reap.
+pub(crate) async fn kill_with_grace(
+    child: &mut Child,
+    grace: Duration,
+    cgroup: Option<&WorkloadCgroup>,
+) -> GraceKillOutcome {
     send_terminate(child);
     match timeout(grace, child.wait()).await {
         Ok(result) => GraceKillOutcome::ExitedWithinGrace(result),
         Err(_) => {
             kill_tokio_process_group(child);
+            // A different-uid child ignores the runtime's group signals without CAP_KILL.
+            if let Some(cgroup) = cgroup {
+                cgroup.kill();
+            }
             if let Err(error) = child.wait().await {
                 tracing::warn!(error = %error, "wait after SIGKILL failed while escalating child termination");
             }

@@ -505,6 +505,7 @@ const DOMAIN_MODULES: &[(&str, &str)] = &[
     ("archive", include_str!("archive.rs")),
     ("node_runtime", include_str!("node_runtime.rs")),
     ("serve", include_str!("serve.rs")),
+    ("sandbox", include_str!("sandbox.rs")),
     ("agent_install", include_str!("agent_install.rs")),
     ("agent_runtime", include_str!("agent_runtime.rs")),
     ("session", include_str!("session.rs")),

@@ -989,3 +989,53 @@ fn start_init_request_sandbox_mask_files_stage_into_the_starter_config() {
         "starter config must carry the mask file: {toml}"
     );
 }
+
+#[test]
+fn start_init_request_sandbox_identity_stages_into_the_starter_config() {
+    let args = request_from_json(
+        r#"{
+                "agent": "placebo",
+                "sandbox": "unshare",
+                "sandbox_workload_user": "agent",
+                "sandbox_require_network_provider": true
+            }"#,
+    )
+    .into_init_args()
+    .expect("valid request");
+    assert_eq!(args.prompt_sandbox_workload_user.as_deref(), Some("agent"));
+    assert!(args.prompt_sandbox_require_network_provider);
+    let toml = super::super::super::starter_config::starter_config(&args)
+        .expect("a valid declaration must assemble into a starter config");
+    assert!(
+        toml.contains("workload_user = \"agent\""),
+        "starter config must carry the workload user: {toml}"
+    );
+    assert!(
+        toml.contains("require_network_provider = true"),
+        "starter config must carry the network requirement: {toml}"
+    );
+
+    let args = request_from_json(r#"{"agent":"placebo"}"#)
+        .into_init_args()
+        .expect("valid request");
+    assert_eq!(args.prompt_sandbox_workload_user, None);
+    assert!(!args.prompt_sandbox_require_network_provider);
+}
+
+#[test]
+fn start_init_request_sandbox_identity_is_rejected_against_an_existing_config() {
+    for body in [
+        r#"{"agent":"placebo","sandbox_workload_user":"agent"}"#,
+        r#"{"agent":"placebo","sandbox_require_network_provider":true}"#,
+    ] {
+        let args = request_from_json(body)
+            .into_init_args()
+            .expect("valid request");
+        let error =
+            super::super::super::starter_config::reject_starter_only_args_for_existing_config(
+                &args, false,
+            )
+            .expect_err("starter-only declarations are refused against an existing config");
+        assert!(error.to_string().contains("sandbox_"), "got: {error}");
+    }
+}

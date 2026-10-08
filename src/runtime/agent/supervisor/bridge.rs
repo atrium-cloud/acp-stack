@@ -45,23 +45,29 @@ pub(super) async fn spawn_agent_bridge(
         state.clone(),
         session_changes.clone(),
     ));
-    let bridge = match AcpBridge::spawn(
-        home,
-        agent,
-        env,
-        cwd,
-        sink,
-        permissions.into(),
-        &sandbox,
-        &shell,
-        network_provider.as_ref(),
-        Some(crate::runtime::agent::acp_bridge::TerminalCommandLog {
-            state: state.clone(),
-            event_hub: event_hub.clone(),
-        }),
-    )
-    .await
-    {
+    // Resolved per spawn so an on-crash restart sees the same identity checks as a cold start.
+    let spawned = match crate::runtime::sandbox::SandboxProfile::resolve(&sandbox) {
+        Ok(profile) => {
+            AcpBridge::spawn(
+                home,
+                agent,
+                env,
+                cwd,
+                sink,
+                permissions.into(),
+                &profile,
+                &shell,
+                network_provider.as_ref(),
+                Some(crate::runtime::agent::acp_bridge::TerminalCommandLog {
+                    state: state.clone(),
+                    event_hub: event_hub.clone(),
+                }),
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    };
+    let bridge = match spawned {
         Ok(bridge) => bridge,
         Err(err) => {
             let data = json!({

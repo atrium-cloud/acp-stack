@@ -65,7 +65,7 @@ flowchart LR
 - Workspace: bounded file operations and workspace source materialization.
 - Workload filesystem: no-follow file operations below a trusted anchor, run with the process credentials or on a dedicated thread holding the workload identity's filesystem credentials, plus staged-tree handoff and workload access checks (`src/workload_fs.rs`).
 - Command gateway: policy-mediated shell command execution and output capture.
-- Sandbox: optional isolation backend wrapping each harness and mediated-shell spawn, masking the daemon's secrets, state, and socket.
+- Sandbox: optional isolation backend wrapping each harness and mediated-shell spawn, masking the daemon's secrets, state, and socket. The workload identity resolves into a `SandboxProfile` that every wrapped spawn carries (`src/runtime/sandbox/identity.rs`), and `off`-mode spawns under an identity run in per-spawn cgroups (`src/runtime/sandbox/cgroup.rs`).
 - Extensions: typed, data-declared integration seams (`src/extensions.rs`), namely the network-provider policy the sandbox consumes and the managed-state apply orchestration.
 
 ### Observability and edge

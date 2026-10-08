@@ -5,33 +5,28 @@ use crate::config::SandboxMode;
 use crate::security::SecurityCheckInputs;
 use crate::security::findings::SecurityFinding;
 
-fn mode_label(mode: SandboxMode) -> &'static str {
-    match mode {
-        SandboxMode::Off => "off",
-        SandboxMode::Unshare => "unshare",
-        SandboxMode::Bwrap => "bwrap",
-        SandboxMode::Custom => "custom",
-    }
-}
-
 pub(in crate::security) fn check_sandbox(
     inputs: &SecurityCheckInputs<'_>,
     findings: &mut Vec<SecurityFinding>,
 ) {
     if let Some(reason) = inputs.sandbox_unavailable_reason.as_deref() {
+        // Under `off` only a workload identity has prerequisites to miss.
+        let remediation = if inputs.sandbox_mode == SandboxMode::Off {
+            "Grant the runtime what `[workspace.sandbox].workload_user` requires, or remove \
+             `workload_user`."
+        } else {
+            "Install the backend's prerequisites, switch `[workspace.sandbox].mode`, \
+             or set it to `off`."
+        };
         findings.push(
             SecurityFinding::critical(
                 "runtime.sandbox_unavailable",
                 &format!(
                     "configured sandbox mode `{}` cannot run on this host: {reason}",
-                    mode_label(inputs.sandbox_mode),
+                    inputs.sandbox_mode.as_str(),
                 ),
             )
-            .with_remediation(
-                "Install the backend's prerequisites, switch `[workspace.sandbox].mode`, \
-                 or set it to `off`."
-                    .to_owned(),
-            ),
+            .with_remediation(remediation.to_owned()),
         );
     } else if inputs.sandbox_off_but_capable {
         findings.push(

@@ -45,6 +45,11 @@ pub const FEATURE_AGENT_TEST_JSON: &str = "agent-test-json";
 pub const FEATURE_MANAGED_CREDENTIAL_BASE_URL: &str = "managed-credential-base-url";
 pub const FEATURE_SANDBOX_MASK_FILES: &str = "sandbox-mask-files";
 pub const FEATURE_MANAGED_NODE_RUNTIME: &str = "managed-node-runtime";
+pub const FEATURE_SANDBOX_WORKLOAD_USER: &str = "sandbox-workload-user";
+pub const FEATURE_SANDBOX_CAPABILITY_DROP: &str = "sandbox-capability-drop";
+pub const FEATURE_SANDBOX_WORKLOAD_TERMINATION: &str = "sandbox-workload-termination";
+pub const FEATURE_SANDBOX_REQUIRE_NETWORK_PROVIDER: &str = "sandbox-require-network-provider";
+pub const FEATURE_SANDBOX_OFF_IDENTITY: &str = "sandbox-off-identity";
 
 const SERVER_FEATURES: &[&str] = &[
     FEATURE_NETWORK_PROVIDER_WORKLOAD_ENV,
@@ -52,6 +57,11 @@ const SERVER_FEATURES: &[&str] = &[
     FEATURE_MANAGED_CREDENTIAL_BASE_URL,
     FEATURE_SANDBOX_MASK_FILES,
     FEATURE_MANAGED_NODE_RUNTIME,
+    FEATURE_SANDBOX_WORKLOAD_USER,
+    FEATURE_SANDBOX_CAPABILITY_DROP,
+    FEATURE_SANDBOX_WORKLOAD_TERMINATION,
+    FEATURE_SANDBOX_REQUIRE_NETWORK_PROVIDER,
+    FEATURE_SANDBOX_OFF_IDENTITY,
 ];
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -62,8 +72,10 @@ pub(crate) struct ServerInfo {
     version: &'static str,
     /// Advertised capability names, currently `network-provider-workload-env`,
     /// `agent-test-json`, `managed-credential-base-url`, `sandbox-mask-files`,
-    /// and `managed-node-runtime`. The list grows over time; an absent or empty
-    /// list means none are present.
+    /// `managed-node-runtime`, `sandbox-workload-user`, `sandbox-capability-drop`,
+    /// `sandbox-workload-termination`, `sandbox-require-network-provider`, and
+    /// `sandbox-off-identity`. The list grows over time; an absent or empty list
+    /// means none are present.
     features: &'static [&'static str],
 }
 
@@ -378,6 +390,11 @@ mod tests {
                 "managed-credential-base-url",
                 "sandbox-mask-files",
                 "managed-node-runtime",
+                "sandbox-workload-user",
+                "sandbox-capability-drop",
+                "sandbox-workload-termination",
+                "sandbox-require-network-provider",
+                "sandbox-off-identity",
             ])
         );
     }

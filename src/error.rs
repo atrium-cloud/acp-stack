@@ -13,6 +13,7 @@ mod edge;
 mod extensions;
 mod node_runtime;
 mod permission;
+mod sandbox;
 mod secrets;
 mod security;
 mod serve;
@@ -80,6 +81,41 @@ pub enum StackError {
 
     #[error("sandbox setup failed: {reason}")]
     SandboxFailed { reason: String },
+
+    // === sandbox workload identity ===
+    #[error("[workspace.sandbox].workload_user `{name}` does not resolve to a local user")]
+    WorkloadUserUnresolved { name: String },
+
+    #[error("[workspace.sandbox].workload_user `{name}` lookup failed: {source}")]
+    WorkloadUserLookupFailed {
+        name: String,
+        source: std::io::Error,
+    },
+
+    #[error(
+        "[workspace.sandbox].workload_user `{name}` resolves to uid {uid}, the runtime's own uid; declare a separate user"
+    )]
+    WorkloadUserIsRuntime { name: String, uid: u32 },
+
+    #[error(
+        "[workspace.sandbox].workload_user `{name}` resolves to uid 0; declare an unprivileged user"
+    )]
+    WorkloadUserIsRoot { name: String },
+
+    #[error(
+        "[workspace.sandbox].workload_user `{name}` has primary gid {gid}, shared with root or the runtime; give the workload user its own primary group"
+    )]
+    WorkloadUserSharesGroup { name: String, gid: u32 },
+
+    #[error(
+        "[workspace.sandbox].workload_user requires mode = \"unshare\" or \"off\"; mode \"{mode}\" cannot run the workload as another user"
+    )]
+    WorkloadUserModeUnsupported { mode: &'static str },
+
+    #[error(
+        "[workspace.sandbox].require_network_provider is set but no network-provider extension is declared; refusing to spawn with host networking"
+    )]
+    NetworkProviderRequired,
 
     // === extensions ===
     #[error("no managed-state extension named `{name}` is declared")]

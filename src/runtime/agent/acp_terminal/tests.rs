@@ -55,13 +55,36 @@ fn buffer_append_trims_to_cap_during_accumulation() {
 #[test]
 fn terminal_environment_excludes_provider_keys() {
     let agent_env = vec![EnvVariable::new("MY_FLAG", "1")];
-    let env = terminal_environment(Path::new("/home/acp-terminal-test"), &agent_env);
+    let env = terminal_environment(
+        Path::new("/home/acp-terminal-test"),
+        &crate::runtime::sandbox::SandboxProfile::default(),
+        &agent_env,
+    );
     assert_eq!(env.get("MY_FLAG").map(String::as_str), Some("1"));
     // Composition starts from an empty map, never the agent process env,
     // which carries provider API keys.
     let allowed = ["PATH", "HOME", "MY_FLAG"];
     for key in env.keys() {
         assert!(allowed.contains(&key.as_str()), "unexpected env var {key}");
+    }
+}
+
+#[test]
+fn terminal_environment_uses_the_workload_home_when_an_identity_is_declared() {
+    let sandbox = crate::runtime::sandbox::SandboxProfile {
+        config: crate::config::SandboxConfig::default(),
+        identity: Some(crate::runtime::sandbox::WorkloadIdentity {
+            name: "agent".to_owned(),
+            uid: 2001,
+            gid: 2001,
+            home: PathBuf::from("/home/agent"),
+        }),
+    };
+    let env = terminal_environment(Path::new("/home/runtime"), &sandbox, &[]);
+    assert_eq!(env.get("HOME").map(String::as_str), Some("/home/agent"));
+    // PATH filtering switches credentials, which the privileged Linux tests cover.
+    if let Some(path) = env.get("PATH") {
+        assert!(!path.contains("/home/agent"));
     }
 }
 
@@ -73,7 +96,7 @@ async fn registered_terminal_captures_output_and_exit_code() {
         &cwd.to_string_lossy(),
     )
     .expect("resolve cwd");
-    let child = crate::runtime::mediation::commands::exec::spawn_child(
+    let (child, cgroup) = crate::runtime::mediation::commands::exec::spawn_child(
         std::path::Path::new("/bin/sh"),
         &[
             "-c".to_owned(),
@@ -81,7 +104,7 @@ async fn registered_terminal_captures_output_and_exit_code() {
         ],
         &resolved,
         None,
-        &crate::config::SandboxConfig::default(),
+        &crate::runtime::sandbox::SandboxProfile::default(),
         None,
     )
     .expect("spawn");
@@ -94,6 +117,7 @@ async fn registered_terminal_captures_output_and_exit_code() {
                 "sess_test",
                 &terminal_id,
                 child,
+                cgroup,
                 DEFAULT_TERMINAL_OUTPUT_BYTE_LIMIT,
                 None
             )
@@ -126,12 +150,12 @@ async fn kill_terminates_long_running_child_and_publishes_signal() {
         &cwd.to_string_lossy(),
     )
     .expect("resolve cwd");
-    let child = crate::runtime::mediation::commands::exec::spawn_child(
+    let (child, cgroup) = crate::runtime::mediation::commands::exec::spawn_child(
         std::path::Path::new("/bin/sh"),
         &["-c".to_owned(), "sleep 30".to_owned()],
         &resolved,
         None,
-        &crate::config::SandboxConfig::default(),
+        &crate::runtime::sandbox::SandboxProfile::default(),
         None,
     )
     .expect("spawn");
@@ -144,6 +168,7 @@ async fn kill_terminates_long_running_child_and_publishes_signal() {
                 "sess_test",
                 &terminal_id,
                 child,
+                cgroup,
                 DEFAULT_TERMINAL_OUTPUT_BYTE_LIMIT,
                 None
             )
@@ -194,7 +219,7 @@ async fn create_terminal_defaults_cwd_to_session_cwd() {
         registry: Arc::new(TerminalRegistry::default()),
         workspace_root: root.path().to_path_buf(),
         home: root.path().to_path_buf(),
-        sandbox: crate::config::SandboxConfig::default(),
+        sandbox: crate::runtime::sandbox::SandboxProfile::default(),
         shell: TEST_SHELL.to_owned(),
         network_provider: None,
         command_log: None,
@@ -258,7 +283,7 @@ async fn create_terminal_start_failure_finalizes_command_row() {
         registry: Arc::new(TerminalRegistry::default()),
         workspace_root: std::env::temp_dir(),
         home: std::env::temp_dir(),
-        sandbox: crate::config::SandboxConfig::default(),
+        sandbox: crate::runtime::sandbox::SandboxProfile::default(),
         shell: TEST_SHELL.to_owned(),
         network_provider: None,
         command_log: Some(TerminalCommandLog {
@@ -299,7 +324,7 @@ async fn kill_finalizes_command_row_as_canceled() {
         registry: Arc::new(TerminalRegistry::default()),
         workspace_root: std::env::temp_dir(),
         home: std::env::temp_dir(),
-        sandbox: crate::config::SandboxConfig::default(),
+        sandbox: crate::runtime::sandbox::SandboxProfile::default(),
         shell: TEST_SHELL.to_owned(),
         network_provider: None,
         command_log: Some(TerminalCommandLog {
@@ -375,7 +400,7 @@ fn logging_context(state: Arc<TokioMutex<StateStore>>) -> TerminalHandlerContext
         registry: Arc::new(TerminalRegistry::default()),
         workspace_root: std::env::temp_dir(),
         home: std::env::temp_dir(),
-        sandbox: crate::config::SandboxConfig::default(),
+        sandbox: crate::runtime::sandbox::SandboxProfile::default(),
         shell: TEST_SHELL.to_owned(),
         network_provider: None,
         command_log: Some(TerminalCommandLog {
@@ -517,7 +542,7 @@ async fn create_terminal_without_args_runs_the_command_through_a_shell() {
         registry: Arc::new(TerminalRegistry::default()),
         workspace_root: root.path().to_path_buf(),
         home: root.path().to_path_buf(),
-        sandbox: crate::config::SandboxConfig::default(),
+        sandbox: crate::runtime::sandbox::SandboxProfile::default(),
         shell: TEST_SHELL.to_owned(),
         network_provider: None,
         command_log: None,
@@ -550,7 +575,7 @@ async fn create_terminal_with_args_execs_the_program_verbatim() {
         registry: Arc::new(TerminalRegistry::default()),
         workspace_root: root.path().to_path_buf(),
         home: root.path().to_path_buf(),
-        sandbox: crate::config::SandboxConfig::default(),
+        sandbox: crate::runtime::sandbox::SandboxProfile::default(),
         shell: TEST_SHELL.to_owned(),
         network_provider: None,
         command_log: None,
@@ -599,7 +624,7 @@ async fn create_terminal_runs_the_configured_workspace_shell() {
         registry: Arc::new(TerminalRegistry::default()),
         workspace_root: root.path().to_path_buf(),
         home: root.path().to_path_buf(),
-        sandbox: crate::config::SandboxConfig::default(),
+        sandbox: crate::runtime::sandbox::SandboxProfile::default(),
         shell: shell_path.to_string_lossy().into_owned(),
         network_provider: None,
         command_log: None,
@@ -649,7 +674,7 @@ async fn create_terminal_rejects_a_blank_command() {
         registry: Arc::new(TerminalRegistry::default()),
         workspace_root: root.path().to_path_buf(),
         home: root.path().to_path_buf(),
-        sandbox: crate::config::SandboxConfig::default(),
+        sandbox: crate::runtime::sandbox::SandboxProfile::default(),
         shell: TEST_SHELL.to_owned(),
         network_provider: None,
         command_log: Some(TerminalCommandLog {
@@ -693,7 +718,7 @@ async fn shell_wrapped_terminal_logs_the_agent_requested_command() {
         registry: Arc::new(TerminalRegistry::default()),
         workspace_root: root.path().to_path_buf(),
         home: root.path().to_path_buf(),
-        sandbox: crate::config::SandboxConfig::default(),
+        sandbox: crate::runtime::sandbox::SandboxProfile::default(),
         shell: TEST_SHELL.to_owned(),
         network_provider: None,
         command_log: Some(TerminalCommandLog {
@@ -737,12 +762,12 @@ async fn closed_registry_rejects_registration_and_kills_child() {
         &cwd.to_string_lossy(),
     )
     .expect("resolve cwd");
-    let child = crate::runtime::mediation::commands::exec::spawn_child(
+    let (child, cgroup) = crate::runtime::mediation::commands::exec::spawn_child(
         std::path::Path::new("/bin/sh"),
         &["-c".to_owned(), "sleep 30".to_owned()],
         &resolved,
         None,
-        &crate::config::SandboxConfig::default(),
+        &crate::runtime::sandbox::SandboxProfile::default(),
         None,
     )
     .expect("spawn");
@@ -757,6 +782,7 @@ async fn closed_registry_rejects_registration_and_kills_child() {
             "sess_test",
             &terminal_id,
             child,
+            cgroup,
             DEFAULT_TERMINAL_OUTPUT_BYTE_LIMIT,
             None,
         )

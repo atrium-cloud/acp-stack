@@ -463,6 +463,14 @@ pub struct InitArgs {
     /// first spawn.
     #[arg(skip)]
     pub(super) prompt_sandbox_mask_files: Vec<String>,
+    /// Workload user from the hosted start request (`sandbox_workload_user`),
+    /// staged as the starter config's `[workspace.sandbox].workload_user`.
+    #[arg(skip)]
+    pub(super) prompt_sandbox_workload_user: Option<String>,
+    /// From the hosted start request (`sandbox_require_network_provider`),
+    /// staged as the starter config's `[workspace.sandbox].require_network_provider`.
+    #[arg(skip)]
+    pub(super) prompt_sandbox_require_network_provider: bool,
     /// Resume the most recent non-terminal init run. With `--run-id`, resume
     /// the specified run. Conflicts with `--fresh`.
     #[arg(long, conflicts_with = "fresh")]
@@ -565,6 +573,8 @@ impl Default for InitArgs {
             prompt_extensions: std::collections::BTreeMap::new(),
             prompt_sandbox_mask_paths: Vec::new(),
             prompt_sandbox_mask_files: Vec::new(),
+            prompt_sandbox_workload_user: None,
+            prompt_sandbox_require_network_provider: false,
             skip_testflight: false,
             standard_agent_work_deps: false,
             browser_use_profile: false,

@@ -179,6 +179,13 @@ pub(super) struct StartInitRequest {
     /// starter config.
     #[serde(default)]
     sandbox_mask_files: Vec<String>,
+    /// The starter config's `[workspace.sandbox].workload_user`: the local
+    /// user every sandboxed spawn runs as from the first one. Applies only
+    /// when creating a starter config.
+    sandbox_workload_user: Option<String>,
+    /// The starter config's `[workspace.sandbox].require_network_provider`.
+    /// Applies only when creating a starter config. Absent → false.
+    sandbox_require_network_provider: Option<bool>,
     #[serde(default)]
     data_sources: Vec<DataSourceRequest>,
     /// Continue the most recent unfinished or failed run instead of starting a
@@ -741,6 +748,9 @@ impl StartInitRequest {
         args.prompt_extensions = self.extensions;
         args.prompt_sandbox_mask_paths = self.sandbox_mask_paths;
         args.prompt_sandbox_mask_files = self.sandbox_mask_files;
+        args.prompt_sandbox_workload_user = self.sandbox_workload_user;
+        args.prompt_sandbox_require_network_provider =
+            self.sandbox_require_network_provider.unwrap_or(false);
         args.prompt_data_sources = self
             .data_sources
             .into_iter()
