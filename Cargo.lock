@@ -27,6 +27,7 @@ dependencies = [
  "roxmltree",
  "rpassword",
  "rusqlite",
+ "rustix",
  "rustls",
  "schemars 1.2.2",
  "serde",

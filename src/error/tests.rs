@@ -425,6 +425,66 @@ fn download_public_messages_fall_back_when_url_is_missing_or_unparseable() {
     );
 }
 
+#[test]
+fn workload_fs_errors_report_codes_and_sanitized_messages() {
+    let io = StackError::WorkloadFsIo {
+        path: PathBuf::from(CANARY_PATH),
+        operation: "open",
+        source: std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("cannot open {CANARY_PATH}"),
+        ),
+    };
+    assert_eq!(io.error_code(), "workload_fs.io_failed");
+    assert_eq!(io.http_status(), http::StatusCode::INTERNAL_SERVER_ERROR);
+    let message = assert_public_message_excludes(&io, &[CANARY_PATH, "cannot open"]);
+    assert_eq!(message, "workload filesystem I/O failed");
+
+    let symlink = StackError::WorkloadFsSymlinkRefused {
+        path: PathBuf::from(CANARY_PATH),
+    };
+    assert_eq!(symlink.error_code(), "workload_fs.symlink_refused");
+    assert_eq!(symlink.http_status(), http::StatusCode::BAD_REQUEST);
+    assert_public_message_excludes(&symlink, &[CANARY_PATH]);
+
+    let invalid = StackError::WorkloadFsInvalidPath {
+        path: PathBuf::from(CANARY_PATH),
+        reason: "contains a `..` component",
+    };
+    let message = assert_public_message_excludes(&invalid, &[CANARY_PATH]);
+    assert_eq!(
+        message,
+        "workload path is invalid: contains a `..` component"
+    );
+
+    let credentials = StackError::WorkloadFsCredentialsFailed {
+        reason: format!("capset failed while reading {CANARY_PATH}"),
+    };
+    assert_eq!(credentials.error_code(), "workload_fs.credentials_failed");
+    assert_eq!(
+        credentials.http_status(),
+        http::StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_public_message_excludes(&credentials, &[CANARY_PATH, "capset"]);
+
+    let timeout = StackError::WorkloadFsTimeout {
+        timeout: std::time::Duration::from_secs(60),
+    };
+    assert_eq!(timeout.error_code(), "workload_fs.timeout");
+    assert_eq!(
+        timeout.public_message(),
+        "workload filesystem job timed out"
+    );
+
+    let owner = StackError::WorkloadFsOwnerMismatch {
+        path: PathBuf::from(CANARY_PATH),
+        expected_uid: 1001,
+        actual_uid: 0,
+    };
+    assert_eq!(owner.http_status(), http::StatusCode::BAD_REQUEST);
+    assert_public_message_excludes(&owner, &[CANARY_PATH, "1001"]);
+}
+
 // === domain coverage ===
 
 const ENUM_SOURCE: &str = include_str!("../error.rs");
@@ -452,6 +512,7 @@ const DOMAIN_MODULES: &[(&str, &str)] = &[
     ("command", include_str!("command.rs")),
     ("permission", include_str!("permission.rs")),
     ("auth_http", include_str!("auth_http.rs")),
+    ("workload_fs", include_str!("workload_fs.rs")),
 ];
 
 const DISPATCH_FUNCTIONS: &[&str] = &["error_code", "public_message", "http_status"];

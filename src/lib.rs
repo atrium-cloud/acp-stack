@@ -26,6 +26,7 @@ pub mod security;
 pub mod state;
 pub mod time_util;
 pub mod tracing_init;
+pub mod workload_fs;
 pub mod workspace;
 
 pub use error::{Result, StackError};

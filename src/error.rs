@@ -19,6 +19,7 @@ mod serve;
 mod session;
 mod state;
 mod supabase;
+mod workload_fs;
 mod workspace;
 mod workspace_source;
 
@@ -931,6 +932,61 @@ pub enum StackError {
         "secret ref at `{field}` looks like an inline secret value rather than a reference name"
     )]
     SecretRefLooksLikeValue { field: &'static str },
+
+    // === workload fs ===
+    #[error("workload path {path} is invalid: {reason}")]
+    WorkloadFsInvalidPath { path: PathBuf, reason: &'static str },
+
+    #[error("workload path {path} contains a symlink; refusing to follow it")]
+    WorkloadFsSymlinkRefused { path: PathBuf },
+
+    #[error("workload file {path} has more than one hard link; refusing it")]
+    WorkloadFsHardLinkRefused { path: PathBuf },
+
+    #[error("workload path {path} is not a regular file")]
+    WorkloadFsNotRegular { path: PathBuf },
+
+    #[error("workload path {path} was not found")]
+    WorkloadFsNotFound { path: PathBuf },
+
+    #[error("workload path {path} already exists")]
+    WorkloadFsAlreadyExists { path: PathBuf },
+
+    #[error("workload destination {path} exists and is not an empty directory")]
+    WorkloadFsDestinationNotEmpty { path: PathBuf },
+
+    #[error("workload file {path} is owned by uid {actual_uid}, expected uid {expected_uid}")]
+    WorkloadFsOwnerMismatch {
+        path: PathBuf,
+        expected_uid: u32,
+        actual_uid: u32,
+    },
+
+    #[error("symlink chain at {path} loops or exceeds {max_hops} hops")]
+    WorkloadFsSymlinkLoop { path: PathBuf, max_hops: usize },
+
+    #[error("{path} is writable by the workload identity")]
+    WorkloadFsWorkloadWritable { path: PathBuf },
+
+    #[error("{path} is not readable and executable by the workload identity")]
+    WorkloadFsWorkloadUnreadable { path: PathBuf },
+
+    #[error("failed to enter workload filesystem credentials: {reason}")]
+    WorkloadFsCredentialsFailed { reason: String },
+
+    #[error("workload filesystem job failed: {reason}")]
+    WorkloadFsExecutorFailed { reason: String },
+
+    #[error("workload filesystem job did not finish within {timeout:?}")]
+    WorkloadFsTimeout { timeout: std::time::Duration },
+
+    #[error("workload filesystem {operation} on {path} failed: {source}")]
+    WorkloadFsIo {
+        path: PathBuf,
+        operation: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, StackError>;

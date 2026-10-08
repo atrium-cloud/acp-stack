@@ -1666,6 +1666,20 @@
             "description": "Absolute non-directory paths unioned into the starter config's\n`[workspace.sandbox].mask_files`, so a host control socket or plain file\nis masked from the first sandboxed spawn. Applies only when creating a\nstarter config.",
             "default": []
           },
+          "sandbox_workload_user": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The starter config's `[workspace.sandbox].workload_user`: the local\nuser every sandboxed spawn runs as from the first one. Applies only\nwhen creating a starter config."
+          },
+          "sandbox_require_network_provider": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "The starter config's `[workspace.sandbox].require_network_provider`.\nApplies only when creating a starter config. Absent → false."
+          },
           "data_sources": {
             "type": "array",
             "items": {
@@ -4336,7 +4350,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Advertised capability names, currently `network-provider-workload-env`,\n`agent-test-json`, `managed-credential-base-url`, `sandbox-mask-files`,\nand `managed-node-runtime`. The list grows over time; an absent or empty\nlist means none are present."
+            "description": "Advertised capability names, currently `network-provider-workload-env`,\n`agent-test-json`, `managed-credential-base-url`, `sandbox-mask-files`,\n`managed-node-runtime`, `sandbox-workload-user`, `sandbox-capability-drop`,\n`sandbox-workload-termination`, `workload-io-identity`,\n`host-exec-trusted-inputs`, `install-workload-reachability`,\n`sandbox-require-network-provider`, and `sandbox-off-identity`. The list\ngrows over time; an absent or empty list means none are present."
           }
         },
         "required": [
@@ -8314,6 +8328,17 @@
               "type": "string"
             },
             "description": "Extra absolute paths the workload may read+write (e.g. bwrap binds)\nbeyond the workspace root."
+          },
+          "workload_user": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Local user the agent, ACP terminals and mediated commands run as,\nresolved at load to a uid, gid and home distinct from the runtime's.\n`unshare` and `off` only."
+          },
+          "require_network_provider": {
+            "type": "boolean",
+            "description": "Refuse an `unshare` spawn when no network-provider extension is\ndeclared, instead of falling back to host networking."
           }
         },
         "additionalProperties": false

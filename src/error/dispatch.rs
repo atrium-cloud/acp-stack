@@ -46,6 +46,7 @@ impl StackError {
             .or_else(|| command::error_code(self))
             .or_else(|| permission::error_code(self))
             .or_else(|| auth_http::error_code(self))
+            .or_else(|| workload_fs::error_code(self))
             .unwrap_or_else(|| unclaimed(self, "error_code", INTERNAL_ERROR_CODE))
     }
 
@@ -74,6 +75,7 @@ impl StackError {
             .or_else(|| command::public_message(self))
             .or_else(|| permission::public_message(self))
             .or_else(|| auth_http::public_message(self))
+            .or_else(|| workload_fs::public_message(self))
             .unwrap_or_else(|| unclaimed(self, "public_message", INTERNAL_ERROR_MESSAGE.to_owned()))
     }
 
@@ -166,6 +168,7 @@ impl StackError {
             .or_else(|| command::http_status(self))
             .or_else(|| permission::http_status(self))
             .or_else(|| auth_http::http_status(self))
+            .or_else(|| workload_fs::http_status(self))
             .unwrap_or_else(|| unclaimed(self, "http_status", StatusCode::INTERNAL_SERVER_ERROR))
     }
 }

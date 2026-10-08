@@ -16,6 +16,7 @@ This document records technology choices that affect maintenance or deployment. 
 | serde_norway              | YAML parsing/serialization (maintained serde_yaml successor)                                                                                                                                       |
 | cliclack                  | interactive `acps init` prompts and searchable selectors                                                                                                                                           |
 | rpassword                 | hidden terminal prompts for admin-key entry                                                                                                                                                        |
+| rustix                    | syscall wrappers for the workload filesystem walker and per-thread credential and capability changes                                                                                               |
 | clap_complete             | shell completion script generation for `acps`                                                                                                                                                      |
 | schemars                  | derives the published `/v1` JSON Schema from the wire DTOs (also pulled in transitively by the ACP SDK); the generator bin and `schema_export` module are `dev-tools`-gated, only the derive ships |
 
