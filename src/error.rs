@@ -835,6 +835,13 @@ pub enum StackError {
     #[error("workspace upload is invalid: {reason}")]
     WorkspaceUploadInvalid { reason: &'static str },
 
+    #[error("permission denied for workspace path `{requested}`: {source}")]
+    WorkspacePermissionDenied {
+        requested: String,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("workspace I/O on `{requested}` failed: {source}")]
     WorkspaceIo {
         requested: String,

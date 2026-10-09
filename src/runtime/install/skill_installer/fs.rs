@@ -10,8 +10,8 @@ use rand::RngExt as _;
 use std::time::Duration;
 
 use crate::workload_fs::{
-    Anchor, HandoffOptions, SymlinkPolicy, WriteOptions, copy_file, create_dir_all, handoff_tree,
-    list_dir, remove_tree, rename, stat,
+    Anchor, HandoffOptions, LinkPolicy, SymlinkPolicy, WriteOptions, copy_file, create_dir_all,
+    handoff_tree, list_dir, remove_tree, rename, stat_followed,
 };
 
 // === CONSTANTS ===
@@ -183,8 +183,6 @@ pub(super) fn copy_skill_dir_atomically(
 ) -> Result<()> {
     let staging = staging_path(target_dir, skill_name, "")?;
     let staged = match managed_source {
-        // The handoff walks the destination without following symlinks, so it refuses a
-        // symlinked install directory before creating anything.
         Some(source_id) => handoff_tree(
             workload.executor(),
             source_dir,
@@ -193,6 +191,7 @@ pub(super) fn copy_skill_dir_atomically(
             &HandoffOptions {
                 symlinks: SymlinkPolicy::Reject,
                 hard_links: workload.accepts_hard_links(),
+                destination_links: LinkPolicy::Follow { contained: false },
                 file_mode: workload.file_mode(),
                 dir_mode: workload.dir_mode(),
                 timeout: SKILL_TREE_COPY_TIMEOUT,
@@ -346,10 +345,10 @@ pub(super) fn validate_skill_dir_for_port(
     Ok(())
 }
 
-/// Walk `path` below the workload home one component at a time: every existing component must
-/// be a real directory, and missing ones are created when `create_missing` is set. Returns
-/// whether `path` exists.
-pub(super) fn ensure_directory_no_symlink_ancestors(
+/// Walk `path` below the workload home one component at a time, following links: every existing
+/// component must resolve to a directory, and missing ones are created when `create_missing` is
+/// set. Returns whether `path` exists.
+pub(super) fn ensure_directory_path(
     workload: &WorkloadHome,
     path: &Path,
     create_missing: bool,
@@ -359,12 +358,12 @@ pub(super) fn ensure_directory_no_symlink_ancestors(
         let mut current = PathBuf::new();
         for component in relative.components() {
             current.push(component);
-            match stat(anchor, &current)? {
+            match stat_followed(anchor, &current)? {
                 Some(metadata) if metadata.kind == EntryKind::Dir => {}
                 Some(_) => {
                     return Err(StackError::SkillInstallTargetConflict {
                         path: anchor.path().join(&current),
-                        reason: "skill directory path segment is not a real directory".to_owned(),
+                        reason: "skill directory path segment is not a directory".to_owned(),
                     });
                 }
                 None if create_missing => create_dir_all(anchor, &current, options.dir_mode)?,

@@ -27,6 +27,7 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         WorkspaceNotFound { .. } | WorkspaceParentNotFound { .. } => "workspace.not_found",
         WorkspaceTooLarge { .. } => "workspace.too_large",
         WorkspaceUploadInvalid { .. } => "workspace.upload_invalid",
+        WorkspacePermissionDenied { .. } => "workspace.permission_denied",
         WorkspaceIo { .. } => "workspace.io_failed",
         WorkspaceEncodingInvalid { .. } => "workspace.encoding_invalid",
         _ => return None,
@@ -50,6 +51,9 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
             format!("workspace file exceeds the {limit}-byte size limit")
         }
         WorkspaceUploadInvalid { reason } => format!("workspace upload is invalid: {reason}"),
+        WorkspacePermissionDenied { requested, .. } => {
+            format!("permission denied for workspace path `{requested}`")
+        }
         WorkspaceIo { .. } => "workspace I/O failed".to_owned(),
         WorkspaceEncodingInvalid { reason } => {
             format!("workspace file encoding is invalid: {reason}")
@@ -67,6 +71,7 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         | WorkspaceEncodingInvalid { .. } => StatusCode::BAD_REQUEST,
         WorkspaceNotFound { .. } | WorkspaceParentNotFound { .. } => StatusCode::NOT_FOUND,
         WorkspaceTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+        WorkspacePermissionDenied { .. } => StatusCode::FORBIDDEN,
         WorkspaceIo { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         _ => return None,
     })

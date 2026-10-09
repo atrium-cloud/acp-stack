@@ -105,15 +105,6 @@ impl SandboxProfile {
         }
     }
 
-    /// How workload file I/O treats links: refused with an identity, followed without one, where
-    /// the workload already runs as the runtime. `contained` keeps resolved paths below the root.
-    pub fn link_policy(&self, contained: bool) -> crate::workload_fs::LinkPolicy {
-        match self.identity {
-            Some(_) => crate::workload_fs::LinkPolicy::Refuse,
-            None => crate::workload_fs::LinkPolicy::Follow { contained },
-        }
-    }
-
     /// Whether a copy into workload-owned space may read a hard-linked source file. With an
     /// identity, a link the workload planted could alias a file only the runtime can read.
     pub fn accepts_hard_links(&self) -> bool {

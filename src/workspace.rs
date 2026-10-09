@@ -1,8 +1,9 @@
 //! Workspace file operations for the HTTP and ACP `fs/*` surfaces. A request names a path that
 //! passes lexical validation (no NUL, `..`, or absolute prefix) and becomes a path relative to an
-//! [`Anchor`]; every operation then walks from that anchor with the no-follow walker, so a symlink
-//! anywhere below it and a hard-linked target are refused instead of followed. Callers run these
-//! synchronous primitives as [`crate::workload_fs::Executor`] jobs.
+//! [`Anchor`]; every operation then walks from that anchor following links, and refuses a path
+//! whose resolved form leaves the anchor. Callers run these synchronous primitives as
+//! [`crate::workload_fs::Executor`] jobs, so a workload identity's credentials decide what a link
+//! inside the root may reach.
 
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
@@ -18,6 +19,7 @@ use crate::workload_fs::{self, Anchor, LinkPolicy, WriteOptions};
 
 const HARD_LINK_REASON: &str = "target has more than one hard link";
 const NOT_REGULAR_REASON: &str = "target is not a regular file";
+const SYMLINK_LOOP_REASON: &str = "symlinks form a loop";
 const OWNER_MISMATCH_REASON: &str = "target is owned by another user";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,8 +91,8 @@ pub fn anchored_relative_path(
 
 /// Open the anchor a request on `root` walks from. A missing root reads as a missing path whatever
 /// the operation.
-pub fn open_root(root: &Path, requested: &str, links: LinkPolicy) -> Result<Anchor> {
-    Anchor::open_with(root, links)
+pub fn open_root(root: &Path, requested: &str) -> Result<Anchor> {
+    Anchor::open_with(root, LinkPolicy::Follow { contained: true })
         .map_err(|error| workspace_error(error, requested, PathIntent::ReadExisting))
 }
 
@@ -178,7 +180,7 @@ pub fn list_directory(
     Ok(WorkspaceListing { entries })
 }
 
-/// Read the single-link regular file at `relative`, at most `max_bytes` long.
+/// Read the regular file at `relative`, at most `max_bytes` long.
 pub fn read_file(
     anchor: &Anchor,
     relative: &Path,
@@ -195,8 +197,8 @@ pub fn read_file(
     })
 }
 
-/// Open the single-link regular file at `relative` for streaming, with no size bound. The size is
-/// the opened file's own, so it describes exactly what the handle reads.
+/// Open the regular file at `relative` for streaming, with no size bound. The size is the opened
+/// file's own, so it describes exactly what the handle reads.
 pub fn open_file(anchor: &Anchor, relative: &Path, requested: &str) -> Result<FileOpen> {
     let (file, info) = workload_fs::open_file(anchor, relative)
         .map_err(|error| workspace_error(error, requested, PathIntent::ReadExisting))?;
@@ -206,7 +208,8 @@ pub fn open_file(anchor: &Anchor, relative: &Path, requested: &str) -> Result<Fi
     })
 }
 
-/// Atomically replace or create the file at `relative`, returning its post-write size and mtime.
+/// Atomically replace or create the file at `relative`, or the file a symlink there leads to,
+/// returning its post-write size and mtime.
 pub fn write_file(
     anchor: &Anchor,
     relative: &Path,
@@ -219,14 +222,15 @@ pub fn write_file(
     file_metadata(anchor, relative, requested)
 }
 
-/// Remove the regular file at `relative`; directories and symlinks are refused.
+/// Remove the regular file or symlink at `relative`; a symlink is removed as a link and its target
+/// is kept. Directories are refused.
 pub fn delete_file(anchor: &Anchor, relative: &Path, requested: &str) -> Result<()> {
     workload_fs::remove_file(anchor, relative)
         .map_err(|error| workspace_error(error, requested, PathIntent::ReadExisting))
 }
 
 fn file_metadata(anchor: &Anchor, relative: &Path, requested: &str) -> Result<FileMetadata> {
-    let info = workload_fs::stat(anchor, relative)
+    let info = workload_fs::stat_followed(anchor, relative)
         .map_err(|error| workspace_error(error, requested, PathIntent::ReadExisting))?
         .ok_or_else(|| StackError::WorkspaceNotFound {
             requested: requested.to_owned(),
@@ -251,6 +255,7 @@ fn workspace_error(error: StackError, requested: &str, intent: PathIntent) -> St
             StackError::WorkspaceSymlinkEscape { requested }
         }
         StackError::WorkloadFsHardLinkRefused { .. } => invalid(HARD_LINK_REASON, requested),
+        StackError::WorkloadFsSymlinkLoop { .. } => invalid(SYMLINK_LOOP_REASON, requested),
         StackError::WorkloadFsNotRegular { .. } => invalid(NOT_REGULAR_REASON, requested),
         StackError::WorkloadFsOwnerMismatch { .. } => invalid(OWNER_MISMATCH_REASON, requested),
         // A write's own target may be missing, so a missing component is a missing parent.
@@ -258,6 +263,11 @@ fn workspace_error(error: StackError, requested: &str, intent: PathIntent) -> St
             PathIntent::ReadExisting => StackError::WorkspaceNotFound { requested },
             PathIntent::WriteOrCreate => StackError::WorkspaceParentNotFound { requested },
         },
+        StackError::WorkloadFsIo { source, .. }
+            if source.kind() == std::io::ErrorKind::PermissionDenied =>
+        {
+            StackError::WorkspacePermissionDenied { requested, source }
+        }
         StackError::WorkloadFsIo { source, .. } => StackError::WorkspaceIo { requested, source },
         other => other,
     }
@@ -296,7 +306,7 @@ mod tests {
 
     fn workspace() -> (tempfile::TempDir, Anchor) {
         let root = tempfile::tempdir().expect("tempdir");
-        let anchor = Anchor::open(root.path()).expect("anchor");
+        let anchor = open_root(root.path(), ".").expect("anchor");
         (root, anchor)
     }
 
@@ -399,12 +409,8 @@ mod tests {
     #[test]
     fn open_root_reports_a_missing_root_as_not_found() {
         let parent = tempfile::tempdir().expect("tempdir");
-        let error = open_root(
-            &parent.path().join("missing-root"),
-            "notes/x.txt",
-            LinkPolicy::Refuse,
-        )
-        .expect_err("missing root");
+        let error = open_root(&parent.path().join("missing-root"), "notes/x.txt")
+            .expect_err("missing root");
         assert!(matches!(
             error,
             StackError::WorkspaceNotFound { requested } if requested == "notes/x.txt"
@@ -475,16 +481,14 @@ mod tests {
     }
 
     #[test]
-    fn read_file_refuses_symlinks_inside_and_outside_the_root() {
+    fn read_file_refuses_links_that_resolve_outside_the_root() {
         let (root, anchor) = workspace();
         let outside = tempfile::tempdir().expect("outside");
         fs::write(outside.path().join("secret"), b"leak").expect("secret");
-        fs::write(root.path().join("real.txt"), b"ok").expect("real");
         symlink(outside.path().join("secret"), root.path().join("escape")).expect("escape");
-        symlink(root.path().join("real.txt"), root.path().join("inner")).expect("inner");
         symlink(outside.path(), root.path().join("dir")).expect("dir");
 
-        for relative in ["escape", "inner", "dir/secret"] {
+        for relative in ["escape", "dir/secret"] {
             assert!(
                 matches!(
                     read_file(&anchor, Path::new(relative), relative, MAX_READ),
@@ -496,10 +500,8 @@ mod tests {
     }
 
     #[test]
-    fn without_an_identity_links_inside_the_root_are_followed() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let anchor =
-            Anchor::open_with(root.path(), LinkPolicy::Follow { contained: true }).expect("anchor");
+    fn links_inside_the_root_are_followed() {
+        let (root, anchor) = workspace();
         let outside = tempfile::tempdir().expect("outside");
         fs::write(outside.path().join("secret"), b"leak").expect("secret");
         fs::create_dir(root.path().join("real")).expect("real dir");
@@ -533,6 +535,67 @@ mod tests {
             read_file(&anchor, Path::new("escape"), "escape", MAX_READ),
             Err(StackError::WorkspaceSymlinkEscape { .. })
         ));
+    }
+
+    #[test]
+    fn write_file_writes_through_a_link_and_keeps_it() {
+        let (root, anchor) = workspace();
+        fs::write(root.path().join("real.txt"), b"old").expect("real");
+        symlink("real.txt", root.path().join("relative")).expect("relative link");
+        symlink(root.path().join("relative"), root.path().join("chained")).expect("chained link");
+        symlink("made.txt", root.path().join("dangling")).expect("dangling link");
+
+        let written = write_file(
+            &anchor,
+            Path::new("chained"),
+            "chained",
+            b"through",
+            &owner_only(),
+        )
+        .expect("write through a chain");
+        assert_eq!(written.size, 7);
+        assert_eq!(
+            fs::read(root.path().join("real.txt")).expect("real"),
+            b"through"
+        );
+        for link in ["relative", "chained"] {
+            assert!(
+                fs::symlink_metadata(root.path().join(link))
+                    .expect("link kept")
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+
+        write_file(
+            &anchor,
+            Path::new("dangling"),
+            "dangling",
+            b"made",
+            &owner_only(),
+        )
+        .expect("write through a dangling link");
+        assert_eq!(
+            fs::read(root.path().join("made.txt")).expect("made"),
+            b"made"
+        );
+    }
+
+    #[test]
+    fn symlink_loops_are_reported_as_invalid_paths() {
+        let (root, anchor) = workspace();
+        symlink("second", root.path().join("first")).expect("first");
+        symlink("first", root.path().join("second")).expect("second");
+
+        assert_invalid(
+            read_file(&anchor, Path::new("first"), "first", MAX_READ).expect_err("read loop"),
+            SYMLINK_LOOP_REASON,
+        );
+        assert_invalid(
+            write_file(&anchor, Path::new("first"), "first", b"x", &owner_only())
+                .expect_err("write loop"),
+            SYMLINK_LOOP_REASON,
+        );
     }
 
     #[test]
@@ -624,7 +687,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_file_removes_files_and_refuses_directories_symlinks_and_missing() {
+    fn delete_file_removes_files_and_links_and_refuses_directories_escapes_and_missing() {
         let (root, anchor) = workspace();
         let outside = tempfile::tempdir().expect("outside");
         let secret = outside.path().join("secret");
@@ -636,19 +699,16 @@ mod tests {
 
         delete_file(&anchor, Path::new("scratch.txt"), "scratch.txt").expect("delete");
         assert!(!root.path().join("scratch.txt").exists());
+        delete_file(&anchor, Path::new("link"), "link").expect("delete the link");
+        assert!(fs::symlink_metadata(root.path().join("link")).is_err());
         assert_invalid(
             delete_file(&anchor, Path::new("subdir"), "subdir").expect_err("directory"),
             "regular file",
         );
-        for relative in ["link", "dir/secret"] {
-            assert!(
-                matches!(
-                    delete_file(&anchor, Path::new(relative), relative),
-                    Err(StackError::WorkspaceSymlinkEscape { .. })
-                ),
-                "{relative} must be refused"
-            );
-        }
+        assert!(matches!(
+            delete_file(&anchor, Path::new("dir/secret"), "dir/secret"),
+            Err(StackError::WorkspaceSymlinkEscape { .. })
+        ));
         assert!(matches!(
             delete_file(&anchor, Path::new("absent"), "absent"),
             Err(StackError::WorkspaceNotFound { .. })
@@ -684,7 +744,7 @@ mod tests {
         let written = profile
             .executor()
             .run(workload_fs::DEFAULT_JOB_TIMEOUT, move || {
-                let anchor = open_root(&root_path, "note.md", LinkPolicy::Refuse)?;
+                let anchor = open_root(&root_path, "note.md")?;
                 write_file(&anchor, Path::new("note.md"), "note.md", b"hello", &options)
             })
             .expect("workload write");
@@ -709,7 +769,7 @@ mod tests {
     }
 
     #[test]
-    fn open_file_refuses_symlinks_and_hard_links_without_following() {
+    fn open_file_follows_links_inside_the_root_only() {
         let (root, anchor) = workspace();
         let outside = tempfile::tempdir().expect("outside");
         fs::write(outside.path().join("secret"), b"leak").expect("secret");
@@ -719,7 +779,11 @@ mod tests {
         symlink(outside.path(), root.path().join("dir")).expect("dir");
         fs::hard_link(root.path().join("real.txt"), root.path().join("linked")).expect("hard");
 
-        for relative in ["escape", "inner", "dir/secret"] {
+        for relative in ["inner", "linked"] {
+            let opened = open_file(&anchor, Path::new(relative), relative).expect(relative);
+            assert_eq!(opened.size, 2);
+        }
+        for relative in ["escape", "dir/secret"] {
             assert!(
                 matches!(
                     open_file(&anchor, Path::new(relative), relative),
@@ -728,10 +792,6 @@ mod tests {
                 "{relative} must be refused"
             );
         }
-        assert_invalid(
-            open_file(&anchor, Path::new("linked"), "linked").expect_err("hard link"),
-            HARD_LINK_REASON,
-        );
     }
 
     #[cfg(target_os = "linux")]
@@ -762,16 +822,12 @@ mod tests {
         let outcome = profile
             .executor()
             .run(workload_fs::DEFAULT_JOB_TIMEOUT, move || {
-                let anchor = open_root(&root_path, "private.bin", LinkPolicy::Refuse)?;
+                let anchor = open_root(&root_path, "private.bin")?;
                 open_file(&anchor, Path::new("private.bin"), "private.bin")
             });
 
         assert!(
-            matches!(
-                &outcome,
-                Err(StackError::WorkspaceIo { source, .. })
-                    if source.kind() == std::io::ErrorKind::PermissionDenied
-            ),
+            matches!(&outcome, Err(StackError::WorkspacePermissionDenied { .. })),
             "expected a permission refusal, got {outcome:?}"
         );
     }

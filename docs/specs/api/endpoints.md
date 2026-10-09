@@ -958,7 +958,7 @@ The `agent.inference_*` codes carry a sanitized public message of the form `"inf
 
 ## Workspace Files
 
-Workspace routes are session-tier. Paths are workspace-relative. The runtime rejects absolute paths, NUL bytes, `..` traversal, symlink escapes, writes through existing symlink targets, and reads, writes, and uploads above `workspace.max_file_bytes`.
+Workspace routes are session-tier. Paths are workspace-relative. The runtime rejects absolute paths, NUL bytes, `..` traversal, symlink escapes, and reads, writes, and uploads above `workspace.max_file_bytes`. Symlinks that resolve inside the root are followed: a write through one replaces the file it leads to and keeps the link.
 
 ### `GET /v1/workspace`
 
@@ -1004,11 +1004,15 @@ Workspace routes are session-tier. Paths are workspace-relative. The runtime rej
 - Tier: `session`
 - Request: `path` query parameter.
 - Response: standard envelope.
-- Notes: deletes one regular file.
+- Notes: deletes one regular file, or one symlink as a link while its target stays.
 
 #### Size Cap
 
 `workspace.max_file_bytes` caps reads, writes, and uploads. Oversized files return `413 workspace.too_large`.
+
+#### Permission Errors
+
+A path the operation's credentials cannot open returns `403 workspace.permission_denied`. With `[workspace.sandbox].workload_user` set, those are the identity's credentials, so a link to a path the identity cannot open fails this way. A write to a file owned by another user, directly or through a link, returns `400 workspace.path_invalid`.
 
 #### Workload Identity Errors
 
@@ -1173,7 +1177,7 @@ A `running` row is reconciled to `failed` with `error.code = "deps.apply_abandon
 ```json
 {
   "version": "0.1.9",
-  "features": ["network-provider-workload-env", "agent-test-json", "managed-credential-base-url", "sandbox-mask-files", "managed-node-runtime", "sandbox-workload-user", "sandbox-capability-drop", "sandbox-workload-termination", "workload-io-identity", "host-exec-trusted-inputs", "install-workload-reachability", "sandbox-require-network-provider", "sandbox-off-identity"]
+  "features": ["network-provider-workload-env", "agent-test-json", "managed-credential-base-url", "sandbox-mask-files", "managed-node-runtime", "sandbox-workload-user", "sandbox-capability-drop", "sandbox-workload-termination", "workload-io-identity", "host-exec-trusted-inputs", "install-workload-reachability", "sandbox-require-network-provider", "sandbox-off-identity", "workload-io-follow-links"]
 }
 ```
 
@@ -1188,11 +1192,12 @@ A `running` row is reconciled to `failed` with `error.code = "deps.apply_abandon
     - `sandbox-workload-user` covers `[workspace.sandbox].workload_user`, its separate workload home, and `sandbox_workload_user` on the init create body (see [security.md](../security.md#workload-identity))
     - `sandbox-capability-drop` covers empty effective, permitted, and bounding capability sets for a workload identity under `unshare` and `off`
     - `sandbox-workload-termination` covers stopping a workload identity's whole process tree without same-uid signals
-    - `workload-io-identity` covers workload file I/O under the identity's filesystem credentials and the no-symlink, no-hard-link walk
+    - `workload-io-identity` covers workload file I/O under the identity's filesystem credentials
     - `host-exec-trusted-inputs` covers probes, installs, and updates running from a runtime-owned cwd and an identity-safe `PATH` and executable chain
     - `install-workload-reachability` covers the post-install check that the Agent's binary chain is reachable and not writable by the identity
     - `sandbox-require-network-provider` covers `[workspace.sandbox].require_network_provider` and `sandbox_require_network_provider` on the init create body
     - `sandbox-off-identity` covers `off` with a workload identity: the privilege drop without namespaces or masks
+    - `workload-io-follow-links` covers workload file I/O following symlinks and hard links under the I/O credentials, workspace paths contained by their resolved path, writes through a link keeping the link, and `403 workspace.permission_denied`
 
 ### `GET /v1/status/agent`
 

@@ -32,7 +32,7 @@ pub struct WorkloadHome {
     runtime_home: PathBuf,
     home: PathBuf,
     executor: Executor,
-    links: LinkPolicy,
+    hard_links: bool,
     file_mode: u32,
     dir_mode: u32,
     expected_owner: u32,
@@ -61,7 +61,7 @@ impl WorkloadHome {
             runtime_home: runtime_home.to_path_buf(),
             home: profile.workload_home(runtime_home).to_path_buf(),
             executor: profile.executor(),
-            links: profile.link_policy(false),
+            hard_links: profile.accepts_hard_links(),
             file_mode,
             dir_mode,
             expected_owner,
@@ -99,7 +99,7 @@ impl WorkloadHome {
 
     /// Whether copies into the home may read hard-linked sources; see [`SandboxProfile::accepts_hard_links`].
     pub fn accepts_hard_links(&self) -> bool {
-        matches!(self.links, LinkPolicy::Follow { .. })
+        self.hard_links
     }
 
     /// Writes create missing parents and refuse to replace a file another uid owns.
@@ -151,17 +151,15 @@ impl WorkloadHome {
     }
 
     /// Opened under the executor because the runtime may lack search permission on a workload
-    /// identity's home.
+    /// identity's home. Walks below it follow links anywhere, as the agent's own tools would.
     fn anchor(&self) -> Result<Arc<Anchor>> {
         if let Some(anchor) = self.anchor.get() {
             return Ok(Arc::clone(anchor));
         }
         let home = self.home.clone();
-        let links = self.links;
-        let opened = Arc::new(
-            self.executor
-                .run(DEFAULT_JOB_TIMEOUT, move || Anchor::open_with(&home, links))?,
-        );
+        let opened = Arc::new(self.executor.run(DEFAULT_JOB_TIMEOUT, move || {
+            Anchor::open_with(&home, LinkPolicy::Follow { contained: false })
+        })?);
         Ok(Arc::clone(self.anchor.get_or_init(|| opened)))
     }
 
@@ -208,9 +206,11 @@ impl WorkloadHome {
         })
     }
 
+    /// Remove the file at `path`, or the file a symlink there leads to, keeping the link, so it
+    /// undoes a [`WorkloadHome::write_atomic`] through the link.
     pub fn remove_file(&self, path: &Path) -> Result<()> {
         let relative = self.relative(path)?;
-        self.run(move |anchor, _| crate::workload_fs::remove_file(anchor, &relative))
+        self.run(move |anchor, _| crate::workload_fs::remove_link_target(anchor, &relative))
     }
 
     /// Whether a file was there to remove.
@@ -251,9 +251,9 @@ impl WorkloadHome {
         self.run(move |anchor, _| crate::workload_fs::read_link(anchor, &relative))
     }
 
-    /// Validate a file target below the workload home: every existing parent must be a real
-    /// directory owned by the expected uid, missing parents are created, and an existing target
-    /// must be a single-link regular file owned by the expected uid.
+    /// Validate a file target below the workload home, following links: every existing parent
+    /// must resolve to a directory owned by the expected uid, missing parents are created, and an
+    /// existing target must resolve to a regular file owned by the expected uid.
     pub fn prepare_owned_file(&self, path: &Path) -> Result<()> {
         let relative = self.relative(path)?;
         let home = self.home.clone();
@@ -269,13 +269,10 @@ impl WorkloadHome {
                 };
                 parent.push(name);
                 let display = home.join(&parent);
-                match crate::workload_fs::stat(anchor, &parent)? {
+                match crate::workload_fs::stat_followed(anchor, &parent)? {
                     None => crate::workload_fs::create_dir_all(anchor, &parent, options.dir_mode)?,
                     Some(info) if info.kind == EntryKind::Dir => {
                         require_owner(&info, expected_owner, display)?;
-                    }
-                    Some(info) if info.kind == EntryKind::Symlink => {
-                        return Err(StackError::WorkloadFsSymlinkRefused { path: display });
                     }
                     Some(_) => {
                         return Err(StackError::WorkloadFsInvalidPath {
@@ -286,17 +283,11 @@ impl WorkloadHome {
                 }
             }
             let display = home.join(&relative);
-            match crate::workload_fs::stat(anchor, &relative)? {
+            match crate::workload_fs::stat_followed(anchor, &relative)? {
                 None => Ok(()),
                 Some(info) => match info.kind {
-                    EntryKind::File if info.nlink > 1 => {
-                        Err(StackError::WorkloadFsHardLinkRefused { path: display })
-                    }
                     EntryKind::File => require_owner(&info, expected_owner, display),
-                    EntryKind::Symlink => {
-                        Err(StackError::WorkloadFsSymlinkRefused { path: display })
-                    }
-                    EntryKind::Dir | EntryKind::Other => {
+                    EntryKind::Dir | EntryKind::Symlink | EntryKind::Other => {
                         Err(StackError::WorkloadFsNotRegular { path: display })
                     }
                 },
@@ -564,9 +555,9 @@ mod tests {
     }
 
     #[test]
-    fn prepare_owned_file_creates_missing_parents_and_refuses_links() {
+    fn prepare_owned_file_creates_missing_parents_and_follows_links() {
         let home = tempfile::tempdir().expect("home");
-        let outside = tempfile::tempdir().expect("outside");
+        let dotfiles = tempfile::tempdir().expect("dotfiles");
         let workload = WorkloadHome::with_process_credentials(home.path(), home.path());
 
         workload
@@ -574,27 +565,43 @@ mod tests {
             .expect("missing parents created");
         assert!(home.path().join(".config/opencode").is_dir());
 
-        std::os::unix::fs::symlink(outside.path(), home.path().join(".codex")).expect("link");
-        let error = workload
-            .prepare_owned_file(&home.path().join(".codex/config.toml"))
-            .expect_err("symlinked parent");
-        assert!(
-            matches!(error, StackError::WorkloadFsSymlinkRefused { .. }),
-            "{error:?}"
+        std::os::unix::fs::symlink(dotfiles.path(), home.path().join(".codex")).expect("link");
+        let codex_config = home.path().join(".codex/config.toml");
+        workload
+            .prepare_owned_file(&codex_config)
+            .expect("symlinked parent");
+        workload
+            .write_atomic(&codex_config, b"model = \"x\"\n".to_vec())
+            .expect("write through the linked parent");
+        assert_eq!(
+            std::fs::read(dotfiles.path().join("config.toml")).expect("dotfile"),
+            b"model = \"x\"\n"
         );
 
-        let outside_file = outside.path().join("settings.json");
-        std::fs::write(&outside_file, b"{}").expect("outside file");
+        let shared = dotfiles.path().join("settings.json");
+        std::fs::write(&shared, b"{}").expect("shared settings");
         std::fs::create_dir(home.path().join(".claude")).expect("claude dir");
         let linked = home.path().join(".claude/settings.json");
-        std::fs::hard_link(&outside_file, &linked).expect("hard link");
-        let error = workload
+        std::os::unix::fs::symlink(&shared, &linked).expect("file link");
+        workload
             .prepare_owned_file(&linked)
-            .expect_err("hard-linked target");
+            .expect("symlinked target");
+        workload
+            .write_atomic(&linked, b"{\"a\":1}".to_vec())
+            .expect("write through the linked target");
+        assert_eq!(std::fs::read(&shared).expect("shared"), b"{\"a\":1}");
         assert!(
-            matches!(error, StackError::WorkloadFsHardLinkRefused { .. }),
-            "{error:?}"
+            std::fs::symlink_metadata(&linked)
+                .expect("link kept")
+                .file_type()
+                .is_symlink()
         );
+
+        let hard = home.path().join(".claude/hard.json");
+        std::fs::hard_link(&shared, &hard).expect("hard link");
+        workload
+            .prepare_owned_file(&hard)
+            .expect("hard-linked target");
     }
 
     #[test]
@@ -602,20 +609,24 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         let path = home.path().join(".claude.json");
         std::fs::write(&path, b"{}").expect("file");
+        let link = home.path().join(".claude-link.json");
+        std::os::unix::fs::symlink(&path, &link).expect("link");
         let mut workload = WorkloadHome::with_process_credentials(home.path(), home.path());
         workload.expected_owner = crate::ownership::process_euid().wrapping_add(1);
 
-        let prepared = workload.prepare_owned_file(&path);
-        let written = workload.write_atomic(&path, b"{\"changed\":true}".to_vec());
+        for target in [&path, &link] {
+            let prepared = workload.prepare_owned_file(target);
+            let written = workload.write_atomic(target, b"{\"changed\":true}".to_vec());
 
-        assert!(
-            matches!(prepared, Err(StackError::WorkloadFsOwnerMismatch { .. })),
-            "{prepared:?}"
-        );
-        assert!(
-            matches!(written, Err(StackError::WorkloadFsOwnerMismatch { .. })),
-            "{written:?}"
-        );
+            assert!(
+                matches!(prepared, Err(StackError::WorkloadFsOwnerMismatch { .. })),
+                "{prepared:?}"
+            );
+            assert!(
+                matches!(written, Err(StackError::WorkloadFsOwnerMismatch { .. })),
+                "{written:?}"
+            );
+        }
         assert_eq!(std::fs::read(&path).expect("unchanged"), b"{}");
     }
 }

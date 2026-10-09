@@ -235,7 +235,7 @@ pub fn all_skills_installed(
     skill_names: &[String],
 ) -> bool {
     if !matches!(
-        ensure_directory_no_symlink_ancestors(workload, destination_root, false),
+        ensure_directory_path(workload, destination_root, false),
         Ok(true)
     ) {
         return false;

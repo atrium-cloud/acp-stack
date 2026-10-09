@@ -127,26 +127,38 @@ fn port_skill_directories_preflight_rejects_nested_symlink_before_target_mutatio
 
 #[test]
 #[cfg(unix)]
-fn port_skill_directories_refuses_a_symlinked_source_root() {
+fn port_skill_directories_follows_symlinked_source_and_target_roots() {
     let home = tempfile::tempdir().expect("home");
     let home = canonical_temp_home(&home);
-    let outside = tempfile::tempdir().expect("outside");
-    write_installed_skill(outside.path(), "repo-map", "# Outside\n");
+    let dotfiles = tempfile::tempdir().expect("dotfiles");
+    write_installed_skill(&dotfiles.path().join("source"), "repo-map", "# Linked\n");
+    std::fs::create_dir(dotfiles.path().join("target")).expect("target dir");
     std::fs::create_dir(home.join(".agents")).expect("agents dir");
-    std::os::unix::fs::symlink(outside.path(), home.join(".agents/skills")).expect("symlink");
-    let target = home.join(".config/agents/skills");
+    std::fs::create_dir(home.join(".claude")).expect("claude dir");
+    std::os::unix::fs::symlink(dotfiles.path().join("source"), home.join(".agents/skills"))
+        .expect("source link");
+    std::os::unix::fs::symlink(dotfiles.path().join("target"), home.join(".claude/skills"))
+        .expect("target link");
 
-    let err = port_skill_directories(&workload_at(&home), &home.join(".agents/skills"), &target)
-        .expect_err("symlinked source root");
+    port_skill_directories(
+        &workload_at(&home),
+        &home.join(".agents/skills"),
+        &home.join(".claude/skills"),
+    )
+    .expect("port through linked roots");
 
-    assert!(matches!(err, StackError::SkillInstallTargetConflict { .. }));
-    assert!(!target.exists());
     assert!(
-        outside
+        dotfiles
             .path()
-            .join("repo-map")
+            .join("target/repo-map")
             .join(SKILL_DESCRIPTOR)
             .is_file()
+    );
+    assert!(
+        std::fs::symlink_metadata(home.join(".claude/skills"))
+            .expect("link kept")
+            .file_type()
+            .is_symlink()
     );
 }
 

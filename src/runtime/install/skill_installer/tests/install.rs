@@ -343,33 +343,36 @@ fn all_skills_installed_rejects_symlinked_target() {
 
 #[test]
 #[cfg(unix)]
-fn install_from_extracted_root_rejects_symlinked_destination_ancestor() {
+fn install_from_extracted_root_follows_a_symlinked_destination_ancestor() {
     let archive = tempfile::tempdir().expect("archive");
     let home = tempfile::tempdir().expect("home");
-    let external = tempfile::tempdir().expect("external");
+    let dotfiles = tempfile::tempdir().expect("dotfiles");
     write_skill(archive.path(), "skills/.curated", "repo-map");
     let home_path = canonical_temp_home(&home);
-    std::os::unix::fs::symlink(external.path(), home_path.join(".agents")).expect("symlink");
+    std::os::unix::fs::symlink(dotfiles.path(), home_path.join(".agents")).expect("symlink");
     let destination = home_path.join(".agents/skills");
 
-    let err = install_from_extracted_root(
+    install_from_extracted_root(
         &source(),
         archive.path(),
         &home_workload(&home),
         &destination,
         &["repo-map".to_owned()],
     )
-    .expect_err("symlinked ancestor rejected");
+    .expect("install through the symlinked ancestor");
 
+    assert!(dotfiles.path().join("skills/repo-map/SKILL.md").is_file());
+    assert!(all_skills_installed(
+        &source(),
+        &home_workload(&home),
+        &destination,
+        &["repo-map".to_owned()]
+    ));
     assert!(
-        matches!(err, StackError::WorkloadFsSymlinkRefused { .. }),
-        "{err:?}"
-    );
-    assert_eq!(
-        std::fs::read_dir(external.path())
-            .expect("external listing")
-            .count(),
-        0
+        std::fs::symlink_metadata(home_path.join(".agents"))
+            .expect("link kept")
+            .file_type()
+            .is_symlink()
     );
 }
 

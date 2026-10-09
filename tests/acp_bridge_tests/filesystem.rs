@@ -86,14 +86,50 @@ async fn fs_rejects_out_of_workspace_write_and_missing_file_read() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn fs_write_rejects_symlink_target() {
+async fn fs_write_through_a_symlink_inside_the_workspace_keeps_the_link() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let outside = tempfile::NamedTempFile::new().expect("outside file");
+    let target = dir.path().join("target.txt");
+    std::fs::write(&target, "before").expect("target");
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&target, &link).expect("symlink");
+    let (report, bridge, _sink) = run_terminal_probe(
+        &[
+            "--fs-write-path",
+            &link.to_string_lossy(),
+            "--fs-write-content",
+            "through",
+        ],
+        None,
+    )
+    .await;
+    assert_eq!(report["fs_write_ok"], true);
+    assert_eq!(std::fs::read_to_string(&target).expect("target"), "through");
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .expect("link kept")
+            .file_type()
+            .is_symlink()
+    );
+    bridge.shutdown().await.expect("shutdown ok");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fs_write_rejects_a_symlink_that_leaves_the_workspace() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let outside_dir =
+        tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).expect("dir outside the workspace");
+    let outside = outside_dir.path().join("outside.txt");
+    std::fs::write(&outside, "outside").expect("outside file");
     let link = dir.path().join("sneaky-link");
-    std::os::unix::fs::symlink(outside.path(), &link).expect("symlink");
+    std::os::unix::fs::symlink(&outside, &link).expect("symlink");
     let (report, bridge, _sink) =
         run_terminal_probe(&["--fs-write-path", &link.to_string_lossy()], None).await;
     assert_eq!(report["fs_write_error_code"], INVALID_PARAMS_CODE);
+    assert_eq!(
+        std::fs::read_to_string(&outside).expect("outside"),
+        "outside"
+    );
     bridge.shutdown().await.expect("shutdown ok");
 }
 

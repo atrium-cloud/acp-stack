@@ -4,8 +4,9 @@
 //! - [`Executor`] runs a job with the process's own credentials or, for a workload identity, on a
 //!   dedicated thread holding the workload's filesystem credentials.
 //! - The walker ([`Anchor`], [`read_file`], [`write_file_atomic`], and siblings) walks below its
-//!   anchor by its [`LinkPolicy`]: for a workload identity it never follows a symlink and refuses
-//!   hard-linked and non-regular targets.
+//!   anchor by its [`LinkPolicy`]. Walks on a workload thread follow links, so the identity's own
+//!   credentials decide what a link reaches; walks with the runtime's credentials over a tree the
+//!   workload can write never follow a symlink and refuse hard-linked targets.
 //! - [`handoff_tree`] moves a runtime-staged tree into a workload-owned destination.
 //! - [`workload_writable_components`] and [`check_exec_chain`] report what the workload identity
 //!   can write or execute.
@@ -32,7 +33,8 @@ pub use handoff::{HandoffOptions, HandoffSummary, SymlinkPolicy, handoff_tree};
 pub use walk::{
     Anchor, EntryInfo, EntryKind, LinkPolicy, WriteOptions, copy_file, create_dir_all, list_dir,
     open_file, read_file, read_file_with_info, read_link, remove_empty_dir, remove_file,
-    remove_tree, rename, stat, symlink, write_file_atomic, write_file_new,
+    remove_link_target, remove_tree, rename, stat, stat_followed, symlink, write_file_atomic,
+    write_file_new,
 };
 
 // === CONSTANTS ===
@@ -41,6 +43,7 @@ pub use walk::{
 pub const DEFAULT_JOB_TIMEOUT: Duration = Duration::from_secs(60);
 /// Matches the kernel's MAXSYMLINKS.
 const SYMLINK_CHAIN_MAX_HOPS: usize = 40;
+const NOT_DIRECTORY_REASON: &str = "a path component is not a directory";
 /// File mode for runtime-owned writes made without a workload identity.
 pub const OWNER_ONLY_FILE_MODE: u32 = 0o600;
 /// Directory mode for runtime-owned writes made without a workload identity.
@@ -385,10 +388,25 @@ fn symlink_chain(path: &Path, max_hops: usize, missing_ends_chain: bool) -> Resu
 }
 
 fn chain_failure(path: &Path, operation: &'static str, source: std::io::Error) -> StackError {
-    if source.kind() == std::io::ErrorKind::NotFound {
-        return StackError::WorkloadFsNotFound {
-            path: path.to_path_buf(),
-        };
+    match source.raw_os_error() {
+        Some(libc::ENOENT) => {
+            return StackError::WorkloadFsNotFound {
+                path: path.to_path_buf(),
+            };
+        }
+        Some(libc::ELOOP) => {
+            return StackError::WorkloadFsSymlinkLoop {
+                path: path.to_path_buf(),
+                max_hops: SYMLINK_CHAIN_MAX_HOPS,
+            };
+        }
+        Some(libc::ENOTDIR) => {
+            return StackError::WorkloadFsInvalidPath {
+                path: path.to_path_buf(),
+                reason: NOT_DIRECTORY_REASON,
+            };
+        }
+        _ => {}
     }
     StackError::WorkloadFsIo {
         path: path.to_path_buf(),

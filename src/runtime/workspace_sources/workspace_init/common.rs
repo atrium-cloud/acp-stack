@@ -13,7 +13,7 @@ use crate::runtime::process_runner::HostExec;
 use crate::runtime::sandbox::SandboxProfile;
 use crate::workload_fs::{
     self, Anchor, DEFAULT_JOB_TIMEOUT, EntryKind, Executor, HandoffOptions, HandoffSummary,
-    SymlinkPolicy, WriteOptions,
+    LinkPolicy, SymlinkPolicy, WriteOptions,
 };
 
 use super::SOURCE_SENTINEL_FILE;
@@ -33,6 +33,9 @@ const SENTINEL_MAX_BYTES: u64 = 64 * 1024;
 /// without a workload identity; only the sentinel keeps the owner-only mode the workspace writes use.
 const MATERIALIZED_FILE_MODE_MASK: u32 = 0o777;
 const MATERIALIZED_DIR_MODE: u32 = workload_fs::UMASK_DIR_MODE;
+/// Destination walks run under the executor's credentials, so they follow links that stay inside
+/// the workspace root.
+const ROOT_LINKS: LinkPolicy = LinkPolicy::Follow { contained: true };
 
 /// What every lane materializer shares: the runtime side that fetches into staging and the
 /// workload side that receives the result.
@@ -82,8 +85,8 @@ impl Drop for StagingDir {
 }
 
 /// The workload side of materialization. Every operation walks from an anchor on
-/// `workspace.root` without following symlinks, under the workload identity's credentials when one
-/// is declared; paths are relative to the root.
+/// `workspace.root`, following links that stay inside it, under the workload identity's
+/// credentials when one is declared; paths are relative to the root.
 pub(super) struct WorkspaceDestination {
     root: PathBuf,
     executor: Executor,
@@ -117,7 +120,7 @@ impl WorkspaceDestination {
     ) -> Result<T> {
         let root = self.root.clone();
         self.executor.run(DEFAULT_JOB_TIMEOUT, move || {
-            let anchor = Anchor::open(&root)?;
+            let anchor = Anchor::open_with(&root, ROOT_LINKS)?;
             job(&anchor)
         })
     }
@@ -127,25 +130,30 @@ impl WorkspaceDestination {
         let relative = lane.to_path_buf();
         let display = self.display(lane);
         let dir_mode = MATERIALIZED_DIR_MODE;
-        self.run(move |anchor| match workload_fs::stat(anchor, &relative) {
-            Ok(None) => workload_fs::create_dir_all(anchor, &relative, dir_mode),
-            Ok(Some(info)) => match info.kind {
-                EntryKind::Dir => Ok(()),
-                EntryKind::Symlink => Err(outside_root_error(&display)),
-                EntryKind::File | EntryKind::Other => Err(StackError::WorkspaceMaterializeFailed {
-                    reason: format!(
-                        "lane root `{}` exists and is not a directory",
-                        display.display()
-                    ),
-                }),
+        self.run(
+            move |anchor| match workload_fs::stat_followed(anchor, &relative) {
+                Ok(None) => workload_fs::create_dir_all(anchor, &relative, dir_mode),
+                Ok(Some(info)) => match info.kind {
+                    EntryKind::Dir => Ok(()),
+                    EntryKind::File | EntryKind::Symlink | EntryKind::Other => {
+                        Err(StackError::WorkspaceMaterializeFailed {
+                            reason: format!(
+                                "lane root `{}` exists and is not a directory",
+                                display.display()
+                            ),
+                        })
+                    }
+                },
+                Err(StackError::WorkloadFsSymlinkRefused { .. }) => {
+                    Err(outside_root_error(&display))
+                }
+                Err(error) => Err(error),
             },
-            Err(StackError::WorkloadFsSymlinkRefused { .. }) => Err(outside_root_error(&display)),
-            Err(error) => Err(error),
-        })
+        )
     }
 
     /// The sentinel in the destination at `relative`; `None` when the destination or its
-    /// sentinel is missing. A symlinked destination is refused.
+    /// sentinel is missing. A destination linked outside the root is refused.
     pub(super) fn read_sentinel(&self, relative: &Path) -> Result<Option<Sentinel>> {
         let destination = relative.to_path_buf();
         let display = self.display(relative);
@@ -154,11 +162,9 @@ impl WorkspaceDestination {
             if destination_kind(anchor, &destination, &display)?.is_none() {
                 return Ok(None);
             }
-            match workload_fs::read_file(
-                anchor,
-                &destination.join(SOURCE_SENTINEL_FILE),
-                SENTINEL_MAX_BYTES,
-            ) {
+            let sentinel = destination.join(SOURCE_SENTINEL_FILE);
+            refuse_linked_sentinel(anchor, &sentinel, &display)?;
+            match workload_fs::read_file(anchor, &sentinel, SENTINEL_MAX_BYTES) {
                 Ok(content) => Ok(Some(content)),
                 Err(StackError::WorkloadFsNotFound { .. }) => Ok(None),
                 Err(error) => Err(error),
@@ -204,15 +210,23 @@ impl WorkspaceDestination {
         })
     }
 
-    /// Remove the destination at `relative` and everything below it, never following a symlink.
+    /// Remove the destination at `relative` and everything below it. A destination that is a
+    /// symlink keeps the link and is emptied through it; links below it are unlinked as links.
     pub(super) fn remove(&self, relative: &Path) -> Result<()> {
         let destination = relative.to_path_buf();
-        self.run(
-            move |anchor| match workload_fs::remove_tree(anchor, &destination) {
+        self.run(move |anchor| {
+            let removed = match workload_fs::stat(anchor, &destination)? {
+                None => return Ok(()),
+                Some(info) if info.kind == EntryKind::Symlink => {
+                    clear_linked_directory(anchor, &destination)
+                }
+                Some(_) => workload_fs::remove_tree(anchor, &destination),
+            };
+            match removed {
                 Err(StackError::WorkloadFsNotFound { .. }) => Ok(()),
                 removed => removed,
-            },
-        )
+            }
+        })
     }
 
     /// Hand the tree at `source` off into the destination at `relative`, then stamp the sentinel
@@ -233,6 +247,7 @@ impl WorkspaceDestination {
             &HandoffOptions {
                 symlinks,
                 hard_links: self.hard_links,
+                destination_links: ROOT_LINKS,
                 file_mode: MATERIALIZED_FILE_MODE_MASK,
                 dir_mode: MATERIALIZED_DIR_MODE,
                 timeout: HANDOFF_TIMEOUT,
@@ -244,7 +259,8 @@ impl WorkspaceDestination {
         }
     }
 
-    /// Whether every path in `sentinels` is a regular file, checked without following symlinks.
+    /// Whether every path in `sentinels` is a regular file; a sentinel path that is itself a
+    /// symlink does not count.
     pub(super) fn sentinels_present(&self, sentinels: Vec<PathBuf>) -> Result<bool> {
         self.run(move |anchor| {
             for sentinel in &sentinels {
@@ -264,8 +280,12 @@ impl WorkspaceDestination {
             }
         })?;
         let target = relative.join(SOURCE_SENTINEL_FILE);
+        let display = self.display(relative);
         let options = self.write_options;
-        self.run(move |anchor| workload_fs::write_file_atomic(anchor, &target, &payload, &options))
+        self.run(move |anchor| {
+            refuse_linked_sentinel(anchor, &target, &display)?;
+            workload_fs::write_file_atomic(anchor, &target, &payload, &options)
+        })
     }
 
     pub(super) fn discard_after_failure(
@@ -285,15 +305,38 @@ impl WorkspaceDestination {
     }
 }
 
-/// Kind of the destination entry at `relative`, `None` when it is missing. A symlink at the
-/// destination or along its parents is refused as leaving the workspace.
+/// Kind of the entry the destination at `relative` resolves to, `None` when it is missing. A link
+/// at the destination or along its parents that resolves outside the root is refused as leaving
+/// the workspace.
 fn destination_kind(anchor: &Anchor, relative: &Path, display: &Path) -> Result<Option<EntryKind>> {
-    match workload_fs::stat(anchor, relative) {
+    match workload_fs::stat_followed(anchor, relative) {
         Ok(None) => Ok(None),
-        Ok(Some(info)) if info.kind == EntryKind::Symlink => Err(outside_root_error(display)),
         Ok(Some(info)) => Ok(Some(info.kind)),
         Err(StackError::WorkloadFsSymlinkRefused { .. }) => Err(outside_root_error(display)),
         Err(error) => Err(error),
+    }
+}
+
+fn clear_linked_directory(anchor: &Anchor, destination: &Path) -> Result<()> {
+    for (name, _) in workload_fs::list_dir(anchor, destination)? {
+        workload_fs::remove_tree(anchor, &destination.join(name))?;
+    }
+    Ok(())
+}
+
+/// A source tree can carry its own symlink named like the sentinel, which would otherwise redirect
+/// the sentinel's write and read onto another file in the workspace.
+fn refuse_linked_sentinel(anchor: &Anchor, sentinel: &Path, destination: &Path) -> Result<()> {
+    match workload_fs::stat(anchor, sentinel)? {
+        Some(info) if info.kind == EntryKind::Symlink => {
+            Err(StackError::WorkspaceMaterializeFailed {
+                reason: format!(
+                    "sentinel `{}` is a symlink",
+                    destination.join(SOURCE_SENTINEL_FILE).display()
+                ),
+            })
+        }
+        _ => Ok(()),
     }
 }
 

@@ -1,6 +1,7 @@
 //! Moves a runtime-staged tree into a workload-owned destination. The runtime side walks the source
 //! without following symlinks and streams entries, files as already-open descriptors, to a job run
-//! by the executor, which recreates each entry through the no-follow walker.
+//! by the executor, which recreates each entry through the walker under the destination's
+//! [`LinkPolicy`].
 
 use super::*;
 
@@ -28,6 +29,8 @@ pub struct HandoffOptions {
     /// Accept source files with more than one link. Refused with a workload identity, where a link
     /// planted in a workload-writable source could alias a file only the runtime can read.
     pub hard_links: bool,
+    /// How the destination-side walk treats links; it runs under the executor's credentials.
+    pub destination_links: LinkPolicy,
     /// Copied files keep their source permission bits within this mask.
     pub file_mode: u32,
     pub dir_mode: u32,
@@ -187,7 +190,7 @@ fn receive_into_destination(
     options: &HandoffOptions,
     receiver: Receiver<HandoffEntry>,
 ) -> Result<HandoffSummary> {
-    let anchor = Anchor::open(anchor_path)?;
+    let anchor = Anchor::open_with(anchor_path, options.destination_links)?;
     let created = prepare_destination(&anchor, destination, options.dir_mode)?;
     let received = create_entries(&anchor, destination, options, &receiver);
     // Release a walker blocked on a full channel before cleaning up.
@@ -201,7 +204,7 @@ fn receive_into_destination(
 /// Returns whether this job created the destination directory.
 fn prepare_destination(anchor: &Anchor, destination: &Path, dir_mode: u32) -> Result<bool> {
     let display = anchor.path().join(destination);
-    match stat(anchor, destination)? {
+    match stat_followed(anchor, destination)? {
         None => {
             create_dir_all(anchor, destination, dir_mode)?;
             Ok(true)
@@ -287,6 +290,7 @@ mod tests {
         HandoffOptions {
             symlinks,
             hard_links: false,
+            destination_links: LinkPolicy::Follow { contained: true },
             file_mode: FILE_MODE_MASK,
             dir_mode: OWNER_ONLY_DIR_MODE,
             timeout: DEFAULT_JOB_TIMEOUT,
@@ -511,5 +515,56 @@ mod tests {
         assert!(matches!(error, StackError::WorkloadFsSymlinkRefused { .. }));
         assert!(!outside.path().join("payload").exists());
         assert!(!destination.path().join("tree").exists());
+    }
+
+    #[test]
+    fn a_symlinked_destination_is_followed_when_it_stays_inside_the_anchor() {
+        let source = staged_tree();
+        let destination = tempfile::tempdir().expect("destination");
+        let outside = tempfile::tempdir().expect("outside");
+        std::fs::create_dir(destination.path().join("real")).expect("real");
+        std::os::unix::fs::symlink("real", destination.path().join("inside")).expect("inside");
+        std::os::unix::fs::symlink(outside.path(), destination.path().join("escape"))
+            .expect("escape");
+
+        handoff_tree(
+            &Executor::Process,
+            source.path(),
+            destination.path(),
+            Path::new("inside"),
+            &options(SymlinkPolicy::Reject),
+        )
+        .expect("contained symlinked destination");
+        assert!(destination.path().join("real/bin/tool").is_file());
+
+        let error = handoff_tree(
+            &Executor::Process,
+            source.path(),
+            destination.path(),
+            Path::new("escape"),
+            &options(SymlinkPolicy::Reject),
+        )
+        .expect_err("escaping destination");
+        assert!(matches!(error, StackError::WorkloadFsSymlinkRefused { .. }));
+        assert_eq!(
+            std::fs::read_dir(outside.path()).expect("outside").count(),
+            0
+        );
+
+        let refused = handoff_tree(
+            &Executor::Process,
+            source.path(),
+            destination.path(),
+            Path::new("inside"),
+            &HandoffOptions {
+                destination_links: LinkPolicy::Refuse,
+                ..options(SymlinkPolicy::Reject)
+            },
+        )
+        .expect_err("refused under Refuse");
+        assert!(matches!(
+            refused,
+            StackError::WorkloadFsSymlinkRefused { .. }
+        ));
     }
 }

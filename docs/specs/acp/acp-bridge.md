@@ -91,7 +91,7 @@ Output honors `outputByteLimit` in the spec's direction: truncation drops the ol
 
 `fs/read_text_file` and `fs/write_text_file` operate on paths confined to the session workspace:
 
-- Absolute paths from the agent must resolve inside `[workspace].root` through the same canonicalization and symlink refusal as the workspace API.
+- Absolute paths from the agent must resolve inside `[workspace].root` through the same link following and escape refusal as the workspace API.
 - Reads honor the optional 1-based `line` offset and `limit` line count and are capped at 10 MiB.
 - Writes are atomic write-throughs and record a durable `fs.write` event with source `acp`.
 - Headless, there are no editor buffers, so disk is the truth on both methods.

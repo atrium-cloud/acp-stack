@@ -703,6 +703,7 @@ fn acp_fs_error(error: StackError) -> AcpFsError {
         StackError::WorkspacePathInvalid { .. }
         | StackError::WorkspaceSymlinkEscape { .. }
         | StackError::WorkspaceParentNotFound { .. }
+        | StackError::WorkspacePermissionDenied { .. }
         | StackError::WorkspaceTooLarge { .. } => {
             AcpFsError::invalid_params().data(serde_json::json!({
                 "reason": error.to_string(),

@@ -110,7 +110,9 @@ Pending requests expire according to config. Approval and denial decisions are d
 
 Workspace paths are resolved under `[workspace].root`. The runtime rejects absolute paths from API callers, `..` traversal, embedded NUL bytes, and reads, writes, and uploads above `workspace.max_file_bytes`. Oversized ones return `413 workspace.too_large`.
 
-Without a workload identity, workspace reads, writes, uploads, and deletes follow symlinks that resolve inside the root and refuse symlink escapes and writes through an existing symlink target. With `[workspace.sandbox].workload_user` set, every operation walks the path one component at a time from the workspace root without following symlinks: a symlink at the target or at any parent, a hard-linked target, and a non-regular target are refused. Writes replace the target atomically.
+Workspace reads, writes, uploads, and deletes follow symlinks and hard links like the kernel does, and refuse a path whose resolved form leaves the root with `400 workspace.symlink_escape`. A write through a symlink replaces the file at the end of its chain and keeps the link; a delete of a symlink removes the link. Writes replace the target atomically, and a non-regular target is refused.
+
+With `[workspace.sandbox].workload_user` set, every operation runs with the identity's filesystem credentials, so the kernel decides what a link reaches. A link to a path the identity cannot open fails with `403 workspace.permission_denied`, and a write through a link to a file owned by another user fails with `400 workspace.path_invalid`. Either way the target is unchanged.
 
 ACP `fs/read_text_file` and `fs/write_text_file` requests carry absolute paths by protocol. The runtime accepts them only when they resolve inside the session workspace through the same walk. Each write records a durable `fs.write` audit event.
 
@@ -128,7 +130,7 @@ A selected import durably stages only the prepared canonical config and stripped
 
 Credentials, authentication state, permission and sandbox controls, and other `acps`-owned security fields are removed before an unmanaged residual can be written. Unmanaged hooks, notification commands, command helpers, plugins, or formatters require explicit acknowledgement for the inspected SHA-256 revision.
 
-Native transaction targets are fixed under the workload home, which is the runtime user's home when no workload identity is declared. They must be owned by the workload user and be regular files, and symlinks and linked files are refused. Without a workload identity, managed directories and files use owner-only permissions.
+Native transaction targets are fixed under the workload home, which is the runtime user's home when no workload identity is declared. Symlinks along the path and at the target are followed, and the directories and file they resolve to must be owned by the workload user, with a regular file at the target. Without a workload identity, managed directories and files use owner-only permissions.
 
 ## Deployment Posture
 
@@ -197,7 +199,7 @@ Termination does not depend on signalling the identity's uid:
 
 Files the runtime reads or writes for the workload use the identity's filesystem credentials on a dedicated thread: ACP `fs/*` requests, workspace API reads and writes, native Agent config writes and imports, skill installs, and workspace source materialisation. The kernel marks the `acps` process non-dumpable on the first such credential switch.
 
-Results are owned by the identity. New files follow the runtime's umask, and copied workspace sources keep their source permissions. Every path follows the no-symlink walk described under Workspace Boundary.
+Results are owned by the identity. New files follow the runtime's umask, and copied workspace sources keep their source permissions. Paths follow links with the identity's credentials, as described under Workspace Boundary. Walks the runtime makes with its own credentials over a tree the identity can write, such as reading a local workspace source, follow no symlink and refuse hard-linked files.
 
 Workspace sources are cloned or downloaded by the runtime into a runtime-owned staging directory and then copied in as the identity, so clone credentials never reach it. A local data source containing a hard-linked file is refused.
 

@@ -333,6 +333,23 @@ mod tests {
     }
 
     #[test]
+    fn workspace_permission_denied_maps_to_403_without_local_paths() {
+        let err = StackError::WorkspacePermissionDenied {
+            requested: "notes.md".into(),
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "/srv/acps/secret"),
+        };
+        assert_eq!(err.error_code(), "workspace.permission_denied");
+        assert_eq!(err.http_status(), StatusCode::FORBIDDEN);
+        let env = ApiError::from_stack_error(&err);
+        assert!(env.message.contains("notes.md"), "{}", env.message);
+        assert!(
+            !env.message.contains("/srv/acps"),
+            "leaked: {}",
+            env.message
+        );
+    }
+
+    #[test]
     fn workspace_encoding_invalid_maps_to_400() {
         let err = StackError::WorkspaceEncodingInvalid {
             reason: "encoding must be utf8 or base64",

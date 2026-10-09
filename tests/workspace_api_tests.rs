@@ -779,7 +779,7 @@ async fn assert_refused(response: reqwest::Response, code: &str, context: &str) 
 
 #[cfg(unix)]
 #[tokio::test]
-async fn mutations_refuse_symlinks_at_the_target_and_a_parent() {
+async fn mutations_refuse_symlinks_that_escape_at_the_target_and_a_parent() {
     use std::os::unix::fs::symlink;
 
     let harness = Harness::spawn().await;
@@ -805,7 +805,7 @@ async fn mutations_refuse_symlinks_at_the_target_and_a_parent() {
         )
         .await;
     }
-    for path in ["link", "dir/secret", "uploads/link", "uploads/dir/secret"] {
+    for path in ["dir/secret", "uploads/dir/secret"] {
         assert_refused(
             delete(&harness, path).await,
             "workspace.symlink_escape",
@@ -813,17 +813,67 @@ async fn mutations_refuse_symlinks_at_the_target_and_a_parent() {
         )
         .await;
     }
+    for path in ["link", "uploads/link"] {
+        let response = delete(&harness, path).await;
+        assert!(response.status().is_success(), "DELETE {path}");
+    }
 
     assert_eq!(std::fs::read(&secret).expect("secret"), b"outside");
     assert!(!outside.path().join("new").exists());
     for base in [&harness.workspace_root, &harness.uploads_root] {
-        assert!(
-            std::fs::symlink_metadata(base.join("link"))
-                .expect("link kept")
-                .file_type()
-                .is_symlink()
-        );
+        assert!(std::fs::symlink_metadata(base.join("link")).is_err());
     }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn links_inside_the_root_read_write_and_delete_as_links() {
+    use std::os::unix::fs::symlink;
+
+    let harness = Harness::spawn().await;
+    let root = &harness.workspace_root;
+    std::fs::write(root.join("AGENTS.md"), b"rules").expect("target");
+    symlink("AGENTS.md", root.join("CLAUDE.md")).expect("file link");
+    std::fs::create_dir(root.join("real")).expect("real dir");
+    symlink("real", root.join("linked")).expect("dir link");
+
+    let read = auth(session_client().get(format!(
+        "{}/v1/files/content?path=CLAUDE.md",
+        harness.base_url
+    )))
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(read.status(), StatusCode::OK);
+    let body: Value = read.json().await.expect("json");
+    assert_eq!(body["data"]["content"], "rules");
+
+    let written = put_content(&harness, "CLAUDE.md").await;
+    assert_eq!(written.status(), StatusCode::OK);
+    let body: Value = written.json().await.expect("json");
+    assert_eq!(body["data"]["size"], 7);
+    assert_eq!(
+        std::fs::read(root.join("AGENTS.md")).expect("target"),
+        b"changed"
+    );
+    assert!(
+        std::fs::symlink_metadata(root.join("CLAUDE.md"))
+            .expect("link kept")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        put_content(&harness, "linked/new.md").await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        std::fs::read(root.join("real/new.md")).expect("through dir link"),
+        b"changed"
+    );
+
+    assert!(delete(&harness, "CLAUDE.md").await.status().is_success());
+    assert!(std::fs::symlink_metadata(root.join("CLAUDE.md")).is_err());
+    assert!(root.join("AGENTS.md").is_file());
 }
 
 // ----- WebSocket -------------------------------------------------------------

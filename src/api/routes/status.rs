@@ -53,6 +53,7 @@ pub const FEATURE_HOST_EXEC_TRUSTED_INPUTS: &str = "host-exec-trusted-inputs";
 pub const FEATURE_INSTALL_WORKLOAD_REACHABILITY: &str = "install-workload-reachability";
 pub const FEATURE_SANDBOX_REQUIRE_NETWORK_PROVIDER: &str = "sandbox-require-network-provider";
 pub const FEATURE_SANDBOX_OFF_IDENTITY: &str = "sandbox-off-identity";
+pub const FEATURE_WORKLOAD_IO_FOLLOW_LINKS: &str = "workload-io-follow-links";
 
 const SERVER_FEATURES: &[&str] = &[
     FEATURE_NETWORK_PROVIDER_WORKLOAD_ENV,
@@ -68,6 +69,7 @@ const SERVER_FEATURES: &[&str] = &[
     FEATURE_INSTALL_WORKLOAD_REACHABILITY,
     FEATURE_SANDBOX_REQUIRE_NETWORK_PROVIDER,
     FEATURE_SANDBOX_OFF_IDENTITY,
+    FEATURE_WORKLOAD_IO_FOLLOW_LINKS,
 ];
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -81,8 +83,9 @@ pub(crate) struct ServerInfo {
     /// `managed-node-runtime`, `sandbox-workload-user`, `sandbox-capability-drop`,
     /// `sandbox-workload-termination`, `workload-io-identity`,
     /// `host-exec-trusted-inputs`, `install-workload-reachability`,
-    /// `sandbox-require-network-provider`, and `sandbox-off-identity`. The list
-    /// grows over time; an absent or empty list means none are present.
+    /// `sandbox-require-network-provider`, `sandbox-off-identity`, and
+    /// `workload-io-follow-links`. The list grows over time; an absent or empty
+    /// list means none are present.
     features: &'static [&'static str],
 }
 
@@ -405,6 +408,7 @@ mod tests {
                 "install-workload-reachability",
                 "sandbox-require-network-provider",
                 "sandbox-off-identity",
+                "workload-io-follow-links",
             ])
         );
     }

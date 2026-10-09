@@ -4350,7 +4350,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Advertised capability names, currently `network-provider-workload-env`,\n`agent-test-json`, `managed-credential-base-url`, `sandbox-mask-files`,\n`managed-node-runtime`, `sandbox-workload-user`, `sandbox-capability-drop`,\n`sandbox-workload-termination`, `workload-io-identity`,\n`host-exec-trusted-inputs`, `install-workload-reachability`,\n`sandbox-require-network-provider`, and `sandbox-off-identity`. The list\ngrows over time; an absent or empty list means none are present."
+            "description": "Advertised capability names, currently `network-provider-workload-env`,\n`agent-test-json`, `managed-credential-base-url`, `sandbox-mask-files`,\n`managed-node-runtime`, `sandbox-workload-user`, `sandbox-capability-drop`,\n`sandbox-workload-termination`, `workload-io-identity`,\n`host-exec-trusted-inputs`, `install-workload-reachability`,\n`sandbox-require-network-provider`, `sandbox-off-identity`, and\n`workload-io-follow-links`. The list grows over time; an absent or empty\nlist means none are present."
           }
         },
         "required": [

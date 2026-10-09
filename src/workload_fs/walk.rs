@@ -43,10 +43,14 @@ const CREATE_OPEN_FLAGS: OFlags = OFlags::WRONLY
 /// How a walk treats links below its [`Anchor`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LinkPolicy {
-    /// Refuse every symlink and hard-linked target, as walks for a workload identity must.
+    /// Refuse every symlink and hard-linked target. Walks that run with the runtime's credentials
+    /// over a tree the workload can write use it, because following there would lend the workload
+    /// the runtime's file access.
     Refuse,
-    /// Follow symlinks and accept hard links like a plain path walk; without a workload identity
-    /// there is no boundary to hold. `contained` refuses a path that resolves outside the anchor.
+    /// Follow symlinks and accept hard links like a plain path walk. Only for walks that run with
+    /// the workload's credentials (or with no identity, where the workload is the runtime), so the
+    /// kernel's permission checks bound what a link reaches. `contained` refuses a path that
+    /// resolves outside the anchor.
     Follow { contained: bool },
 }
 
@@ -84,8 +88,23 @@ impl Anchor {
         matches!(self.links, LinkPolicy::Follow { .. })
     }
 
+    /// [`failure`] for a call that follows symlinks as this anchor's policy says.
+    fn link_failure(
+        &self,
+        path: &Path,
+        operation: &'static str,
+        source: impl Into<std::io::Error>,
+    ) -> StackError {
+        if self.follows() {
+            followed_failure(path, operation, source)
+        } else {
+            failure(path, operation, source)
+        }
+    }
+
     /// Under `Follow { contained: true }`, refuse a path whose existing part resolves outside the
-    /// anchor. Without a workload identity nothing else can swap the path in between.
+    /// anchor. A workload identity can swap the path between this check and the open, which only
+    /// reaches what the identity's own credentials can open.
     fn require_contained(&self, path: &Path) -> Result<()> {
         if self.links != (LinkPolicy::Follow { contained: true }) {
             return Ok(());
@@ -100,7 +119,7 @@ impl Anchor {
                         None => return Ok(()),
                     }
                 }
-                Err(error) => return Err(failure(existing, "canonicalize", error)),
+                Err(error) => return Err(followed_failure(existing, "canonicalize", error)),
             }
         };
         if resolved.starts_with(&self.path) {
@@ -204,7 +223,7 @@ fn open_readable(
     anchor.require_contained(&display)?;
     // Vet the entry before opening it so a device or FIFO is never opened.
     let status = stat_at(directory.as_fd(), &name, anchor.follows())
-        .map_err(|source| failure(&display, "fstatat", source))?
+        .map_err(|source| anchor.link_failure(&display, "fstatat", source))?
         .ok_or_else(|| StackError::WorkloadFsNotFound {
             path: display.clone(),
         })?;
@@ -215,7 +234,7 @@ fn open_readable(
         READ_OPEN_FLAGS
     };
     let descriptor = open_at(directory.as_fd(), &name, open_flags, 0)
-        .map_err(|source| failure(&display, "openat", source))?;
+        .map_err(|source| anchor.link_failure(&display, "openat", source))?;
     let status =
         fstat_entry(descriptor.as_fd()).map_err(|source| failure(&display, "fstat", source))?;
     vet_readable(anchor, &status, &display, max_bytes)?;
@@ -223,7 +242,9 @@ fn open_readable(
 }
 
 /// Atomically replace (or create) a regular file through a sibling temp file. An existing target
-/// must be a single-link regular file, owned by `require_existing_owner` when set.
+/// must be a regular file, single-link under [`LinkPolicy::Refuse`], and owned by
+/// `require_existing_owner` when set. Under [`LinkPolicy::Follow`] a symlink at the target is
+/// written through: the file at the end of its chain is replaced and the link is kept.
 pub fn write_file_atomic(
     anchor: &Anchor,
     relative: &Path,
@@ -238,38 +259,95 @@ pub fn write_file_atomic(
         &parents,
         options.create_parents.then_some(options.dir_mode),
     )?;
-    if let Some(status) =
-        lstat_at(directory.as_fd(), &name).map_err(|source| failure(&display, "fstatat", source))?
-    {
-        vet_regular_file(&status, &display, anchor.follows())?;
+    let existing = lstat_at(directory.as_fd(), &name)
+        .map_err(|source| failure(&display, "fstatat", source))?;
+    let target = match existing {
+        Some(status) if status.kind == EntryKind::Symlink && anchor.follows() => {
+            link_write_target(anchor, &display)?
+        }
+        existing => WriteTarget {
+            directory,
+            name,
+            parent_display,
+            display,
+            existing,
+        },
+    };
+    if let Some(status) = &target.existing {
+        vet_regular_file(status, &target.display, anchor.follows())?;
         if let Some(expected_uid) = options.require_existing_owner
             && status.uid != expected_uid
         {
             return Err(StackError::WorkloadFsOwnerMismatch {
-                path: display,
+                path: target.display,
                 expected_uid,
                 actual_uid: status.uid,
             });
         }
     }
-    let temp_name = temp_file_name(&parent_display)?;
-    let temp_display = child_path(&parent_display, &temp_name);
-    let descriptor = open_at(
-        directory.as_fd(),
-        &temp_name,
-        CREATE_OPEN_FLAGS,
-        options.file_mode,
+    replace_file(&target, content, options.file_mode)
+}
+
+/// The entry a write replaces: its parent directory, its name there, and its status before the
+/// write.
+struct WriteTarget {
+    directory: OwnedFd,
+    name: CString,
+    parent_display: PathBuf,
+    display: PathBuf,
+    existing: Option<EntryInfo>,
+}
+
+/// The write target behind the symlink at `link`: the final hop of its chain, which a dangling
+/// chain leaves missing so the write creates it. The hop's parent is opened by its canonical path,
+/// so the containment check and the open see the same directory.
+fn link_write_target(anchor: &Anchor, link: &Path) -> Result<WriteTarget> {
+    let chain = symlink_chain(link, SYMLINK_CHAIN_MAX_HOPS, true)?;
+    let last = chain.last().map_or(link, PathBuf::as_path);
+    let (Some(parent), Some(file_name)) = (last.parent(), last.file_name()) else {
+        return Err(StackError::WorkloadFsInvalidPath {
+            path: last.to_path_buf(),
+            reason: "symlink target does not name a file",
+        });
+    };
+    let parent_display = std::fs::canonicalize(parent)
+        .map_err(|source| followed_failure(parent, "canonicalize", source))?;
+    let display = parent_display.join(file_name);
+    anchor.require_contained(&display)?;
+    let directory = open_at(
+        CWD,
+        &path_cstring(&parent_display)?,
+        DIRECTORY_OPEN_FLAGS.difference(OFlags::NOFOLLOW),
+        0,
     )
-    .map_err(|source| failure(&temp_display, "openat", source))?;
+    .map_err(|source| followed_failure(&parent_display, "openat", source))?;
+    let name = path_cstring(Path::new(file_name))?;
+    let existing = lstat_at(directory.as_fd(), &name)
+        .map_err(|source| failure(&display, "fstatat", source))?;
+    Ok(WriteTarget {
+        directory,
+        name,
+        parent_display,
+        display,
+        existing,
+    })
+}
+
+fn replace_file(target: &WriteTarget, content: &[u8], file_mode: u32) -> Result<()> {
+    let directory = target.directory.as_fd();
+    let temp_name = temp_file_name(&target.parent_display)?;
+    let temp_display = child_path(&target.parent_display, &temp_name);
+    let descriptor = open_at(directory, &temp_name, CREATE_OPEN_FLAGS, file_mode)
+        .map_err(|source| failure(&temp_display, "openat", source))?;
     let published = fill_file(descriptor, &mut &content[..], &temp_display).and_then(|()| {
-        rustix::fs::renameat(&directory, &temp_name, &directory, &name)
-            .map_err(|source| failure(&display, "renameat", source))
+        rustix::fs::renameat(directory, &temp_name, directory, &target.name)
+            .map_err(|source| failure(&target.display, "renameat", source))
     });
     if let Err(error) = published {
-        discard_entry(directory.as_fd(), &temp_name, &temp_display);
+        discard_entry(directory, &temp_name, &temp_display);
         return Err(error);
     }
-    rustix::fs::fsync(&directory).map_err(|source| failure(&parent_display, "fsync", source))
+    rustix::fs::fsync(directory).map_err(|source| failure(&target.parent_display, "fsync", source))
 }
 
 /// Create a new regular file; any existing entry at the target, symlinks included, is refused.
@@ -282,7 +360,8 @@ pub fn write_file_new(
     write_new_from_reader(anchor, relative, &mut &content[..], options)
 }
 
-/// Remove a regular file; directories, symlinks, and special files are refused.
+/// Remove a regular file; directories and special files are refused. A symlink is unlinked as a
+/// link under [`LinkPolicy::Follow`] and refused under [`LinkPolicy::Refuse`].
 pub fn remove_file(anchor: &Anchor, relative: &Path) -> Result<()> {
     let (parents, name) = entry_components(&anchor.path, relative)?;
     let display = joined(&anchor.path, &parents).join(OsStr::from_bytes(name.as_bytes()));
@@ -294,6 +373,7 @@ pub fn remove_file(anchor: &Anchor, relative: &Path) -> Result<()> {
         })?;
     match status.kind {
         EntryKind::File => {}
+        EntryKind::Symlink if anchor.follows() => {}
         EntryKind::Symlink => return Err(StackError::WorkloadFsSymlinkRefused { path: display }),
         EntryKind::Dir | EntryKind::Other => {
             return Err(StackError::WorkloadFsNotRegular { path: display });
@@ -301,6 +381,29 @@ pub fn remove_file(anchor: &Anchor, relative: &Path) -> Result<()> {
     }
     rustix::fs::unlinkat(&directory, &name, AtFlags::empty())
         .map_err(|source| failure(&display, "unlinkat", source))
+}
+
+/// Remove the regular file at `relative`, or under [`LinkPolicy::Follow`] the file a symlink there
+/// leads to, keeping the link: the removal that mirrors a [`write_file_atomic`] through the link.
+pub fn remove_link_target(anchor: &Anchor, relative: &Path) -> Result<()> {
+    let (parents, name) = entry_components(&anchor.path, relative)?;
+    let display = joined(&anchor.path, &parents).join(OsStr::from_bytes(name.as_bytes()));
+    let directory = open_directory_chain(anchor, &parents, None)?;
+    let is_link = lstat_at(directory.as_fd(), &name)
+        .map_err(|source| failure(&display, "fstatat", source))?
+        .is_some_and(|status| status.kind == EntryKind::Symlink);
+    if !(is_link && anchor.follows()) {
+        return remove_file(anchor, relative);
+    }
+    let target = link_write_target(anchor, &display)?;
+    let status = target
+        .existing
+        .ok_or_else(|| StackError::WorkloadFsNotFound {
+            path: target.display.clone(),
+        })?;
+    vet_regular_file(&status, &target.display, true)?;
+    rustix::fs::unlinkat(&target.directory, &target.name, AtFlags::empty())
+        .map_err(|source| failure(&target.display, "unlinkat", source))
 }
 
 /// Remove an entry and, for a directory, everything below it. Symlinks are unlinked as links and
@@ -375,6 +478,16 @@ pub fn read_link(anchor: &Anchor, relative: &Path) -> Result<PathBuf> {
 
 /// `lstat` of `relative` (the anchor itself when empty); `None` when it or a parent is missing.
 pub fn stat(anchor: &Anchor, relative: &Path) -> Result<Option<EntryInfo>> {
+    stat_entry(anchor, relative, false)
+}
+
+/// [`stat`] that follows a symlink at `relative` itself under [`LinkPolicy::Follow`], subject to
+/// its containment; `None` also when a followed link dangles.
+pub fn stat_followed(anchor: &Anchor, relative: &Path) -> Result<Option<EntryInfo>> {
+    stat_entry(anchor, relative, anchor.follows())
+}
+
+fn stat_entry(anchor: &Anchor, relative: &Path, follow: bool) -> Result<Option<EntryInfo>> {
     let mut components = components_of(&anchor.path, relative)?;
     let Some(name) = components.pop() else {
         return fstat_entry(anchor.directory.as_fd())
@@ -387,7 +500,13 @@ pub fn stat(anchor: &Anchor, relative: &Path) -> Result<Option<EntryInfo>> {
         Err(StackError::WorkloadFsNotFound { .. }) => return Ok(None),
         Err(error) => return Err(error),
     };
-    lstat_at(directory.as_fd(), &name).map_err(|source| failure(&display, "fstatat", source))
+    if !follow {
+        return lstat_at(directory.as_fd(), &name)
+            .map_err(|source| failure(&display, "fstatat", source));
+    }
+    anchor.require_contained(&display)?;
+    stat_at(directory.as_fd(), &name, true)
+        .map_err(|source| followed_failure(&display, "fstatat", source))
 }
 
 /// Entries of the directory at `relative` (the anchor itself when empty), sorted by name.
@@ -641,6 +760,22 @@ pub(super) fn failure(
     }
 }
 
+/// [`failure`] for a call that follows symlinks, where ELOOP means a symlink loop.
+fn followed_failure(
+    path: &Path,
+    operation: &'static str,
+    source: impl Into<std::io::Error>,
+) -> StackError {
+    let source = source.into();
+    if source.raw_os_error() == Some(libc::ELOOP) {
+        return StackError::WorkloadFsSymlinkLoop {
+            path: path.to_path_buf(),
+            max_hops: SYMLINK_CHAIN_MAX_HOPS,
+        };
+    }
+    failure(path, operation, source)
+}
+
 fn invalid_path(anchor_path: &Path, relative: &Path, reason: &'static str) -> StackError {
     StackError::WorkloadFsInvalidPath {
         path: anchor_path.join(relative),
@@ -753,6 +888,15 @@ fn open_child_directory(
     display: &Path,
 ) -> Result<OwnedFd> {
     let open = || open_at(parent, name, flags, 0);
+    let follows = !flags.contains(OFlags::NOFOLLOW);
+    let open_failure = |error: Errno| match error {
+        Errno::LOOP if follows => followed_failure(display, "openat", error),
+        Errno::NOTDIR if follows => StackError::WorkloadFsInvalidPath {
+            path: display.to_path_buf(),
+            reason: NOT_DIRECTORY_REASON,
+        },
+        _ => directory_open_failure(parent, name, display, error),
+    };
     match open() {
         Ok(directory) => Ok(directory),
         Err(Errno::NOENT) => {
@@ -762,13 +906,13 @@ fn open_child_directory(
                 });
             };
             match rustix::fs::mkdirat(parent, name, mode_of(mode)) {
-                // A concurrent creator won; the no-follow reopen below still vets what it made.
+                // A concurrent creator won; the reopen below still vets what it made.
                 Ok(()) | Err(Errno::EXIST) => {}
                 Err(error) => return Err(failure(display, "mkdirat", error)),
             }
-            open().map_err(|error| directory_open_failure(parent, name, display, error))
+            open().map_err(open_failure)
         }
-        Err(error) => Err(directory_open_failure(parent, name, display, error)),
+        Err(error) => Err(open_failure(error)),
     }
 }
 
@@ -789,7 +933,7 @@ fn directory_open_failure(
             }
             Ok(Some(_)) => StackError::WorkloadFsInvalidPath {
                 path: display.to_path_buf(),
-                reason: "a path component is not a directory",
+                reason: NOT_DIRECTORY_REASON,
             },
             Ok(None) => StackError::WorkloadFsNotFound {
                 path: display.to_path_buf(),
@@ -1363,6 +1507,141 @@ mod tests {
             .expect("file");
         assert_eq!((file.kind, file.size, file.nlink), (EntryKind::File, 1, 1));
         assert_eq!(file.uid, crate::ownership::process_euid());
+    }
+
+    fn following(tempdir: &tempfile::TempDir, contained: bool) -> Anchor {
+        Anchor::open_with(tempdir.path(), LinkPolicy::Follow { contained }).expect("anchor")
+    }
+
+    #[test]
+    fn follow_writes_through_links_and_removes_links_as_links() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let anchor = following(&tempdir, true);
+        let outside = tempfile::tempdir().expect("outside");
+        let secret = outside.path().join("secret");
+        std::fs::write(&secret, b"outside").expect("secret");
+        std::fs::write(tempdir.path().join("target"), b"old").expect("target");
+        std::os::unix::fs::symlink("target", tempdir.path().join("link")).expect("link");
+        std::os::unix::fs::symlink(&secret, tempdir.path().join("escape")).expect("escape");
+
+        write_file_atomic(&anchor, Path::new("link"), b"new", &owner_only(false))
+            .expect("write through");
+        assert_eq!(
+            std::fs::read(tempdir.path().join("target")).expect("target"),
+            b"new"
+        );
+        let followed = stat_followed(&anchor, Path::new("link"))
+            .expect("stat")
+            .expect("exists");
+        assert_eq!((followed.kind, followed.size), (EntryKind::File, 3));
+        assert!(matches!(
+            write_file_atomic(&anchor, Path::new("escape"), b"x", &owner_only(false)),
+            Err(StackError::WorkloadFsSymlinkRefused { .. })
+        ));
+        assert!(matches!(
+            stat_followed(&anchor, Path::new("escape")),
+            Err(StackError::WorkloadFsSymlinkRefused { .. })
+        ));
+        assert_eq!(std::fs::read(&secret).expect("secret"), b"outside");
+
+        let mut foreign_owner = owner_only(false);
+        foreign_owner.require_existing_owner =
+            Some(crate::ownership::process_euid().wrapping_add(1));
+        assert!(matches!(
+            write_file_atomic(&anchor, Path::new("link"), b"x", &foreign_owner),
+            Err(StackError::WorkloadFsOwnerMismatch { .. })
+        ));
+
+        remove_file(&anchor, Path::new("link")).expect("remove the link");
+        assert!(std::fs::symlink_metadata(tempdir.path().join("link")).is_err());
+        assert!(tempdir.path().join("target").is_file());
+    }
+
+    #[test]
+    fn remove_link_target_removes_the_file_behind_a_link_and_keeps_the_link() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let anchor = following(&tempdir, true);
+        std::fs::write(tempdir.path().join("target"), b"x").expect("target");
+        std::fs::write(tempdir.path().join("plain"), b"x").expect("plain");
+        std::os::unix::fs::symlink("target", tempdir.path().join("link")).expect("link");
+
+        remove_link_target(&anchor, Path::new("link")).expect("remove through the link");
+        assert!(!tempdir.path().join("target").exists());
+        assert!(
+            std::fs::symlink_metadata(tempdir.path().join("link"))
+                .expect("link kept")
+                .file_type()
+                .is_symlink()
+        );
+        assert!(matches!(
+            remove_link_target(&anchor, Path::new("link")),
+            Err(StackError::WorkloadFsNotFound { .. })
+        ));
+        remove_link_target(&anchor, Path::new("plain")).expect("remove a plain file");
+        assert!(!tempdir.path().join("plain").exists());
+    }
+
+    #[test]
+    fn a_link_through_a_file_or_a_loop_fails_as_an_invalid_path() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let anchor = following(&tempdir, true);
+        std::fs::write(tempdir.path().join("file.txt"), b"x").expect("file");
+        std::os::unix::fs::symlink("file.txt/x", tempdir.path().join("through-file"))
+            .expect("through file");
+        std::os::unix::fs::symlink("a", tempdir.path().join("b")).expect("b");
+        std::os::unix::fs::symlink("b", tempdir.path().join("a")).expect("a");
+        std::os::unix::fs::symlink("a/x", tempdir.path().join("through-loop"))
+            .expect("through loop");
+
+        assert!(matches!(
+            write_file_atomic(&anchor, Path::new("through-file"), b"x", &owner_only(false)),
+            Err(StackError::WorkloadFsInvalidPath { .. })
+        ));
+        assert!(matches!(
+            write_file_atomic(&anchor, Path::new("through-loop"), b"x", &owner_only(false)),
+            Err(StackError::WorkloadFsSymlinkLoop { .. })
+        ));
+    }
+
+    #[test]
+    fn uncontained_follow_reaches_outside_the_anchor() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let anchor = following(&tempdir, false);
+        let dotfiles = tempfile::tempdir().expect("dotfiles");
+        std::os::unix::fs::symlink(dotfiles.path(), tempdir.path().join(".agents")).expect("link");
+
+        write_file_atomic(
+            &anchor,
+            Path::new(".agents/skills/note"),
+            b"x",
+            &owner_only(true),
+        )
+        .expect("write below a linked directory");
+        assert_eq!(
+            std::fs::read(dotfiles.path().join("skills/note")).expect("note"),
+            b"x"
+        );
+    }
+
+    #[test]
+    fn follow_reports_symlink_loops() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let anchor = following(&tempdir, false);
+        std::os::unix::fs::symlink("b", tempdir.path().join("a")).expect("a");
+        std::os::unix::fs::symlink("a", tempdir.path().join("b")).expect("b");
+
+        assert!(matches!(
+            read_file(&anchor, Path::new("a"), MAX_READ),
+            Err(StackError::WorkloadFsSymlinkLoop { .. })
+        ));
+        assert!(matches!(
+            list_dir(&anchor, Path::new("a")),
+            Err(StackError::WorkloadFsSymlinkLoop { .. })
+        ));
+        assert!(matches!(
+            write_file_atomic(&anchor, Path::new("a"), b"x", &owner_only(false)),
+            Err(StackError::WorkloadFsSymlinkLoop { .. })
+        ));
     }
 
     #[test]

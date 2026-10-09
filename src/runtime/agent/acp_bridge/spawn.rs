@@ -43,13 +43,16 @@ impl AcpBridge {
     ) -> Result<Self> {
         wait_for_managed_node(home).await;
         // Opened before anything is spawned, so a failure leaves no child to reap.
-        let fs_anchor = crate::workload_fs::Anchor::open_with(&cwd, sandbox.link_policy(true))
-            .map_err(|error| StackError::AgentSpawnFailed {
-                source: std::io::Error::other(format!(
-                    "agent cwd `{}` could not be opened: {error}",
-                    cwd.display()
-                )),
-            })?;
+        let fs_anchor = crate::workload_fs::Anchor::open_with(
+            &cwd,
+            crate::workload_fs::LinkPolicy::Follow { contained: true },
+        )
+        .map_err(|error| StackError::AgentSpawnFailed {
+            source: std::io::Error::other(format!(
+                "agent cwd `{}` could not be opened: {error}",
+                cwd.display()
+            )),
+        })?;
         let fs_context = Arc::new(AcpFsContext {
             anchor: Arc::new(fs_anchor),
             cwd: cwd.clone(),

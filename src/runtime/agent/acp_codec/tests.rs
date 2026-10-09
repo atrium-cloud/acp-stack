@@ -989,7 +989,13 @@ const FS_SESSION_ID: &str = "sess_fs";
 
 fn fs_context(cwd: &Path, state: Option<Arc<TokioMutex<StateStore>>>) -> AcpFsContext {
     AcpFsContext {
-        anchor: Arc::new(crate::workload_fs::Anchor::open(cwd).expect("anchor")),
+        anchor: Arc::new(
+            crate::workload_fs::Anchor::open_with(
+                cwd,
+                crate::workload_fs::LinkPolicy::Follow { contained: true },
+            )
+            .expect("anchor"),
+        ),
         cwd: cwd.to_path_buf(),
         sandbox: crate::runtime::sandbox::SandboxProfile::default(),
         state,
@@ -1059,7 +1065,7 @@ async fn fs_handlers_round_trip_a_file_through_both_cwd_spellings_and_audit_the_
 }
 
 #[tokio::test]
-async fn fs_handlers_keep_the_spawn_time_cwd_after_it_is_swapped_for_a_symlink() {
+async fn fs_handlers_refuse_a_cwd_swapped_for_a_symlink_outside_it() {
     let parent = tempfile::tempdir().expect("parent");
     let cwd = parent.path().join("cwd");
     std::fs::create_dir(&cwd).expect("cwd");
@@ -1071,19 +1077,118 @@ async fn fs_handlers_keep_the_spawn_time_cwd_after_it_is_swapped_for_a_symlink()
     std::fs::rename(&cwd, &moved).expect("move the original cwd away");
     std::os::unix::fs::symlink(outside.path(), &cwd).expect("plant the swap");
 
-    handle_write_text_file(&context, write_request(&cwd.join("planted"), "agent"))
+    let write = handle_write_text_file(&context, write_request(&cwd.join("planted"), "agent"))
         .await
-        .expect("write lands in the anchored directory");
+        .expect_err("the swapped-in directory is never written");
     let read = handle_read_text_file(&context, read_request(&cwd.join("secret")))
         .await
         .expect_err("the swapped-in directory is never read");
 
-    assert_eq!(read.code, AcpFsError::resource_not_found(None).code);
-    assert_eq!(
-        std::fs::read_to_string(moved.join("planted")).expect("anchored write"),
-        "agent"
-    );
+    assert_invalid_params(&write);
+    assert_invalid_params(&read);
+    assert!(!moved.join("planted").exists());
     assert!(!outside.path().join("planted").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "requires CAP_SETUID/CAP_SETGID and ACPS_TEST_WORKLOAD_USER"]
+async fn fs_handlers_follow_links_as_the_workload_identity() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let user = std::env::var("ACPS_TEST_WORKLOAD_USER").expect("ACPS_TEST_WORKLOAD_USER");
+    let sandbox = crate::runtime::sandbox::SandboxProfile::resolve(&crate::config::SandboxConfig {
+        workload_user: Some(user),
+        ..crate::config::SandboxConfig::default()
+    })
+    .expect("the workload user must resolve");
+    let cwd = tempfile::tempdir().expect("cwd");
+    std::fs::set_permissions(cwd.path(), std::fs::Permissions::from_mode(0o777))
+        .expect("open the cwd to the workload user");
+    let private = cwd.path().join("private");
+    std::fs::create_dir(&private).expect("private");
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700))
+        .expect("runtime-only dir");
+    std::fs::write(private.join("secret"), "runtime").expect("secret");
+    std::os::unix::fs::symlink(private.join("secret"), cwd.path().join("planted"))
+        .expect("planted link");
+    let context = AcpFsContext {
+        sandbox,
+        ..fs_context(cwd.path(), None)
+    };
+
+    handle_write_text_file(
+        &context,
+        write_request(&cwd.path().join("AGENTS.md"), "rules\n"),
+    )
+    .await
+    .expect("seed as the identity");
+    std::os::unix::fs::symlink("AGENTS.md", cwd.path().join("CLAUDE.md")).expect("link");
+    let read = handle_read_text_file(&context, read_request(&cwd.path().join("CLAUDE.md")))
+        .await
+        .expect("read through the link");
+    assert_eq!(read.content, "rules\n");
+    handle_write_text_file(
+        &context,
+        write_request(&cwd.path().join("CLAUDE.md"), "updated\n"),
+    )
+    .await
+    .expect("write through the link");
+    assert_eq!(
+        std::fs::read_to_string(cwd.path().join("AGENTS.md")).expect("target"),
+        "updated\n"
+    );
+
+    let denied_read = handle_read_text_file(&context, read_request(&cwd.path().join("planted")))
+        .await
+        .expect_err("runtime-only target");
+    let denied_write = handle_write_text_file(
+        &context,
+        write_request(&cwd.path().join("planted"), "planted"),
+    )
+    .await
+    .expect_err("runtime-only target");
+    for denied in [&denied_read, &denied_write] {
+        assert_invalid_params(denied);
+        assert!(
+            format!("{denied:?}").contains("permission denied"),
+            "{denied:?}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(private.join("secret")).expect("secret"),
+        "runtime"
+    );
+}
+
+#[tokio::test]
+async fn fs_handlers_read_and_write_through_a_link_inside_the_cwd() {
+    let cwd = tempfile::tempdir().expect("cwd");
+    std::fs::write(cwd.path().join("AGENTS.md"), "rules\n").expect("target");
+    std::os::unix::fs::symlink("AGENTS.md", cwd.path().join("CLAUDE.md")).expect("link");
+    let context = fs_context(cwd.path(), None);
+
+    let read = handle_read_text_file(&context, read_request(&cwd.path().join("CLAUDE.md")))
+        .await
+        .expect("read through the link");
+    assert_eq!(read.content, "rules\n");
+    handle_write_text_file(
+        &context,
+        write_request(&cwd.path().join("CLAUDE.md"), "updated\n"),
+    )
+    .await
+    .expect("write through the link");
+
+    assert_eq!(
+        std::fs::read_to_string(cwd.path().join("AGENTS.md")).expect("target"),
+        "updated\n"
+    );
+    assert!(
+        std::fs::symlink_metadata(cwd.path().join("CLAUDE.md"))
+            .expect("link kept")
+            .file_type()
+            .is_symlink()
+    );
 }
 
 #[tokio::test]

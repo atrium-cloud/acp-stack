@@ -43,7 +43,7 @@ pub(super) fn port_skill_directories(
             kept_unmanaged: Vec::new(),
         });
     }
-    if !ensure_directory_no_symlink_ancestors(workload, source_root, false)? {
+    if !ensure_directory_path(workload, source_root, false)? {
         return Ok(SkillPortReport {
             source_root: source_root.to_path_buf(),
             target_root: target_root.to_path_buf(),
@@ -67,7 +67,7 @@ pub(super) fn port_skill_directories(
         });
     }
 
-    ensure_directory_no_symlink_ancestors(workload, target_root, true)?;
+    ensure_directory_path(workload, target_root, true)?;
     let mut installs = Vec::with_capacity(candidates.len());
     let mut kept_unmanaged = Vec::new();
     for (skill_name, entry_path) in candidates {
@@ -77,7 +77,7 @@ pub(super) fn port_skill_directories(
             .ok_or_else(|| StackError::SkillInstallFailed {
                 reason: format!("skill target `{}` has no parent", target_dir.display()),
             })?;
-        ensure_directory_no_symlink_ancestors(workload, target_parent, true)?;
+        ensure_directory_path(workload, target_parent, true)?;
         let action = match existing_target_state(workload, &target_dir)? {
             ExistingTargetState::Missing => PortAction::Copy,
             ExistingTargetState::AlreadyInstalled if has_managed_marker(workload, &target_dir) => {

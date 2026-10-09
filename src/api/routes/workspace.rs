@@ -538,11 +538,10 @@ async fn run_in_workspace<T: Send + 'static>(
     let relative = workspace::workspace_relative_path(requested, intent)?;
     let root = PathBuf::from(root);
     let requested = requested.to_owned();
-    let links = profile.link_policy(true);
     profile
         .executor()
         .run_async(DEFAULT_JOB_TIMEOUT, move || {
-            let anchor = workspace::open_root(&root, &requested, links)?;
+            let anchor = workspace::open_root(&root, &requested)?;
             job(&anchor, &relative, &requested)
         })
         .await

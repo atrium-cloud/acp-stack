@@ -278,6 +278,55 @@ fn git_handoff_preserves_symlinks_and_removes_the_staging_dir() {
 }
 
 #[test]
+fn git_source_carrying_a_sentinel_symlink_never_writes_through_it() {
+    if !git_available() {
+        eprintln!("skipping: git not on PATH");
+        return;
+    }
+    let upstream = tempdir().expect("upstream");
+    run_git_init(upstream.path());
+    git_commit_in(upstream.path(), "README.md", "hello\n", "init");
+    std::os::unix::fs::symlink(
+        "../../../AGENTS.md",
+        upstream.path().join(SOURCE_SENTINEL_FILE),
+    )
+    .expect("sentinel link");
+    run_fixture_git(upstream.path(), &["add", SOURCE_SENTINEL_FILE]);
+    run_fixture_git(upstream.path(), &["commit", "-q", "-m", "planted sentinel"]);
+    let root_dir = tempdir().expect("root");
+    std::fs::write(root_dir.path().join("AGENTS.md"), b"rules").expect("victim");
+    let mut workspace = workspace_with(root_dir.path());
+    workspace.code_sources.push(CodeSourceConfig {
+        source_type: "git".to_owned(),
+        repo: Some(upstream.path().display().to_string()),
+        branch: None,
+        credential_ref: None,
+        name: Some("upstream".to_owned()),
+    });
+    let home = runtime_home();
+
+    let error = materialize_workspace(&workspace, &empty_secret_store(), home.path(), None)
+        .expect_err("linked sentinel");
+
+    assert!(
+        error.to_string().contains("is a symlink"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        std::fs::read(root_dir.path().join("AGENTS.md")).expect("victim"),
+        b"rules"
+    );
+    assert!(
+        !root_dir
+            .path()
+            .join(CODE_LANE_DIR)
+            .join("upstream")
+            .exists()
+    );
+    assert!(staging_leftovers(home.path()).is_empty());
+}
+
+#[test]
 fn git_materialization_ignores_inherited_repo_scope_env() {
     if !git_available() {
         eprintln!("skipping: git not on PATH");
@@ -535,7 +584,43 @@ fn local_source_replaces_a_lone_stale_sentinel() {
 }
 
 #[test]
-fn symlinked_destination_or_lane_root_is_refused_and_left_untouched() {
+fn destination_or_lane_root_linked_inside_the_root_is_followed() {
+    let upstream = tempdir().expect("upstream");
+    std::fs::write(upstream.path().join("a.txt"), b"alpha").expect("a");
+    let home = runtime_home();
+    for planted in [
+        Path::new(DATA_LANE_DIR).join("dataset"),
+        PathBuf::from(DATA_LANE_DIR),
+    ] {
+        let workspace_root = tempdir().expect("root");
+        let real = workspace_root.path().join("real");
+        std::fs::create_dir(&real).expect("real");
+        let link = workspace_root.path().join(&planted);
+        std::fs::create_dir_all(link.parent().expect("parent")).expect("link parent");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+        let mut workspace = workspace_with(workspace_root.path());
+        workspace.data_sources.push(local_source(upstream.path()));
+
+        materialize_workspace(&workspace, &empty_secret_store(), home.path(), None)
+            .expect("contained link");
+
+        let landed = workspace_root
+            .path()
+            .join(DATA_LANE_DIR)
+            .join("dataset/a.txt");
+        assert_eq!(std::fs::read(&landed).expect("landed"), b"alpha");
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .expect("link kept")
+                .file_type()
+                .is_symlink()
+        );
+    }
+    assert!(staging_leftovers(home.path()).is_empty());
+}
+
+#[test]
+fn destination_or_lane_root_linked_outside_the_root_is_refused_and_left_untouched() {
     let upstream = tempdir().expect("upstream");
     std::fs::write(upstream.path().join("a.txt"), b"alpha").expect("a");
     let outside = tempdir().expect("outside");
