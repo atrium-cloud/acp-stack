@@ -99,11 +99,12 @@ pub async fn bind_local(
 pub async fn serve_local(state: AppState, bound: BoundLocalListener) -> Result<()> {
     let BoundLocalListener { listener, guard } = bound;
     let _guard = guard;
+    let shutdown = state.shutdown.clone();
+    let active_requests = state.active_requests.clone();
     let app = build_local_router(state);
-    axum::serve(listener, app)
-        .with_graceful_shutdown(api::shutdown_signal())
-        .await
-        .map_err(|source| StackError::ServeIo { source })
+    let server =
+        axum::serve(listener, app).with_graceful_shutdown(api::graceful_shutdown(shutdown.clone()));
+    api::serve_until_drained(server.into_future(), shutdown, active_requests).await
 }
 
 fn prepare_parent_dir(parent: &Path, policy: ParentPolicy) -> Result<()> {

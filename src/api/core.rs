@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
@@ -14,6 +15,7 @@ use axum::routing::{get, post, put};
 use dashmap::DashMap;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex as TokioMutex, RwLock as TokioRwLock};
+use tokio_util::sync::CancellationToken;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 
@@ -99,6 +101,13 @@ use crate::runtime::mediation::commands::CommandGateway;
 use crate::runtime::mediation::permissions::PermissionService;
 use crate::state::StateStore;
 
+// === CONSTANTS ===
+
+/// How long shutdown waits for response bodies still streaming once every handler has returned.
+const SHUTDOWN_BODY_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+/// How often shutdown checks whether every handler has returned.
+const SHUTDOWN_HANDLER_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
 /// Shared handler/middleware state. Cheap to clone (Arc-only inside).
 #[derive(Clone)]
 pub struct AppState {
@@ -132,6 +141,9 @@ pub struct AppState {
     pub ws_registry: Arc<super::ws_registry::WsRegistry>,
     /// Outcome of the startup Node.js ensure; `Unmanaged` unless `acps serve` runs one.
     pub node_runtime: crate::runtime::node_runtime::NodeRuntimeState,
+    /// Cancelled when graceful shutdown starts, so unbounded response bodies end at their next
+    /// read.
+    pub shutdown: CancellationToken,
 }
 
 pub(crate) struct AgentConfigMutationGuard {
@@ -481,6 +493,7 @@ impl AppState {
             rate_limiter,
             ws_registry,
             node_runtime: crate::runtime::node_runtime::NodeRuntimeState::default(),
+            shutdown: CancellationToken::new(),
         }
     }
 }
@@ -802,18 +815,58 @@ pub fn build_router(state: AppState) -> Router {
 
 /// Drive the HTTP server on an already-bound listener until graceful shutdown.
 pub async fn serve(state: AppState, listener: TcpListener) -> Result<()> {
+    let shutdown = state.shutdown.clone();
+    let active_requests = state.active_requests.clone();
     let app = build_router(state);
-    axum::serve(
+    let server = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
-    .await
-    .map_err(|source| StackError::ServeIo { source })
+    .with_graceful_shutdown(graceful_shutdown(shutdown.clone()));
+    serve_until_drained(server.into_future(), shutdown, active_requests).await
+}
+
+/// Drive `server` until its graceful shutdown completes. After `shutdown` is cancelled, handlers
+/// still running get unlimited time to return their response head, as they always have; only
+/// connections left streaming a body after that get [`SHUTDOWN_BODY_DRAIN_TIMEOUT`], because a
+/// client that stopped reading never lets the body observe `shutdown`.
+pub(crate) async fn serve_until_drained(
+    server: impl Future<Output = std::io::Result<()>>,
+    shutdown: CancellationToken,
+    active_requests: Arc<AtomicU64>,
+) -> Result<()> {
+    let mut server = std::pin::pin!(server);
+    tokio::select! {
+        result = &mut server => return result.map_err(|source| StackError::ServeIo { source }),
+        () = shutdown.cancelled() => {}
+    }
+    let drain_deadline = async {
+        while active_requests.load(Ordering::Relaxed) > 0 {
+            tokio::time::sleep(SHUTDOWN_HANDLER_POLL_INTERVAL).await;
+        }
+        tokio::time::sleep(SHUTDOWN_BODY_DRAIN_TIMEOUT).await;
+    };
+    tokio::select! {
+        result = &mut server => result.map_err(|source| StackError::ServeIo { source }),
+        () = drain_deadline => {
+            tracing::warn!(
+                timeout_secs = SHUTDOWN_BODY_DRAIN_TIMEOUT.as_secs(),
+                "closing connections still streaming a response body after the shutdown drain deadline"
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Resolves on the shutdown signal after cancelling `shutdown`, so streamed bodies end at their
+/// next read. Bodies a stalled client never reads are bounded by [`serve_until_drained`].
+pub(crate) async fn graceful_shutdown(shutdown: CancellationToken) {
+    shutdown_signal().await;
+    shutdown.cancel();
 }
 
 #[cfg(unix)]
-pub(crate) async fn shutdown_signal() {
+async fn shutdown_signal() {
     use tokio::signal::unix::{SignalKind, signal};
     let ctrl_c = async {
         // Install can fail on unusual hosts (PID 1 with no controlling terminal);
@@ -841,7 +894,7 @@ pub(crate) async fn shutdown_signal() {
 }
 
 #[cfg(not(unix))]
-pub(crate) async fn shutdown_signal() {
+async fn shutdown_signal() {
     // Non-unix hosts (tests, dev on Windows): only Ctrl-C is wired.
     if let Err(err) = tokio::signal::ctrl_c().await {
         tracing::warn!(error = %err, "ctrl-c handler install failed");
@@ -852,6 +905,60 @@ pub(crate) async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Long enough for a handler that outlives the drain deadline several times over.
+    const HANDLER_RUNTIME: Duration = Duration::from_secs(600);
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_body_is_dropped_after_the_drain_deadline() {
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+        let started = tokio::time::Instant::now();
+
+        serve_until_drained(
+            std::future::pending(),
+            shutdown,
+            Arc::new(AtomicU64::new(0)),
+        )
+        .await
+        .expect("drained");
+        assert!(started.elapsed() >= SHUTDOWN_BODY_DRAIN_TIMEOUT);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_drain_deadline_starts_only_after_every_handler_returns() {
+        let shutdown = CancellationToken::new();
+        let active_requests = Arc::new(AtomicU64::new(1));
+        let drain = tokio::spawn(serve_until_drained(
+            std::future::pending(),
+            shutdown.clone(),
+            active_requests.clone(),
+        ));
+        shutdown.cancel();
+
+        tokio::time::sleep(HANDLER_RUNTIME).await;
+        assert!(!drain.is_finished(), "a running handler must not be cut");
+        active_requests.store(0, Ordering::Relaxed);
+        let handler_returned = tokio::time::Instant::now();
+        drain.await.expect("join").expect("drained");
+        assert!(handler_returned.elapsed() >= SHUTDOWN_BODY_DRAIN_TIMEOUT);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_server_that_drains_on_its_own_returns_without_waiting() {
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+        let started = tokio::time::Instant::now();
+
+        serve_until_drained(
+            std::future::ready(Ok(())),
+            shutdown,
+            Arc::new(AtomicU64::new(0)),
+        )
+        .await
+        .expect("served");
+        assert!(started.elapsed() < SHUTDOWN_BODY_DRAIN_TIMEOUT);
+    }
 
     #[test]
     fn adapter_metadata_can_be_populated_from_override_registry() {

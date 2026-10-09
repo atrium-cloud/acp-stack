@@ -5,8 +5,11 @@ use axum::Json;
 use axum::body::Body;
 use axum::extract::{Multipart, Query, State};
 use axum::response::Response;
+use futures::Stream;
 use http::StatusCode;
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncReadExt as _;
+use tokio_util::sync::CancellationToken;
 
 use super::super::core::AppState;
 use crate::auth::KeyKind;
@@ -14,7 +17,12 @@ use crate::envelope::ApiSuccess;
 use crate::error::StackError;
 use crate::runtime::sandbox::SandboxProfile;
 use crate::workload_fs::{Anchor, DEFAULT_JOB_TIMEOUT};
-use crate::workspace::{self, FileMetadata, FileRead, PathIntent, WorkspaceListing};
+use crate::workspace::{self, FileMetadata, FileOpen, FileRead, PathIntent, WorkspaceListing};
+
+// === CONSTANTS ===
+
+/// Largest read a download body makes per chunk, which bounds the file data one download holds.
+const DOWNLOAD_CHUNK_BYTES: usize = 64 * 1024;
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct WorkspaceMetadataResponse {
@@ -115,7 +123,7 @@ pub(crate) async fn files_download_handler(
     State(state): State<AppState>,
     Query(params): Query<FilesPathParams>,
 ) -> std::result::Result<Response, StackError> {
-    let read = read_workspace_file(&state, &params.path).await?;
+    let opened = open_workspace_file(&state, &params.path).await?;
     let filename = Path::new(&params.path)
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
@@ -127,14 +135,84 @@ pub(crate) async fn files_download_handler(
     let response = Response::builder()
         .status(StatusCode::OK)
         .header(http::header::CONTENT_TYPE, "application/octet-stream")
-        .header(http::header::CONTENT_LENGTH, read.size)
+        .header(http::header::CONTENT_LENGTH, opened.size)
         .header(http::header::CONTENT_DISPOSITION, disposition)
-        .body(Body::from(read.content))
+        .body(Body::from_stream(download_stream(
+            opened,
+            state.shutdown.clone(),
+            params.path.clone(),
+        )))
         .map_err(|_| StackError::WorkspaceIo {
             requested: params.path.clone(),
             source: std::io::Error::other("failed to build download response"),
         })?;
     Ok(response)
+}
+
+/// Read cursor over an opened download, owned by the body stream.
+struct DownloadCursor {
+    file: tokio::fs::File,
+    remaining: u64,
+    shutdown: CancellationToken,
+    requested: String,
+}
+
+/// Stream `opened` in chunks of at most [`DOWNLOAD_CHUNK_BYTES`], reading only when polled so a
+/// slow reader slows the reads. A stream error aborts the connection, which keeps the body from
+/// falling short of the declared Content-Length when the file shrinks, and ends the body when
+/// shutdown starts.
+fn download_stream(
+    opened: FileOpen,
+    shutdown: CancellationToken,
+    requested: String,
+) -> impl Stream<Item = std::io::Result<Vec<u8>>> + Send + 'static {
+    let cursor = DownloadCursor {
+        file: tokio::fs::File::from_std(opened.file),
+        remaining: opened.size,
+        shutdown,
+        requested,
+    };
+    futures::stream::try_unfold(cursor, |mut cursor| async move {
+        match cursor.next_chunk().await {
+            Ok(Some(chunk)) => Ok(Some((chunk, cursor))),
+            Ok(None) => Ok(None),
+            Err(error) => {
+                tracing::warn!(path = %cursor.requested, %error, "workspace download ended early");
+                Err(error)
+            }
+        }
+    })
+}
+
+impl DownloadCursor {
+    async fn next_chunk(&mut self) -> std::io::Result<Option<Vec<u8>>> {
+        // A file that grew is sent up to its declared length, which still matches Content-Length.
+        if self.remaining == 0 {
+            return Ok(None);
+        }
+        let length = usize::try_from(self.remaining).map_or(DOWNLOAD_CHUNK_BYTES, |remaining| {
+            remaining.min(DOWNLOAD_CHUNK_BYTES)
+        });
+        let mut chunk = vec![0u8; length];
+        let read = self.read(&mut chunk).await?;
+        if read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "file shrank below its declared length during download",
+            ));
+        }
+        chunk.truncate(read);
+        self.remaining -= read as u64;
+        Ok(Some(chunk))
+    }
+
+    async fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        tokio::select! {
+            biased;
+            () = self.shutdown.cancelled() => Err(std::io::Error::other("server is shutting down")),
+            read = self.file.read(buffer) => read,
+        }
+    }
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -491,6 +569,23 @@ async fn read_workspace_file(
     .await
 }
 
+/// Only the open runs as a workspace job, under the same credentials and timeout as a read. Reads
+/// through the opened handle need no credentials, so the body streams with no job deadline.
+async fn open_workspace_file(
+    state: &AppState,
+    requested: &str,
+) -> std::result::Result<FileOpen, StackError> {
+    let profile = SandboxProfile::resolve(&state.config.workspace.sandbox)?;
+    run_in_workspace(
+        &profile,
+        &state.config.workspace.root,
+        requested,
+        PathIntent::ReadExisting,
+        workspace::open_file,
+    )
+    .await
+}
+
 /// Writes run with the workload identity's credentials when one is declared,
 /// so the file lands owned by the workload.
 async fn write_workspace_file(
@@ -510,4 +605,167 @@ async fn write_workspace_file(
         },
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt as _;
+    use std::io::Write as _;
+    use std::pin::pin;
+
+    const FILE_NAME: &str = "data.bin";
+    const TRAILING_BYTES: usize = 17;
+
+    fn patterned(length: usize) -> Vec<u8> {
+        (0..length).map(|index| (index % 251) as u8).collect()
+    }
+
+    fn workspace_with(content: &[u8]) -> tempfile::TempDir {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join(FILE_NAME), content).expect("write");
+        root
+    }
+
+    async fn open(root: &tempfile::TempDir) -> FileOpen {
+        run_in_workspace(
+            &SandboxProfile::default(),
+            &root.path().to_string_lossy(),
+            FILE_NAME,
+            PathIntent::ReadExisting,
+            workspace::open_file,
+        )
+        .await
+        .expect("open")
+    }
+
+    fn stream_of(
+        opened: FileOpen,
+        shutdown: CancellationToken,
+    ) -> impl Stream<Item = std::io::Result<Vec<u8>>> {
+        download_stream(opened, shutdown, FILE_NAME.to_owned())
+    }
+
+    #[tokio::test]
+    async fn chunks_stay_bounded_and_reassemble_the_file() {
+        let content = patterned(3 * DOWNLOAD_CHUNK_BYTES + TRAILING_BYTES);
+        let root = workspace_with(&content);
+        let opened = open(&root).await;
+        assert_eq!(opened.size, content.len() as u64);
+
+        let chunks: Vec<Vec<u8>> = stream_of(opened, CancellationToken::new())
+            .map(|chunk| chunk.expect("chunk"))
+            .collect()
+            .await;
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.len() <= DOWNLOAD_CHUNK_BYTES)
+        );
+        assert_eq!(chunks.concat(), content);
+    }
+
+    #[tokio::test]
+    async fn a_file_that_shrinks_mid_stream_ends_the_body_with_an_error() {
+        let root = workspace_with(&patterned(2 * DOWNLOAD_CHUNK_BYTES));
+        let mut stream = pin!(stream_of(open(&root).await, CancellationToken::new()));
+        stream
+            .next()
+            .await
+            .expect("first item")
+            .expect("first chunk");
+
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(root.path().join(FILE_NAME))
+            .and_then(|file| file.set_len(DOWNLOAD_CHUNK_BYTES as u64))
+            .expect("truncate");
+        let error = stream
+            .next()
+            .await
+            .expect("error item")
+            .expect_err("shrunk file");
+        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[tokio::test]
+    async fn a_file_that_grows_mid_stream_is_sent_up_to_its_declared_length() {
+        let content = patterned(2 * DOWNLOAD_CHUNK_BYTES);
+        let root = workspace_with(&content);
+        let mut stream = pin!(stream_of(open(&root).await, CancellationToken::new()));
+        let mut received = stream.next().await.expect("item").expect("chunk");
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(root.path().join(FILE_NAME))
+            .and_then(|mut file| file.write_all(b"more"))
+            .expect("append");
+        while let Some(chunk) = stream.next().await {
+            received.extend(chunk.expect("chunk"));
+        }
+        assert_eq!(received, content);
+    }
+
+    #[tokio::test]
+    async fn shutdown_ends_the_body_with_an_error() {
+        let root = workspace_with(&patterned(2 * DOWNLOAD_CHUNK_BYTES));
+        let shutdown = CancellationToken::new();
+        let mut stream = pin!(stream_of(open(&root).await, shutdown.clone()));
+        stream
+            .next()
+            .await
+            .expect("first item")
+            .expect("first chunk");
+
+        shutdown.cancel();
+        stream
+            .next()
+            .await
+            .expect("error item")
+            .expect_err("shutdown");
+    }
+
+    fn state_for(root: &tempfile::TempDir) -> AppState {
+        let mut config = crate::config::load_config_from_str(include_str!(
+            "../../../tests/fixtures/valid-placebo-stack.toml"
+        ))
+        .expect("fixture parses");
+        config.workspace.root = root.path().to_string_lossy().into_owned();
+        let state_dir = tempfile::tempdir().expect("state tempdir");
+        let store = crate::state::StateStore::open(state_dir.path().join("state.sqlite"))
+            .expect("state open");
+        store.migrate().expect("migrate");
+        // Leaked because the returned AppState keeps the sqlite handle open.
+        std::mem::forget(state_dir);
+        AppState::new(config, store, String::new(), String::new())
+    }
+
+    #[tokio::test]
+    async fn a_slow_reader_outlives_the_job_timeout() {
+        let content = patterned(2 * DOWNLOAD_CHUNK_BYTES + TRAILING_BYTES);
+        let root = workspace_with(&content);
+        let response = files_download_handler(
+            State(state_for(&root)),
+            Query(FilesPathParams {
+                path: FILE_NAME.to_owned(),
+            }),
+        )
+        .await
+        .expect("download response");
+        let mut body = response.into_body().into_data_stream();
+        let mut received = body
+            .next()
+            .await
+            .expect("first frame")
+            .expect("first chunk")
+            .to_vec();
+
+        // Paused only after the handler returns, so the open's job timeout runs on the real clock.
+        tokio::time::pause();
+        tokio::time::sleep(DEFAULT_JOB_TIMEOUT * 2).await;
+        while let Some(chunk) = body.next().await {
+            received.extend_from_slice(&chunk.expect("chunk"));
+        }
+        assert_eq!(received, content);
+    }
 }

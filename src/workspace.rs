@@ -142,6 +142,12 @@ pub struct FileRead {
     pub modified: DateTime<Utc>,
 }
 
+#[derive(Debug)]
+pub struct FileOpen {
+    pub file: std::fs::File,
+    pub size: u64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct FileMetadata {
     pub size: u64,
@@ -186,6 +192,17 @@ pub fn read_file(
         size: content.len() as u64,
         content,
         modified: system_time_to_utc(info.modified),
+    })
+}
+
+/// Open the single-link regular file at `relative` for streaming, with no size bound. The size is
+/// the opened file's own, so it describes exactly what the handle reads.
+pub fn open_file(anchor: &Anchor, relative: &Path, requested: &str) -> Result<FileOpen> {
+    let (file, info) = workload_fs::open_file(anchor, relative)
+        .map_err(|error| workspace_error(error, requested, PathIntent::ReadExisting))?;
+    Ok(FileOpen {
+        file,
+        size: info.size,
     })
 }
 
@@ -675,5 +692,87 @@ mod tests {
         assert_eq!(written.size, 5);
         let metadata = fs::symlink_metadata(root.path().join("note.md")).expect("metadata");
         assert_eq!((metadata.uid(), metadata.gid()), (entry.uid, entry.gid));
+    }
+
+    #[test]
+    fn open_file_reports_the_opened_size_with_no_limit() {
+        let (root, anchor) = workspace();
+        let content = vec![7u8; MAX_READ as usize * 4];
+        fs::write(root.path().join("large.bin"), &content).expect("write");
+
+        let opened = open_file(&anchor, Path::new("large.bin"), "large.bin").expect("open");
+        assert_eq!(opened.size, content.len() as u64);
+        assert!(matches!(
+            open_file(&anchor, Path::new("absent"), "absent"),
+            Err(StackError::WorkspaceNotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn open_file_refuses_symlinks_and_hard_links_without_following() {
+        let (root, anchor) = workspace();
+        let outside = tempfile::tempdir().expect("outside");
+        fs::write(outside.path().join("secret"), b"leak").expect("secret");
+        fs::write(root.path().join("real.txt"), b"ok").expect("real");
+        symlink(outside.path().join("secret"), root.path().join("escape")).expect("escape");
+        symlink(root.path().join("real.txt"), root.path().join("inner")).expect("inner");
+        symlink(outside.path(), root.path().join("dir")).expect("dir");
+        fs::hard_link(root.path().join("real.txt"), root.path().join("linked")).expect("hard");
+
+        for relative in ["escape", "inner", "dir/secret"] {
+            assert!(
+                matches!(
+                    open_file(&anchor, Path::new(relative), relative),
+                    Err(StackError::WorkspaceSymlinkEscape { .. })
+                ),
+                "{relative} must be refused"
+            );
+        }
+        assert_invalid(
+            open_file(&anchor, Path::new("linked"), "linked").expect_err("hard link"),
+            HARD_LINK_REASON,
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires CAP_SETUID/CAP_SETGID and ACPS_TEST_WORKLOAD_USER"]
+    fn workload_open_refuses_a_file_the_identity_cannot_read() {
+        let user = std::env::var("ACPS_TEST_WORKLOAD_USER").expect("ACPS_TEST_WORKLOAD_USER");
+        let entry = crate::ownership::lookup_user(&user)
+            .expect("lookup")
+            .expect("workload user exists");
+        let profile = SandboxProfile {
+            config: Default::default(),
+            identity: Some(crate::runtime::sandbox::WorkloadIdentity {
+                name: user,
+                uid: entry.uid,
+                gid: entry.gid,
+                home: entry.home,
+            }),
+        };
+        let root = tempfile::tempdir().expect("tempdir");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o777))
+            .expect("open the root to the workload user");
+        let private = root.path().join("private.bin");
+        fs::write(&private, b"runtime only").expect("write");
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o600)).expect("owner only");
+        let root_path = root.path().to_path_buf();
+
+        let outcome = profile
+            .executor()
+            .run(workload_fs::DEFAULT_JOB_TIMEOUT, move || {
+                let anchor = open_root(&root_path, "private.bin", LinkPolicy::Refuse)?;
+                open_file(&anchor, Path::new("private.bin"), "private.bin")
+            });
+
+        assert!(
+            matches!(
+                &outcome,
+                Err(StackError::WorkspaceIo { source, .. })
+                    if source.kind() == std::io::ErrorKind::PermissionDenied
+            ),
+            "expected a permission refusal, got {outcome:?}"
+        );
     }
 }

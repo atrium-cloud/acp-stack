@@ -958,7 +958,7 @@ The `agent.inference_*` codes carry a sanitized public message of the form `"inf
 
 ## Workspace Files
 
-Workspace routes are session-tier. Paths are workspace-relative. The runtime rejects absolute paths, NUL bytes, `..` traversal, symlink escapes, writes through existing symlink targets, and files above `workspace.max_file_bytes`.
+Workspace routes are session-tier. Paths are workspace-relative. The runtime rejects absolute paths, NUL bytes, `..` traversal, symlink escapes, writes through existing symlink targets, and reads, writes, and uploads above `workspace.max_file_bytes`.
 
 ### `GET /v1/workspace`
 
@@ -997,6 +997,7 @@ Workspace routes are session-tier. Paths are workspace-relative. The runtime rej
 - Tier: `session`
 - Request: `path` query parameter.
 - Response: streams raw file bytes. Not wrapped in the response envelope.
+- Notes: `Content-Length` is the opened file's size. The stream has no size cap or total deadline and follows the reader's pace. The connection aborts mid-body if the file shrinks during the download or the server begins shutdown. A file that grows is sent up to its size at open. During shutdown, a download whose client has stopped reading is closed 10 seconds after every other in-flight request has returned its response.
 
 ### `DELETE /v1/files?path=...`
 
@@ -1007,7 +1008,7 @@ Workspace routes are session-tier. Paths are workspace-relative. The runtime rej
 
 #### Size Cap
 
-`workspace.max_file_bytes` caps reads, writes, uploads, and downloads. Oversized files return `413 workspace.too_large`.
+`workspace.max_file_bytes` caps reads, writes, and uploads. Oversized files return `413 workspace.too_large`.
 
 #### Workload Identity Errors
 

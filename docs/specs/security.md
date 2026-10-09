@@ -108,7 +108,7 @@ Pending requests expire according to config. Approval and denial decisions are d
 
 ## Workspace Boundary
 
-Workspace paths are resolved under `[workspace].root`. The runtime rejects absolute paths from API callers, `..` traversal, embedded NUL bytes, and files above `workspace.max_file_bytes`. Oversized reads/writes/uploads/downloads return `413 workspace.too_large`.
+Workspace paths are resolved under `[workspace].root`. The runtime rejects absolute paths from API callers, `..` traversal, embedded NUL bytes, and reads, writes, and uploads above `workspace.max_file_bytes`. Oversized ones return `413 workspace.too_large`.
 
 Without a workload identity, workspace reads, writes, uploads, and deletes follow symlinks that resolve inside the root and refuse symlink escapes and writes through an existing symlink target. With `[workspace.sandbox].workload_user` set, every operation walks the path one component at a time from the workspace root without following symlinks: a symlink at the target or at any parent, a hard-linked target, and a non-regular target are refused. Writes replace the target atomically.
 

@@ -290,13 +290,13 @@ async fn download_streams_bytes_with_disposition_header() {
 }
 
 #[tokio::test]
-async fn download_above_limit_returns_too_large_before_any_body() {
+async fn download_above_limit_streams_the_full_file() {
     let harness = Harness::spawn().await;
-    std::fs::write(
-        harness.workspace_root.join("over.bin"),
-        vec![0u8; 8 * 1024 * 1024 + 1],
-    )
-    .expect("write");
+    // 8 MiB + 1 byte, one past `workspace.max_file_bytes` in the fixture.
+    let bytes: Vec<u8> = (0..8 * 1024 * 1024 + 1)
+        .map(|index: usize| (index % 251) as u8)
+        .collect();
+    std::fs::write(harness.workspace_root.join("over.bin"), &bytes).expect("write");
 
     let response = auth(session_client().get(format!(
         "{}/v1/files/download?path=over.bin",
@@ -305,9 +305,79 @@ async fn download_above_limit_returns_too_large_before_any_body() {
     .send()
     .await
     .expect("send");
-    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(response.status(), StatusCode::OK);
+    let length: u64 = response
+        .headers()
+        .get(reqwest::header::CONTENT_LENGTH)
+        .expect("content-length")
+        .to_str()
+        .expect("ascii")
+        .parse()
+        .expect("parse");
+    assert_eq!(length, bytes.len() as u64);
+    let body = response.bytes().await.expect("body");
+    assert!(body.as_ref() == bytes.as_slice(), "downloaded bytes differ");
+}
+
+#[tokio::test]
+async fn download_of_an_empty_file_has_zero_length() {
+    let harness = Harness::spawn().await;
+    std::fs::write(harness.workspace_root.join("empty.bin"), b"").expect("write");
+
+    let response = auth(session_client().get(format!(
+        "{}/v1/files/download?path=empty.bin",
+        harness.base_url
+    )))
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(reqwest::header::CONTENT_LENGTH)
+            .expect("content-length"),
+        "0"
+    );
+    assert!(response.bytes().await.expect("body").is_empty());
+}
+
+#[tokio::test]
+async fn download_rejects_path_traversal() {
+    let harness = Harness::spawn().await;
+    let response = auth(session_client().get(format!(
+        "{}/v1/files/download?path=../etc/passwd",
+        harness.base_url
+    )))
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body: Value = response.json().await.expect("json");
-    assert_eq!(body["error"]["code"], "workspace.too_large");
+    assert_eq!(body["error"]["code"], "workspace.path_invalid");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn download_rejects_symlink_escape() {
+    use std::os::unix::fs::symlink;
+
+    let harness = Harness::spawn().await;
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    let outside_target = outside.path().join("leak");
+    std::fs::write(&outside_target, b"leak").expect("write outside");
+    symlink(&outside_target, harness.workspace_root.join("escape")).expect("symlink");
+
+    let response = auth(session_client().get(format!(
+        "{}/v1/files/download?path=escape",
+        harness.base_url
+    )))
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "workspace.symlink_escape");
 }
 
 #[tokio::test]

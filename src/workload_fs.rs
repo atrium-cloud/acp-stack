@@ -31,8 +31,8 @@ mod walk;
 pub use handoff::{HandoffOptions, HandoffSummary, SymlinkPolicy, handoff_tree};
 pub use walk::{
     Anchor, EntryInfo, EntryKind, LinkPolicy, WriteOptions, copy_file, create_dir_all, list_dir,
-    read_file, read_file_with_info, read_link, remove_empty_dir, remove_file, remove_tree, rename,
-    stat, symlink, write_file_atomic, write_file_new,
+    open_file, read_file, read_file_with_info, read_link, remove_empty_dir, remove_file,
+    remove_tree, rename, stat, symlink, write_file_atomic, write_file_new,
 };
 
 // === CONSTANTS ===

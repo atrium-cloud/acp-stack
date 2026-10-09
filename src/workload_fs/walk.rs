@@ -185,6 +185,13 @@ pub fn copy_file(anchor: &Anchor, from: &Path, to: &Path, options: &WriteOptions
     write_new_from_reader(anchor, to, &mut File::from(descriptor), &file_options)
 }
 
+/// Open the file at `relative` for reading, vetted as [`read_file`] vets it with no size bound,
+/// along with the status of the opened file.
+pub fn open_file(anchor: &Anchor, relative: &Path) -> Result<(File, EntryInfo)> {
+    let (descriptor, status, _) = open_readable(anchor, relative, u64::MAX)?;
+    Ok((File::from(descriptor), status))
+}
+
 /// Open the regular file at `relative` for reading, with its status and display path.
 fn open_readable(
     anchor: &Anchor,
