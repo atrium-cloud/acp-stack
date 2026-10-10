@@ -96,6 +96,7 @@ async fn assert_real_agent_advertises_model(
         "/bin/sh",
         None,
         None,
+        None,
     )
     .await
     .expect("real ACP agent should initialize");
@@ -139,6 +140,7 @@ async fn print_real_agent_mode_values(agent: AgentConfig, env: HashMap<String, S
         "/bin/sh",
         None,
         None,
+        None,
     )
     .await
     .expect("real ACP agent should initialize");
@@ -174,6 +176,7 @@ async fn send_real_agent_prompt(agent: AgentConfig, env: HashMap<String, String>
         AcpPermissionPolicy::Cancel,
         &Default::default(),
         "/bin/sh",
+        None,
         None,
         None,
     )
@@ -264,6 +267,7 @@ async fn real_terminal_uname_probe(agent: AgentConfig, env: HashMap<String, Stri
             state: state.clone(),
             event_hub: acp_stack::events::EventHub::new(),
         }),
+        None,
     )
     .await
     .expect("real ACP agent should initialize");

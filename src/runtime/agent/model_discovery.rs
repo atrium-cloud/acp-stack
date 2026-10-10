@@ -375,6 +375,7 @@ pub async fn fetch_session_config_with_timeout(
         &config.workspace.default_shell,
         crate::extensions::resolve_network_provider(config).as_ref(),
         None,
+        None,
     )
     .await?;
     // One budget covers `session/new` and the model application: the pair is a
@@ -541,6 +542,7 @@ pub async fn fetch_agent_capabilities_async(
         &crate::runtime::sandbox::SandboxProfile::resolve(&config.workspace.sandbox)?,
         &config.workspace.default_shell,
         crate::extensions::resolve_network_provider(config).as_ref(),
+        None,
         None,
     )
     .await?;

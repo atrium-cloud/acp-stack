@@ -1149,6 +1149,7 @@ async fn run_agent_test_inner(
         &shell,
         network_provider.as_ref(),
         None,
+        None,
     )
     .await
     {

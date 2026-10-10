@@ -114,6 +114,12 @@ pub(crate) struct AcpArgs {
     pub(crate) session_new_error: bool,
     #[arg(long)]
     pub(crate) session_new_stall: bool,
+    /// Write this many numbered lines to stderr at startup.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) stderr_lines: usize,
+    /// Write this text as one stderr line at startup, after any `--stderr-lines`.
+    #[arg(long)]
+    pub(crate) stderr_echo: Option<String>,
     /// Exit the process on `session/new` without answering it.
     #[arg(long)]
     pub(crate) session_new_exit: bool,

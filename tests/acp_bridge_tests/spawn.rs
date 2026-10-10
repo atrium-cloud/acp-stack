@@ -15,6 +15,7 @@ async fn spawn_completes_initialize_and_captures_capabilities() {
         "/bin/sh",
         None,
         None,
+        None,
     )
     .await
     .expect("bridge spawns");
@@ -39,10 +40,70 @@ async fn spawn_sends_client_identity() {
         "/bin/sh",
         None,
         None,
+        None,
     )
     .await
     .expect("placebo accepted clientInfo");
     bridge.shutdown().await.expect("shutdown ok");
+}
+
+async fn spawn_with_args(args: &[&str]) -> acp_stack::error::Result<AcpBridge> {
+    let mut config = fake_agent_config();
+    config.args.extend(args.iter().map(|arg| (*arg).to_owned()));
+    AcpBridge::spawn(
+        &std::env::temp_dir(),
+        &config,
+        fake_env(),
+        std::env::temp_dir(),
+        null_sink(),
+        AcpPermissionPolicy::Cancel,
+        &Default::default(),
+        "/bin/sh",
+        None,
+        None,
+        None,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn initialize_failure_carries_the_redacted_stderr_tail() {
+    acp_stack::redaction::register_secret_values(["StderrCanary-5Tq81"]);
+    let error = match spawn_with_args(&[
+        "--stderr-lines",
+        "2",
+        "--stderr-echo",
+        "boot failed with key StderrCanary-5Tq81",
+        "--initialize-error",
+    ])
+    .await
+    {
+        Ok(bridge) => {
+            bridge.shutdown().await.expect("shutdown ok");
+            panic!("initialize must fail");
+        }
+        Err(error) => error,
+    };
+    assert_eq!(
+        error.to_string(),
+        "agent failed to initialize: fake initialize failure; agent stderr:\nplacebo stderr line 0\nplacebo stderr line 1\nboot failed with key [redacted]"
+    );
+}
+
+// The per-line logging and rate limit are covered by the `agent_stderr` unit tests; a
+// thread-local subscriber here races other tests for the shared callsite interest.
+#[tokio::test]
+async fn shutdown_keeps_the_last_stderr_lines_past_the_rate_limit() {
+    let bridge = spawn_with_args(&["--stderr-lines", "205"])
+        .await
+        .expect("spawn");
+    bridge.shutdown().await.expect("shutdown ok");
+
+    assert!(
+        bridge
+            .stderr_tail()
+            .ends_with("placebo stderr line 203\nplacebo stderr line 204")
+    );
 }
 
 #[tokio::test]
@@ -58,6 +119,7 @@ async fn spawn_rejects_an_incompatible_protocol_version() {
         AcpPermissionPolicy::Cancel,
         &Default::default(),
         "/bin/sh",
+        None,
         None,
         None,
     )
@@ -89,6 +151,7 @@ async fn unadvertised_http_mcp_transport_is_skipped_not_fatal() {
         AcpPermissionPolicy::Cancel,
         &Default::default(),
         "/bin/sh",
+        None,
         None,
         None,
     )
@@ -126,6 +189,7 @@ async fn shutdown_terminates_the_child() {
         "/bin/sh",
         None,
         None,
+        None,
     )
     .await
     .expect("spawn ok");
@@ -161,6 +225,7 @@ async fn terminate_probe_terminates_the_child() {
         AcpPermissionPolicy::Cancel,
         &Default::default(),
         "/bin/sh",
+        None,
         None,
         None,
     )
@@ -214,6 +279,7 @@ async fn spawn_forwards_only_reserved_runtime_context_and_explicit_env() {
         AcpPermissionPolicy::Cancel,
         &Default::default(),
         "/bin/sh",
+        None,
         None,
         None,
     )

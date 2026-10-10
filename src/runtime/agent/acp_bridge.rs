@@ -45,6 +45,7 @@ use crate::runtime::mediation::permissions::PermissionService;
 use crate::runtime::process_runner::kill_tokio_process_group;
 use crate::state::FailureClass;
 
+mod agent_stderr;
 mod capabilities;
 mod process_env;
 mod sessions;
@@ -162,6 +163,7 @@ pub struct AcpBridge {
     agent_id: String,
     /// The supervisor target this bridge serves; `None` for bridges spawned outside one.
     target_id: Option<String>,
+    stderr: agent_stderr::StderrCapture,
     child: Arc<TokioMutex<Option<Child>>>,
     /// Present under `off` with a workload identity: the only way to stop a different-uid
     /// agent tree there. Dropping the bridge kills and removes it.
@@ -265,10 +267,9 @@ impl Drop for NotificationGuard {
 }
 
 impl AcpBridge {
-    /// Name the supervisor target this bridge serves in its failed-request errors.
-    pub fn with_target_id(mut self, target_id: impl Into<String>) -> Self {
-        self.target_id = Some(target_id.into());
-        self
+    /// The adapter's newest stderr lines, redacted; empty when it wrote nothing.
+    pub fn stderr_tail(&self) -> String {
+        self.stderr.tail.snapshot()
     }
 
     pub fn capabilities(&self) -> &AgentCapabilitiesDto {
@@ -391,6 +392,7 @@ impl AcpBridge {
         if let Some(cgroup) = &self.cgroup {
             cgroup.kill();
         }
+        self.stderr.finish().await;
 
         if kill_first {
             self.stop_connection_task().await;

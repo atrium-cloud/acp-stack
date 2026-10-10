@@ -22,6 +22,7 @@ async fn new_session_round_trips_and_prompt_emits_notifications() {
         "/bin/sh",
         None,
         None,
+        None,
     )
     .await
     .expect("spawn");
@@ -78,6 +79,7 @@ async fn prompt_rejects_unadvertised_image_content() {
         AcpPermissionPolicy::Cancel,
         &Default::default(),
         "/bin/sh",
+        None,
         None,
         None,
     )
@@ -139,6 +141,7 @@ async fn cancelled_permission_does_not_block_dispatch_and_is_persisted() {
         "/bin/sh",
         None,
         None,
+        None,
     )
     .await
     .expect("spawn");
@@ -183,10 +186,10 @@ async fn spawn_placebo(args: &[&str]) -> AcpBridge {
         "/bin/sh",
         None,
         None,
+        Some("primary"),
     )
     .await
     .expect("spawn")
-    .with_target_id("primary")
 }
 
 #[tokio::test]
@@ -295,6 +298,7 @@ async fn new_session_returns_custom_model_config_option_id() {
         "/bin/sh",
         None,
         None,
+        None,
     )
     .await
     .expect("spawn");
@@ -328,6 +332,7 @@ async fn new_session_advertises_config_options_to_strict_agent() {
         AcpPermissionPolicy::Cancel,
         &Default::default(),
         "/bin/sh",
+        None,
         None,
         None,
     )
@@ -365,6 +370,7 @@ async fn set_config_option_sends_boolean_values() {
         AcpPermissionPolicy::Cancel,
         &Default::default(),
         "/bin/sh",
+        None,
         None,
         None,
     )

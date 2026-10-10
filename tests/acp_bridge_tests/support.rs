@@ -97,6 +97,7 @@ pub(crate) async fn run_terminal_probe(
         "/bin/sh",
         None,
         command_log,
+        None,
     )
     .await
     .expect("spawn");

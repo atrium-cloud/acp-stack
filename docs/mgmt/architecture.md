@@ -36,7 +36,7 @@ flowchart LR
 
 - Agent supervisor: process lifecycle for each configured ACP agent target.
 - Array: multi-target fleet with per-target supervision and one primary target as the default and coordination point.
-- ACP bridge: ACP initialization, sessions, prompts, updates, and permissions.
+- ACP bridge: ACP initialization, sessions, prompts, updates, and permissions. The adapter's stderr is read into the redacted daemon log and a bounded tail (`src/runtime/agent/acp_bridge/agent_stderr.rs`).
 - ACP terminals: client-side `terminal/*` handlers with per-terminal owning tasks, capped output buffers, and command-log recording (`src/runtime/agent/acp_terminal.rs`).
 - Session changes: bounded process-local reduction of explicit ACP diff tool content.
 - State sweeper: background flips of stalled prompts to terminal `stalled` and idle `active` sessions to `available`, and pruning of expired deleted-session tombstones (`src/runtime/agent/sweeper.rs`).

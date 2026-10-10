@@ -59,6 +59,7 @@ async fn shutdown_waits_for_connection_task_before_flushing_sink() {
             "/bin/sh",
             None,
             None,
+            None,
         )
         .await
         .expect("spawn"),
@@ -165,6 +166,7 @@ async fn shutdown_drains_notification_queued_before_capture_blocks() {
             "/bin/sh",
             None,
             None,
+            None,
         )
         .await
         .expect("spawn"),
@@ -221,6 +223,7 @@ async fn cancel_session_settles_prompt_with_cancelled_stop_reason() {
         AcpPermissionPolicy::Cancel,
         &Default::default(),
         "/bin/sh",
+        None,
         None,
         None,
     )

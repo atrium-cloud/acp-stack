@@ -84,6 +84,12 @@ async fn run_acp(args: AcpArgs) -> agent_client_protocol::Result<()> {
             .await
             .map_err(Error::into_internal_error)?;
     }
+    for index in 0..args.stderr_lines {
+        eprintln!("placebo stderr line {index}");
+    }
+    if let Some(text) = &args.stderr_echo {
+        eprintln!("{text}");
+    }
 
     let state = Arc::new(Mutex::new(PlaceboState::new(args)));
     Agent

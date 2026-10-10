@@ -2,7 +2,7 @@
 //! registration, and the `initialize` handshake that produces a live
 //! [`AcpBridge`].
 
-use tokio::process::{ChildStdin, ChildStdout};
+use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
 
 use super::*;
 
@@ -20,6 +20,15 @@ struct ConnectionTask {
     task: JoinHandle<()>,
     connection_rx: oneshot::Receiver<InitializeOutcome>,
     shutdown_tx: oneshot::Sender<()>,
+}
+
+/// A launched agent process with its stdio taken.
+struct SpawnedChild {
+    child: Child,
+    cgroup: Option<crate::runtime::sandbox::WorkloadCgroup>,
+    stdin: ChildStdin,
+    stdout: ChildStdout,
+    stderr: ChildStderr,
 }
 
 type InitializeOutcome = std::result::Result<(InitializeResponse, ConnectionTo<Agent>), String>;
@@ -40,6 +49,7 @@ impl AcpBridge {
         shell: &str,
         network_provider: Option<&crate::extensions::NetworkProviderExtension>,
         command_log: Option<TerminalCommandLog>,
+        target_id: Option<&str>,
     ) -> Result<Self> {
         wait_for_managed_node(home).await;
         // Opened before anything is spawned, so a failure leaves no child to reap.
@@ -66,8 +76,23 @@ impl AcpBridge {
         crate::extensions::apply_workload_env(&mut env, network_provider);
         let wrapped = wrap_agent_command(agent, &cwd, sandbox, network_provider, home)?;
         let command = build_agent_command(&wrapped, &cwd, &env, home, sandbox);
-        let (mut child, cgroup, stdin, stdout) =
-            spawn_agent_child(command, &wrapped, sandbox, network_provider)?;
+        let SpawnedChild {
+            mut child,
+            cgroup,
+            stdin,
+            stdout,
+            stderr,
+        } = spawn_agent_child(command, &wrapped, sandbox, network_provider)?;
+        // Started before initialize, so an adapter that writes a lot while starting never
+        // blocks on a full pipe.
+        let stderr = agent_stderr::StderrCapture::start(
+            stderr,
+            agent_stderr::StderrLabels {
+                agent_id: agent.id.clone(),
+                target_id: target_id.map(str::to_owned),
+                pid: child.id(),
+            },
+        );
 
         let (exit_tx, exit_rx) = watch::channel(None);
         let exit = ExitReporter {
@@ -105,14 +130,15 @@ impl AcpBridge {
         );
 
         let (capabilities, connection, task) =
-            complete_initialize(&mut child, cgroup.as_ref(), task, connection_rx).await?;
+            complete_initialize(&mut child, cgroup.as_ref(), task, connection_rx, &stderr).await?;
 
         let child = Arc::new(TokioMutex::new(Some(child)));
         spawn_child_exit_watcher(Arc::clone(&child), exit.clone());
 
         Ok(Self {
             agent_id: agent.id.clone(),
-            target_id: None,
+            target_id: target_id.map(str::to_owned),
+            stderr,
             child,
             cgroup,
             capabilities,
@@ -182,9 +208,9 @@ fn build_agent_command(
         .current_dir(cwd)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        // stderr is the agent's ACP log channel, so inherit it into the daemon
-        // logs.
-        .stderr(std::process::Stdio::inherit())
+        // stderr is the agent's diagnostic channel; the bridge reads it into the
+        // redacted daemon log rather than letting raw output reach the daemon's stderr.
+        .stderr(std::process::Stdio::piped())
         .env_clear();
     // Runtime context is deliberately narrow: managed PATH for
     // registry-installed harnesses, HOME for agent config/cache directories.
@@ -217,12 +243,7 @@ fn spawn_agent_child(
     wrapped: &crate::runtime::sandbox::WrappedCommand,
     sandbox: &crate::runtime::sandbox::SandboxProfile,
     network_provider: Option<&crate::extensions::NetworkProviderExtension>,
-) -> Result<(
-    Child,
-    Option<crate::runtime::sandbox::WorkloadCgroup>,
-    ChildStdin,
-    ChildStdout,
-)> {
+) -> Result<SpawnedChild> {
     let cgroup = crate::runtime::sandbox::prepare_workload_spawn(sandbox, &mut command)
         .map_err(|source| StackError::AgentSpawnFailed { source })?;
     // Network-isolated spawns get the daemon's stderr at the supervisor's
@@ -252,7 +273,19 @@ fn spawn_agent_child(
         .ok_or_else(|| StackError::AgentInitializeFailed {
             reason: "agent stdout was not piped".to_owned(),
         })?;
-    Ok((child, cgroup, stdin, stdout))
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| StackError::AgentInitializeFailed {
+            reason: "agent stderr was not piped".to_owned(),
+        })?;
+    Ok(SpawnedChild {
+        child,
+        cgroup,
+        stdin,
+        stdout,
+        stderr,
+    })
 }
 
 /// Register the client-side ACP handlers and drive the connection.
@@ -498,48 +531,63 @@ async fn complete_initialize(
     cgroup: Option<&crate::runtime::sandbox::WorkloadCgroup>,
     connection_task: JoinHandle<()>,
     connection_rx: oneshot::Receiver<InitializeOutcome>,
+    stderr: &agent_stderr::StderrCapture,
 ) -> Result<(AgentCapabilitiesDto, ConnectionTo<Agent>, JoinHandle<()>)> {
     let (init_response, connection) = match timeout(INITIALIZE_TIMEOUT, connection_rx).await {
         Ok(Ok(Ok((response, connection)))) => (response, connection),
         Ok(Ok(Err(reason))) => {
-            fail_spawn(child, cgroup, connection_task).await;
-            return Err(StackError::AgentInitializeFailed { reason });
+            fail_spawn(child, cgroup, connection_task, stderr).await;
+            return Err(initialize_failed(reason, stderr));
         }
         Ok(Err(_)) => {
-            fail_spawn(child, cgroup, connection_task).await;
-            return Err(StackError::AgentInitializeFailed {
-                reason: "connection ended before initialize completed".to_owned(),
-            });
+            fail_spawn(child, cgroup, connection_task, stderr).await;
+            return Err(initialize_failed(
+                "connection ended before initialize completed".to_owned(),
+                stderr,
+            ));
         }
         Err(_) => {
-            fail_spawn(child, cgroup, connection_task).await;
-            return Err(StackError::AgentInitializeFailed {
-                reason: format!(
+            fail_spawn(child, cgroup, connection_task, stderr).await;
+            return Err(initialize_failed(
+                format!(
                     "initialize did not return within {}s",
                     INITIALIZE_TIMEOUT.as_secs()
                 ),
-            });
+                stderr,
+            ));
         }
     };
 
     if init_response.protocol_version != ProtocolVersion::V1 {
         let returned = init_response.protocol_version.as_u16();
-        fail_spawn(child, cgroup, connection_task).await;
-        return Err(StackError::AgentInitializeFailed {
-            reason: format!(
+        fail_spawn(child, cgroup, connection_task, stderr).await;
+        return Err(initialize_failed(
+            format!(
                 "requested ACP protocol version {} but agent returned {returned}",
                 ProtocolVersion::V1.as_u16()
             ),
-        });
+            stderr,
+        ));
     }
     let capabilities = match AgentCapabilitiesDto::from_initialize_response(&init_response) {
         Ok(capabilities) => capabilities,
         Err(error) => {
-            fail_spawn(child, cgroup, connection_task).await;
-            return Err(error);
+            fail_spawn(child, cgroup, connection_task, stderr).await;
+            return Err(match error {
+                StackError::AgentInitializeFailed { reason } => initialize_failed(reason, stderr),
+                other => other,
+            });
         }
     };
     Ok((capabilities, connection, connection_task))
+}
+
+/// `AgentInitializeFailed` with the adapter's last stderr lines appended, since an adapter that
+/// dies while starting usually says why only there.
+fn initialize_failed(reason: String, stderr: &agent_stderr::StderrCapture) -> StackError {
+    StackError::AgentInitializeFailed {
+        reason: format!("{reason}{}", stderr.reason_suffix()),
+    }
 }
 
 /// Capabilities advertised to every agent at initialize. A flag flips only
@@ -600,6 +648,7 @@ async fn fail_spawn(
     child: &mut Child,
     cgroup: Option<&crate::runtime::sandbox::WorkloadCgroup>,
     connection_task: JoinHandle<()>,
+    stderr: &agent_stderr::StderrCapture,
 ) {
     connection_task.abort();
     let _ = connection_task.await;
@@ -608,6 +657,7 @@ async fn fail_spawn(
         cgroup.kill();
     }
     let _ = child.wait().await;
+    stderr.finish().await;
 }
 
 /// Resolve a configured command path the same way process spawning will: an absolute

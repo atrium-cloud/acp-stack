@@ -63,13 +63,14 @@ pub(super) async fn spawn_agent_bridge(
                     state: state.clone(),
                     event_hub: event_hub.clone(),
                 }),
+                Some(target_id),
             )
             .await
         }
         Err(error) => Err(error),
     };
     let bridge = match spawned {
-        Ok(bridge) => bridge.with_target_id(target_id),
+        Ok(bridge) => bridge,
         Err(err) => {
             let data = json!({
                 "target_id": target_id,
@@ -219,6 +220,7 @@ async fn monitor_bridge_exit(
             restart_policy,
             &exit,
             exit_status,
+            &bridge.stderr_tail(),
         ),
     )
     .await?;
@@ -359,6 +361,7 @@ fn bridge_exit_payload(
     restart_policy: &str,
     exit: &AcpBridgeExit,
     exit_status: Option<i32>,
+    stderr_tail: &str,
 ) -> Value {
     json!({
         "target_id": target_id,
@@ -369,6 +372,7 @@ fn bridge_exit_payload(
         "message": exit.message,
         "exit_status": exit.exit_status.or(exit_status),
         "restart": restart_policy,
+        "stderr_tail": (!stderr_tail.is_empty()).then_some(stderr_tail),
     })
 }
 

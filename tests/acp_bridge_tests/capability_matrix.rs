@@ -15,6 +15,7 @@ async fn list_sessions_returns_agent_sessions() {
         "/bin/sh",
         None,
         None,
+        None,
     )
     .await
     .expect("spawn");
@@ -45,6 +46,7 @@ async fn list_sessions_follows_pagination() {
         "/bin/sh",
         None,
         None,
+        None,
     )
     .await
     .expect("spawn");
@@ -71,6 +73,7 @@ async fn list_sessions_returns_unsupported_capability_when_agent_disables_flag()
         AcpPermissionPolicy::Cancel,
         &Default::default(),
         "/bin/sh",
+        None,
         None,
         None,
     )
@@ -106,6 +109,7 @@ async fn list_sessions_rejects_repeated_cursor() {
         "/bin/sh",
         None,
         None,
+        None,
     )
     .await
     .expect("spawn");
@@ -138,6 +142,7 @@ async fn load_session_returns_unsupported_capability_when_agent_disables_flag() 
         AcpPermissionPolicy::Cancel,
         &Default::default(),
         "/bin/sh",
+        None,
         None,
         None,
     )
@@ -178,6 +183,7 @@ async fn resume_session_returns_unsupported_capability_when_agent_disables_flag(
         "/bin/sh",
         None,
         None,
+        None,
     )
     .await
     .expect("spawn");
@@ -215,6 +221,7 @@ async fn close_session_returns_unsupported_capability_when_agent_disables_flag()
         "/bin/sh",
         None,
         None,
+        None,
     )
     .await
     .expect("spawn");
@@ -248,6 +255,7 @@ async fn delete_session_returns_unsupported_capability_when_agent_disables_flag(
         AcpPermissionPolicy::Cancel,
         &Default::default(),
         "/bin/sh",
+        None,
         None,
         None,
     )
@@ -284,6 +292,7 @@ async fn delete_session_round_trips_when_the_agent_advertises_the_capability() {
         "/bin/sh",
         None,
         None,
+        None,
     )
     .await
     .expect("spawn");
@@ -310,6 +319,7 @@ async fn fork_session_returns_child_session() {
         AcpPermissionPolicy::Cancel,
         &Default::default(),
         "/bin/sh",
+        None,
         None,
         None,
     )
@@ -343,6 +353,7 @@ async fn fork_session_returns_unsupported_capability_when_agent_disables_flag() 
         AcpPermissionPolicy::Cancel,
         &Default::default(),
         "/bin/sh",
+        None,
         None,
         None,
     )
@@ -383,6 +394,7 @@ async fn fork_session_sends_message_id_when_capability_is_present() {
         AcpPermissionPolicy::Cancel,
         &Default::default(),
         "/bin/sh",
+        None,
         None,
         None,
     )
@@ -426,6 +438,7 @@ async fn fork_session_sends_an_air_fork_point_without_the_acp_stack_capability()
         "/bin/sh",
         None,
         None,
+        None,
     )
     .await
     .expect("spawn");
@@ -457,6 +470,7 @@ async fn fork_session_rejects_message_id_when_capability_is_missing() {
         AcpPermissionPolicy::Cancel,
         &Default::default(),
         "/bin/sh",
+        None,
         None,
         None,
     )

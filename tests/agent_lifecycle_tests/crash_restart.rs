@@ -182,6 +182,8 @@ async fn never_policy_does_not_restart_after_agent_crash() {
     config.agent.args.extend([
         "--write-pid".to_owned(),
         pid_path.to_string_lossy().into_owned(),
+        "--stderr-echo".to_owned(),
+        "placebo stderr before the crash".to_owned(),
     ]);
     let harness = AgentHarness::spawn_with_config(config).await;
     let client = http().await;
@@ -212,15 +214,40 @@ async fn never_policy_does_not_restart_after_agent_crash() {
     assert_eq!(resume_status, StatusCode::CONFLICT, "body: {resume_body}");
     assert_eq!(resume_body["error"]["code"], "agent.not_running");
 
-    let store = harness.state.lock().await;
-    let lifecycle = store.query_agent_lifecycle(50).expect("lifecycle");
-    drop(store);
+    // The supervisor marks the agent stopped before the exit monitor appends its rows, and
+    // `agent.restart_skipped` is the last of them.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let lifecycle = loop {
+        let lifecycle = harness
+            .state
+            .lock()
+            .await
+            .query_agent_lifecycle(50)
+            .expect("lifecycle");
+        if lifecycle
+            .iter()
+            .any(|row| row.event_kind == "agent.restart_skipped")
+        {
+            break lifecycle;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "agent.restart_skipped was never recorded"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
     let kinds: Vec<&str> = lifecycle
         .iter()
         .map(|row| row.event_kind.as_str())
         .collect();
     assert!(kinds.contains(&"agent.exited"), "kinds: {kinds:?}");
     assert!(kinds.contains(&"agent.restart_skipped"), "kinds: {kinds:?}");
+    let exited = lifecycle
+        .iter()
+        .find(|row| row.event_kind == "agent.exited")
+        .expect("agent.exited row");
+    let payload: Value = serde_json::from_str(&exited.payload_json).expect("agent.exited payload");
+    assert_eq!(payload["stderr_tail"], "placebo stderr before the crash");
     assert!(
         !kinds.contains(&"agent.restart_scheduled"),
         "never policy must not schedule restart: {kinds:?}"

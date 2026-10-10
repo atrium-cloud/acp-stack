@@ -344,6 +344,11 @@ The daemon writes diagnostic lines to stderr at `warn` and above. Every line pas
 
 - Each failed request logs one `request failed` line with `request_id`, `method`, `route`, `path`, `status`, `code`, and `error`. `error` is the internal error text with its source chain, which the public envelope omits. Server errors log at `error`, client errors at `warn`.
 - On `agent.request_failed`, `error` names the agent and, when known, its target and the agent session id. It then gives the agent's JSON-RPC error code, message, and `data` when the agent sent an error, and acp-stack's own description otherwise.
+- Each line the agent writes to stderr logs at `warn` under the `agent_stderr` target with `agent_id`, `target_id`, and `pid`.
+    - The first 8192 bytes of a line are read and the rest are discarded. A cut line loses its trailing partial word, and a cut line with no whitespace keeps no text.
+    - A line is cut at 4096 bytes after redaction. A cut adds a ` [truncated N bytes]` marker, and a read past 8192 bytes adds ` [N more bytes not read]`.
+    - At most 200 lines log per 10 seconds. The rest are counted, and one line reports the count with the next logged line after the window ends, or when the agent's stderr closes.
+    - The newest 4 KiB of whole lines are kept as a tail. A failed agent start appends the tail to the `agent.initialize_failed` error text, which the daemon log and the `agent.spawn_failed` event's `reason` carry. `agent.exited` carries the tail as `stderr_tail` (`null` when the agent wrote nothing).
 - A 4xx that no runtime error produced logs no line: auth rejections, which `auth_failures` rows and security events record, and framework rejections such as an unknown route, a wrong method, an oversized body, or an unparseable request body.
 
 ## External Logging

@@ -44,7 +44,7 @@ The supervisor:
 - Transitions are recorded in durable state and published to live subscribers.
 - After a successful spawn, the supervisor retains a sanitized provider/alias/revision snapshot for restart detection. It clears the snapshot on stop or exit.
 - Agent start, stop, and restart are admin operations.
-- With `restart = "on-crash"`, an unexpected ACP subprocess or connection exit records `agent.exited`, schedules a bounded restart, and relaunches with the same resolved config and environment used for the prior successful start.
+- With `restart = "on-crash"`, an unexpected ACP subprocess or connection exit records `agent.exited`, whose `stderr_tail` holds the adapter's last stderr lines, schedules a bounded restart, and relaunches with the same resolved config and environment used for the prior successful start.
 - `restart = "never"` leaves the process stopped.
 - Planned stop, restart, and daemon shutdown do not trigger crash recovery.
 
