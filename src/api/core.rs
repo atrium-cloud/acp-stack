@@ -17,11 +17,11 @@ use tokio::net::TcpListener;
 use tokio::sync::{Mutex as TokioMutex, RwLock as TokioRwLock};
 use tokio_util::sync::CancellationToken;
 use tower_http::limit::RequestBodyLimitLayer;
-use tower_http::trace::TraceLayer;
+use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 
 use super::auth::{
-    authenticate, enforce_http_origin, ensure_envelope, log_api_request, require_admin,
-    require_session, track_active_requests,
+    authenticate, enforce_http_origin, ensure_envelope, log_api_request, log_error_response,
+    require_admin, require_session, screen_request_id, track_active_requests,
 };
 use super::routes::agent::{
     agent_capabilities_handler, agent_config_options_handler, agent_install_handler,
@@ -799,17 +799,22 @@ pub fn build_router(state: AppState) -> Router {
         ));
     }
     router
-        .layer(TraceLayer::new_for_http())
+        .layer(middleware::from_fn(log_error_response))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             track_active_requests,
         ))
-        // Outermost: rewraps framework-generated rejections (413/400/404) so every
-        // error response carries the documented envelope shape.
+        // Rewraps framework-generated rejections (413/400/404) so every error response
+        // carries the documented envelope shape.
         .layer(middleware::from_fn_with_state(
             state.clone(),
             ensure_envelope,
         ))
+        // Outermost: a caller's id is screened, then the id is set before any inner layer logs
+        // and echoed on every response.
+        .layer(PropagateRequestIdLayer::x_request_id())
+        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+        .layer(middleware::from_fn(screen_request_id))
         .with_state(state)
 }
 

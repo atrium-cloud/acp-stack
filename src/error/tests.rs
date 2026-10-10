@@ -712,3 +712,53 @@ fn newly_claimed_variants_report_codes_and_sanitized_messages() {
     );
     assert_public_message_excludes(&egress, &["api.example.com"]);
 }
+
+#[derive(Debug, thiserror::Error)]
+#[error("loading the catalog failed")]
+struct OpaqueWrapper {
+    #[source]
+    source: StackError,
+}
+
+#[test]
+fn report_appends_sources_the_display_text_omits() {
+    let error = OpaqueWrapper {
+        source: StackError::WorkloadFsIo {
+            path: PathBuf::from("/srv/catalog.json"),
+            operation: "read",
+            source: std::io::Error::other("disk quota exceeded"),
+        },
+    };
+    assert_eq!(
+        super::report(&error),
+        "loading the catalog failed: workload filesystem read on /srv/catalog.json failed: disk quota exceeded"
+    );
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("session not found for user bob")]
+struct CoincidentalWrapper {
+    #[source]
+    source: std::io::Error,
+}
+
+#[test]
+fn report_keeps_a_source_that_only_coincidentally_appears_in_the_text() {
+    let error = CoincidentalWrapper {
+        source: std::io::Error::other("not found"),
+    };
+    assert_eq!(
+        super::report(&error),
+        "session not found for user bob: not found"
+    );
+}
+
+#[test]
+fn report_skips_a_source_the_display_text_already_carries() {
+    let error = StackError::WorkloadFsIo {
+        path: PathBuf::from("/srv/catalog.json"),
+        operation: "read",
+        source: std::io::Error::other("disk quota exceeded"),
+    };
+    assert_eq!(super::report(&error), error.to_string());
+}

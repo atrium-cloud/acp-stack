@@ -50,6 +50,8 @@ JSON errors:
 }
 ```
 
+Every response carries an `x-request-id` header. The runtime keeps a caller-supplied `x-request-id` of at most 128 bytes with no space, tab, `"`, or `\`, and otherwise assigns a UUID. The daemon log line for a failed request carries the same id (see [Daemon Log](../state-logging.md#daemon-log)).
+
 ### Envelope Exceptions
 
 - Binary downloads stream raw bytes.

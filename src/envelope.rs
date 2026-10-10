@@ -175,10 +175,24 @@ where
     }
 }
 
+/// The internal account of a `StackError` response, carried in the response extensions for the
+/// error-response logger. It holds the full Display text and source chain, which the public
+/// envelope omits, and never leaves the process.
+#[derive(Debug, Clone)]
+pub(crate) struct ErrorReport {
+    pub(crate) code: String,
+    pub(crate) report: String,
+}
+
 impl IntoResponse for StackError {
     fn into_response(self) -> Response {
         let status = self.http_status();
-        ApiError::from_stack_error(&self).into_response_with(status)
+        let mut response = ApiError::from_stack_error(&self).into_response_with(status);
+        response.extensions_mut().insert(ErrorReport {
+            code: self.error_code().to_owned(),
+            report: crate::error::report(&self),
+        });
+        response
     }
 }
 
@@ -382,6 +396,21 @@ mod tests {
         let result: ApiResult<()> = ApiResult(Err(err));
         let response = result.into_response();
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn stack_error_response_carries_the_internal_report() {
+        let err = StackError::WorkspaceIo {
+            requested: "notes.md".into(),
+            source: std::io::Error::other("/home/alice/secret"),
+        };
+        let response = err.into_response();
+        let report = response
+            .extensions()
+            .get::<ErrorReport>()
+            .expect("error report extension");
+        assert_eq!(report.code, "workspace.io_failed");
+        assert!(report.report.contains("/home/alice/secret"), "{report:?}");
     }
 
     #[test]

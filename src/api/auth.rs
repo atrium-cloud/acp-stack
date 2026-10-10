@@ -8,10 +8,21 @@ use axum::middleware::Next;
 use axum::response::Response;
 use http::StatusCode;
 use http::header::AUTHORIZATION;
+use tower_http::request_id::RequestId;
 
 use super::core::AppState;
 use crate::auth::{AuthFailureReason, KeyKind, record_auth_failure_with_origin};
-use crate::envelope::ApiError;
+use crate::envelope::{ApiError, ErrorReport};
+
+// ----- Constants ------------------------------------------------------------
+
+const REQUEST_ID_HEADER: &str = "x-request-id";
+
+/// Longest caller-supplied request id kept; longer ones are replaced with a UUID.
+const REQUEST_ID_MAX_BYTES: usize = 128;
+
+/// Characters that disqualify a caller-supplied request id from the log line.
+const REQUEST_ID_REJECTED_CHARS: &[char] = &[' ', '\t', '"', '\\'];
 
 // ----- Middleware -----------------------------------------------------------
 
@@ -366,6 +377,64 @@ pub(crate) async fn log_api_request(
     response
 }
 
+/// Drop a caller-supplied `x-request-id` that is too long or would muddle a log line, so
+/// `SetRequestIdLayer` assigns a fresh UUID in its place. Runs outside `SetRequestIdLayer`.
+pub(crate) async fn screen_request_id(mut req: Request<Body>, next: Next) -> Response {
+    let rejected = req
+        .headers()
+        .get_all(REQUEST_ID_HEADER)
+        .iter()
+        .any(|value| !is_acceptable_request_id(value));
+    if rejected {
+        req.headers_mut().remove(REQUEST_ID_HEADER);
+    }
+    next.run(req).await
+}
+
+fn is_acceptable_request_id(value: &http::HeaderValue) -> bool {
+    value.to_str().is_ok_and(|text| {
+        !text.is_empty()
+            && text.len() <= REQUEST_ID_MAX_BYTES
+            && !text.contains(REQUEST_ID_REJECTED_CHARS)
+    })
+}
+
+/// Log each failed request once with its internal error report: every response a `StackError`
+/// produced (it carries an [`ErrorReport`]) and every other 5xx. Auth rejections and framework
+/// 4xx are left to the `auth_failures` rows and security events that already record them.
+pub(crate) async fn log_error_response(req: Request<Body>, next: Next) -> Response {
+    let request_id = req
+        .extensions()
+        .get::<RequestId>()
+        .and_then(|id| id.header_value().to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    let method = req.method().clone();
+    let path = req.uri().path().to_owned();
+    let route = req
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|matched| matched.as_str().to_owned())
+        .unwrap_or_default();
+
+    let response = next.run(req).await;
+
+    let server_error = response.status().is_server_error();
+    let report = response.extensions().get::<ErrorReport>();
+    if report.is_none() && !server_error {
+        return response;
+    }
+    let status = response.status().as_u16();
+    let code = report.map_or("", |report| report.code.as_str());
+    let error = report.map_or("", |report| report.report.as_str());
+    if server_error {
+        tracing::error!(request_id, %method, route, path, status, code, error, "request failed");
+    } else {
+        tracing::warn!(request_id, %method, route, path, status, code, error, "request failed");
+    }
+    response
+}
+
 /// Returns true when the path should not produce an `api.request` row: WS keeps
 /// its own connect/disconnect pair, the poll surfaces would dwarf real traffic,
 /// and `/v1/health/live` is contracted to stay state-store-free.
@@ -432,14 +501,12 @@ async fn enforce_tier(
         None => {
             // `authenticate` runs ahead of this and must populate the tag, so a
             // missing one is a server-side wiring bug.
-            tracing::error!(
-                route = %req.uri().path(),
-                "require_tier saw no KeyKind extension; authenticate middleware not wired ahead",
-            );
-            reject(
+            reject_with_report(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "auth.internal",
                 "auth middleware misconfigured",
+                "require_tier saw no KeyKind extension; authenticate middleware not wired ahead"
+                    .to_owned(),
             )
         }
     }
@@ -601,11 +668,14 @@ async fn log_failure(
     if let Err(err) =
         record_auth_failure_with_origin(&store, kind, reason, client_ip, Some(route), Some(origin))
     {
-        tracing::error!(error = %err, "failed to record auth failure");
-        return Err(Box::new(reject(
+        return Err(Box::new(reject_with_report(
             StatusCode::INTERNAL_SERVER_ERROR,
             "state.error",
             "internal state error while recording auth failure",
+            format!(
+                "failed to record auth failure: {}",
+                crate::error::report(&err)
+            ),
         )));
     }
     drop(store);
@@ -660,6 +730,16 @@ pub(super) async fn persist_security_event(
 
 pub(super) fn reject(status: StatusCode, code: &str, message: &str) -> Response {
     ApiError::new(code, message).into_response_with(status)
+}
+
+/// [`reject`] with the internal account attached, so `log_error_response` logs it once.
+fn reject_with_report(status: StatusCode, code: &str, message: &str, report: String) -> Response {
+    let mut response = reject(status, code, message);
+    response.extensions_mut().insert(ErrorReport {
+        code: code.to_owned(),
+        report,
+    });
+    response
 }
 
 // ----- Tests ----------------------------------------------------------------
@@ -740,6 +820,142 @@ mod tests {
             .expect("request build");
         let response = app.oneshot(req).await.expect("response");
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedLog(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl CapturedLog {
+        fn text(&self) -> String {
+            let bytes = self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            String::from_utf8(bytes).expect("utf8 log output")
+        }
+    }
+
+    fn capture_warnings() -> (CapturedLog, tracing::subscriber::DefaultGuard) {
+        let captured = CapturedLog::default();
+        let sink = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || sink.clone())
+            .finish();
+        (captured, tracing::subscriber::set_default(subscriber))
+    }
+
+    async fn get_with_session_key(app: Router, uri: &str, request_id: Option<&str>) -> Response {
+        let mut builder = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header(AUTHORIZATION, "Bearer acps_session_abc");
+        if let Some(request_id) = request_id {
+            builder = builder.header("x-request-id", request_id);
+        }
+        let request = builder.body(Body::empty()).expect("request build");
+        app.oneshot(request).await.expect("response")
+    }
+
+    #[tokio::test]
+    async fn stack_error_response_is_logged_once_with_its_request_id() {
+        let (captured, _guard) = capture_warnings();
+        let app = crate::api::build_router(new_state("acps_session_abc", "acps_admin_xyz"));
+
+        let response = get_with_session_key(app, "/v1/sessions/missing-session", None).await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let request_id = response
+            .headers()
+            .get("x-request-id")
+            .and_then(|value| value.to_str().ok())
+            .expect("x-request-id echoed")
+            .to_owned();
+        let log = captured.text();
+        assert_eq!(log.matches("request failed").count(), 1, "{log}");
+        for expected in [
+            format!("request_id=\"{request_id}\""),
+            "route=\"/v1/sessions/{id}\"".to_owned(),
+            "path=\"/v1/sessions/missing-session\"".to_owned(),
+            "status=404".to_owned(),
+            "code=\"session.not_found\"".to_owned(),
+        ] {
+            assert!(log.contains(&expected), "missing {expected}: {log}");
+        }
+    }
+
+    #[tokio::test]
+    async fn client_request_id_is_kept_and_auth_rejections_are_not_logged() {
+        let (captured, _guard) = capture_warnings();
+        let app = crate::api::build_router(new_state("acps_session_abc", "acps_admin_xyz"));
+
+        let response = get_with_session_key(app, "/v1/secrets", Some("client-chosen-id")).await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-request-id")
+                .map(|value| value.as_bytes()),
+            Some(b"client-chosen-id".as_slice())
+        );
+        let log = captured.text();
+        assert!(!log.contains("request failed"), "{log}");
+    }
+
+    #[tokio::test]
+    async fn unfit_client_request_ids_are_replaced_and_proxy_ids_kept() {
+        let state = new_state("acps_session_abc", "acps_admin_xyz");
+        let echoed = |response: Response| {
+            response
+                .headers()
+                .get(REQUEST_ID_HEADER)
+                .and_then(|value| value.to_str().ok())
+                .expect("x-request-id echoed")
+                .to_owned()
+        };
+
+        let proxy_id = "Root=1-67a2/b3c4+d5==";
+        let response = get_with_session_key(
+            crate::api::build_router(state.clone()),
+            "/v1/sessions/missing-session",
+            Some(proxy_id),
+        )
+        .await;
+        assert_eq!(echoed(response), proxy_id);
+
+        let overlong = "a".repeat(REQUEST_ID_MAX_BYTES + 1);
+        for unfit in [overlong.as_str(), "two words", "quoted\"id"] {
+            let response = get_with_session_key(
+                crate::api::build_router(state.clone()),
+                "/v1/sessions/missing-session",
+                Some(unfit),
+            )
+            .await;
+            let replaced = echoed(response);
+            let uuid_shaped = replaced.len() == 36
+                && replaced.matches('-').count() == 4
+                && replaced
+                    .chars()
+                    .all(|character| character == '-' || character.is_ascii_hexdigit());
+            assert!(uuid_shaped, "{unfit} -> {replaced}");
+        }
     }
 
     #[test]

@@ -255,11 +255,17 @@ pub(crate) fn has_credential_prefix(token: &str, prefix: &str) -> bool {
 
 /// Three dot-separated base64url segments, each long enough to rule out version strings.
 pub(crate) fn looks_like_jwt(text: &str) -> bool {
-    let segments = text.split('.').collect::<Vec<_>>();
-    segments.len() == JWT_SEGMENT_COUNT
-        && segments.iter().all(|segment| {
-            segment.len() >= JWT_MIN_SEGMENT_LEN && segment.chars().all(is_base64url_char)
-        })
+    let mut segment_count = 0;
+    for segment in text.split('.') {
+        segment_count += 1;
+        if segment_count > JWT_SEGMENT_COUNT
+            || segment.len() < JWT_MIN_SEGMENT_LEN
+            || !segment.chars().all(is_base64url_char)
+        {
+            return false;
+        }
+    }
+    segment_count == JWT_SEGMENT_COUNT
 }
 
 /// Whether `text` begins with a `Bearer ` auth scheme.
@@ -442,18 +448,35 @@ fn is_inline_whitespace(gap: &str) -> bool {
 }
 
 fn sensitive_field_name(token: &str) -> Option<FieldName> {
-    let normalized = token
-        .trim_start_matches('-')
-        .to_ascii_lowercase()
-        .replace('-', "_");
-    if SENSITIVE_HEADER_NAMES.contains(&normalized.as_str()) {
+    let name = token.trim_start_matches('-').as_bytes();
+    if SENSITIVE_HEADER_NAMES
+        .iter()
+        .any(|header| folded_eq(name, header.as_bytes()))
+    {
         return Some(FieldName::Header);
     }
-    let field = SENSITIVE_FIELD_NAMES.contains(&normalized.as_str())
-        || SENSITIVE_FIELD_NAME_SUFFIXES
-            .iter()
-            .any(|suffix| normalized.ends_with(suffix));
+    let field = SENSITIVE_FIELD_NAMES
+        .iter()
+        .any(|field| folded_eq(name, field.as_bytes()))
+        || SENSITIVE_FIELD_NAME_SUFFIXES.iter().any(|suffix| {
+            name.len() >= suffix.len()
+                && folded_eq(&name[name.len() - suffix.len()..], suffix.as_bytes())
+        });
     field.then_some(FieldName::Field)
+}
+
+/// Compare `name` against a lowercase, `_`-separated table entry, folding ASCII case and `-`.
+/// Runs per token on every log line, so it avoids building a normalized copy.
+fn folded_eq(name: &[u8], entry: &[u8]) -> bool {
+    name.len() == entry.len()
+        && name.iter().zip(entry).all(|(&byte, &expected)| {
+            let folded = if byte == b'-' {
+                b'_'
+            } else {
+                byte.to_ascii_lowercase()
+            };
+            folded == expected
+        })
 }
 
 /// Replace the union of `spans` with one placeholder per merged run, in a single pass over the

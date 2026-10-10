@@ -1043,5 +1043,22 @@ pub enum StackError {
 
 pub type Result<T> = std::result::Result<T, StackError>;
 
+/// `error`'s Display text followed by each `source()` in its chain, joined by `: `. A source the
+/// report already ends with is skipped, since many variants end in `: {source}`; a source that
+/// merely appears elsewhere is kept, as repeating a cause beats dropping one.
+pub fn report(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let cause_text = cause.to_string();
+        if !cause_text.is_empty() && !text.ends_with(&cause_text) {
+            text.push_str(": ");
+            text.push_str(&cause_text);
+        }
+        source = cause.source();
+    }
+    text
+}
+
 #[cfg(test)]
 mod tests;

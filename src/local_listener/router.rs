@@ -6,6 +6,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 
 use crate::api::routes::agent::{
     agent_capabilities_handler, agent_config_options_handler, array_agent_capabilities_handler,
@@ -160,10 +161,12 @@ pub fn build_local_router(state: AppState) -> Router {
         ));
 
     // LAYER ORDER MATTERS: the LAST `.layer` added sees requests first, so
-    // `tag_local` must stay outermost or `KeyKind::Local` is missing when
-    // `ensure_envelope` and `log_api_request` inspect the request.
+    // `tag_local` must stay outside every layer that reads `KeyKind`, or
+    // `KeyKind::Local` is missing when `ensure_envelope` and `log_api_request`
+    // inspect the request. The request-id screen and layers stay outermost.
     Router::new()
         .merge(routes)
+        .layer(middleware::from_fn(api::log_error_response))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             api::log_api_request,
@@ -177,6 +180,9 @@ pub fn build_local_router(state: AppState) -> Router {
             api::ensure_envelope,
         ))
         .layer(middleware::from_fn(tag_local))
+        .layer(PropagateRequestIdLayer::x_request_id())
+        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+        .layer(middleware::from_fn(api::screen_request_id))
         .with_state(state)
 }
 

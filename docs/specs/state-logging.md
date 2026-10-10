@@ -338,6 +338,13 @@ The `security_category` filter clusters the flat `security.*` kinds into operato
 - Cumulative cost remains in the durable usage event rather than being aggregated across sessions or currencies.
 - The shape is additive: existing keys remain stable as new dimensions are added.
 
+## Daemon Log
+
+The daemon writes diagnostic lines to stderr at `warn` and above. Every line passes through the shared redactor, which replaces registered secret values and credential-shaped tokens with `[redacted]`.
+
+- Each failed request logs one `request failed` line with `request_id`, `method`, `route`, `path`, `status`, `code`, and `error`. `error` is the internal error text with its source chain, which the public envelope omits. Server errors log at `error`, client errors at `warn`.
+- A 4xx that no runtime error produced logs no line: auth rejections, which `auth_failures` rows and security events record, and framework rejections such as an unknown route, a wrong method, an oversized body, or an unparseable request body.
+
 ## External Logging
 
 When the Supabase sink is enabled, selected local rows are redacted and delivered to the configured external backend. The recommended `postgres` backend uses `[logging.supabase].db_url_ref`; the legacy `postgrest` backend uses `[logging.supabase].api_key_ref`. Delivery is asynchronous and retryable.
