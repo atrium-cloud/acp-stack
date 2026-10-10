@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use acp_stack::error::{AcpErrorDetail, AgentRequestContext, StackError};
 use acp_stack::runtime::agent::acp_bridge::{AcpBridge, AcpPermissionPolicy, SessionEventSink};
 
 use crate::support::{InMemorySink, fake_agent_config, fake_env, null_sink};
@@ -164,6 +165,112 @@ async fn cancelled_permission_does_not_block_dispatch_and_is_persisted() {
     .await
     .expect("durable permission cancellation event");
     assert_eq!(canceled.payload["data"]["reason"], "acp-request-cancelled");
+    bridge.shutdown().await.expect("shutdown ok");
+}
+
+async fn spawn_placebo(args: &[&str]) -> AcpBridge {
+    let mut config = fake_agent_config();
+    config.id = "placebo".into();
+    config.args.extend(args.iter().map(|arg| (*arg).to_owned()));
+    AcpBridge::spawn(
+        &std::env::temp_dir(),
+        &config,
+        fake_env(),
+        std::env::temp_dir(),
+        null_sink(),
+        AcpPermissionPolicy::Cancel,
+        &Default::default(),
+        "/bin/sh",
+        None,
+        None,
+    )
+    .await
+    .expect("spawn")
+    .with_target_id("primary")
+}
+
+#[tokio::test]
+async fn new_session_failure_names_the_agent_and_carries_the_acp_error() {
+    let bridge = spawn_placebo(&["--session-new-error"]).await;
+
+    let err = bridge
+        .new_session(std::env::temp_dir(), vec![])
+        .await
+        .expect_err("session/new must fail");
+
+    let StackError::AgentRequestFailed {
+        method, context, ..
+    } = &err
+    else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(*method, "session/new");
+    assert_eq!(
+        **context,
+        AgentRequestContext {
+            agent_id: Some("placebo".to_owned()),
+            target_id: Some("primary".to_owned()),
+            acp_session_id: None,
+            acp_error: Some(AcpErrorDetail {
+                code: -32000,
+                message: "fake session/new failure".to_owned(),
+                data: None,
+            }),
+        }
+    );
+    assert_eq!(
+        err.to_string(),
+        "agent request to session/new failed (agent `placebo`, target `primary`): ACP error -32000: fake session/new failure"
+    );
+    bridge.shutdown().await.expect("shutdown ok");
+}
+
+#[tokio::test]
+async fn agent_exit_during_a_request_carries_no_acp_error() {
+    let bridge = spawn_placebo(&["--session-new-exit"]).await;
+
+    let err = bridge
+        .new_session(std::env::temp_dir(), vec![])
+        .await
+        .expect_err("session/new must fail");
+
+    let StackError::AgentRequestFailed {
+        message, context, ..
+    } = &err
+    else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(message, "agent connection closed before the agent answered");
+    assert_eq!(context.acp_error, None);
+    assert_eq!(context.agent_id.as_deref(), Some("placebo"));
+    assert!(err.public_details().is_empty());
+}
+
+#[tokio::test]
+async fn session_scoped_failure_names_the_session() {
+    let bridge = spawn_placebo(&["--fail-set-config-option"]).await;
+    let session = bridge
+        .new_session(std::env::temp_dir(), vec![])
+        .await
+        .expect("session/new");
+    let session_id = session.session_id.0.to_string();
+
+    let err = bridge
+        .set_session_config_option(session.session_id, "mode", "plan")
+        .await
+        .expect_err("set_config_option must fail");
+
+    let StackError::AgentRequestFailed { context, .. } = &err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(context.acp_session_id.as_deref(), Some(session_id.as_str()));
+    assert_eq!(
+        context
+            .acp_error
+            .as_ref()
+            .map(|detail| detail.message.as_str()),
+        Some("placebo agent refuses session/set_config_option")
+    );
     bridge.shutdown().await.expect("shutdown ok");
 }
 

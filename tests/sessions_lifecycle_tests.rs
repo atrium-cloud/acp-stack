@@ -2206,3 +2206,78 @@ async fn advertised_model_is_still_applied_without_ignore_records() {
         "{events:?}"
     );
 }
+
+async fn create_session_response(harness: &Harness) -> reqwest::Response {
+    http()
+        .post(format!("{}/v1/sessions", harness.base_url))
+        .header("Authorization", session_bearer())
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("create")
+}
+
+#[tokio::test]
+async fn create_session_rejection_carries_the_adapter_error_in_details() {
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.push("--session-new-error".to_owned());
+    })
+    .await;
+
+    let response = create_session_response(&harness).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert!(response.headers().contains_key("x-request-id"));
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "agent.request_failed");
+    assert_eq!(
+        body["error"]["details"],
+        json!({ "acp_error": { "code": -32000, "message": "fake session/new failure" } })
+    );
+}
+
+#[tokio::test]
+async fn create_session_after_the_agent_exits_mid_request_has_empty_details() {
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.push("--session-new-exit".to_owned());
+    })
+    .await;
+
+    let response = create_session_response(&harness).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "agent.request_failed");
+    assert_eq!(
+        body["error"]["message"],
+        "agent request `session/new` failed"
+    );
+    assert_eq!(body["error"]["details"], json!({}));
+}
+
+#[tokio::test]
+async fn create_session_rejection_details_are_redacted() {
+    acp_stack::redaction::register_secret_values(["LeakCanary-7Qz93x"]);
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.extend([
+            "--session-new-error-detail".to_owned(),
+            "key LeakCanary-7Qz93x and sk-AbCdEf123456".to_owned(),
+        ]);
+    })
+    .await;
+
+    let response = create_session_response(&harness).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body: Value = response.json().await.expect("json");
+    let acp_error = &body["error"]["details"]["acp_error"];
+    assert_eq!(acp_error["code"], -32000);
+    assert_eq!(
+        acp_error["message"],
+        "fake session/new failure: key [redacted] and [redacted]"
+    );
+    assert_eq!(
+        acp_error["data"],
+        json!({ "detail": "key [redacted] and [redacted]" })
+    );
+}

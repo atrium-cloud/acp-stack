@@ -3,6 +3,18 @@
 
 use super::*;
 
+use agent_client_protocol::Error as AcpError;
+use serde_json::Value;
+
+use crate::error::{AcpErrorDetail, AgentRequestContext};
+use crate::redaction::{bounded, redact_json, redact_text};
+
+// CONSTANTS
+
+/// Cap on the adapter's error message and, separately, on its serialized `data`, as carried
+/// into the API error details and the daemon log.
+const ACP_ERROR_DETAIL_MAX_BYTES: usize = 2048;
+
 /// A resolved breakpoint for `session/fork`, already translated into the
 /// dialect the running adapter reads. The supervisor owns the translation
 /// because only it can map an acp-stack prompt message id onto the adapter's
@@ -24,6 +36,56 @@ impl AcpBridge {
         guard.as_ref().cloned().ok_or(StackError::AgentNotRunning)
     }
 
+    fn request_context(&self, acp_session_id: Option<&str>) -> AgentRequestContext {
+        AgentRequestContext {
+            agent_id: Some(self.agent_id.clone()),
+            target_id: self.target_id.clone(),
+            acp_session_id: acp_session_id.map(str::to_owned),
+            acp_error: None,
+        }
+    }
+
+    /// `AgentRequestFailed` for a failure acp-stack detected itself, naming the agent and session.
+    fn local_request_failure(
+        &self,
+        method: &'static str,
+        acp_session_id: Option<&str>,
+        message: String,
+    ) -> StackError {
+        StackError::AgentRequestFailed {
+            method,
+            message,
+            context: Box::new(self.request_context(acp_session_id)),
+        }
+    }
+
+    /// `AgentRequestFailed` carrying the adapter's JSON-RPC error, redacted and bounded.
+    fn request_failed(
+        &self,
+        method: &'static str,
+        acp_session_id: Option<&str>,
+        error: AcpError,
+    ) -> StackError {
+        // The SDK answers a pending request itself when the adapter's stdout closes; that error
+        // is not the adapter's reply, so it must not read as the adapter refusing the request.
+        if agent_client_protocol::is_incoming_transport_closed(&error) {
+            return self.local_request_failure(
+                method,
+                acp_session_id,
+                "agent connection closed before the agent answered".to_owned(),
+            );
+        }
+        let detail = acp_error_detail(error);
+        StackError::AgentRequestFailed {
+            method,
+            message: detail.message.clone(),
+            context: Box::new(AgentRequestContext {
+                acp_error: Some(detail),
+                ..self.request_context(acp_session_id)
+            }),
+        }
+    }
+
     /// `session/new`. Always supported per ACP baseline.
     pub async fn new_session(
         &self,
@@ -39,10 +101,7 @@ impl AcpBridge {
             .send_request(request)
             .block_task()
             .await
-            .map_err(|err| StackError::AgentRequestFailed {
-                method: "session/new",
-                message: err.to_string(),
-            })?;
+            .map_err(|err| self.request_failed("session/new", None, err))?;
         self.mark_session_attached(response.session_id.0.as_ref())
             .await;
         Ok(response)
@@ -73,6 +132,7 @@ impl AcpBridge {
         self.capabilities
             .reject_unmodeled_mcp_servers(&mcp_servers)?;
         let connection = self.connection().await?;
+        let source_session_id = session_id.0.to_string();
         let mut request = ForkSessionRequest::new(session_id, cwd).mcp_servers(mcp_servers);
         match &fork_point {
             Some(ForkPoint::AcpStackMessageId(message_id)) => {
@@ -87,10 +147,7 @@ impl AcpBridge {
             .send_request(request)
             .block_task()
             .await
-            .map_err(|err| StackError::AgentRequestFailed {
-                method: "session/fork",
-                message: err.to_string(),
-            })?;
+            .map_err(|err| self.request_failed("session/fork", Some(&source_session_id), err))?;
         self.mark_session_attached(response.session_id.0.as_ref())
             .await;
         Ok(response)
@@ -113,19 +170,17 @@ impl AcpBridge {
                 .send_request(request)
                 .block_task()
                 .await
-                .map_err(|err| StackError::AgentRequestFailed {
-                    method: "session/list",
-                    message: err.to_string(),
-                })?;
+                .map_err(|err| self.request_failed("session/list", None, err))?;
             sessions.extend(response.sessions);
             let Some(next_cursor) = response.next_cursor else {
                 return Ok(sessions);
             };
             if !seen_cursors.insert(next_cursor.clone()) {
-                return Err(StackError::AgentRequestFailed {
-                    method: "session/list",
-                    message: format!("agent returned repeated pagination cursor `{next_cursor}`"),
-                });
+                return Err(self.local_request_failure(
+                    "session/list",
+                    None,
+                    format!("agent returned repeated pagination cursor `{next_cursor}`"),
+                ));
             }
             cursor = Some(next_cursor);
         }
@@ -155,14 +210,14 @@ impl AcpBridge {
         value: SessionConfigOptionValue,
     ) -> Result<SetSessionConfigOptionResponse> {
         let connection = self.connection().await?;
+        let acp_session_id = session_id.0.to_string();
         let request = SetSessionConfigOptionRequest::new(session_id, config_id.to_owned(), value);
         connection
             .send_request(request)
             .block_task()
             .await
-            .map_err(|err| StackError::AgentRequestFailed {
-                method: "session/set_config_option",
-                message: err.to_string(),
+            .map_err(|err| {
+                self.request_failed("session/set_config_option", Some(&acp_session_id), err)
             })
     }
 
@@ -174,16 +229,14 @@ impl AcpBridge {
         mode_id: &str,
     ) -> Result<SetSessionModeResponse> {
         let connection = self.connection().await?;
+        let acp_session_id = session_id.0.to_string();
         let request =
             SetSessionModeRequest::new(session_id, SessionModeId::new(mode_id.to_owned()));
         connection
             .send_request(request)
             .block_task()
             .await
-            .map_err(|err| StackError::AgentRequestFailed {
-                method: "session/set_mode",
-                message: err.to_string(),
-            })
+            .map_err(|err| self.request_failed("session/set_mode", Some(&acp_session_id), err))
     }
 
     /// `session/load`. Requires the `loadSession` capability.
@@ -207,10 +260,7 @@ impl AcpBridge {
             .send_request(request)
             .block_task()
             .await
-            .map_err(|err| StackError::AgentRequestFailed {
-                method: "session/load",
-                message: err.to_string(),
-            })?;
+            .map_err(|err| self.request_failed("session/load", Some(&attached_id), err))?;
         self.mark_session_attached(&attached_id).await;
         Ok(())
     }
@@ -236,10 +286,7 @@ impl AcpBridge {
             .send_request(request)
             .block_task()
             .await
-            .map_err(|err| StackError::AgentRequestFailed {
-                method: "session/resume",
-                message: err.to_string(),
-            })?;
+            .map_err(|err| self.request_failed("session/resume", Some(&attached_id), err))?;
         self.mark_session_attached(&attached_id).await;
         Ok(())
     }
@@ -258,10 +305,7 @@ impl AcpBridge {
             .send_request(request)
             .block_task()
             .await
-            .map_err(|err| StackError::AgentRequestFailed {
-                method: "session/close",
-                message: err.to_string(),
-            })?;
+            .map_err(|err| self.request_failed("session/close", Some(&attached_id), err))?;
         self.forget_attached_session(&attached_id).await;
         Ok(())
     }
@@ -281,10 +325,7 @@ impl AcpBridge {
             .send_request(request)
             .block_task()
             .await
-            .map_err(|err| StackError::AgentRequestFailed {
-                method: "session/delete",
-                message: err.to_string(),
-            })?;
+            .map_err(|err| self.request_failed("session/delete", Some(&attached_id), err))?;
         self.forget_attached_session(&attached_id).await;
         Ok(())
     }
@@ -305,7 +346,10 @@ impl AcpBridge {
                 // an adapter rejecting the prompt content.
                 tracing::warn!(
                     method = "session/prompt",
+                    agent_id = %self.agent_id,
+                    target_id = self.target_id.as_deref().unwrap_or_default(),
                     agent_session_id = %agent_session_id,
+                    acp_error_code = i32::from(err.code),
                     error = %err,
                     "agent rejected the prompt request"
                 );
@@ -318,11 +362,12 @@ impl AcpBridge {
     /// `session/cancel` is a fire-and-forget notification.
     pub async fn cancel_session(&self, session_id: SessionId) -> Result<()> {
         let connection = self.connection().await?;
+        let acp_session_id = session_id.0.to_string();
         connection
             .send_notification(CancelNotification::new(session_id))
-            .map_err(|err| StackError::AgentRequestFailed {
-                method: "session/cancel",
-                message: err.to_string(),
+            .map_err(|err| {
+                // A notification gets no reply, so this is a local send failure.
+                self.local_request_failure("session/cancel", Some(&acp_session_id), err.to_string())
             })?;
         Ok(())
     }
@@ -339,14 +384,81 @@ fn map_prompt_error(classified: Classified) -> StackError {
             },
             // An inference class with no status code would persist
             // `status_code = 0`, a meaningless row.
-            _ => StackError::AgentRequestFailed {
-                method: "session/prompt",
-                message: "prompt request failed".to_owned(),
-            },
+            _ => StackError::agent_request_failed("session/prompt", "prompt request failed"),
         },
-        _ => StackError::AgentRequestFailed {
-            method: "session/prompt",
-            message: "prompt request failed".to_owned(),
-        },
+        _ => StackError::agent_request_failed("session/prompt", "prompt request failed"),
+    }
+}
+
+/// The adapter's JSON-RPC error with secrets redacted and `message` and `data` each bounded at
+/// [`ACP_ERROR_DETAIL_MAX_BYTES`]. A `data` that serializes past the cap becomes a truncated
+/// JSON string, since a cut JSON value would no longer parse.
+fn acp_error_detail(error: AcpError) -> AcpErrorDetail {
+    let message = bounded(&redact_text(&error.message), ACP_ERROR_DETAIL_MAX_BYTES).into_owned();
+    let data = error.data.map(|mut data| {
+        redact_json(&mut data);
+        if let Value::String(text) = &data {
+            return Value::String(bounded(text, ACP_ERROR_DETAIL_MAX_BYTES).into_owned());
+        }
+        let serialized = data.to_string();
+        if serialized.len() <= ACP_ERROR_DETAIL_MAX_BYTES {
+            data
+        } else {
+            Value::String(bounded(&serialized, ACP_ERROR_DETAIL_MAX_BYTES).into_owned())
+        }
+    });
+    AcpErrorDetail {
+        code: i32::from(error.code),
+        message,
+        data,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn acp_error_detail_keeps_small_data_as_json() {
+        let error = AcpError::new(-32000, "refused").data(serde_json::json!({ "reason": "quota" }));
+        let detail = acp_error_detail(error);
+        assert_eq!(detail.code, -32000);
+        assert_eq!(detail.message, "refused");
+        assert_eq!(detail.data, Some(serde_json::json!({ "reason": "quota" })));
+    }
+
+    #[test]
+    fn acp_error_detail_bounds_message_and_turns_oversized_data_into_a_cut_string() {
+        let long = "x".repeat(ACP_ERROR_DETAIL_MAX_BYTES * 2);
+        let error = AcpError::new(-32603, long.clone()).data(serde_json::json!({ "trace": long }));
+        let detail = acp_error_detail(error);
+        assert!(
+            detail
+                .message
+                .starts_with(&"x".repeat(ACP_ERROR_DETAIL_MAX_BYTES))
+        );
+        assert!(
+            detail.message.ends_with("[truncated 2048 bytes]"),
+            "{}",
+            detail.message
+        );
+        let Some(Value::String(data)) = &detail.data else {
+            panic!("oversized data must become a string: {:?}", detail.data);
+        };
+        assert!(data.starts_with("{\"trace\":\"xxx"), "{data}");
+        assert!(data.contains("[truncated "), "{data}");
+    }
+
+    #[test]
+    fn acp_error_detail_bounds_a_string_data_without_reserializing_it() {
+        let long = "y".repeat(ACP_ERROR_DETAIL_MAX_BYTES + 10);
+        let detail = acp_error_detail(AcpError::new(-32000, "refused").data(long));
+        assert_eq!(
+            detail.data,
+            Some(Value::String(format!(
+                "{} [truncated 10 bytes]",
+                "y".repeat(ACP_ERROR_DETAIL_MAX_BYTES)
+            )))
+        );
     }
 }

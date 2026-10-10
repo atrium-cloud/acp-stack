@@ -69,7 +69,7 @@ pub(super) async fn spawn_agent_bridge(
         Err(error) => Err(error),
     };
     let bridge = match spawned {
-        Ok(bridge) => bridge,
+        Ok(bridge) => bridge.with_target_id(target_id),
         Err(err) => {
             let data = json!({
                 "target_id": target_id,

@@ -341,10 +341,10 @@ impl AgentSupervisor {
             // its handle and its unfired token so a retry can cancel it again,
             // and one that settled on its own terms is already terminal, so
             // later liveness checks skip its handle anyway.
-            return Err(StackError::AgentRequestFailed {
-                method: "session/cancel",
-                message: format!("prompt did not settle as cancelled ({})", verdict.as_str()),
-            });
+            return Err(StackError::agent_request_failed(
+                "session/cancel",
+                format!("prompt did not settle as cancelled ({})", verdict.as_str()),
+            ));
         }
         self.forget_prompts(&live_prompts).await;
 

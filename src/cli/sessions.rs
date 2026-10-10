@@ -770,10 +770,10 @@ async fn await_prompt_settle(
             "errored" => {
                 let code = poll["data"]["error_code"].as_str().unwrap_or("agent.error");
                 let message = poll["data"]["error_message"].as_str().unwrap_or("");
-                return Err(StackError::AgentRequestFailed {
-                    method: "session/prompt",
-                    message: format!("{code}: {message}"),
-                });
+                return Err(StackError::agent_request_failed(
+                    "session/prompt",
+                    format!("{code}: {message}"),
+                ));
             }
             "cancelled" => {
                 if output.is_json() {

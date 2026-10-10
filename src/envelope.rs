@@ -42,6 +42,11 @@ pub struct ApiError {
     /// failures. See docs/specs/api/api.md and docs/specs/state-logging.md.
     pub code: String,
     pub message: String,
+    /// Structured context for the error; `{}` when there is none. On `agent.request_failed`,
+    /// `acp_error` carries the adapter's JSON-RPC error as `{ code, message, data? }`, redacted
+    /// of secrets and with `message` and `data` each cut at 2048 bytes plus a
+    /// ` [truncated N bytes]` marker (a non-string `data` past the cap becomes a string of its
+    /// cut JSON text).
     // Always serialized, even when empty: the spec shows `"details": {}` as present in error
     // responses, so clients never have to distinguish "missing" from "empty".
     #[serde(default)]
@@ -74,11 +79,16 @@ impl ApiError {
     }
 
     /// Build a wire-ready error from a `StackError`. The dotted code comes
-    /// from `StackError::error_code`; the message comes from
-    /// `StackError::public_message` so API clients do not receive local paths
-    /// or secret-store internals from the CLI/internal `Display` text.
+    /// from `StackError::error_code`; the message and details come from
+    /// `StackError::public_message` and `StackError::public_details` so API
+    /// clients do not receive local paths or secret-store internals from the
+    /// CLI/internal `Display` text.
     pub fn from_stack_error(err: &StackError) -> Self {
-        Self::new(err.error_code(), err.public_message())
+        Self {
+            code: err.error_code().to_owned(),
+            message: err.public_message(),
+            details: err.public_details(),
+        }
     }
 
     pub fn into_envelope(self) -> ApiErrorEnvelope {

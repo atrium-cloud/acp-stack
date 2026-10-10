@@ -2159,6 +2159,7 @@
           "details": {
             "type": "object",
             "default": {},
+            "description": "Structured context for the error; `{}` when there is none. On `agent.request_failed`,\n`acp_error` carries the adapter's JSON-RPC error as `{ code, message, data? }`, redacted\nof secrets and with `message` and `data` each cut at 2048 bytes plus a\n` [truncated N bytes]` marker (a non-string `data` past the cap becomes a string of its\ncut JSON text).",
             "additionalProperties": true
           }
         },

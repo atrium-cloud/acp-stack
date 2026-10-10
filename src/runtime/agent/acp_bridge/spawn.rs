@@ -111,6 +111,8 @@ impl AcpBridge {
         spawn_child_exit_watcher(Arc::clone(&child), exit.clone());
 
         Ok(Self {
+            agent_id: agent.id.clone(),
+            target_id: None,
             child,
             cgroup,
             capabilities,

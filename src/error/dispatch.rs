@@ -81,6 +81,11 @@ impl StackError {
             .unwrap_or_else(|| unclaimed(self, "public_message", INTERNAL_ERROR_MESSAGE.to_owned()))
     }
 
+    /// Structured `details` safe for the public HTTP envelope; empty for most variants.
+    pub fn public_details(&self) -> serde_json::Map<String, serde_json::Value> {
+        agent_runtime::public_details(self).unwrap_or_default()
+    }
+
     pub fn remediation_hint(&self) -> Option<String> {
         if let StackError::DepsApplyFailed { retry_command, .. } = self {
             return Some(format!(

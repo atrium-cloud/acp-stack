@@ -74,6 +74,15 @@ pub(crate) async fn handle_new_session(
     if state.args.session_new_error {
         return responder.respond_with_error(Error::new(-32000, "fake session/new failure"));
     }
+    if state.args.session_new_exit {
+        std::process::exit(1);
+    }
+    if let Some(detail) = &state.args.session_new_error_detail {
+        return responder.respond_with_error(
+            Error::new(-32000, format!("fake session/new failure: {detail}"))
+                .data(serde_json::json!({ "detail": detail })),
+        );
+    }
     if state.args.session_new_stall {
         drop(state);
         loop {

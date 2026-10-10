@@ -62,11 +62,28 @@ Every response carries an `x-request-id` header. The runtime keeps a caller-supp
 
 Errors carry a machine-readable `code`, a human-readable `message`, and structured `details`. Codes are dotted identifiers such as `config.invalid`, `request.invalid_param`, and `agent.inference_5xx`. An internal error without a code mapping of its own is reported as `server.internal_error` with a generic message and HTTP 500.
 
+When the agent answers an ACP request with a JSON-RPC error, `agent.request_failed` carries it in `details.acp_error`:
+
+```json
+{
+  "code": "agent.request_failed",
+  "message": "agent rejected `session/new` request",
+  "details": {
+    "acp_error": { "code": -32000, "message": "model not configured", "data": { "model": "deepseek-v4-flash" } }
+  }
+}
+```
+
+- `data` is present only when the agent sent one.
+- A response from the agent that the ACP client cannot parse is reported as code `-32700`, with the parse failure and the received JSON in `data`.
+- `message` and `data` are each cut at 2048 bytes, followed by a ` [truncated N bytes]` marker. A string `data` is cut on its text. Any other `data` whose JSON text runs past 2048 bytes becomes a string holding that cut JSON text.
+- `details` is `{}` when acp-stack detected the failure itself, such as the agent exiting before it answered, and on `session/prompt` failures, which are classified as described in [Prompt-Path Error Codes](endpoints.md#prompt-path-error-codes).
+
 ### Sanitization
 
 Public error text is sanitized:
 
-- Error messages interpolate identifiers only, such as field names, provider, session, and prompt ids, secret ref names, machine codes, the caller's own workspace-relative paths, and download URLs reduced to scheme, host, and path with userinfo, query, and fragment stripped. Local filesystem paths, OS and I/O error text, subprocess argv, and subprocess output stay in local logs and never appear in the envelope.
+- Error messages interpolate identifiers only, such as field names, provider, session, and prompt ids, secret ref names, machine codes, the caller's own workspace-relative paths, and download URLs reduced to scheme, host, and path with userinfo, query, and fragment stripped. Local filesystem paths, OS and I/O error text, subprocess argv, and subprocess output stay in local logs and never appear in the envelope. The one exception is the agent's own JSON-RPC error in `details.acp_error`, which passes through the shared redactor first: registered secret values and credential-shaped tokens become `[redacted]`.
 - Cross-field validation errors name the offending field but never echo its value.
 - Secret positions carrying pasted-credential shapes are rejected without echoing the value. An invalid secret ref name is reported without quoting the offending name, since a pasted inline credential fails the same name check.
 - The `agent.inference_*` prompt codes use the fixed message form `"inference endpoint returned <status_code> (<reason_category>)"`. No URLs, request/response bodies, headers, or secret material reach the API response or the persisted prompt row.

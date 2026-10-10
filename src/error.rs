@@ -24,6 +24,8 @@ mod workload_fs;
 mod workspace;
 mod workspace_source;
 
+pub use self::agent_runtime::{AcpErrorDetail, AgentRequestContext};
+
 use self::agent_install::stack_update_rollback_suffix;
 use self::workspace::workspace_command_failed_message;
 
@@ -733,10 +735,16 @@ pub enum StackError {
         summary: String,
     },
 
-    #[error("agent request to {method} failed: {message}")]
+    /// `message` is acp-stack's own description, or the adapter's redacted message when
+    /// `context.acp_error` carries the adapter's JSON-RPC error.
+    #[error(
+        "{}",
+        agent_runtime::agent_request_failed_display(method, message, context)
+    )]
     AgentRequestFailed {
         method: &'static str,
         message: String,
+        context: Box<AgentRequestContext>,
     },
 
     /// Carries only a status code and a vetted `'static` label, so raw

@@ -696,6 +696,8 @@ All skill routes load config leniently, dropping individually invalid `[[skills.
 
 ## Sessions
 
+A session route answering `502 agent.request_failed` because the agent returned a JSON-RPC error carries that error in `details.acp_error` (see [Error Codes](api.md#error-codes)).
+
 ### `POST /v1/sessions`
 
 - Tier: `session`

@@ -713,6 +713,49 @@ fn newly_claimed_variants_report_codes_and_sanitized_messages() {
     assert_public_message_excludes(&egress, &["api.example.com"]);
 }
 
+#[test]
+fn agent_request_failed_details_carry_the_acp_error_only_when_present() {
+    let with_acp_error = StackError::AgentRequestFailed {
+        method: "session/new",
+        message: "quota exceeded".to_owned(),
+        context: Box::new(super::AgentRequestContext {
+            agent_id: Some("opencode".to_owned()),
+            target_id: None,
+            acp_session_id: None,
+            acp_error: Some(super::AcpErrorDetail {
+                code: -32000,
+                message: "quota exceeded".to_owned(),
+                data: Some(serde_json::json!({ "retry_after": 30 })),
+            }),
+        }),
+    };
+    assert_eq!(
+        serde_json::Value::Object(with_acp_error.public_details()),
+        serde_json::json!({
+            "acp_error": { "code": -32000, "message": "quota exceeded", "data": { "retry_after": 30 } }
+        })
+    );
+    assert_eq!(
+        with_acp_error.to_string(),
+        "agent request to session/new failed (agent `opencode`): ACP error -32000: quota exceeded; data: {\"retry_after\":30}"
+    );
+    assert_eq!(
+        with_acp_error.public_message(),
+        "agent rejected `session/new` request"
+    );
+
+    let without = StackError::agent_request_failed("session/cancel", "prompt did not settle");
+    assert!(without.public_details().is_empty());
+    assert_eq!(
+        without.public_message(),
+        "agent request `session/cancel` failed"
+    );
+    assert_eq!(
+        without.to_string(),
+        "agent request to session/cancel failed: prompt did not settle"
+    );
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("loading the catalog failed")]
 struct OpaqueWrapper {

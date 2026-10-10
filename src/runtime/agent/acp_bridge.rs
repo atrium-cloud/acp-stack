@@ -158,6 +158,10 @@ impl AgentSessionConfigCategory {
 /// One spawned agent + its live ACP connection. Single-use lifecycle: `spawn`
 /// once, hold while the agent should run, then `shutdown()` exactly once.
 pub struct AcpBridge {
+    /// Named in every failed-request error, so a 502 identifies the adapter that refused.
+    agent_id: String,
+    /// The supervisor target this bridge serves; `None` for bridges spawned outside one.
+    target_id: Option<String>,
     child: Arc<TokioMutex<Option<Child>>>,
     /// Present under `off` with a workload identity: the only way to stop a different-uid
     /// agent tree there. Dropping the bridge kills and removes it.
@@ -261,6 +265,12 @@ impl Drop for NotificationGuard {
 }
 
 impl AcpBridge {
+    /// Name the supervisor target this bridge serves in its failed-request errors.
+    pub fn with_target_id(mut self, target_id: impl Into<String>) -> Self {
+        self.target_id = Some(target_id.into());
+        self
+    }
+
     pub fn capabilities(&self) -> &AgentCapabilitiesDto {
         &self.capabilities
     }

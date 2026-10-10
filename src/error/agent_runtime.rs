@@ -2,8 +2,80 @@
 //! subprocess is running (spawn, lifecycle state, JSON-RPC requests).
 
 use http::StatusCode;
+use serde_json::{Map, Value, json};
 
 use super::StackError;
+
+/// Who a failed ACP request concerned, plus the adapter's own JSON-RPC error when it sent one.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AgentRequestContext {
+    pub agent_id: Option<String>,
+    pub target_id: Option<String>,
+    pub acp_session_id: Option<String>,
+    pub acp_error: Option<AcpErrorDetail>,
+}
+
+/// The adapter's JSON-RPC error, already redacted and bounded where it was captured.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AcpErrorDetail {
+    pub code: i32,
+    pub message: String,
+    pub data: Option<Value>,
+}
+
+impl StackError {
+    /// `AgentRequestFailed` for a failure acp-stack itself detected, with no adapter error.
+    pub fn agent_request_failed(method: &'static str, message: impl Into<String>) -> Self {
+        Self::AgentRequestFailed {
+            method,
+            message: message.into(),
+            context: Box::default(),
+        }
+    }
+}
+
+pub(super) fn agent_request_failed_display(
+    method: &str,
+    message: &str,
+    context: &AgentRequestContext,
+) -> String {
+    let ids: Vec<String> = [
+        ("agent", &context.agent_id),
+        ("target", &context.target_id),
+        ("session", &context.acp_session_id),
+    ]
+    .into_iter()
+    .filter_map(|(label, id)| id.as_ref().map(|id| format!("{label} `{id}`")))
+    .collect();
+    let mut text = format!("agent request to {method} failed");
+    if !ids.is_empty() {
+        text.push_str(&format!(" ({})", ids.join(", ")));
+    }
+    match &context.acp_error {
+        Some(detail) => {
+            text.push_str(&format!(": ACP error {}: {}", detail.code, detail.message));
+            if let Some(data) = &detail.data {
+                text.push_str(&format!("; data: {data}"));
+            }
+        }
+        None => text.push_str(&format!(": {message}")),
+    }
+    text
+}
+
+pub(super) fn public_details(err: &StackError) -> Option<Map<String, Value>> {
+    let StackError::AgentRequestFailed { context, .. } = err else {
+        return None;
+    };
+    let detail = context.acp_error.as_ref()?;
+    let mut acp_error = json!({ "code": detail.code, "message": detail.message });
+    if let (Some(data), Some(object)) = (&detail.data, acp_error.as_object_mut()) {
+        object.insert("data".to_owned(), data.clone());
+    }
+    let mut details = Map::new();
+    details.insert("acp_error".to_owned(), acp_error);
+    Some(details)
+}
 
 pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
     use StackError::*;
@@ -49,7 +121,12 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
         AgentApiStatus { path, status, .. } => {
             format!("agent API request to {path} failed with status {status}")
         }
-        AgentRequestFailed { method, .. } => format!("agent rejected `{method}` request"),
+        AgentRequestFailed {
+            method, context, ..
+        } => match context.acp_error {
+            Some(_) => format!("agent rejected `{method}` request"),
+            None => format!("agent request `{method}` failed"),
+        },
         InferenceRequestFailed {
             status_code,
             reason_category,

@@ -114,6 +114,12 @@ pub(crate) struct AcpArgs {
     pub(crate) session_new_error: bool,
     #[arg(long)]
     pub(crate) session_new_stall: bool,
+    /// Exit the process on `session/new` without answering it.
+    #[arg(long)]
+    pub(crate) session_new_exit: bool,
+    /// Fail `session/new` with this text in both the error message and its `data`.
+    #[arg(long)]
+    pub(crate) session_new_error_detail: Option<String>,
     #[arg(long)]
     pub(crate) prompt_error: bool,
     #[arg(long)]
