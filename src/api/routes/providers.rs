@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::Config;
 use crate::envelope::ApiSuccess;
 use crate::error::{Result, StackError};
+use crate::redaction::redact_text;
 use crate::runtime::agent::acp_bridge::AgentSessionConfigCategory;
 use crate::runtime::agent::acp_codec::session_model_choices;
 use crate::runtime::agent::model_discovery::{
@@ -203,7 +204,7 @@ pub(crate) async fn models_response_for_config(
         match refresh_provider_models(home, config).await {
             Ok(models) => models,
             Err(error) => {
-                let reason = error.to_string();
+                let reason = redact_text(&error.to_string()).into_owned();
                 tracing::warn!(reason = %reason, "provider model catalog refresh failed");
                 catalog_error = Some(reason);
                 // A stale cache entry still serves through a provider outage.

@@ -12,6 +12,7 @@ use tokio::sync::Notify;
 use crate::config::{self, Config};
 use crate::error::{Result, StackError};
 use crate::fs_util::home_dir;
+use crate::redaction::redact_values;
 use crate::runtime::agent::acp_bridge::{
     AcpBridge, AcpPermissionPolicy, AgentSessionConfigCategory, AgentSessionModeSelection,
     AgentSessionModelSelection, SessionEventSink, session_config_id_for_value,
@@ -95,15 +96,6 @@ const SESSION_DELETE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Bound on the retained assistant-message tail.
 const EVIDENCE_TEXT_TAIL_BYTES: usize = 2048;
-
-/// Placeholder written over a resolved secret value in the assistant-text evidence.
-const SECRET_REDACTION_PLACEHOLDER: &str = "[redacted]";
-
-/// Shortest resolved env value treated as a secret; low-entropy settings are left alone.
-const MIN_REDACTED_SECRET_LEN: usize = 6;
-
-/// Shortest leading fragment of a secret redacted at the front-truncated tail's head.
-const MIN_REDACTED_SECRET_FRAGMENT_LEN: usize = 8;
 
 /// Some adapters answer the prompt before their final file writes are visible to a
 /// stat from this process; re-poll briefly before declaring the artifact missing.
@@ -256,40 +248,6 @@ impl AgentTestEvidence {
     }
 }
 
-/// Redact resolved secret values from the assistant-text tail before it is emitted as
-/// JSON: the test agent runs with credentials in its env and auto-approves tools, so
-/// the diagnostic tail must not become an exfiltration channel.
-fn redact_secret_values(text: &mut String, secret_values: &[String], text_truncated: bool) {
-    for value in secret_values {
-        if value.len() < MIN_REDACTED_SECRET_LEN {
-            continue;
-        }
-        if text.contains(value.as_str()) {
-            *text = text.replace(value.as_str(), SECRET_REDACTION_PLACEHOLDER);
-        }
-        if text_truncated {
-            redact_leading_secret_fragment(text, value);
-        }
-    }
-}
-
-/// Redact the longest suffix of `value` that `text` begins with. The tail is
-/// truncated from the front, so a straddling secret leaves only a suffix fragment.
-fn redact_leading_secret_fragment(text: &mut String, value: &str) {
-    let max = value.len().min(text.len());
-    for len in (MIN_REDACTED_SECRET_FRAGMENT_LEN..=max).rev() {
-        let suffix_start = value.len() - len;
-        if !value.is_char_boundary(suffix_start) {
-            continue;
-        }
-        let suffix = &value[suffix_start..];
-        if text.starts_with(suffix) {
-            text.replace_range(..suffix.len(), SECRET_REDACTION_PLACEHOLDER);
-            return;
-        }
-    }
-}
-
 struct AgentTestSessionEventSink {
     updates: AtomicUsize,
     notify: Notify,
@@ -375,7 +333,7 @@ impl CleanupOutcome {
 /// What one `agent test` run observed. The harness fields report codes only: no reason
 /// strings, prompt text, or paths. `evidence` is the deliberate exception, carrying
 /// arbitrary agent output (final assistant text, update-kind counts) scrubbed only of the
-/// secret values this process injected into the agent's env (see [`redact_secret_values`]),
+/// secret values this process injected into the agent's env (see [`redact_values`]),
 /// so a credentialed auto-approving run cannot echo those back. That scrub is the bound of
 /// the guarantee: credentials the agent reads from its own on-disk config, or prompt and
 /// workspace-file content it echoes, are agent-authored, unknowable here, and retained
@@ -788,7 +746,9 @@ fn execute_agent_test(
     outcome.stop_reason = report.stop_reason;
     outcome.updates = report.updates;
     outcome.evidence = report.evidence;
-    redact_secret_values(
+    // The test agent runs with credentials in its env and auto-approves tools, so the
+    // diagnostic tail must not become an exfiltration channel.
+    redact_values(
         &mut outcome.evidence.final_assistant_text,
         &secret_values,
         outcome.evidence.text_truncated,
@@ -1623,37 +1583,5 @@ mod evidence_tests {
         assert!(evidence.final_assistant_text.len() <= EVIDENCE_TEXT_TAIL_BYTES);
         assert!(evidence.final_assistant_text.ends_with("final words"));
         assert!(evidence.final_assistant_text.is_char_boundary(0));
-    }
-
-    #[test]
-    fn redaction_scrubs_full_and_straddling_secret_values() {
-        let secrets = vec![
-            "sk-supersecretkey-ABCDEF".to_owned(),
-            "on".to_owned(),
-            "https://api.example.test/v1".to_owned(),
-        ];
-
-        let mut text = "I wrote the key sk-supersecretkey-ABCDEF to the file.".to_owned();
-        redact_secret_values(&mut text, &secrets, false);
-        assert!(!text.contains("sk-supersecretkey-ABCDEF"));
-        assert!(text.contains(SECRET_REDACTION_PLACEHOLDER));
-
-        let mut short = "mode is on now".to_owned();
-        redact_secret_values(&mut short, &secrets, true);
-        assert_eq!(short, "mode is on now");
-
-        let mut straddled = "retkey-ABCDEF was the tail".to_owned();
-        redact_secret_values(&mut straddled, &secrets, true);
-        assert!(straddled.starts_with(SECRET_REDACTION_PLACEHOLDER));
-        assert!(straddled.ends_with(" was the tail"));
-        assert!(!straddled.contains("retkey-ABCDEF"));
-
-        let mut untruncated = "retkey-ABCDEF was the tail".to_owned();
-        redact_secret_values(&mut untruncated, &secrets, false);
-        assert_eq!(untruncated, "retkey-ABCDEF was the tail");
-
-        let mut clean = "created report.txt with the requested summary".to_owned();
-        redact_secret_values(&mut clean, &secrets, true);
-        assert_eq!(clean, "created report.txt with the requested summary");
     }
 }

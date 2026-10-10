@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 
 use crate::error::{Result, StackError};
+use crate::redaction::{CREDENTIAL_PREFIXES, looks_like_jwt};
 
 /// Parse a duration string like `10m`, `750ms`, `4w`. A bare number is rejected rather than
 /// meaning seconds, so config typos surface at load time.
@@ -463,29 +464,13 @@ pub(crate) fn secret_value_shape(text: &str) -> bool {
     if text.len() > 40 && text.chars().all(|c| c.is_ascii_hexdigit()) {
         return true;
     }
-    if text.starts_with("acps_")
-        || text.starts_with("sk-")
-        || text.starts_with("ghp_")
-        || text.starts_with("github_pat_")
-        || text.starts_with("xoxb-")
-        || text.starts_with("xoxp-")
-        || text.starts_with("xoxa-")
+    if CREDENTIAL_PREFIXES
+        .iter()
+        .any(|entry| entry.config_screened && text.starts_with(entry.prefix))
     {
         return true;
     }
-    let jwt_parts = text.split('.').collect::<Vec<_>>();
-    if jwt_parts.len() == 3
-        && jwt_parts
-            .iter()
-            .all(|part| part.len() >= 10 && part.chars().all(is_base64url_char))
-    {
-        return true;
-    }
-    false
-}
-
-fn is_base64url_char(value: char) -> bool {
-    value.is_ascii_alphanumeric() || value == '_' || value == '-'
+    looks_like_jwt(text)
 }
 
 #[cfg(test)]

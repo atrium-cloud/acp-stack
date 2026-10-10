@@ -17,6 +17,7 @@ pub mod http_client;
 pub mod http_hardening;
 pub mod local_listener;
 pub mod ownership;
+pub mod redaction;
 pub mod runtime;
 // Derives the published `/v1` JSON Schema contract from the wire DTOs.
 #[cfg(feature = "dev-tools")]

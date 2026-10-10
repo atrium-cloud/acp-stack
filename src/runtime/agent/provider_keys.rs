@@ -76,6 +76,8 @@ const HERMES_API_MODES: [&str; 3] = ["chat_completions", "anthropic_messages", "
 /// `KIMI_MODEL_PROVIDER_TYPE` values; `kimi` is Kimi Code's own wire and is never exported.
 pub const KIMI_PROVIDER_TYPES: [&str; 4] = ["kimi", "anthropic", "openai", "openai_responses"];
 pub const KIMI_NATIVE_PROVIDER_TYPE: &str = "kimi";
+/// Env-name fragments that mark an optional provider env ref as key material.
+const CREDENTIAL_ENV_NAME_MARKERS: [&str; 4] = ["KEY", "SECRET", "TOKEN", "PASSWORD"];
 
 static PROVIDER_KEY_MAPPING: LazyLock<ProviderKeyMapping> = LazyLock::new(|| {
     ProviderKeyMapping::from_toml_parts(EMBEDDED_ENV_VARS, EMBEDDED_PROVIDERS)
@@ -1053,6 +1055,31 @@ pub fn optional_env_refs_for_agent_provider_id(
         return dedupe_refs(optional.iter().map(|value| static_str(value)).collect());
     }
     optional_env_refs_for_provider_id(provider_id)
+}
+
+/// Env refs a provider's stored credential may carry that are not key material: every companion
+/// (regions, project ids, hosts) and every optional ref whose name marks no credential. Optional
+/// lists mix both kinds (Bedrock's carries `AWS_REGION` beside `AWS_SECRET_ACCESS_KEY`).
+pub fn non_credential_env_refs_for_provider_id(provider_id: &str) -> Vec<&'static str> {
+    let mut refs = companion_env_refs_for_provider_id(provider_id);
+    refs.extend(companion_env_refs_for_agent_provider_id(
+        CLAUDE_CODE_AGENT_ID,
+        provider_id,
+    ));
+    refs.extend(
+        optional_env_refs_for_provider_id(provider_id)
+            .into_iter()
+            .chain(optional_env_refs_for_agent_provider_id(
+                CLAUDE_CODE_AGENT_ID,
+                provider_id,
+            ))
+            .filter(|env_ref| {
+                !CREDENTIAL_ENV_NAME_MARKERS
+                    .iter()
+                    .any(|marker| env_ref.contains(marker))
+            }),
+    );
+    dedupe_refs(refs)
 }
 
 pub fn provider_ids_for_env_refs<'a>(

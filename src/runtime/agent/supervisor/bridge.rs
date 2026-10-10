@@ -2,6 +2,7 @@
 //! integrity guard, the lifecycle rows, and the `on-crash` restart path.
 
 use super::*;
+use crate::redaction::redact_text;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn spawn_agent_bridge(
@@ -73,7 +74,7 @@ pub(super) async fn spawn_agent_bridge(
             let data = json!({
                 "target_id": target_id,
                 "agent_id": agent.id,
-                "reason": err.to_string(),
+                "reason": redact_text(&err.to_string()),
             });
             if let Err(persist_err) = append_and_publish_agent_lifecycle(
                 state,
@@ -317,7 +318,7 @@ async fn monitor_bridge_exit(
                 json!({
                     "target_id": restart_context.target_id,
                     "agent_id": restart_context.agent.id,
-                    "reason": err.to_string(),
+                    "reason": redact_text(&err.to_string()),
                 }),
             )
             .await?;

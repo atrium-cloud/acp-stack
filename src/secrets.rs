@@ -382,13 +382,15 @@ impl SecretStore {
             plaintext
         };
 
-        Ok(Self {
+        let store = Self {
             identity,
             secrets: plaintext.secrets,
             provider_credentials: plaintext.provider_credentials,
             managed_state: plaintext.managed_state,
             store_path: store_path.to_path_buf(),
-        })
+        };
+        store.register_known_values();
+        Ok(store)
     }
 
     /// Open an existing store, failing if the age key or the ciphertext is missing.
@@ -406,13 +408,15 @@ impl SecretStore {
         validate_owner_only_regular_file(&store_path)?;
         let identity = load_identity(&key_path)?;
         let plaintext = decrypt_store(&identity, &store_path)?;
-        Ok(Self {
+        let store = Self {
             identity,
             secrets: plaintext.secrets,
             provider_credentials: plaintext.provider_credentials,
             managed_state: plaintext.managed_state,
             store_path,
-        })
+        };
+        store.register_known_values();
+        Ok(store)
     }
 
     /// Open an existing store from explicit runtime-managed paths.
@@ -426,13 +430,15 @@ impl SecretStore {
         }
         let plaintext = decrypt_store(&identity, store_path)?;
 
-        Ok(Self {
+        let store = Self {
             identity,
             secrets: plaintext.secrets,
             provider_credentials: plaintext.provider_credentials,
             managed_state: plaintext.managed_state,
             store_path: store_path.to_path_buf(),
-        })
+        };
+        store.register_known_values();
+        Ok(store)
     }
 
     pub fn store_path(&self) -> &Path {
@@ -518,6 +524,7 @@ impl SecretStore {
         }
         .validate()?;
         self.provider_credentials = provider_credentials;
+        self.register_known_values();
         Ok(())
     }
 
@@ -541,6 +548,7 @@ impl SecretStore {
         atomic_write_owner_only(&self.store_path, &ciphertext)?;
         self.secrets = secrets;
         self.provider_credentials = provider_credentials;
+        self.register_known_values();
         Ok(())
     }
 
@@ -602,6 +610,7 @@ impl SecretStore {
                 atomic_write_owner_only(&self.store_path, &ciphertext)?;
                 self.provider_credentials = provider_credentials;
                 self.managed_state = managed_state;
+                self.register_known_values();
                 Ok(outcome)
             }
         }
@@ -675,7 +684,10 @@ impl SecretStore {
             Ok(outcome)
         }));
         match result {
-            Ok(Ok(outcome)) => Ok(outcome),
+            Ok(Ok(outcome)) => {
+                self.register_known_values();
+                Ok(outcome)
+            }
             Ok(Err(error)) => {
                 // Roll back the in-memory deposit so a failed apply cannot leave the store's memory
                 // holding secrets that never reached disk.
@@ -831,6 +843,7 @@ impl SecretStore {
     }
 
     pub fn set(&mut self, name: &str, value: &str) -> Result<()> {
+        crate::redaction::register_secret_values([value]);
         self.secrets.insert(name.to_owned(), value.to_owned());
         self.persist()
     }
@@ -841,6 +854,7 @@ impl SecretStore {
         I: IntoIterator<Item = (&'a str, &'a str)>,
     {
         for (name, value) in pairs {
+            crate::redaction::register_secret_values([value]);
             self.secrets.insert(name.to_owned(), value.to_owned());
         }
         self.persist()
@@ -853,6 +867,29 @@ impl SecretStore {
             });
         }
         self.persist()
+    }
+
+    /// Feed every decrypted value to the redaction registry; this store is the one place every
+    /// secret-backed value (agent env, MCP headers, provider keys) passes through in plaintext.
+    /// Provider companions such as `CLOUD_ML_REGION=global` are skipped: redacting them would
+    /// mangle unrelated text (`kimi-coding-global`) without hiding any key material.
+    fn register_known_values(&self) {
+        let mut values: Vec<&str> = self.secrets.values().map(String::as_str).collect();
+        for (provider_id, set) in &self.provider_credentials {
+            let non_credential_refs =
+                crate::runtime::agent::provider_keys::non_credential_env_refs_for_provider_id(
+                    provider_id,
+                );
+            values.extend(
+                set.sole
+                    .iter()
+                    .chain(set.aliases.values())
+                    .flat_map(|credential| credential.values.iter())
+                    .filter(|(name, _)| !non_credential_refs.contains(&name.as_str()))
+                    .map(|(_, value)| value.as_str()),
+            );
+        }
+        crate::redaction::register_secret_values(values);
     }
 
     fn persist(&self) -> Result<()> {

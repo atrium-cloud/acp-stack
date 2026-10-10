@@ -1,6 +1,7 @@
 //! MCP server classification, credential detection, and inspection builder.
 
 use super::*;
+use crate::redaction::{CREDENTIAL_PREFIXES, has_credential_prefix, starts_with_bearer_scheme};
 
 pub(super) fn classify_goose_extensions(builder: &mut InspectionBuilder, value: JsonValue) {
     let JsonValue::Object(servers) = value else {
@@ -482,12 +483,11 @@ pub(super) fn mcp_http_url_is_credential_free(value: &str) -> bool {
 }
 
 /// Tokens embedded as URL path segments carry no field name to classify, so
-/// match key prefixes; the length floor excludes words like `sk-learn`.
+/// match key prefixes.
 pub(super) fn path_segment_looks_like_credential(segment: &str) -> bool {
-    let lowered = segment.to_ascii_lowercase();
-    CREDENTIAL_PATH_SEGMENT_PREFIXES
+    CREDENTIAL_PREFIXES
         .iter()
-        .any(|prefix| lowered.starts_with(prefix) && lowered.len() > prefix.len() + 8)
+        .any(|entry| entry.native_import_screened && has_credential_prefix(segment, entry.prefix))
 }
 
 pub(super) fn url_contains_userinfo(value: &str) -> bool {
@@ -511,11 +511,7 @@ pub(super) fn command_args_contain_literal_credentials(args: &[String]) -> bool 
 /// Header-style credentials arrive as values rather than flag names, so the
 /// name-based flag scan alone misses them.
 pub(super) fn argument_carries_header_credential(argument: &str) -> bool {
-    if argument
-        .trim_start()
-        .get(..7)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("bearer "))
-    {
+    if starts_with_bearer_scheme(argument) {
         return true;
     }
     let Some((name, value)) = argument.split_once(':') else {

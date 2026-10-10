@@ -87,6 +87,59 @@ fn provider_credentials_round_trip_without_exposing_values_in_debug() {
 }
 
 #[test]
+fn redaction_registry_takes_key_material_but_not_companion_or_optional_settings() {
+    let home = fresh_home();
+    let mut store = SecretStore::open_or_create(home.path()).expect("open or create");
+    let vertex = ProviderCredential::new(
+        BTreeMap::from([
+            (
+                "ANTHROPIC_VERTEX_PROJECT_ID".to_owned(),
+                "vtxprj7q-redaction-z".to_owned(),
+            ),
+            ("CLOUD_ML_REGION".to_owned(), "global".to_owned()),
+            (
+                "GOOGLE_APPLICATION_CREDENTIALS".to_owned(),
+                "/srv/redaction-test/adc.json".to_owned(),
+            ),
+        ]),
+        BTreeMap::new(),
+    );
+    let bedrock = ProviderCredential::new(
+        BTreeMap::from([
+            ("AWS_REGION".to_owned(), "eu-redaction-test-1".to_owned()),
+            (
+                "AWS_SECRET_ACCESS_KEY".to_owned(),
+                "BedrockRedactionTestSecret".to_owned(),
+            ),
+        ]),
+        BTreeMap::new(),
+    );
+    store
+        .replace_provider_credentials(
+            BTreeMap::from([
+                (
+                    "google-vertex-anthropic".to_owned(),
+                    ProviderCredentialSet::aliasless(vertex),
+                ),
+                (
+                    "amazon-bedrock".to_owned(),
+                    ProviderCredentialSet::aliasless(bedrock),
+                ),
+            ]),
+            &[],
+        )
+        .expect("persist catalog");
+
+    let text = "kimi-coding-global vtxprj7q-redaction-z /srv/redaction-test/adc.json \
+                eu-redaction-test-1 BedrockRedactionTestSecret";
+    assert_eq!(
+        crate::redaction::redact_text(text),
+        "kimi-coding-global vtxprj7q-redaction-z /srv/redaction-test/adc.json \
+         eu-redaction-test-1 [redacted]"
+    );
+}
+
+#[test]
 fn staged_provider_credentials_are_not_persisted_until_replaced() {
     let home = fresh_home();
     let mut store = SecretStore::open_or_create(home.path()).expect("open or create");

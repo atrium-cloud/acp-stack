@@ -72,6 +72,7 @@ flowchart LR
 ### Observability and edge
 
 - Logging: local event history, metrics, and optional external sink.
+- Redaction: a process-wide registry of secret values the secret store decrypts, plus one shared credential-shape list, applied to text that is persisted, returned, or logged (`src/redaction.rs`).
 - Edge: reverse-proxy/tunnel artifacts and optional Cloudflare provisioning.
 
 ### Dev-only

@@ -55,22 +55,6 @@ pub const APPLIED_ROLLBACK_RETENTION_SECONDS: u64 = 15 * 60;
 pub const TERMINAL_RETENTION_SECONDS: u64 = 24 * 60 * 60;
 const JOURNAL_DIR_NAME: &str = "native-config-imports";
 const JOURNAL_FILE_LIMIT: usize = (IMPORT_SIZE_LIMIT * 4) + (256 * 1024);
-const CREDENTIAL_PATH_SEGMENT_PREFIXES: [&str; 14] = [
-    "sk-",
-    "pk-",
-    "rk-",
-    "ghp_",
-    "gho_",
-    "ghu_",
-    "ghs_",
-    "ghr_",
-    "github_pat_",
-    "glpat-",
-    "xoxb-",
-    "xoxp-",
-    "xoxa-",
-    "xoxs-",
-];
 
 static OPERATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
