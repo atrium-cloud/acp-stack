@@ -76,6 +76,15 @@ async fn config_validate_rejects_garbage_with_400() {
     let body: Value = response.json().await.expect("json");
     assert_eq!(body["ok"], Value::Bool(false));
     assert_eq!(body["error"]["code"], "config.invalid");
+    let details = &body["error"]["details"];
+    assert_eq!(details["line"], 1, "{body}");
+    assert!(details["column"].as_u64().is_some(), "{body}");
+    assert!(
+        details["reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()),
+        "{body}"
+    );
 }
 
 #[tokio::test]

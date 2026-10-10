@@ -46,7 +46,10 @@ pub struct ApiError {
     /// `acp_error` carries the adapter's JSON-RPC error as `{ code, message, data? }`, redacted
     /// of secrets and with `message` and `data` each cut at 2048 bytes plus a
     /// ` [truncated N bytes]` marker (a non-string `data` past the cap becomes a string of its
-    /// cut JSON text).
+    /// cut JSON text). On `prompt.body_invalid`, `reason` names the failed check. On
+    /// `config.invalid` for unparseable TOML, `line` and `column` (1-based, when known) locate
+    /// the error and `reason` is the parser message. Each `reason` has its value literals
+    /// replaced by `[redacted]`, is redacted, and is cut at 1024 bytes.
     // Always serialized, even when empty: the spec shows `"details": {}` as present in error
     // responses, so clients never have to distinguish "missing" from "empty".
     #[serde(default)]
@@ -110,6 +113,10 @@ impl ApiError {
 /// framework-generated 5xx produce the same envelope.
 pub(crate) const INTERNAL_ERROR_CODE: &str = "server.internal_error";
 pub(crate) const INTERNAL_ERROR_MESSAGE: &str = "internal server error";
+/// Shared with `StackError::RequestTooLarge` so a multipart body cut by the limit reads the same
+/// as a JSON body the limit layer rejected.
+pub(crate) const REQUEST_TOO_LARGE_CODE: &str = "request.too_large";
+pub(crate) const REQUEST_TOO_LARGE_MESSAGE: &str = "request body exceeds configured size limit";
 
 fn error_code_for_status(status: StatusCode) -> &'static str {
     match status {
@@ -118,7 +125,7 @@ fn error_code_for_status(status: StatusCode) -> &'static str {
         StatusCode::FORBIDDEN => "auth.forbidden",
         StatusCode::NOT_FOUND => "request.not_found",
         StatusCode::METHOD_NOT_ALLOWED => "request.method_not_allowed",
-        StatusCode::PAYLOAD_TOO_LARGE => "request.too_large",
+        StatusCode::PAYLOAD_TOO_LARGE => REQUEST_TOO_LARGE_CODE,
         StatusCode::UNSUPPORTED_MEDIA_TYPE => "request.unsupported_media_type",
         _ if status.is_server_error() => INTERNAL_ERROR_CODE,
         _ => "request.rejected",
@@ -132,7 +139,7 @@ fn message_for_status(status: StatusCode) -> &'static str {
         StatusCode::FORBIDDEN => "forbidden",
         StatusCode::NOT_FOUND => "not found",
         StatusCode::METHOD_NOT_ALLOWED => "method not allowed",
-        StatusCode::PAYLOAD_TOO_LARGE => "request body exceeds configured size limit",
+        StatusCode::PAYLOAD_TOO_LARGE => REQUEST_TOO_LARGE_MESSAGE,
         StatusCode::UNSUPPORTED_MEDIA_TYPE => "unsupported media type",
         _ if status.is_server_error() => INTERNAL_ERROR_MESSAGE,
         _ => "request rejected",
@@ -334,6 +341,7 @@ mod tests {
     fn workspace_upload_invalid_maps_to_400() {
         let err = StackError::WorkspaceUploadInvalid {
             reason: "missing path field",
+            source: None,
         };
         assert_eq!(err.error_code(), "workspace.upload_invalid");
         assert_eq!(err.http_status(), StatusCode::BAD_REQUEST);

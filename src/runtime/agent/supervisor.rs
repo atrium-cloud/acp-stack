@@ -630,10 +630,14 @@ impl AgentSupervisor {
         // BEFORE `shutdown_result?` so a messy shutdown cannot skip it.
         demote_sessions_on_agent_teardown(state, target_id, "agent_stopped").await;
 
-        let exit = shutdown_result?;
+        let reaped = shutdown_result?;
+        let exit_status = reaped.and_then(|status| status.code());
         let data = json!({
             "target_id": target_id,
-            "exit_status": exit,
+            "exit_status": exit_status,
+            "signal": reaped
+                .as_ref()
+                .and_then(crate::runtime::mediation::commands::process::exit_signal),
             "elapsed_ms": elapsed_ms,
         });
         let payload = data.to_string();
@@ -646,11 +650,15 @@ impl AgentSupervisor {
                 event_hub.publish_agent_event(&row.id, &row.created_at, "agent.stopped", data);
             }
             Err(err) => {
-                tracing::warn!(error = %err, "failed to record agent.stopped lifecycle row");
+                tracing::warn!(
+                    error = %crate::error::report(&err),
+                    target_id,
+                    "failed to record agent.stopped lifecycle row"
+                );
             }
         }
 
-        Ok(exit)
+        Ok(exit_status)
     }
 
     /// Called from `acps serve` between the HTTP server returning and

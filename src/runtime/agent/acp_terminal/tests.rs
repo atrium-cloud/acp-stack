@@ -531,6 +531,59 @@ async fn spawn_failure_still_records_the_session_event() {
     assert_eq!(finished["status"], "failed");
     assert_eq!(finished["exit_status"], serde_json::Value::Null);
     assert_eq!(finished["output_tail"], "");
+    let reason = finished["reason"]
+        .as_str()
+        .expect("spawn failure carries a reason");
+    assert!(!reason.is_empty());
+
+    // The command log carries the same reason on its own lifecycle event.
+    let events = guard
+        .query_events(crate::state::LogFilter {
+            limit: 10,
+            kind: Some("command.spawn_failed"),
+            ..Default::default()
+        })
+        .expect("query events");
+    assert_eq!(events.len(), 1, "expected one command.spawn_failed event");
+    let payload: serde_json::Value =
+        serde_json::from_str(&events[0].payload_json).expect("payload is json");
+    assert_eq!(payload["command_id"], commands[0].id);
+    assert_eq!(payload["status"], "failed");
+    assert_eq!(payload["reason"], reason);
+}
+
+#[tokio::test]
+async fn natural_signal_death_records_the_signal_on_the_command_event() {
+    use agent_client_protocol::schema::v1::SessionId;
+
+    let (_state_dir, state) = logging_state();
+    let context = logging_context(state.clone());
+    let request = CreateTerminalRequest::new(SessionId::new("sess_agent"), "/bin/sh")
+        .args(vec!["-c".to_owned(), "kill -9 $$".to_owned()]);
+    let response = handle_create_terminal(&context, request)
+        .await
+        .expect("terminal created");
+    let handle = context
+        .registry
+        .get("sess_agent", &response.terminal_id.0)
+        .await
+        .expect("handle");
+    handle.wait_for_exit().await;
+
+    let guard = state.lock().await;
+    let events = guard
+        .query_events(crate::state::LogFilter {
+            limit: 10,
+            kind: Some("command.failed"),
+            ..Default::default()
+        })
+        .expect("query events");
+    assert_eq!(events.len(), 1, "expected one command.failed event");
+    let payload: serde_json::Value =
+        serde_json::from_str(&events[0].payload_json).expect("payload is json");
+    assert_eq!(payload["signal"], "SIGKILL");
+    assert_eq!(payload["exit_status"], serde_json::Value::Null);
+    assert_eq!(payload["reason"], serde_json::Value::Null);
 }
 
 #[tokio::test]

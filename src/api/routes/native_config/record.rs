@@ -166,7 +166,7 @@ pub(super) fn spawn_terminal_operation_cleanup(state: AppState, operation_id: St
             let mutation = match state.lock_agent_config_mutation().await {
                 Ok(mutation) => mutation,
                 Err(error) => {
-                    tracing::warn!(error = %error, operation_id, "failed to acquire native config cleanup lock");
+                    tracing::warn!(error = %crate::error::report(&error), operation_id, "failed to acquire native config cleanup lock");
                     tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                     continue;
                 }
@@ -183,7 +183,7 @@ pub(super) fn spawn_terminal_operation_cleanup(state: AppState, operation_id: St
                     &state.runtime_paths.state_path,
                     &operation_id,
                 ) {
-                    tracing::warn!(error = %error, operation_id, "failed to remove expired native config import journal");
+                    tracing::warn!(error = %crate::error::report(&error), operation_id, "failed to remove expired native config import journal");
                 }
                 return;
             };
@@ -203,7 +203,7 @@ pub(super) fn spawn_terminal_operation_cleanup(state: AppState, operation_id: St
                 &state.runtime_paths.state_path,
                 &operation_id,
             ) {
-                tracing::warn!(error = %error, operation_id, "failed to remove expired native config import journal");
+                tracing::warn!(error = %crate::error::report(&error), operation_id, "failed to remove expired native config import journal");
                 drop(mutation);
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 continue;

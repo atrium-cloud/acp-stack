@@ -136,6 +136,7 @@ pub(super) fn inspect_opencode(
     let filename_jsonc = filename.is_some_and(|name| name.to_ascii_lowercase().ends_with(".jsonc"));
     let (mut root, normalized_jsonc) = match parse_json_object(content) {
         Ok(root) => (root, filename_jsonc),
+        // The JSONC retry reports its own error, which supersedes the strict-JSON one.
         Err(_) => (parse_jsonc_object(content)?, true),
     };
     let format = if normalized_jsonc {

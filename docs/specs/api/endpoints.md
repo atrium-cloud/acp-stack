@@ -280,12 +280,14 @@ The API withholds secret values from every response. Auth keys live outside the 
 - Tier: `session`
 - Request: raw TOML.
 - Response: validation result. Nothing is written.
+- Errors: unparseable TOML returns `400 config.invalid` with `details.line`, `details.column`, and `details.reason` (see [Error Codes](api.md#error-codes)).
 
 ### `POST /v1/config/import`
 
 - Tier: `admin`
 - Request: canonical TOML; supports `dry_run=true`.
 - Response: untyped import response (not covered by the JSON Schema).
+- Errors: unparseable TOML returns `400 config.invalid` with the same `details` as `POST /v1/config/validate`.
 - Notes: validates and writes canonical TOML.
 
 ### `GET /v1/secrets`
@@ -634,7 +636,7 @@ All skill routes load config leniently, dropping individually invalid `[[skills.
     - `efforts` carries the agent's ACP-advertised reasoning-effort values (the `thought_level` session config option) and is empty when the agent exposes no such option. On the `acp_advertised` source, adapters advertise those values per model, so the list belongs to `?model=` when one is given, to the configured model otherwise, and to the model the probed harness booted with when neither is set. Entries in `models` carry no `efforts` there; one `?model=` call per model reports them. Where the harness pins the effort in its own config (Codex with OpenRouter), the catalog supplies `efforts` for the configured model and `?model=` does not redirect it.
     - On the catalog path each model may carry its own `efforts`, the reasoning-effort values the provider's listing reports for that model (OpenRouter's `reasoning.supported_efforts`); the key is absent for models without any.
     - `source` is `"provider_catalog"` when models come from the provider's live model listing (`models_url` in the embedded provider metadata, fetched with the stored API key and cached at `~/.config/acp-stack/provider-models.json`) and `"acp_advertised"` when they come from the agent's ACP `session/new` config options. On the `acp_advertised` source, `models` keep the agent's advertised order and each `display_name`, when present, is the ACP option name.
-    - `catalog_error` is present when the provider declares a model listing endpoint but the catalog is unavailable (fetch failed and nothing cached). The response then falls back to ACP-advertised values, which is an empty `models` list for agents whose model is taken verbatim from on-disk config (Hermes Agent).
+    - `catalog_error` is present when the provider declares a model listing endpoint and the catalog fetch failed. It is redacted and cut at 1024 bytes. A cached catalog still serves `models` with `source: "provider_catalog"`. With nothing cached, the response falls back to ACP-advertised values, which is an empty `models` list for agents whose model is taken verbatim from on-disk config (Hermes Agent).
 - Notes:
     - Lists model and mode choices from the provider catalog or ACP discovery.
     - The catalog serves only mapped providers of agents whose harness takes the model verbatim from on-disk config (Claude Code profiled providers, Codex with OpenRouter, Hermes Agent). Custom providers have no listing endpoint, and agents with real ACP discovery keep their advertised list.
@@ -704,7 +706,7 @@ A session route answering `502 agent.request_failed` because the agent returned 
 - Request: creates a new ACP session. Accepts optional `cwd` and `target_id` (alias `target`) in the JSON body.
 - Response: the created session. May carry an `ignored` array (see capability-ignored rules below).
 - Notes:
-    - Session `cwd` values must be existing directories that canonicalize under `[workspace].root`. Stored CWD defaults are rechecked before reuse.
+    - Session `cwd` values must be existing directories that canonicalize under `[workspace].root`. Stored CWD defaults are rechecked before reuse. A rejected `cwd` returns `400 prompt.body_invalid` with the message `session cwd is invalid` and the failed rule in `details.reason`.
     - Closed sessions cannot be loaded, resumed, forked, or prompted.
 
 #### Capability-Ignored Rules (create/load/resume)
@@ -992,6 +994,7 @@ Workspace routes are session-tier. Paths are workspace-relative. The runtime rej
 - Tier: `session`
 - Request: multipart with required `path` and `file` fields.
 - Response: standard envelope.
+- Errors: a malformed multipart body returns `400 workspace.upload_invalid`. A body cut off by the request size limit (`api.max_request_bytes` or `security.http.max_request_bytes`, whichever is lower) returns `413 request.too_large`.
 - Notes: uploads one file below `workspace.uploads`.
 
 ### `GET /v1/files/download?path=...`
@@ -1339,7 +1342,7 @@ Log query filters are per-route, not one shared set. All log routes accept:
 - Response: rows from the `installer_runs` table (agent installs and updates, plus `deps_apply` rows).
     - Each row carries `{ "id", "agent_id", "operation", "step", "method", "status", "started_at", "finished_at", "exit_status", "version" }`.
     - Running rows additionally carry `elapsed_seconds`, computed server-side so pollers need no clock sync with the daemon.
-    - `operation` is `install` or `update`. `step` is `install`, `harness`, `adapter`, or `deps_apply`. `method` is `shell`, `npm`, `github`, `apt`, or `native`.
+    - `operation` is `install` or `update`. `step` is `install`, `harness`, `adapter`, `verify` (the post-install check of the agent entry point), or `deps_apply`. `method` is `shell`, `npm`, `github`, `apt`, or `native`.
     - `status` is `running`, `ran`, `kept`, `failed`, `error`, `timeout`, `skipped`, `config_error`, `installed`, or `privilege_required`.
 - Notes:
     - This is the live-progress surface for harness/adapter installs, which can run for minutes. A platform driving instance init polls `?active=true&agent=<id>` to render step-level progress while `POST /v1/agent/install` (or a switch) is in flight.

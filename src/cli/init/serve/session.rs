@@ -77,12 +77,19 @@ impl HostedInitManager {
             });
             if let Err(error) = result {
                 if !session.has_result() {
+                    // The hosted error frame carries only the public message.
+                    tracing::error!(
+                        error = %crate::error::report(&error),
+                        session_id = %session.id,
+                        "hosted init failed"
+                    );
                     session.set_error(error.error_code(), error.public_message());
                 } else {
                     // A result was already published, so the run error would
                     // otherwise vanish here.
                     tracing::error!(
-                        error = %error,
+                        error = %crate::error::report(&error),
+                        session_id = %session.id,
                         "hosted init failed after a result was already published; \
                          see the durable init_steps/init_runs rows for the settled state",
                     );
@@ -433,6 +440,8 @@ impl HostedInitSession {
             }
             self.emit_event_locked(&mut inner, event)
         };
+        // Broadcast send fails only with no subscriber, and a reconnecting client replays the
+        // history (or `replay_result`). The same holds for every `events.send` in this file.
         let _ = self.events.send(frame.to_string());
     }
 
@@ -445,7 +454,7 @@ impl HostedInitSession {
             Err(error) => {
                 tracing::warn!(
                     event = event_type,
-                    error = %error,
+                    error = %crate::error::report(&error),
                     "hosted init event payload could not be encoded; parking the session as errored"
                 );
                 // Bypasses `set_error_locked`: the encode-failure park wants the
@@ -891,7 +900,7 @@ impl HostedInitSession {
             Ok(frame) => Some(frame),
             Err(error) => {
                 tracing::warn!(
-                    error = %error,
+                    error = %crate::error::report(&error),
                     "hosted init result frame could not be encoded; sending an encode-failure frame instead"
                 );
                 Some(encode_failure_frame())

@@ -126,7 +126,7 @@ impl AgentSupervisor {
                     None,
                     None,
                 ) {
-                    tracing::warn!(error = %err, prompt_id = %prompt_id_owned, "failed to mark prompt running");
+                    tracing::warn!(error = %crate::error::report(&err), prompt_id = %prompt_id_owned, "failed to mark prompt running");
                 }
             }
 
@@ -152,7 +152,7 @@ impl AgentSupervisor {
                         guard.acknowledge_prompt_message_id(&prompt_id_owned, &message_id_owned)
                     {
                         tracing::warn!(
-                            error = %err,
+                            error = %crate::error::report(&err),
                             prompt_id = %prompt_id_owned,
                             message_id = %message_id_owned,
                             "failed to acknowledge prompt message id"
@@ -171,7 +171,7 @@ impl AgentSupervisor {
                         guard.record_prompt_agent_message_id(&prompt_id_owned, &agent_message_id)
                     {
                         tracing::warn!(
-                            error = %err,
+                            error = %crate::error::report(&err),
                             prompt_id = %prompt_id_owned,
                             "failed to record the agent message id anchoring this turn"
                         );
@@ -200,7 +200,7 @@ impl AgentSupervisor {
                     Ok(settle) => settle,
                     Err(err) => {
                         tracing::warn!(
-                            error = %err,
+                            error = %crate::error::report(&err),
                             prompt_id = %prompt_id_owned,
                             "failed to record terminal prompt status"
                         );
@@ -231,7 +231,7 @@ impl AgentSupervisor {
                         &event.payload_json,
                     ) {
                         tracing::warn!(
-                            error = %err,
+                            error = %crate::error::report(&err),
                             prompt_id = %prompt_id_owned,
                             session_id = %session_id_owned,
                             event_kind = event.kind,
@@ -433,7 +433,7 @@ impl AgentSupervisor {
                 && !sweep_failure_logged
             {
                 tracing::warn!(
-                    error = %error,
+                    error = %crate::error::report(&error),
                     session_id,
                     "failed to settle pending permissions while waiting out a session cancel"
                 );
@@ -487,36 +487,74 @@ impl AgentSupervisor {
     pub(super) async fn cancel_all_prompts(&self) {
         // Drain handles out of the map before awaiting: the tasks may
         // re-enter the registry via `reap_finished` from other paths.
-        let handles: Vec<PromptHandle> = {
+        let handles: Vec<(String, PromptHandle)> = {
             let mut prompts = self.prompts.lock().await;
-            prompts.drain().map(|(_, handle)| handle).collect()
+            prompts.drain().collect()
         };
-        for handle in &handles {
+        for (_, handle) in &handles {
             handle.cancel.cancel();
         }
         // Await each task so terminal `prompts` rows are written before
         // shutdown returns, bounded so a stuck task cannot delay teardown.
         let deadline = tokio::time::Instant::now() + PROMPT_DRAIN_BUDGET;
-        for handle in handles {
-            let PromptHandle { join, .. } = handle;
+        for (prompt_id, handle) in handles {
+            let PromptHandle {
+                join, session_id, ..
+            } = handle;
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             match tokio::time::timeout(remaining, join).await {
                 Ok(Ok(())) => {}
                 Ok(Err(err)) => {
-                    tracing::warn!(error = ?err, "prompt task panicked during drain");
+                    tracing::warn!(
+                        error = %crate::error::report(&err),
+                        prompt_id,
+                        session_id,
+                        "prompt task panicked during drain",
+                    );
                 }
                 Err(_) => {
                     // Dropping the JoinHandle detaches the already-cancelled
                     // task; the imminent bridge teardown makes it settle.
-                    tracing::warn!("prompt task did not settle within drain budget");
+                    tracing::warn!(
+                        prompt_id,
+                        session_id,
+                        "prompt task did not settle within drain budget"
+                    );
                 }
             }
         }
     }
 
     async fn reap_finished(&self) {
-        let mut prompts = self.prompts.lock().await;
-        prompts.retain(|_, handle| !handle.join.is_finished());
+        let finished: Vec<(String, PromptHandle)> = {
+            let mut prompts = self.prompts.lock().await;
+            let finished_ids: Vec<String> = prompts
+                .iter()
+                .filter(|(_, handle)| handle.join.is_finished())
+                .map(|(prompt_id, _)| prompt_id.clone())
+                .collect();
+            finished_ids
+                .into_iter()
+                .filter_map(|prompt_id| {
+                    prompts.remove(&prompt_id).map(|handle| (prompt_id, handle))
+                })
+                .collect()
+        };
+        // Each task has finished, so these awaits return at once; awaiting is the only way to
+        // see whether one panicked.
+        for (prompt_id, handle) in finished {
+            let PromptHandle {
+                join, session_id, ..
+            } = handle;
+            if let Err(error) = join.await {
+                tracing::error!(
+                    error = %crate::error::report(&error),
+                    prompt_id,
+                    session_id,
+                    "prompt task panicked; the stale-prompt sweeper settles its row",
+                );
+            }
+        }
     }
 }
 
@@ -544,7 +582,7 @@ fn append_user_prompt_events(
                 Ok(payload) => payload,
                 Err(err) => {
                     tracing::warn!(
-                        error = %err,
+                        error = %crate::error::report(&err),
                         prompt_id,
                         session_id,
                         "failed to encode the user prompt chunk event"
@@ -561,7 +599,7 @@ fn append_user_prompt_events(
             &payload,
         ) {
             tracing::warn!(
-                error = %err,
+                error = %crate::error::report(&err),
                 prompt_id,
                 session_id,
                 "failed to record the user prompt session event"

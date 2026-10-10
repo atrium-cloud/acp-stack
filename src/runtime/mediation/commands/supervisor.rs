@@ -16,13 +16,13 @@ use crate::runtime::mediation::permissions::{PermissionOutcome, PermissionServic
 use crate::state::{CommandStatus, StateStore};
 
 use super::RunningCommand;
-use super::exec::{GraceKillOutcome, kill_with_grace, sandboxed_program};
+use super::exec::{GRACE_ESCALATION_SIGNAL, GraceKillOutcome, kill_with_grace, sandboxed_program};
 use super::output::{
     OptionFlatten, Outcome, OutputChunk, OutputCounter, POST_WAIT_DRAIN_BUDGET,
     floor_char_boundary, read_stream,
 };
 use super::policy::ResolvedCommandCwd;
-use super::process::kill_process_group_pid;
+use super::process::{exit_signal, kill_process_group_pid};
 
 pub(super) struct SupervisorTask {
     pub(super) state: Arc<TokioMutex<StateStore>>,
@@ -108,7 +108,7 @@ impl SupervisorTask {
         }
         let started = Instant::now();
         if let Err(error) = self.mark_running().await {
-            tracing::warn!(error = %error, command_id = %self.command_id, "failed to mark command running before spawn");
+            tracing::warn!(error = %crate::error::report(&error), command_id = %self.command_id, "failed to mark command running before spawn");
             self.deregister(super::PERMISSION_REASON_START_FAILED).await;
             return;
         }
@@ -132,7 +132,7 @@ impl SupervisorTask {
             .publish_status_event("command.started", json!({"command_id": self.command_id}))
             .await
         {
-            tracing::warn!(error = %error, command_id = %self.command_id, "failed to persist command started event");
+            tracing::warn!(error = %crate::error::report(&error), command_id = %self.command_id, "failed to persist command started event");
             break_for_persistence_error(&mut child, self.cgroup.as_ref()).await;
             self.finish_after_persistence_error(started).await;
             self.deregister(super::PERMISSION_REASON_PERSISTENCE_FAILED)
@@ -147,7 +147,7 @@ impl SupervisorTask {
                 )
                 .await
         {
-            tracing::warn!(error = %error, command_id = %self.command_id, "failed to persist command review event");
+            tracing::warn!(error = %crate::error::report(&error), command_id = %self.command_id, "failed to persist command review event");
             break_for_persistence_error(&mut child, self.cgroup.as_ref()).await;
             self.finish_after_persistence_error(started).await;
             self.deregister(super::PERMISSION_REASON_PERSISTENCE_FAILED)
@@ -192,15 +192,18 @@ impl SupervisorTask {
                 }
                 _ = sleep_until(next_progress_deadline) => {
                     if let Err(error) = self.publish_progress_event().await {
-                        tracing::warn!(error = %error, command_id = %self.command_id, "failed to persist command progress; terminating command");
+                        tracing::warn!(error = %crate::error::report(&error), command_id = %self.command_id, "failed to persist command progress; terminating command");
                         break self.handle_persistence_error(&mut child).await;
                     }
                     next_progress_deadline = Instant::now() + self.progress_interval;
                 }
                 wait_result = child.wait() => {
                     break match wait_result {
-                        Ok(status) => Outcome::Exited(status.code()),
-                        Err(_) => Outcome::SpawnError,
+                        Ok(status) => Outcome::Exited {
+                            code: status.code(),
+                            signal: exit_signal(&status),
+                        },
+                        Err(error) => self.wait_failed(&error, "command child wait failed"),
                     };
                 }
                 Some(chunk) = rx.recv() => {
@@ -210,7 +213,7 @@ impl SupervisorTask {
                         }
                         Ok(false) => {}
                         Err(error) => {
-                            tracing::warn!(error = %error, command_id = %self.command_id, "failed to persist command output; terminating command");
+                            tracing::warn!(error = %crate::error::report(&error), command_id = %self.command_id, "failed to persist command output; terminating command");
                             break self.handle_persistence_error(&mut child).await;
                         }
                     }
@@ -241,7 +244,7 @@ impl SupervisorTask {
             match tokio::time::timeout(drain_deadline - now, rx.recv()).await {
                 Ok(Some(chunk)) => {
                     if let Err(error) = self.handle_chunk(chunk, &mut byte_counter).await {
-                        tracing::warn!(error = %error, command_id = %self.command_id, "failed to persist drained command output");
+                        tracing::warn!(error = %crate::error::report(&error), command_id = %self.command_id, "failed to persist drained command output");
                         drained_within_budget = false;
                         break;
                     }
@@ -257,7 +260,7 @@ impl SupervisorTask {
             for handle in reader_handles {
                 if let Err(error) = handle.await {
                     tracing::warn!(
-                        error = %error,
+                        error = %crate::error::report(&error),
                         command_id = %self.command_id,
                         "command output reader task did not exit cleanly",
                     );
@@ -274,17 +277,38 @@ impl SupervisorTask {
         }
 
         let duration_ms = i64::try_from(started.elapsed().as_millis()).ok();
+        let mut signal = None;
+        let mut reason = None;
         let (status, exit_status, kind) = match outcome {
-            Outcome::Exited(code) => {
+            Outcome::Exited {
+                code,
+                signal: exit_signal,
+            } => {
+                signal = exit_signal;
                 if code == Some(0) {
                     (CommandStatus::Exited, code, "command.exited")
                 } else {
                     (CommandStatus::Failed, code, "command.failed")
                 }
             }
-            Outcome::Canceled => (CommandStatus::Canceled, None, "command.cancelled"),
-            Outcome::TimedOut => (CommandStatus::Failed, None, "command.timeout"),
-            Outcome::SpawnError => (CommandStatus::Failed, None, "command.failed"),
+            Outcome::Canceled {
+                signal: kill_signal,
+            } => {
+                signal = kill_signal;
+                (CommandStatus::Canceled, None, "command.cancelled")
+            }
+            Outcome::TimedOut {
+                signal: kill_signal,
+            } => {
+                signal = kill_signal;
+                (CommandStatus::Failed, None, "command.timeout")
+            }
+            Outcome::WaitFailed {
+                reason: wait_reason,
+            } => {
+                reason = Some(wait_reason);
+                (CommandStatus::Failed, None, "command.failed")
+            }
             Outcome::PersistenceError => {
                 (CommandStatus::Failed, None, "command.persistence_failed")
             }
@@ -299,7 +323,7 @@ impl SupervisorTask {
                 duration_ms,
             )
         } {
-            tracing::warn!(error = %error, command_id = %self.command_id, "failed to finalize command row");
+            tracing::warn!(error = %crate::error::report(&error), command_id = %self.command_id, "failed to finalize command row");
             self.deregister(super::PERMISSION_REASON_PERSISTENCE_FAILED)
                 .await;
             return;
@@ -312,12 +336,14 @@ impl SupervisorTask {
                     "command_id": self.command_id,
                     "status": status.as_str(),
                     "exit_status": exit_status,
+                    "signal": signal,
+                    "reason": reason,
                     "duration_ms": duration_ms,
                 }),
             )
             .await
         {
-            tracing::warn!(error = %error, command_id = %self.command_id, "failed to persist terminal command event");
+            tracing::warn!(error = %crate::error::report(&error), command_id = %self.command_id, "failed to persist terminal command event");
         }
 
         self.deregister(super::PERMISSION_REASON_COMMAND_FINISHED)
@@ -429,16 +455,45 @@ impl SupervisorTask {
 
     async fn handle_cancel(&self, child: &mut tokio::process::Child) -> Outcome {
         match kill_with_grace(child, self.cancel_grace, self.cgroup.as_ref()).await {
-            GraceKillOutcome::ExitedWithinGrace(Ok(_)) | GraceKillOutcome::KilledAfterGrace => {
-                Outcome::Canceled
+            GraceKillOutcome::ExitedWithinGrace(Ok(status)) => Outcome::Canceled {
+                signal: exit_signal(&status),
+            },
+            GraceKillOutcome::KilledAfterGrace => Outcome::Canceled {
+                signal: Some(GRACE_ESCALATION_SIGNAL.to_owned()),
+            },
+            GraceKillOutcome::ExitedWithinGrace(Err(error)) => {
+                self.wait_failed(&error, "command child wait failed after cancel SIGTERM")
             }
-            GraceKillOutcome::ExitedWithinGrace(Err(_)) => Outcome::SpawnError,
         }
     }
 
     async fn handle_timeout(&self, child: &mut tokio::process::Child) -> Outcome {
-        kill_with_grace(child, self.cancel_grace, self.cgroup.as_ref()).await;
-        Outcome::TimedOut
+        let signal = match kill_with_grace(child, self.cancel_grace, self.cgroup.as_ref()).await {
+            GraceKillOutcome::ExitedWithinGrace(Ok(status)) => exit_signal(&status),
+            GraceKillOutcome::KilledAfterGrace => Some(GRACE_ESCALATION_SIGNAL.to_owned()),
+            GraceKillOutcome::ExitedWithinGrace(Err(error)) => {
+                // The timeout verdict stands; the process group was already signalled.
+                tracing::warn!(
+                    error = %crate::error::report(&error),
+                    command_id = %self.command_id,
+                    "command child wait failed after timeout SIGTERM",
+                );
+                None
+            }
+        };
+        Outcome::TimedOut { signal }
+    }
+
+    /// Log a failed `wait()` and carry its reason onto the terminal command event.
+    fn wait_failed(&self, error: &std::io::Error, context: &'static str) -> Outcome {
+        tracing::warn!(
+            error = %crate::error::report(error),
+            command_id = %self.command_id,
+            "{context}; recording the command as failed",
+        );
+        Outcome::WaitFailed {
+            reason: crate::error::persisted_report(error),
+        }
     }
 
     async fn handle_persistence_error(&self, child: &mut tokio::process::Child) -> Outcome {
@@ -452,35 +507,51 @@ impl SupervisorTask {
             let store = self.state.lock().await;
             store.finish_command(&self.command_id, CommandStatus::Failed, None, duration_ms)
         } {
-            tracing::warn!(error = %error, command_id = %self.command_id, "failed to finalize command after persistence error");
+            tracing::warn!(error = %crate::error::report(&error), command_id = %self.command_id, "failed to finalize command after persistence error");
         }
     }
 
     async fn record_spawn_failure(&self, error: std::io::Error) {
-        let message = error.to_string();
+        let reason = crate::error::persisted_report(&error);
+        // Same shape as the terminal path's `command.spawn_failed`.
         let payload = json!({
             "command_id": self.command_id,
-            "message": message,
+            "status": CommandStatus::Failed.as_str(),
+            "exit_status": null,
+            "signal": null,
+            "reason": reason,
+            "duration_ms": null,
         });
         let payload_text = payload.to_string();
         if let Err(error) = {
             let store = self.state.lock().await;
             store.finish_command(&self.command_id, CommandStatus::Failed, None, None)
         } {
-            tracing::warn!(error = %error, command_id = %self.command_id, "failed to record command spawn failure");
+            tracing::warn!(error = %crate::error::report(&error), command_id = %self.command_id, "failed to record command spawn failure");
         }
-        if let Ok(event) = {
+        let event = {
             let store = self.state.lock().await;
             store.append_event_with_source(
                 "error",
                 "command.spawn_failed",
                 crate::state::EVENT_SOURCE_COMMAND,
-                &message,
+                &reason,
                 &payload_text,
             )
-        } {
-            self.event_hub
-                .publish_command_event(&self.command_id, &event, payload);
+        };
+        match event {
+            Ok(event) => {
+                self.event_hub
+                    .publish_command_event(&self.command_id, &event, payload);
+            }
+            Err(append_error) => {
+                tracing::warn!(
+                    error = %crate::error::report(&append_error),
+                    spawn_error = %crate::error::report(&error),
+                    command_id = %self.command_id,
+                    "failed to persist command.spawn_failed event",
+                );
+            }
         }
     }
 
@@ -533,7 +604,7 @@ impl SupervisorTask {
             Ok(false) => {}
             Err(error) => {
                 tracing::warn!(
-                    error = %error,
+                    error = %crate::error::report(&error),
                     command_id = %self.command_id,
                     permission_id = %permission_id,
                     reason = permission_reason,
@@ -554,7 +625,7 @@ impl SupervisorTask {
             let store = self.state.lock().await;
             store.finish_command(&self.command_id, status, None, None)
         } {
-            tracing::warn!(error = %error, command_id = %self.command_id, "failed to finalize command without spawn");
+            tracing::warn!(error = %crate::error::report(&error), command_id = %self.command_id, "failed to finalize command without spawn");
         }
         let payload_text = payload.to_string();
         let event = {
@@ -567,9 +638,19 @@ impl SupervisorTask {
                 &payload_text,
             )
         };
-        if let Ok(event) = event {
-            self.event_hub
-                .publish_command_event(&self.command_id, &event, payload);
+        match event {
+            Ok(event) => {
+                self.event_hub
+                    .publish_command_event(&self.command_id, &event, payload);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %crate::error::report(&error),
+                    command_id = %self.command_id,
+                    event_kind = kind,
+                    "failed to persist command event for a command that never spawned",
+                );
+            }
         }
     }
 }
@@ -689,6 +770,68 @@ mod tests {
         assert!(
             !marker.exists(),
             "command must not spawn when durable running transition fails"
+        );
+    }
+
+    /// The payload of the single `kind` event on the command log.
+    async fn command_event_payload(fixture: &Fixture, kind: &str) -> Value {
+        let store = fixture.state.lock().await;
+        let events = store
+            .query_events(crate::state::LogFilter {
+                limit: 10,
+                kind: Some(kind),
+                ..Default::default()
+            })
+            .expect("query events");
+        assert_eq!(events.len(), 1, "expected one {kind} event: {events:?}");
+        serde_json::from_str(&events[0].payload_json).expect("payload is json")
+    }
+
+    #[tokio::test]
+    async fn signal_death_records_the_signal_on_the_failed_event() {
+        let fixture = fixture();
+        let command_id = insert_command(&fixture, "kill -9 $$").await;
+        let (_cancel_tx, task) = task(&fixture, &command_id, "kill -9 $$");
+
+        task.run().await;
+
+        let payload = command_event_payload(&fixture, "command.failed").await;
+        assert_eq!(payload["command_id"], command_id);
+        assert_eq!(payload["status"], "failed");
+        assert_eq!(payload["exit_status"], Value::Null);
+        assert_eq!(payload["signal"], "SIGKILL");
+        assert_eq!(payload["reason"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn spawn_failure_records_the_reason_on_the_spawn_failed_event() {
+        let fixture = fixture();
+        let command_id = insert_command(&fixture, "true").await;
+        let (_cancel_tx, mut task) = task(&fixture, &command_id, "true");
+        task.shell = fixture
+            .tempdir
+            .path()
+            .join("missing-shell")
+            .to_string_lossy()
+            .into_owned();
+
+        task.run().await;
+
+        let command = {
+            let store = fixture.state.lock().await;
+            store
+                .get_command(&command_id)
+                .expect("get command")
+                .expect("command row")
+        };
+        assert_eq!(command.status, "failed");
+        let payload = command_event_payload(&fixture, "command.spawn_failed").await;
+        assert_eq!(payload["command_id"], command_id);
+        assert!(
+            payload["reason"]
+                .as_str()
+                .is_some_and(|reason| !reason.is_empty()),
+            "payload: {payload}"
         );
     }
 

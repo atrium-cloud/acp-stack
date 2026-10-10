@@ -44,7 +44,7 @@ The supervisor:
 - Transitions are recorded in durable state and published to live subscribers.
 - After a successful spawn, the supervisor retains a sanitized provider/alias/revision snapshot for restart detection. It clears the snapshot on stop or exit.
 - Agent start, stop, and restart are admin operations.
-- With `restart = "on-crash"`, an unexpected ACP subprocess or connection exit records `agent.exited`, whose `stderr_tail` holds the adapter's last stderr lines, schedules a bounded restart, and relaunches with the same resolved config and environment used for the prior successful start.
+- With `restart = "on-crash"`, an unexpected ACP subprocess or connection exit records `agent.exited`, whose `stderr_tail` holds the adapter's last stderr lines and whose `exit_status` or `signal` says how the process ended, schedules a bounded restart, and relaunches with the same resolved config and environment used for the prior successful start.
 - `restart = "never"` leaves the process stopped.
 - Planned stop, restart, and daemon shutdown do not trigger crash recovery.
 
@@ -265,6 +265,8 @@ On Unix, the validated CWD is rebound through a verified directory handle at spa
 
 - Chunks are command-scoped events with stream name, sequence number, timestamp, event id, and command id.
 - Command rows track the latest output event, output byte count, and latest progress timestamp, so clients can reconnect and distinguish quiet work from a stalled runtime.
+- The terminal lifecycle event (`command.exited`, `command.failed`, `command.cancelled`, `command.timeout`, `command.persistence_failed`) carries `command_id`, `status`, `exit_status`, `signal` (the signal name when the child died on one), `reason` (the redacted wait error, cut at 2048 bytes, when waiting on the child failed), and `duration_ms`.
+- `command.spawn_failed` carries the same fields with `status: "failed"`, `exit_status`, `signal`, and `duration_ms` null, and `reason`, the redacted spawn error cut at 2048 bytes.
 - Durable command state writes must succeed before side effects continue. Volatile WebSocket fanout remains best effort.
 
 ### Progress And Cancellation

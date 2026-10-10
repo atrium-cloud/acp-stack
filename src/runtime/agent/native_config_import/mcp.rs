@@ -691,7 +691,7 @@ impl InspectionBuilder {
 
     pub(super) fn finish_json(mut self, residual: Vec<u8>) -> Result<InspectedNativeConfig> {
         let value: JsonValue = serde_json::from_slice(&residual)
-            .map_err(|_| native_error("agent.native_config_invalid"))?;
+            .map_err(|error| json_parse_error("agent.native_config_invalid", &error))?;
         collect_json_paths(&value, "", &mut self.inspection.unmanaged_field_paths);
         self.finish(residual)
     }
@@ -699,8 +699,8 @@ impl InspectionBuilder {
     pub(super) fn finish_toml(mut self, residual: Vec<u8>) -> Result<InspectedNativeConfig> {
         let text = std::str::from_utf8(&residual)
             .map_err(|_| native_error("agent.native_config_invalid"))?;
-        let value: TomlValue =
-            toml::from_str(text).map_err(|_| native_error("agent.native_config_invalid"))?;
+        let value: TomlValue = toml::from_str(text)
+            .map_err(|error| toml_parse_error("agent.native_config_invalid", text, &error))?;
         collect_toml_paths(&value, "", &mut self.inspection.unmanaged_field_paths);
         self.finish(residual)
     }

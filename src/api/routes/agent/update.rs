@@ -101,7 +101,9 @@ async fn busy_skip(state: &AppState, agent_id: String) -> ApiSuccess<AgentUpdate
 /// release, terminal event. Runs detached from the request handler so it
 /// always completes even when the HTTP caller disconnects. When the update
 /// stopped a running agent (`restart_after`), the agent is started again
-/// inside this task so a disconnect cannot strand it stopped.
+/// inside this task so a disconnect cannot strand it stopped. A failure is
+/// recorded in `agent.update.failed` here; the boundary logs it when the caller
+/// is still waiting, and the event is the record when it is not.
 // A detached task takes its context by value; bundling the args would only
 // rename the same move.
 #[allow(clippy::too_many_arguments)]
@@ -145,8 +147,14 @@ async fn run_update_and_release(
             } else {
                 ("agent.update.finished", "agent update finished")
             };
-            let mut payload = serde_json::to_value(&report)
-                .unwrap_or_else(|_| serde_json::json!({ "agent_id": report.agent_id }));
+            let mut payload = serde_json::to_value(&report).unwrap_or_else(|error| {
+                tracing::warn!(
+                    error = %crate::error::report(&error),
+                    agent_id = %report.agent_id,
+                    "agent update: report serialization failed; recording the agent id only",
+                );
+                serde_json::json!({ "agent_id": report.agent_id })
+            });
             if let Some(object) = payload.as_object_mut() {
                 object.insert(
                     "trigger".to_owned(),
@@ -161,7 +169,7 @@ async fn run_update_and_release(
                 &state,
                 "agent.update.failed",
                 "agent update failed",
-                serde_json::json!({ "error": err.to_string(), "trigger": UPDATE_TRIGGER_API }),
+                serde_json::json!({ "error": crate::error::persisted_report(&err), "trigger": UPDATE_TRIGGER_API }),
             )
             .await;
             Err(err)
@@ -173,7 +181,7 @@ async fn run_update_and_release(
                 &state,
                 "agent.update.failed",
                 "agent update failed",
-                serde_json::json!({ "error": err.to_string(), "trigger": UPDATE_TRIGGER_API }),
+                serde_json::json!({ "error": crate::error::persisted_report(&err), "trigger": UPDATE_TRIGGER_API }),
             )
             .await;
             Err(StackError::AgentInitializeFailed {

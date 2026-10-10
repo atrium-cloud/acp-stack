@@ -168,8 +168,15 @@ pub fn build_cors_layer(sec: &SecurityHttpConfig) -> Option<CorsLayer> {
     // Wildcard demands AllowOrigin::any() and forbids credentials; the `http.wildcard_origin_public_bind`
     // self-check already warns about `*` on public binds.
     let has_wildcard = sec.allowed_origins.iter().any(|origin| origin == "*");
+    // Browser clients send and read `x-request-id` to correlate a failure with its log line.
+    let request_id = http::HeaderName::from_static(crate::api::auth::REQUEST_ID_HEADER);
     let layer = CorsLayer::new()
-        .allow_headers([http::header::AUTHORIZATION, http::header::CONTENT_TYPE])
+        .allow_headers([
+            http::header::AUTHORIZATION,
+            http::header::CONTENT_TYPE,
+            request_id.clone(),
+        ])
+        .expose_headers([request_id])
         .allow_methods([
             http::Method::GET,
             http::Method::POST,

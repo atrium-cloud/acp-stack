@@ -48,7 +48,7 @@ impl S3Client {
             .build()
             .map_err(|source| StackError::SafeDownloadFailed {
                 url: String::new(),
-                reason: format!("build s3 reqwest client: {source}"),
+                reason: format!("build s3 reqwest client: {}", crate::error::report(&source)),
             })?;
         Ok(Self {
             http,
@@ -218,11 +218,12 @@ impl S3Client {
             .send()
             .map_err(|source| StackError::SafeDownloadFailed {
                 url: url.clone(),
-                reason: source.to_string(),
+                reason: crate::error::report(&source),
             })?;
         if !response.status().is_success() {
             let status = response.status().as_u16();
-            return Err(StackError::SafeDownloadHttpStatus { url, status });
+            let body = crate::http_client::blocking_error_response_body(response);
+            return Err(StackError::SafeDownloadHttpStatus { url, status, body });
         }
         read_response_capped(response, &url, max_bytes)
     }
@@ -427,9 +428,8 @@ mod tests {
     use axum::http::StatusCode as AxumStatus;
     use axum::response::Response;
     use axum::routing::get;
-    use std::net::SocketAddr;
-    use std::sync::mpsc;
-    use tokio::sync::oneshot;
+
+    use crate::http_client::test_server::spawn as spawn_test_server;
 
     #[test]
     fn uri_encode_preserves_slash_when_requested() {
@@ -531,59 +531,6 @@ mod tests {
         }
     }
 
-    struct TestServer {
-        addr: SocketAddr,
-        shutdown: Option<oneshot::Sender<()>>,
-        handle: Option<std::thread::JoinHandle<()>>,
-    }
-
-    impl TestServer {
-        fn endpoint(&self) -> String {
-            format!("http://{}", self.addr)
-        }
-    }
-
-    impl Drop for TestServer {
-        fn drop(&mut self) {
-            if let Some(tx) = self.shutdown.take() {
-                let _ = tx.send(());
-            }
-            if let Some(handle) = self.handle.take() {
-                let _ = handle.join();
-            }
-        }
-    }
-
-    fn spawn_test_server(router: Router) -> TestServer {
-        let (addr_tx, addr_rx) = mpsc::sync_channel(1);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let handle = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("build runtime");
-            rt.block_on(async move {
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                    .await
-                    .expect("bind test server");
-                let addr = listener.local_addr().expect("local addr");
-                addr_tx.send(addr).expect("send addr");
-                axum::serve(listener, router)
-                    .with_graceful_shutdown(async move {
-                        let _ = shutdown_rx.await;
-                    })
-                    .await
-                    .expect("serve");
-            });
-        });
-        let addr = addr_rx.recv().expect("addr from test server");
-        TestServer {
-            addr,
-            shutdown: Some(shutdown_tx),
-            handle: Some(handle),
-        }
-    }
-
     fn test_client(endpoint: String) -> S3Client {
         S3Client::new(
             "us-east-1".to_owned(),
@@ -608,7 +555,7 @@ mod tests {
             }),
         );
         let server = spawn_test_server(router);
-        let client = test_client(server.endpoint());
+        let client = test_client(server.base_url());
         let body = client
             .get_object("example", "data.bin", 16 * 1024)
             .expect("body");
@@ -632,10 +579,39 @@ mod tests {
             }),
         );
         let server = spawn_test_server(router);
-        let client = test_client(server.endpoint());
+        let client = test_client(server.base_url());
         let err = client
             .get_object("example", "big.bin", STREAM_CHUNK_BYTES as u64)
             .expect_err("too large");
         assert!(matches!(err, StackError::SafeDownloadTooLarge { .. }));
+    }
+
+    #[test]
+    fn non_success_status_keeps_the_redacted_bounded_response_body() {
+        let router = Router::new().route(
+            "/example/denied.bin",
+            get(|| async {
+                let body = format!(
+                    "<Error><Code>AccessDenied</Code><Token>sk-s3client0123456789</Token>{}</Error>",
+                    "x".repeat(2 * crate::redaction::HTTP_ERROR_BODY_MAX_BYTES)
+                );
+                Response::builder()
+                    .status(AxumStatus::FORBIDDEN)
+                    .body(Body::from(body))
+                    .unwrap()
+            }),
+        );
+        let server = spawn_test_server(router);
+        let client = test_client(server.base_url());
+        let err = client
+            .get_object("example", "denied.bin", 1024)
+            .expect_err("403");
+        let StackError::SafeDownloadHttpStatus { status, body, .. } = &err else {
+            panic!("unexpected: {err}");
+        };
+        assert_eq!(*status, 403);
+        assert!(body.contains("<Code>AccessDenied</Code>"), "{body}");
+        assert!(!body.contains("sk-s3client"), "{body}");
+        assert!(body.contains("[truncated"), "{body}");
     }
 }

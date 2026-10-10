@@ -2,8 +2,47 @@
 //! `import.*`, `io.*`, and `reset.*` namespaces.
 
 use http::StatusCode;
+use serde_json::{Map, Value};
 
 use super::StackError;
+use crate::redaction::{bounded, redact_text, strip_serde_value_literals};
+
+// CONSTANTS
+
+const CONFIG_TOML_REASON_MAX_BYTES: usize = 1024;
+/// `toml::de::Error`'s Display opens with this header when it knows where the error is.
+const TOML_POSITION_PREFIX: &str = "TOML parse error at line ";
+const TOML_POSITION_COLUMN_SEPARATOR: &str = ", column ";
+
+/// Position and parser message for an invalid config TOML. The body can carry secrets, so the
+/// source line the Display quotes stays out and value literals in the message are replaced.
+pub(super) fn public_details(err: &StackError) -> Option<Map<String, Value>> {
+    let StackError::ConfigToml(error) = err else {
+        return None;
+    };
+    let mut details = Map::new();
+    if let Some((line, column)) = toml_error_position(error) {
+        details.insert("line".to_owned(), Value::from(line));
+        details.insert("column".to_owned(), Value::from(column));
+    }
+    let reason = strip_serde_value_literals(error.message());
+    details.insert(
+        "reason".to_owned(),
+        Value::String(bounded(&redact_text(&reason), CONFIG_TOML_REASON_MAX_BYTES).into_owned()),
+    );
+    Some(details)
+}
+
+/// `toml::de::Error` exposes the span but not the input it indexes, so line and column are read
+/// back from the Display header.
+fn toml_error_position(error: &toml::de::Error) -> Option<(u64, u64)> {
+    let rendered = error.to_string();
+    let header = rendered.lines().next()?;
+    let (line, column) = header
+        .strip_prefix(TOML_POSITION_PREFIX)?
+        .split_once(TOML_POSITION_COLUMN_SEPARATOR)?;
+    Some((line.parse().ok()?, column.parse().ok()?))
+}
 
 pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
     use StackError::*;
@@ -19,6 +58,7 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         ImportBase64Decode { .. } => "import.base64_invalid",
         ImportUtf8 { .. } => "import.utf8_invalid",
         NativeAgentConfig { code } => code,
+        NativeAgentConfigDetailed { code, .. } => code,
         DirectoryCreate { .. } => "io.directory_create_failed",
         FileCreate { .. } => "io.file_create_failed",
         FileRemove { .. } => "io.file_remove_failed",
@@ -61,9 +101,9 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
         ConfigSerialize(_) => "failed to serialize config".to_owned(),
         ImportBase64Decode { .. } => "import data was not valid base64".to_owned(),
         ImportUtf8 { .. } => "imported config was not valid UTF-8".to_owned(),
-        NativeAgentConfig { .. } | NativeAgentConfigOperationFailed { .. } => {
-            "native Agent config import failed".to_owned()
-        }
+        NativeAgentConfig { .. }
+        | NativeAgentConfigDetailed { .. }
+        | NativeAgentConfigOperationFailed { .. } => "native Agent config import failed".to_owned(),
         DirectoryCreate { .. } => "failed to create directory".to_owned(),
         FileCreate { .. } => "failed to create file".to_owned(),
         FileRemove { .. } => "failed to remove file".to_owned(),
@@ -118,6 +158,9 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
 pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
     use StackError::*;
     Some(match err {
+        NativeAgentConfigDetailed { code, .. } => {
+            return http_status(&NativeAgentConfig { code });
+        }
         NativeAgentConfig {
             code: "agent.native_config_operation_not_found",
         } => StatusCode::NOT_FOUND,

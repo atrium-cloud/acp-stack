@@ -54,6 +54,11 @@ async fn create_session_rejects_symlink_cwd_escape() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body: Value = response.json().await.expect("json");
     assert_eq!(body["error"]["code"], "prompt.body_invalid");
+    assert_eq!(body["error"]["message"], "session cwd is invalid");
+    assert_eq!(
+        body["error"]["details"]["reason"],
+        "session cwd must be under workspace.root"
+    );
 }
 
 #[tokio::test]

@@ -8,7 +8,8 @@ use std::time::Duration;
 use acp_stack::config::{CommandsConfig, PermissionsConfig};
 use common::commands::{
     Harness, HarnessOverrides, admin_auth, approve_pending_command, auth, collect_until, open_ws,
-    pending_permission_for_command, session_client, submit, wait_for_terminal,
+    pending_permission_for_command, session_client, submit, wait_for_command_event,
+    wait_for_terminal,
 };
 use reqwest::StatusCode;
 use serde_json::Value;
@@ -36,6 +37,20 @@ async fn submit_records_failure_status_for_nonzero_exit() {
     let final_body = wait_for_terminal(&harness, &id).await;
     assert_eq!(final_body["data"]["status"], "failed");
     assert_eq!(final_body["data"]["exit_status"], 7);
+}
+
+#[tokio::test]
+async fn signal_death_records_the_signal_on_the_failed_event() {
+    let harness = Harness::spawn().await;
+    let response = submit(&harness, serde_json::json!({"command": "kill -9 $$"})).await;
+    let body: Value = response.json().await.expect("json");
+    let id = body["data"]["id"].as_str().expect("id").to_owned();
+    let final_body = wait_for_terminal(&harness, &id).await;
+    assert_eq!(final_body["data"]["status"], "failed");
+
+    let payload = wait_for_command_event(&harness, &id, "command.failed").await;
+    assert_eq!(payload["signal"], "SIGKILL", "{payload}");
+    assert_eq!(payload["exit_status"], Value::Null, "{payload}");
 }
 
 #[tokio::test]
@@ -435,6 +450,8 @@ async fn cancel_transitions_running_command_to_cancelled() {
 
     let final_body = wait_for_terminal(&harness, &id).await;
     assert_eq!(final_body["data"]["status"], "cancelled");
+    let payload = wait_for_command_event(&harness, &id, "command.cancelled").await;
+    assert_eq!(payload["signal"], "SIGTERM", "{payload}");
 
     let events = auth(session_client().get(format!(
         "{}/v1/logs/events?kind=command.cancelled&command_id={id}",

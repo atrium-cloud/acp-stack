@@ -372,9 +372,12 @@ fn download_public_messages_strip_url_credentials() {
     let status = StackError::SafeDownloadHttpStatus {
         url: leaky.clone(),
         status: 403,
+        body: "AccessDenied upstream body".to_owned(),
     };
-    let message =
-        assert_public_message_excludes(&status, &[CANARY_SECRET, "user", "token", "frag"]);
+    let message = assert_public_message_excludes(
+        &status,
+        &[CANARY_SECRET, "user", "token", "frag", "upstream body"],
+    );
     assert_eq!(
         message,
         "download from https://example.com/path failed with HTTP status 403"
@@ -418,6 +421,7 @@ fn download_public_messages_fall_back_when_url_is_missing_or_unparseable() {
     let empty_status = StackError::SafeDownloadHttpStatus {
         url: String::new(),
         status: 502,
+        body: String::new(),
     };
     assert_eq!(
         empty_status.public_message(),
@@ -804,4 +808,94 @@ fn report_skips_a_source_the_display_text_already_carries() {
         source: std::io::Error::other("disk quota exceeded"),
     };
     assert_eq!(super::report(&error), error.to_string());
+}
+
+fn config_toml_error(text: &str) -> StackError {
+    match crate::config::load_config_from_str(text) {
+        Err(error @ StackError::ConfigToml(_)) => error,
+        other => panic!("expected a TOML parse error, got {other:?}"),
+    }
+}
+
+#[test]
+fn config_toml_details_locate_the_error_without_echoing_the_body() {
+    const LITERAL: &str = "sk-proj-AbCdEfGh0123456789xyz";
+    let error = config_toml_error(&format!("[api]\nlisten = \"{LITERAL}\" trailing\n"));
+    assert!(
+        error.to_string().contains(LITERAL),
+        "the Display quotes the body line"
+    );
+
+    let details = error.public_details();
+    assert_eq!(details["line"], 2, "{details:?}");
+    assert!(details["column"].as_u64().is_some(), "{details:?}");
+    let reason = details["reason"].as_str().expect("reason");
+    assert!(!reason.is_empty() && !reason.contains(LITERAL), "{reason}");
+}
+
+#[test]
+fn config_toml_type_errors_replace_the_rejected_value() {
+    const LITERAL: &str = "hunter2-not-a-port";
+    let error = config_toml_error(&format!("[api]\nport = \"{LITERAL}\"\n"));
+    let details = error.public_details();
+    let reason = details["reason"].as_str().expect("reason");
+    assert!(!reason.contains(LITERAL), "{reason}");
+}
+
+#[test]
+fn prompt_body_reason_replaces_quoted_content() {
+    let error = StackError::PromptBodyInvalid(
+        "invalid type: string \"private plan text\", expected a content block".to_owned(),
+    );
+    assert_eq!(
+        error.public_details()["reason"],
+        "invalid type: string [redacted], expected a content block"
+    );
+}
+
+#[test]
+fn persisted_report_redacts_then_bounds_the_chain() {
+    const SECRET: &str = "PersistedCanary-7Qx41";
+    crate::redaction::register_secret_values([SECRET]);
+    let error = StackError::WorkloadFsIo {
+        path: PathBuf::from("/srv/catalog.json"),
+        operation: "read",
+        source: std::io::Error::other(format!(
+            "token {SECRET} rejected {}",
+            "x".repeat(super::PERSISTED_ERROR_MAX_BYTES)
+        )),
+    };
+    let persisted = super::persisted_report(&error);
+    assert!(!persisted.contains(SECRET), "{persisted}");
+    assert!(
+        persisted.contains("token [redacted] rejected"),
+        "{persisted}"
+    );
+    assert!(persisted.contains(" [truncated "), "{persisted}");
+    assert!(
+        persisted.len() < super::PERSISTED_ERROR_MAX_BYTES + 64,
+        "{persisted}"
+    );
+}
+
+#[tokio::test]
+async fn native_config_lock_task_failure_maps_panic_and_cancellation_to_codes() {
+    let panicked = tokio::spawn(async { panic!("lock task canary panic") })
+        .await
+        .expect_err("the task panics");
+    let error = super::native_config_lock_task_failed(&panicked);
+    assert_eq!(error.error_code(), "agent.native_config_lock_task_panicked");
+    assert!(
+        super::report(&error).contains("lock task canary panic"),
+        "{error}"
+    );
+
+    let pending = tokio::spawn(std::future::pending::<()>());
+    pending.abort();
+    let cancelled = pending.await.expect_err("the task is aborted");
+    let error = super::native_config_lock_task_failed(&cancelled);
+    assert_eq!(
+        error.error_code(),
+        "agent.native_config_lock_task_cancelled"
+    );
 }

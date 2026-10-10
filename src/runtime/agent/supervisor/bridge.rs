@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::redaction::redact_text;
+use crate::runtime::mediation::commands::process::exit_signal;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn spawn_agent_bridge(
@@ -192,10 +193,10 @@ async fn monitor_bridge_exit(
     *shared.last_pid.write().await = None;
     *shared.loaded_providers.write().await = None;
 
-    let exit_status = match bridge.shutdown().await {
+    let reaped = match bridge.shutdown().await {
         Ok(status) => status,
         Err(err) => {
-            tracing::warn!(error = %err, "agent supervisor: failed to reap crashed agent bridge");
+            tracing::warn!(error = %crate::error::report(&err), "agent supervisor: failed to reap crashed agent bridge");
             None
         }
     };
@@ -209,6 +210,7 @@ async fn monitor_bridge_exit(
     .await;
 
     let restart_policy = restart_context.agent.restart.as_str();
+    let latest_exit = bridge.subscribe_exit().borrow().clone();
     append_and_publish_agent_lifecycle(
         &restart_context.state_store,
         &restart_context.event_hub,
@@ -219,7 +221,8 @@ async fn monitor_bridge_exit(
             &restart_context.agent.id,
             restart_policy,
             &exit,
-            exit_status,
+            latest_exit.as_ref(),
+            reaped.as_ref(),
             &bridge.stderr_tail(),
         ),
     )
@@ -337,13 +340,14 @@ async fn wait_for_bridge_exit(bridge: &AcpBridge) -> Option<AcpBridgeExit> {
             return Some(exit);
         }
         match bridge.try_wait_child().await {
-            Ok(Some(exit_status)) => {
+            Ok(Some(status)) => {
                 return Some(AcpBridgeExit {
                     pid: bridge.pid(),
                     planned: bridge.planned_shutdown(),
                     reason: AcpBridgeExitReason::ProcessExited,
                     message: None,
-                    exit_status: Some(exit_status),
+                    exit_status: status.code(),
+                    signal: exit_signal(&status),
                 });
             }
             Ok(None) => {}
@@ -360,9 +364,23 @@ fn bridge_exit_payload(
     agent_id: &str,
     restart_policy: &str,
     exit: &AcpBridgeExit,
-    exit_status: Option<i32>,
+    latest_exit: Option<&AcpBridgeExit>,
+    reaped: Option<&std::process::ExitStatus>,
     stderr_tail: &str,
 ) -> Value {
+    // A connection that ends first reports neither a code nor a signal. The exit watcher's later
+    // report, or else the status `shutdown` reaped, then says how the process ended.
+    let (exit_status, signal) = [Some(exit), latest_exit]
+        .into_iter()
+        .flatten()
+        .find(|candidate| candidate.exit_status.is_some() || candidate.signal.is_some())
+        .map(|candidate| (candidate.exit_status, candidate.signal.clone()))
+        .unwrap_or_else(|| {
+            (
+                reaped.and_then(std::process::ExitStatus::code),
+                reaped.and_then(exit_signal),
+            )
+        });
     json!({
         "target_id": target_id,
         "agent_id": agent_id,
@@ -370,7 +388,8 @@ fn bridge_exit_payload(
         "planned": exit.planned,
         "reason": exit.reason.as_str(),
         "message": exit.message,
-        "exit_status": exit.exit_status.or(exit_status),
+        "exit_status": exit_status,
+        "signal": signal,
         "restart": restart_policy,
         "stderr_tail": (!stderr_tail.is_empty()).then_some(stderr_tail),
     })

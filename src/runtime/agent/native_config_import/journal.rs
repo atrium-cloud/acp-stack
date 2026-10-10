@@ -191,8 +191,14 @@ pub fn persist_native_config_operation(
         cancelled: record.cancelled,
         phase: record.phase,
     };
-    let content = serde_json::to_vec(&durable)
-        .map_err(|_| native_error("agent.native_config_journal_invalid"))?;
+    let content =
+        serde_json::to_vec(&durable).map_err(|error| StackError::NativeAgentConfigDetailed {
+            code: "agent.native_config_journal_invalid",
+            detail: format!(
+                "journal serialization failed: {}",
+                crate::error::report(&error)
+            ),
+        })?;
     if content.len() > JOURNAL_FILE_LIMIT {
         return Err(native_error("agent.native_config_journal_too_large"));
     }
@@ -249,7 +255,7 @@ pub fn load_native_config_operation_journal(
             source,
         })?;
         let durable: DurableOperationRecord = serde_json::from_slice(&content)
-            .map_err(|_| native_error("agent.native_config_journal_invalid"))?;
+            .map_err(|error| json_parse_error("agent.native_config_journal_invalid", &error))?;
         let expected_id = path.file_stem().and_then(|value| value.to_str());
         if expected_id != Some(durable.operation.operation_id.as_str()) {
             return Err(native_error("agent.native_config_journal_invalid"));
@@ -293,7 +299,10 @@ fn inflate_durable_record(
             }
             let native_content = base64::engine::general_purpose::STANDARD
                 .decode(prepared.native_content_base64)
-                .map_err(|_| native_error("agent.native_config_journal_invalid"))?;
+                .map_err(|error| StackError::NativeAgentConfigDetailed {
+                    code: "agent.native_config_journal_invalid",
+                    detail: base64_error_detail(&error),
+                })?;
             if native_content.len() > IMPORT_SIZE_LIMIT {
                 return Err(native_error("agent.native_config_journal_too_large"));
             }
@@ -512,4 +521,17 @@ pub fn next_native_config_operation_id() -> String {
     let sequence = OPERATION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0).max(0) as u128;
     format!("nci_{nanos:020}_{sequence:010}_{:010}", std::process::id())
+}
+
+/// A base64 decode error without the offending byte, which is native config content.
+fn base64_error_detail(error: &base64::DecodeError) -> String {
+    let problem = match error {
+        base64::DecodeError::InvalidByte(offset, _) => format!("invalid byte at offset {offset}"),
+        base64::DecodeError::InvalidLength(length) => format!("invalid length {length}"),
+        base64::DecodeError::InvalidLastSymbol(offset, _) => {
+            format!("invalid last symbol at offset {offset}")
+        }
+        base64::DecodeError::InvalidPadding => "invalid padding".to_owned(),
+    };
+    format!("stored native content is not valid base64: {problem}")
 }

@@ -127,7 +127,12 @@ pub(super) async fn apply_stored_operation_locked(
                 record.phase = NativeConfigOperationPhase::Staged;
             })
             .await?;
-            if persist_operation_record(state, operation_id).await.is_err() {
+            if let Err(error) = persist_operation_record(state, operation_id).await {
+                tracing::warn!(
+                    error = %crate::error::report(&error),
+                    operation_id,
+                    "failed to persist the re-staged native config import; keeping the applying marker"
+                );
                 replace_operation_record(state, applying_record.clone()).await?;
             }
         }
@@ -158,7 +163,12 @@ pub(super) async fn apply_stored_operation_locked(
                         record.phase = NativeConfigOperationPhase::Staged;
                     })
                     .await?;
-                    if persist_operation_record(state, operation_id).await.is_err() {
+                    if let Err(error) = persist_operation_record(state, operation_id).await {
+                        tracing::warn!(
+                            error = %crate::error::report(&error),
+                            operation_id,
+                            "failed to persist the re-staged native config import; keeping the applying marker"
+                        );
                         replace_operation_record(state, applying_record.clone()).await?;
                     }
                 }
@@ -181,7 +191,7 @@ pub(super) async fn apply_stored_operation_locked(
                     &prior_config,
                     prior_was_running,
                     &home,
-                    error.error_code(),
+                    &error,
                 )
                 .await;
             }
@@ -197,7 +207,7 @@ pub(super) async fn apply_stored_operation_locked(
             &prior_config,
             prior_was_running,
             &home,
-            error.error_code(),
+            &error,
         )
         .await;
     }
@@ -213,7 +223,7 @@ pub(super) async fn apply_stored_operation_locked(
                 &prior_config,
                 prior_was_running,
                 &home,
-                error.error_code(),
+                &error,
             )
             .await;
         }
@@ -245,7 +255,7 @@ pub(super) async fn apply_stored_operation_locked(
             &prior_config,
             prior_was_running,
             &home,
-            error.error_code(),
+            &error,
         )
         .await;
     }

@@ -83,7 +83,10 @@ impl StackError {
 
     /// Structured `details` safe for the public HTTP envelope; empty for most variants.
     pub fn public_details(&self) -> serde_json::Map<String, serde_json::Value> {
-        agent_runtime::public_details(self).unwrap_or_default()
+        agent_runtime::public_details(self)
+            .or_else(|| session::public_details(self))
+            .or_else(|| config::public_details(self))
+            .unwrap_or_default()
     }
 
     pub fn remediation_hint(&self) -> Option<String> {

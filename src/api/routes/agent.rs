@@ -224,7 +224,8 @@ async fn install_agent_for_config(
         }
         result.outcome?
     } else {
-        // Registry-resolved install: one row for native, two for adapter-backed.
+        // Registry-resolved install: one row for native, two for adapter-backed, plus a
+        // `verify` row when the entry-point check fails.
         let override_path = home.join(".config").join("acp-stack").join("agents.toml");
         let registry = RegistryCatalog::load_with_override(&override_path)?;
         let entry = registry.lookup_required(&config.agent.id)?.clone();

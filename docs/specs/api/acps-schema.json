@@ -2159,7 +2159,7 @@
           "details": {
             "type": "object",
             "default": {},
-            "description": "Structured context for the error; `{}` when there is none. On `agent.request_failed`,\n`acp_error` carries the adapter's JSON-RPC error as `{ code, message, data? }`, redacted\nof secrets and with `message` and `data` each cut at 2048 bytes plus a\n` [truncated N bytes]` marker (a non-string `data` past the cap becomes a string of its\ncut JSON text).",
+            "description": "Structured context for the error; `{}` when there is none. On `agent.request_failed`,\n`acp_error` carries the adapter's JSON-RPC error as `{ code, message, data? }`, redacted\nof secrets and with `message` and `data` each cut at 2048 bytes plus a\n` [truncated N bytes]` marker (a non-string `data` past the cap becomes a string of its\ncut JSON text). On `prompt.body_invalid`, `reason` names the failed check. On\n`config.invalid` for unparseable TOML, `line` and `column` (1-based, when known) locate\nthe error and `reason` is the parser message. Each `reason` has its value literals\nreplaced by `[redacted]`, is redacted, and is cut at 1024 bytes.",
             "additionalProperties": true
           }
         },
@@ -5237,7 +5237,7 @@
               "string",
               "null"
             ],
-            "description": "Set when the provider declares a model listing endpoint but the\ncatalog is unavailable (fetch failed and no cache)."
+            "description": "Set when the provider declares a model listing endpoint and the catalog\nfetch failed: redacted and cut at 1024 bytes. `models` then comes from\nthe cached catalog when one exists, else from ACP discovery."
           }
         },
         "required": [

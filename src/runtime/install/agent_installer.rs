@@ -40,6 +40,8 @@ pub const MAX_INSTALLER_STREAM_BYTES: usize = INSTALLER_OUTPUT_CAP_BYTES;
 pub(crate) const STEP_INSTALL: &str = "install";
 pub(crate) const STEP_HARNESS: &str = "harness";
 pub(crate) const STEP_ADAPTER: &str = "adapter";
+/// The post-install check of the agent's entry point; recorded only when it fails.
+pub(crate) const STEP_VERIFY: &str = "verify";
 
 pub(crate) use crate::state::{
     INSTALLER_METHOD_APT as INSTALL_METHOD_APT, INSTALLER_METHOD_GITHUB as INSTALL_METHOD_GITHUB,
@@ -165,6 +167,23 @@ impl InstallerRowDraft {
             artifact: None,
         }
     }
+
+    fn verification_failed(started_at: String, error: &StackError) -> Self {
+        Self {
+            started_at,
+            finished_at: Some(current_timestamp()),
+            status: "failed".into(),
+            stdout: String::new(),
+            stderr: crate::error::persisted_report(error),
+            exit_status: None,
+            step: STEP_VERIFY.to_owned(),
+            method: None,
+            version: None,
+            log_dir: None,
+            persisted_run_id: None,
+            artifact: None,
+        }
+    }
 }
 
 // =================================================================
@@ -260,7 +279,7 @@ pub(crate) fn begin_tracked_step(
     match result {
         Ok(()) => inserted_id,
         Err(error) => {
-            tracing::warn!(%error, step = step_label, "installer progress: running-row insert failed; step continues untracked");
+            tracing::warn!(error = %crate::error::report(&error), agent_id = progress.agent_id, step = step_label, "installer progress: running-row insert failed; step continues untracked");
             None
         }
     }
@@ -305,9 +324,12 @@ pub(crate) fn finalize_tracked_step(
     match result {
         Ok(()) => row.persisted_run_id = Some(run_id),
         Err(error) => {
-            tracing::warn!(%error, run_id, "installer progress: running-row finalize failed; row falls back to end-of-run append");
+            tracing::warn!(error = %crate::error::report(&error), agent_id = progress.agent_id, run_id, "installer progress: running-row finalize failed; row falls back to end-of-run append");
             let finished_now = current_timestamp();
-            let reason = format!("installer progress finalize failed: {error}");
+            let reason = format!(
+                "installer progress finalize failed: {}",
+                crate::error::persisted_report(&error)
+            );
             let mark = progress.sink.with_store(&mut |store| {
                 store.finish_installer_run(
                     &run_id,
@@ -326,7 +348,7 @@ pub(crate) fn finalize_tracked_step(
                 )
             });
             if let Err(mark_error) = mark {
-                tracing::warn!(error = %mark_error, run_id, "installer progress: failed to mark unfinalizable row as error");
+                tracing::warn!(error = %crate::error::report(&mark_error), agent_id = progress.agent_id, run_id,"installer progress: failed to mark unfinalizable row as error");
             }
         }
     }
@@ -485,7 +507,7 @@ pub fn run_installer_capture(
                     return InstallerResult { outcome, row };
                 }
                 Err(error) => {
-                    tracing::warn!(%error, "existing agent binary failed the spawn gate; re-running installer");
+                    tracing::warn!(error = %crate::error::report(&error), path = %path.display(), "existing agent binary failed the spawn gate; re-running installer");
                 }
             },
         }
@@ -560,8 +582,9 @@ pub(super) fn final_verification(
     entry: &RegistryEntry,
     host: &HostExec,
     dest_dir: &Path,
-    rows: Vec<InstallerRowDraft>,
+    mut rows: Vec<InstallerRowDraft>,
 ) -> InstallerSequenceResult {
+    let started_at = current_timestamp();
     let outcome = (|| {
         let path = resolve_creates(&agent.command, host, &[dest_dir]).ok_or_else(|| {
             StackError::AgentInstallerCreatesMissing {
@@ -579,6 +602,9 @@ pub(super) fn final_verification(
         verify_workload_reachable(host, &commands)?;
         Ok(InstallerOutcome::Installed { path, sha256 })
     })();
+    if let Err(error) = &outcome {
+        rows.push(InstallerRowDraft::verification_failed(started_at, error));
+    }
 
     InstallerSequenceResult { outcome, rows }
 }
@@ -673,12 +699,12 @@ pub fn resolve_creates_for_init_resume(
         let pinned = sha256_of_file(&path)
             .and_then(|sha256| verify_expected_sha256(expected_sha256, &sha256));
         if let Err(error) = pinned {
-            tracing::warn!(%error, "installed agent binary failed the integrity pin; re-running installer");
+            tracing::warn!(error = %crate::error::report(&error), path = %path.display(), "installed agent binary failed the integrity pin; re-running installer");
             return None;
         }
     }
     if let Err(error) = verify_binary_spawns(&path, host, extra_path_dirs) {
-        tracing::warn!(%error, "installed agent binary failed the spawn gate; re-running installer");
+        tracing::warn!(error = %crate::error::report(&error), path = %path.display(), "installed agent binary failed the spawn gate; re-running installer");
         return None;
     }
     Some(path)
@@ -723,7 +749,10 @@ fn version_probe_command(
     use crate::runtime::process_runner::detach_into_new_session;
     // The probe runs in the host-exec dir, so a relative `path` would resolve
     // differently here than it did in `resolve_creates`.
-    let exec_path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let exec_path = std::path::absolute(path).map_err(|source| StackError::AgentBinaryInspect {
+        path: path.to_path_buf(),
+        source,
+    })?;
     host.verify_executable(&exec_path)?;
     let mut command = host.command(&exec_path, extra_path_dirs);
     command.arg("--version").stdin(std::process::Stdio::null());
@@ -742,12 +771,12 @@ pub(crate) fn probe_binary_version(
     extra_path_dirs: &[&Path],
 ) -> Option<String> {
     use crate::runtime::process_runner::{
-        kill_process_group, spawn_capped_reader, wait_with_timeout,
+        join_reader_bounded, kill_process_group, spawn_capped_reader, wait_with_timeout,
     };
     let mut command = match version_probe_command(path, host, extra_path_dirs) {
         Ok(command) => command,
         Err(error) => {
-            tracing::warn!(%error, path = %path.display(), "version probe refused");
+            tracing::warn!(error = %crate::error::report(&error), path = %path.display(), "version probe refused; the row records no version");
             return None;
         }
     };
@@ -757,7 +786,7 @@ pub(crate) fn probe_binary_version(
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            tracing::debug!(%error, path = %path.display(), "version probe spawn failed");
+            tracing::warn!(error = %crate::error::report(&error), path = %path.display(), "version probe spawn failed; the row records no version");
             return None;
         }
     };
@@ -766,7 +795,14 @@ pub(crate) fn probe_binary_version(
     let deadline = std::time::Instant::now() + VERSION_PROBE_TIMEOUT;
     let exited_cleanly = match wait_with_timeout(&mut child, deadline) {
         Ok(Some(status)) => status.success(),
-        Ok(None) | Err(_) => false,
+        Ok(None) => {
+            tracing::warn!(path = %path.display(), timeout_secs = VERSION_PROBE_TIMEOUT.as_secs(), "version probe timed out; the row records no version");
+            false
+        }
+        Err(error) => {
+            tracing::warn!(error = %crate::error::report(&error), path = %path.display(), "version probe wait failed; the row records no version");
+            false
+        }
     };
     if !exited_cleanly {
         kill_process_group(&mut child);
@@ -775,7 +811,8 @@ pub(crate) fn probe_binary_version(
         }
         return None;
     }
-    let output = reader.join().ok()?;
+    // Bounded, since a grandchild holding the pipe would otherwise block the join forever.
+    let output = join_reader_bounded(reader)?;
     version_token_from_output(&output)
 }
 

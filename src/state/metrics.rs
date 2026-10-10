@@ -374,7 +374,7 @@ impl StateStore {
         }
 
         let mut event_statement = self.connection().prepare(
-            "SELECT e.payload_json FROM events e \
+            "SELECT e.id, e.payload_json FROM events e \
              JOIN sessions s ON s.id = e.session_id \
              WHERE e.kind = ?1 AND e.created_at >= ?2 AND e.created_at < ?3 \
                AND e.created_at >= s.created_at",
@@ -385,12 +385,21 @@ impl StateStore {
                 window.since,
                 window.until
             ],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )?;
         for entry in event_rows {
-            let payload_json = entry?;
-            let Ok(payload) = serde_json::from_str::<serde_json::Value>(&payload_json) else {
-                continue;
+            let (event_id, payload_json) = entry?;
+            let payload = match serde_json::from_str::<serde_json::Value>(&payload_json) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %crate::error::report(&error),
+                        event_id,
+                        kind = EVENT_KIND_PROMPT_INFERENCE_FAILED,
+                        "event payload is not valid JSON; leaving it out of the failure metrics"
+                    );
+                    continue;
+                }
             };
             if let Some(status_code) = payload.get("status_code").and_then(|value| value.as_u64()) {
                 let key = status_code.to_string();

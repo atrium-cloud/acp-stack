@@ -226,6 +226,7 @@ pub(crate) fn build_client(repo: &str) -> Result<reqwest::blocking::Client> {
         .map_err(|source| StackError::GithubReleaseFetch {
             repo: repo.to_owned(),
             source,
+            body: None,
         })
 }
 
@@ -253,26 +254,38 @@ fn fetch_release(
     if let Some(token) = token {
         request = request.bearer_auth(token);
     }
-    let response = request
-        .send()
-        .map_err(|source| StackError::GithubReleaseFetch {
-            repo: repo.to_owned(),
-            source,
-        })?;
-    observe_rate_limit(&response);
-    let response =
-        response
-            .error_for_status()
-            .map_err(|source| StackError::GithubReleaseFetch {
-                repo: repo.to_owned(),
-                source,
-            })?;
+    let response = send_checked(request, repo)?;
     response
         .json::<ReleaseResponse>()
         .map_err(|source| StackError::GithubReleaseFetch {
             repo: repo.to_owned(),
             source,
+            body: None,
         })
+}
+
+/// Send `request`, feed the rate-limit circuit, and turn a non-2xx answer into a fetch error
+/// that keeps the response body.
+fn send_checked(
+    request: reqwest::blocking::RequestBuilder,
+    repo: &str,
+) -> Result<reqwest::blocking::Response> {
+    let response = request
+        .send()
+        .map_err(|source| StackError::GithubReleaseFetch {
+            repo: repo.to_owned(),
+            source,
+            body: None,
+        })?;
+    observe_rate_limit(&response);
+    if let Err(source) = response.error_for_status_ref() {
+        return Err(StackError::GithubReleaseFetch {
+            repo: repo.to_owned(),
+            source,
+            body: Some(crate::http_client::blocking_error_response_body(response)),
+        });
+    }
+    Ok(response)
 }
 
 /// Pace requests to quota-bearing domains before they leave the process; unparseable URLs pass
@@ -352,25 +365,12 @@ fn download_bytes(
     if let Some(token) = token {
         request = request.bearer_auth(token);
     }
-    let response = request
-        .send()
-        .map_err(|source| StackError::GithubReleaseFetch {
-            repo: repo.to_owned(),
-            source,
-        })?;
-    observe_rate_limit(&response);
-    let response =
-        response
-            .error_for_status()
-            .map_err(|source| StackError::GithubReleaseFetch {
-                repo: repo.to_owned(),
-                source,
-            })?;
-    Ok(response
+    Ok(send_checked(request, repo)?
         .bytes()
         .map_err(|source| StackError::GithubReleaseFetch {
             repo: repo.to_owned(),
             source,
+            body: None,
         })?
         .to_vec())
 }
@@ -1338,5 +1338,61 @@ mod tests {
             previous_bundle_release(&fixture.link(), &fixture.releases()),
             None
         );
+    }
+
+    fn expect_fetch_body(result: Result<impl std::fmt::Debug>, status: &str) -> String {
+        let error = result.expect_err("non-2xx must fail");
+        let StackError::GithubReleaseFetch { body, .. } = &error else {
+            panic!("unexpected error: {error}");
+        };
+        let display = error.to_string();
+        assert!(display.contains(status), "{display}");
+        body.clone().expect("body kept")
+    }
+
+    #[test]
+    fn non_success_release_and_asset_responses_keep_the_redacted_body() {
+        use axum::http::StatusCode;
+        use axum::routing::get;
+
+        let router = axum::Router::new()
+            .route(
+                "/repos/acme/tool/releases/latest",
+                get(|| async {
+                    (
+                        StatusCode::NOT_FOUND,
+                        r#"{"message":"Not Found","token":"sk-githubrelease0123456789"}"#,
+                    )
+                }),
+            )
+            .route(
+                "/download/tool.tar.gz",
+                get(|| async {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        "y".repeat(2 * crate::redaction::HTTP_ERROR_BODY_MAX_BYTES),
+                    )
+                }),
+            );
+        let server = crate::http_client::test_server::spawn(router);
+        let client = build_client("").expect("client");
+
+        let release_body = expect_fetch_body(
+            fetch_release(&client, &server.base_url(), "acme/tool", None, None),
+            "404",
+        );
+        assert!(release_body.contains("Not Found"), "{release_body}");
+        assert!(!release_body.contains("sk-githubrelease"), "{release_body}");
+
+        let asset_body = expect_fetch_body(
+            download_bytes(
+                &client,
+                &server.url("/download/tool.tar.gz"),
+                None,
+                "acme/tool",
+            ),
+            "502",
+        );
+        assert!(asset_body.contains("[truncated"), "{asset_body}");
     }
 }

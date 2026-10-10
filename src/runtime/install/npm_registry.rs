@@ -18,40 +18,70 @@ struct LatestResponse {
 
 /// Return the latest published version for `package`; scoped names need no extra escaping.
 pub fn latest_version(package: &str) -> Result<String> {
+    latest_version_at(REGISTRY_BASE, package)
+}
+
+fn latest_version_at(registry_base: &str, package: &str) -> Result<String> {
+    let fetch_error = |source, body| StackError::NpmRegistryFetch {
+        package: package.to_owned(),
+        source,
+        body,
+    };
     let client = crate::http_client::blocking_client_builder()
         .timeout(REQUEST_TIMEOUT)
         .user_agent(USER_AGENT)
         .build()
-        .map_err(|source| StackError::NpmRegistryFetch {
-            package: package.to_owned(),
-            source,
-        })?;
-    let url = format!("{REGISTRY_BASE}/{package}/latest");
+        .map_err(|source| fetch_error(source, None))?;
+    let url = format!("{registry_base}/{package}/latest");
     let response = client
         .get(&url)
         .header("Accept", "application/json")
         .send()
-        .map_err(|source| StackError::NpmRegistryFetch {
-            package: package.to_owned(),
-            source,
-        })?;
-    let response = response
-        .error_for_status()
-        .map_err(|source| StackError::NpmRegistryFetch {
-            package: package.to_owned(),
-            source,
-        })?;
-    let parsed: LatestResponse =
-        response
-            .json()
-            .map_err(|source| StackError::NpmRegistryFetch {
-                package: package.to_owned(),
-                source,
-            })?;
+        .map_err(|source| fetch_error(source, None))?;
+    if let Err(source) = response.error_for_status_ref() {
+        let body = crate::http_client::blocking_error_response_body(response);
+        return Err(fetch_error(source, Some(body)));
+    }
+    let parsed: LatestResponse = response
+        .json()
+        .map_err(|source| fetch_error(source, None))?;
     if parsed.version.trim().is_empty() {
         return Err(StackError::NpmRegistryEmptyVersion {
             package: package.to_owned(),
         });
     }
     Ok(parsed.version)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::Router;
+    use axum::http::StatusCode;
+    use axum::routing::get;
+
+    #[test]
+    fn non_success_status_keeps_the_redacted_response_body() {
+        let router = Router::new().route(
+            "/missing-package/latest",
+            get(|| async {
+                (
+                    StatusCode::NOT_FOUND,
+                    r#"{"error":"Not found","token":"sk-npmregistry0123456789"}"#,
+                )
+            }),
+        );
+        let server = crate::http_client::test_server::spawn(router);
+        let error =
+            latest_version_at(&server.base_url(), "missing-package").expect_err("404 must fail");
+        let StackError::NpmRegistryFetch { body, .. } = &error else {
+            panic!("unexpected error: {error}");
+        };
+        let body = body.as_deref().expect("body kept");
+        assert!(body.contains("Not found"), "{body}");
+        assert!(!body.contains("sk-npmregistry"), "{body}");
+        let display = error.to_string();
+        assert!(display.contains("404"), "{display}");
+        assert!(display.contains("Not found"), "{display}");
+    }
 }

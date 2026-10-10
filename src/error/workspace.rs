@@ -50,7 +50,7 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
         WorkspaceTooLarge { limit } => {
             format!("workspace file exceeds the {limit}-byte size limit")
         }
-        WorkspaceUploadInvalid { reason } => format!("workspace upload is invalid: {reason}"),
+        WorkspaceUploadInvalid { reason, .. } => format!("workspace upload is invalid: {reason}"),
         WorkspacePermissionDenied { requested, .. } => {
             format!("permission denied for workspace path `{requested}`")
         }

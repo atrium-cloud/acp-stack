@@ -6,6 +6,47 @@
 /// Nothing listens here; routing a request through it fails at connect before any packet leaves
 /// the loopback interface.
 const DEAD_PROXY_URL: &str = "http://127.0.0.1:1";
+/// Raw bytes read from a non-2xx body; untrusted hosts must not make an error page cost more
+/// than this. The text kept in the error is cut far shorter after redaction.
+const ERROR_BODY_READ_MAX_BYTES: usize = 16 * 1024;
+const EMPTY_ERROR_BODY: &str = "(empty body)";
+
+/// The body of a non-2xx response, redacted and bounded for an error. A failed read is noted in
+/// its place so the caller still reports the status.
+pub async fn error_response_body(mut response: reqwest::Response) -> String {
+    let mut bytes = Vec::new();
+    while bytes.len() < ERROR_BODY_READ_MAX_BYTES {
+        match response.chunk().await {
+            Ok(Some(chunk)) => bytes.extend_from_slice(&chunk),
+            Ok(None) => break,
+            Err(error) => return format!("response body unreadable: {error}"),
+        }
+    }
+    bytes.truncate(ERROR_BODY_READ_MAX_BYTES);
+    error_body_text(&bytes)
+}
+
+/// Blocking twin of [`error_response_body`].
+pub fn blocking_error_response_body(response: reqwest::blocking::Response) -> String {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    match response
+        .take(ERROR_BODY_READ_MAX_BYTES as u64)
+        .read_to_end(&mut bytes)
+    {
+        Ok(_) => error_body_text(&bytes),
+        Err(error) => format!("response body unreadable: {error}"),
+    }
+}
+
+fn error_body_text(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let text = text.trim();
+    if text.is_empty() {
+        return EMPTY_ERROR_BODY.to_owned();
+    }
+    crate::redaction::error_body(text)
+}
 
 pub fn client_builder() -> reqwest::ClientBuilder {
     let builder = reqwest::Client::builder();
@@ -89,6 +130,75 @@ fn url_is_loopback(url: &reqwest::Url) -> bool {
     }
 }
 
+/// A loopback axum server on its own thread and runtime, so blocking and async clients alike can
+/// reach it from a test.
+#[cfg(test)]
+pub(crate) mod test_server {
+    use std::net::SocketAddr;
+
+    use tokio::sync::oneshot;
+
+    pub(crate) struct TestServer {
+        address: SocketAddr,
+        shutdown: Option<oneshot::Sender<()>>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl TestServer {
+        pub(crate) fn base_url(&self) -> String {
+            format!("http://{}", self.address)
+        }
+
+        pub(crate) fn url(&self, path: &str) -> String {
+            format!("{}{path}", self.base_url())
+        }
+    }
+
+    impl Drop for TestServer {
+        fn drop(&mut self) {
+            // Dropping the sender resolves the receiver, which starts the graceful shutdown.
+            self.shutdown.take();
+            if let Some(handle) = self.handle.take()
+                && handle.join().is_err()
+                && !std::thread::panicking()
+            {
+                panic!("test server thread panicked");
+            }
+        }
+    }
+
+    pub(crate) fn spawn(router: axum::Router) -> TestServer {
+        let (address_sender, address_receiver) = std::sync::mpsc::sync_channel(1);
+        let (shutdown_sender, shutdown_receiver) = oneshot::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build runtime");
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("bind test server");
+                let address = listener.local_addr().expect("local addr");
+                address_sender.send(address).expect("send addr");
+                axum::serve(listener, router)
+                    .with_graceful_shutdown(async move {
+                        // A send and a dropped sender both mean shut down.
+                        shutdown_receiver.await.unwrap_or_default();
+                    })
+                    .await
+                    .expect("serve");
+            });
+        });
+        let address = address_receiver.recv().expect("addr from test server");
+        TestServer {
+            address,
+            shutdown: Some(shutdown_sender),
+            handle: Some(handle),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,5 +270,18 @@ mod tests {
             .expect("body");
         assert_eq!(body, "ok");
         server.join().expect("server thread");
+    }
+
+    #[test]
+    fn error_body_text_redacts_bounds_and_names_an_empty_body() {
+        assert_eq!(error_body_text(b"  \n"), EMPTY_ERROR_BODY);
+        assert_eq!(error_body_text(b" not found\n"), "not found");
+        let secret = error_body_text(b"invalid key sk-httpbody0123456789");
+        assert!(!secret.contains("sk-httpbody"), "{secret}");
+        let long = vec![b'x'; ERROR_BODY_READ_MAX_BYTES];
+        assert!(error_body_text(&long).ends_with(&format!(
+            "[truncated {} bytes]",
+            ERROR_BODY_READ_MAX_BYTES - crate::redaction::HTTP_ERROR_BODY_MAX_BYTES
+        )));
     }
 }

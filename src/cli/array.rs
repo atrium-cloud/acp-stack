@@ -381,7 +381,7 @@ enum ArrayDaemonStatus {
 fn query_daemon_array_status(config: &Config) -> ArrayDaemonStatus {
     let session_access = match resolve_session_access(config, None) {
         Ok(access) => access,
-        Err(err) => return ArrayDaemonStatus::Unavailable(err.public_message()),
+        Err(err) => return ArrayDaemonStatus::Unavailable(crate::error::report(&err)),
     };
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -399,7 +399,7 @@ fn query_daemon_array_status(config: &Config) -> ArrayDaemonStatus {
     });
     match result {
         Ok(Ok(body)) => ArrayDaemonStatus::Ready(body.get("data").cloned().unwrap_or(body)),
-        Ok(Err(err)) => ArrayDaemonStatus::Unavailable(err.public_message()),
+        Ok(Err(err)) => ArrayDaemonStatus::Unavailable(crate::error::report(&err)),
         Err(_) => ArrayDaemonStatus::Unavailable("request timed out".to_owned()),
     }
 }
@@ -933,7 +933,7 @@ fn run_array_daemon_with_auto(
                 "response": response.get("data").cloned().unwrap_or(response),
             })),
             Err(error) => {
-                let message = error.to_string();
+                let message = crate::error::report(&error);
                 failures.push(format!("{}: {message}", target.id));
                 results.push(serde_json::json!({
                     "target_id": target.id,

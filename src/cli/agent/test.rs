@@ -41,6 +41,9 @@ const AGENT_TEST_SCHEMA_VERSION: i64 = 3;
 /// many modes cannot spin unbounded. Mode enums are small; this only caps the tail.
 const MAX_TESTFLIGHT_MODE_ATTEMPTS: usize = 6;
 
+/// How a mode attempt that applied no mode is named in failure reasons and logs.
+const AGENT_DEFAULT_MODE_LABEL: &str = "(agent default)";
+
 /// Phases, in run order; derived from the outcome code so text and JSON agree.
 const PHASE_SPAWN: &str = "spawn";
 const PHASE_INITIALIZE: &str = "initialize";
@@ -625,6 +628,8 @@ fn execute_agent_test(
     let mut attempts = 0usize;
     let mut first_failure: Option<AgentTestFailure> = None;
     let mut first_failure_is_fs = false;
+    // Failures after the first, keyed by the mode they ran under.
+    let mut later_failures: Vec<(Option<String>, AgentTestFailure)> = Vec::new();
     // Evidence/cleanup surfaced to the caller: the passing attempt on success, else
     // the first (default-mode) attempt, the most representative failure.
     let mut chosen_report: Option<AgentTestInnerReport> = None;
@@ -651,6 +656,7 @@ fn execute_agent_test(
                 // rather than clobber the recorded outcome with a setup error.
                 tracing::warn!(
                     code = failure.code,
+                    reason = %failure.reason,
                     "testflight artifact prepare failed mid-cycle; keeping the first failure"
                 );
                 break;
@@ -699,6 +705,20 @@ fn execute_agent_test(
 
         match attempt_failure {
             None => {
+                // A passing run surfaces no failure, so the cycled-past ones are logged.
+                let cycled_past = first_failure
+                    .take()
+                    .map(|failure| (chosen_mode.take(), failure))
+                    .into_iter()
+                    .chain(later_failures.drain(..));
+                for (mode, failure) in cycled_past {
+                    tracing::warn!(
+                        mode = mode_label(mode.as_deref()),
+                        code = failure.code,
+                        reason = %failure.reason,
+                        "testflight mode attempt failed before a later mode passed"
+                    );
+                }
                 succeeded = true;
                 chosen_mode = mode_override;
                 chosen_report = Some(report);
@@ -711,6 +731,8 @@ fn execute_agent_test(
                     first_failure = Some(failure);
                     chosen_report = Some(report);
                     chosen_mode = mode_override;
+                } else {
+                    later_failures.push((mode_override, failure));
                 }
                 if args.one_shot
                     || !failure_triggers_mode_cycle(code)
@@ -799,7 +821,39 @@ fn execute_agent_test(
     if first_failure_is_fs {
         outcome.fs_check_status = FS_CHECK_FAILED;
     }
-    Err(first_failure.expect("a failed testflight has a failure"))
+    Err(with_later_attempts(
+        first_failure.expect("a failed testflight has a failure"),
+        &later_failures,
+    ))
+}
+
+/// Append the later mode attempts' outcomes to the surfaced first failure, so their reasons
+/// reach the operator the same way the first one does.
+fn with_later_attempts(
+    mut failure: AgentTestFailure,
+    later_failures: &[(Option<String>, AgentTestFailure)],
+) -> AgentTestFailure {
+    if later_failures.is_empty() {
+        return failure;
+    }
+    let attempts = later_failures
+        .iter()
+        .map(|(mode, attempt)| {
+            format!(
+                "mode {}: {}: {}",
+                mode_label(mode.as_deref()),
+                attempt.code,
+                attempt.reason
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    failure.reason = format!("{}; later mode attempts: {attempts}", failure.reason);
+    failure
+}
+
+fn mode_label(mode: Option<&str>) -> &str {
+    mode.unwrap_or(AGENT_DEFAULT_MODE_LABEL)
 }
 
 /// Whether a failed testflight attempt is worth retrying under a different mode.
@@ -1182,6 +1236,7 @@ async fn run_agent_test_inner(
             *created_session = Some(session.session_id.clone());
             // Captured before any apply can fail, so the caller can cycle modes
             // even when applying this attempt's mode is what failed.
+            // The only error is an agent advertising no mode option, which leaves nothing to cycle.
             *advertised_modes =
                 advertised_values_for_category(&session, AgentSessionConfigCategory::Mode)
                     .unwrap_or_default();
@@ -1240,7 +1295,7 @@ async fn run_agent_test_inner(
                 Ok(Ok(())) => SESSION_DELETE_DELETED,
                 Ok(Err(error)) => {
                     tracing::warn!(
-                        error = %error,
+                        error = %crate::error::report(&error),
                         "agent test could not delete its disposable session"
                     );
                     SESSION_DELETE_CLEANUP_FAILED
@@ -1258,7 +1313,10 @@ async fn run_agent_test_inner(
     let process = match bridge.shutdown().await {
         Ok(_) => PROCESS_TERMINATED,
         Err(error) => {
-            tracing::warn!(error = %error, "agent test could not terminate the agent process");
+            tracing::warn!(
+                error = %crate::error::report(&error),
+                "agent test could not terminate the agent process"
+            );
             PROCESS_TERMINATE_FAILED
         }
     };
@@ -1438,7 +1496,7 @@ fn agent_test_error(
     code: &'static str,
     error: StackError,
 ) -> AgentTestFailure {
-    AgentTestFailure::new(stage, code, error.to_string())
+    AgentTestFailure::new(stage, code, crate::error::report(&error))
 }
 
 fn stop_reason_label(reason: StopReason) -> String {
@@ -1493,6 +1551,54 @@ mod cycle_tests {
         ] {
             assert!(!failure_triggers_mode_cycle(code), "{code} must not cycle");
         }
+    }
+
+    #[test]
+    fn total_failure_keeps_every_later_attempt_reason() {
+        let first = AgentTestFailure::new(
+            "fs_check",
+            CODE_FS_CHECK_MISSING,
+            "artifact was not written".to_owned(),
+        );
+        let later = vec![
+            (
+                Some("plan".to_owned()),
+                AgentTestFailure::new(
+                    "prompt completion",
+                    CODE_UNEXPECTED_STOP_REASON,
+                    "expected stop_reason end_turn, got refusal".to_owned(),
+                ),
+            ),
+            (
+                None,
+                AgentTestFailure::new(
+                    "prompt/progress timeout",
+                    CODE_PROGRESS_TIMEOUT,
+                    "no new session/update within 90s".to_owned(),
+                ),
+            ),
+        ];
+
+        let surfaced = with_later_attempts(first, &later);
+
+        assert_eq!(surfaced.code(), CODE_FS_CHECK_MISSING);
+        assert_eq!(surfaced.stage(), "fs_check");
+        assert_eq!(
+            surfaced.reason(),
+            "artifact was not written; later mode attempts: \
+             mode plan: unexpected_stop_reason: expected stop_reason end_turn, got refusal; \
+             mode (agent default): progress_timeout: no new session/update within 90s"
+        );
+    }
+
+    #[test]
+    fn single_attempt_failure_reason_is_unchanged() {
+        let first = AgentTestFailure::new(
+            "spawn/start",
+            CODE_AGENT_SPAWN_FAILED,
+            "spawn failed".to_owned(),
+        );
+        assert_eq!(with_later_attempts(first, &[]).reason(), "spawn failed");
     }
 }
 

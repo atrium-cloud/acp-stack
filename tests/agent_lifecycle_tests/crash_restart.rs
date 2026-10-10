@@ -248,6 +248,8 @@ async fn never_policy_does_not_restart_after_agent_crash() {
         .expect("agent.exited row");
     let payload: Value = serde_json::from_str(&exited.payload_json).expect("agent.exited payload");
     assert_eq!(payload["stderr_tail"], "placebo stderr before the crash");
+    assert_eq!(payload["signal"], "SIGKILL", "payload: {payload}");
+    assert_eq!(payload["exit_status"], Value::Null, "payload: {payload}");
     assert!(
         !kinds.contains(&"agent.restart_scheduled"),
         "never policy must not schedule restart: {kinds:?}"

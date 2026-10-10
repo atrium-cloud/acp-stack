@@ -50,7 +50,8 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
             }
             None => "download URL is not allowed (only https:// is permitted)".to_owned(),
         },
-        SafeDownloadHttpStatus { url, status } => match sanitized_download_url(url) {
+        // `body` is upstream response text; the URL and status are what the API may carry.
+        SafeDownloadHttpStatus { url, status, .. } => match sanitized_download_url(url) {
             Some(sanitized) => {
                 format!("download from {sanitized} failed with HTTP status {status}")
             }

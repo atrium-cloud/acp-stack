@@ -445,6 +445,79 @@ fn final_verification_searches_managed_bin_dir() {
 }
 
 #[test]
+fn pre_spawn_failure_persists_the_redacted_error_in_row_stderr() {
+    let (tempdir, store) = open_store();
+    let token = "sk-prespawnsecretvalue123";
+    let spawn_error = StackError::AgentSpawnFailed {
+        source: std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("exec refused for {token}"),
+        ),
+    };
+
+    let mut result = finalize_shell_step(
+        STEP_INSTALL,
+        current_timestamp(),
+        Err(spawn_error),
+        "pre-spawn-agent",
+        None,
+        "pre-spawn-agent",
+        &host(tempdir.path()),
+    );
+
+    assert!(matches!(
+        result.outcome,
+        Err(StackError::AgentSpawnFailed { .. })
+    ));
+    assert_eq!(result.row.status, "error");
+    assert_eq!(
+        result.row.stderr,
+        "failed to spawn agent subprocess: exec refused for [redacted]"
+    );
+    persist_untracked_installer_row(
+        &store,
+        &mut result.row,
+        "test-agent",
+        INSTALLER_OPERATION_INSTALL,
+        None,
+    )
+    .expect("persist row");
+    let runs = store.query_installer_runs(10).expect("query");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].stderr, result.row.stderr);
+    assert!(!runs[0].stderr.contains(token));
+}
+
+#[test]
+fn registry_step_pre_spawn_failure_records_the_error_in_row_stderr() {
+    let tempdir = TempDir::new().expect("tempdir");
+    // A pinned npm spec skips `npm view`, and a root dest dir has no parent for `--prefix`, so
+    // the step fails before anything spawns.
+    let spec = ResolvedInstallSpec::Npm {
+        package: "example-agent@1.0.0".to_owned(),
+        name: "example-agent".to_owned(),
+        creates: "example-agent".to_owned(),
+        version: Some("1.0.0".to_owned()),
+    };
+
+    let step = run_install_step(
+        STEP_INSTALL,
+        spec,
+        &HashMap::new(),
+        &host(tempdir.path()),
+        Path::new("/"),
+        false,
+    );
+
+    assert!(matches!(step.outcome, Err(StackError::RegistryLoad { .. })));
+    assert_eq!(step.row.status, "error");
+    assert_eq!(
+        step.row.stderr,
+        "agent registry could not be loaded: managed bin directory / has no parent for npm --prefix"
+    );
+}
+
+#[test]
 fn registry_installs_do_not_receive_agent_runtime_secrets() {
     let tempdir = TempDir::new().expect("tempdir");
     let binary_path = tempdir.path().join("secret-check-agent");

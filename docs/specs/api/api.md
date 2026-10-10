@@ -50,7 +50,7 @@ JSON errors:
 }
 ```
 
-Every response carries an `x-request-id` header. The runtime keeps a caller-supplied `x-request-id` of at most 128 bytes with no space, tab, `"`, or `\`, and otherwise assigns a UUID. The daemon log line for a failed request carries the same id (see [Daemon Log](../state-logging.md#daemon-log)).
+Every response carries an `x-request-id` header. The runtime keeps a caller-supplied `x-request-id` of at most 128 bytes with no space, tab, `"`, or `\`, and otherwise assigns a UUID. The daemon log line for a failed request carries the same id (see [Daemon Log](../state-logging.md#daemon-log)). With `[security.http].allowed_origins` set, CORS allows browsers to send the header and read it back.
 
 ### Envelope Exceptions
 
@@ -79,11 +79,16 @@ When the agent answers an ACP request with a JSON-RPC error, `agent.request_fail
 - `message` and `data` are each cut at 2048 bytes, followed by a ` [truncated N bytes]` marker. A string `data` is cut on its text. Any other `data` whose JSON text runs past 2048 bytes becomes a string holding that cut JSON text.
 - `details` is `{}` when acp-stack detected the failure itself, such as the agent exiting before it answered, and on `session/prompt` failures, which are classified as described in [Prompt-Path Error Codes](endpoints.md#prompt-path-error-codes).
 
+Two input errors also fill `details`:
+
+- `prompt.body_invalid` carries `details.reason`, the failed check: the content-block or `mcp_servers` parse error with string literals and rejected enum values replaced by `[redacted]`, redacted and cut at 1024 bytes, or the session `cwd` rule. A `cwd` rejection has the message `session cwd is invalid`.
+- `config.invalid` for unparseable TOML (for example on `POST /v1/config/validate` and `POST /v1/config/import`) carries `details.line` and `details.column` (1-based, present when the parser located the error) and `details.reason`, the parser message with string literals and rejected enum values replaced by `[redacted]`, redacted and cut at 1024 bytes. The offending TOML line is never echoed.
+
 ### Sanitization
 
 Public error text is sanitized:
 
-- Error messages interpolate identifiers only, such as field names, provider, session, and prompt ids, secret ref names, machine codes, the caller's own workspace-relative paths, and download URLs reduced to scheme, host, and path with userinfo, query, and fragment stripped. Local filesystem paths, OS and I/O error text, subprocess argv, and subprocess output stay in local logs and never appear in the envelope. The one exception is the agent's own JSON-RPC error in `details.acp_error`, which passes through the shared redactor first: registered secret values and credential-shaped tokens become `[redacted]`.
+- Error messages interpolate identifiers only, such as field names, provider, session, and prompt ids, secret ref names, machine codes, the caller's own workspace-relative paths, and download URLs reduced to scheme, host, and path with userinfo, query, and fragment stripped. Local filesystem paths, OS and I/O error text, subprocess argv, and subprocess output stay in local logs and never appear in the envelope. The exceptions are the agent's own JSON-RPC error in `details.acp_error`, the parser text in `details.reason`, and `catalog_error` on `GET /v1/models`, which pass through the shared redactor first: registered secret values and credential-shaped tokens become `[redacted]`.
 - Cross-field validation errors name the offending field but never echo its value.
 - Secret positions carrying pasted-credential shapes are rejected without echoing the value. An invalid secret ref name is reported without quoting the offending name, since a pasted inline credential fails the same name check.
 - The `agent.inference_*` prompt codes use the fixed message form `"inference endpoint returned <status_code> (<reason_category>)"`. No URLs, request/response bodies, headers, or secret material reach the API response or the persisted prompt row.
@@ -184,4 +189,4 @@ The API enforces:
 - auth-failure blocking
 - bounded proxy-header trust
 
-Oversized JSON requests return `413 request.too_large`.
+Oversized JSON and multipart requests return `413 request.too_large`.

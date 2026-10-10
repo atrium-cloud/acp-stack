@@ -409,9 +409,14 @@ fn install_latest(home: &Path, root: &Path, node_arch: &str, dist_base: &str) ->
         ))
     })?;
     let current = root.join(CURRENT_LINK_NAME);
-    let previous_release = std::fs::read_link(&current)
-        .ok()
-        .and_then(|target| target.file_name().map(|name| name.to_owned()));
+    let previous_release = match std::fs::read_link(&current) {
+        Ok(target) => target.file_name().map(|name| name.to_owned()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            tracing::warn!(error = %crate::error::report(&error), path = %current.display(), "could not read the managed Node.js `current` link; the previous release is not kept when pruning");
+            None
+        }
+    };
     replace_symlink_atomically(&Path::new(RELEASES_DIR_NAME).join(&release_name), &current)?;
     drop(staging);
     prune_release_dirs(
@@ -540,15 +545,22 @@ fn probe_version(node: &Path, home: &Path) -> Result<String> {
                 stderr_tail.trim()
             )));
         }
-        CaptureOutcome::TimedOut { mut child, .. }
-        | CaptureOutcome::WaitFailed { mut child, .. } => {
-            kill_process_group(&mut child);
-            if let Err(error) = child.wait() {
-                tracing::debug!(%error, "managed Node.js version probe reap failed");
-            }
+        CaptureOutcome::TimedOut { mut child, .. } => {
+            reap_version_probe(&mut child);
             return Err(install_failed(format!(
-                "{} --version did not finish",
-                node.display()
+                "{} --version did not finish within {}s",
+                node.display(),
+                VERSION_PROBE_TIMEOUT.as_secs()
+            )));
+        }
+        CaptureOutcome::WaitFailed {
+            source, mut child, ..
+        } => {
+            reap_version_probe(&mut child);
+            return Err(install_failed(format!(
+                "wait on {} --version: {}",
+                node.display(),
+                crate::error::report(&source)
             )));
         }
     };
@@ -559,6 +571,13 @@ fn probe_version(node: &Path, home: &Path) -> Result<String> {
         )));
     }
     Ok(version)
+}
+
+fn reap_version_probe(child: &mut std::process::Child) {
+    kill_process_group(child);
+    if let Err(error) = child.wait() {
+        tracing::debug!(%error, "managed Node.js version probe reap failed");
+    }
 }
 
 /// Point `~/.local/bin/{node,npm,npx}` at the managed tools. Symlinks, including stale ones into

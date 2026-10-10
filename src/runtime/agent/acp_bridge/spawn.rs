@@ -2,7 +2,10 @@
 //! registration, and the `initialize` handshake that produces a live
 //! [`AcpBridge`].
 
+use agent_client_protocol::schema::v1::CLIENT_METHOD_NAMES;
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
+
+use crate::runtime::mediation::commands::process::exit_signal;
 
 use super::*;
 
@@ -32,6 +35,32 @@ struct SpawnedChild {
 }
 
 type InitializeOutcome = std::result::Result<(InitializeResponse, ConnectionTo<Agent>), String>;
+
+/// Ids named on every log line about this agent's client-side request handling.
+struct HandlerLabels {
+    agent_id: String,
+    target_id: Option<String>,
+}
+
+impl HandlerLabels {
+    /// Adapters often swallow a failed client request, so the daemon log is the only place the
+    /// error the bridge answered with stays visible.
+    fn log_error_answer(
+        &self,
+        method: &'static str,
+        session_id: &str,
+        error: &agent_client_protocol::Error,
+    ) {
+        tracing::warn!(
+            error = %crate::error::report(error),
+            agent_id = %self.agent_id,
+            target_id = self.target_id.as_deref(),
+            session_id,
+            method,
+            "answered an agent request with an error",
+        );
+    }
+}
 
 impl AcpBridge {
     /// Spawn `[agent].command` and complete the ACP `initialize` handshake.
@@ -305,6 +334,10 @@ fn spawn_connection_task(
     exit: ExitReporter,
     trace_labels: crate::runtime::agent::acp_trace::TraceLabels,
 ) -> ConnectionTask {
+    let handler_labels = Arc::new(HandlerLabels {
+        agent_id: trace_labels.agent_id.clone(),
+        target_id: trace_labels.target_id.clone(),
+    });
     let transport = crate::runtime::agent::acp_trace::traced_lines(stdin, stdout, trace_labels);
     let (init_tx, connection_rx) = oneshot::channel::<InitializeOutcome>();
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -318,6 +351,14 @@ fn spawn_connection_task(
     let release_context = terminal_context;
     let fs_read_context = Arc::clone(&fs_context);
     let fs_write_context = fs_context;
+    let create_labels = Arc::clone(&handler_labels);
+    let output_labels = Arc::clone(&create_labels);
+    let wait_labels = Arc::clone(&create_labels);
+    let kill_labels = Arc::clone(&create_labels);
+    let release_labels = Arc::clone(&create_labels);
+    let fs_read_labels = Arc::clone(&create_labels);
+    let fs_write_labels = Arc::clone(&create_labels);
+    let connection_labels = handler_labels;
 
     let task: JoinHandle<()> = tokio::spawn(async move {
         let run = Client
@@ -352,10 +393,15 @@ fn spawn_connection_task(
             .on_receive_request(
                 async move |request: CreateTerminalRequest, responder, cx| {
                     let context = Arc::clone(&create_context);
+                    let labels = Arc::clone(&create_labels);
                     cx.spawn(async move {
+                        let session_id = request.session_id.0.to_string();
                         match handle_create_terminal(&context, request).await {
                             Ok(response) => responder.respond(response),
-                            Err(error) => responder.respond_with_error(error),
+                            Err(error) => {
+                                labels.log_error_answer(CLIENT_METHOD_NAMES.terminal_create, &session_id, &error);
+                                responder.respond_with_error(error)
+                            }
                         }
                     })
                 },
@@ -364,10 +410,15 @@ fn spawn_connection_task(
             .on_receive_request(
                 async move |request: TerminalOutputRequest, responder, cx| {
                     let context = Arc::clone(&output_context);
+                    let labels = Arc::clone(&output_labels);
                     cx.spawn(async move {
+                        let session_id = request.session_id.0.to_string();
                         match handle_terminal_output(&context.registry, request).await {
                             Ok(response) => responder.respond(response),
-                            Err(error) => responder.respond_with_error(error),
+                            Err(error) => {
+                                labels.log_error_answer(CLIENT_METHOD_NAMES.terminal_output, &session_id, &error);
+                                responder.respond_with_error(error)
+                            }
                         }
                     })
                 },
@@ -376,13 +427,18 @@ fn spawn_connection_task(
             .on_receive_request(
                 async move |request: WaitForTerminalExitRequest, responder, cx| {
                     let context = Arc::clone(&wait_context);
+                    let labels = Arc::clone(&wait_labels);
                     let cancellation = responder.cancellation();
                     cx.spawn(async move {
+                        let session_id = request.session_id.0.to_string();
                         tokio::select! {
                             result = handle_wait_for_terminal_exit(&context.registry, request) => {
                                 match result {
                                     Ok(response) => responder.respond(response),
-                                    Err(error) => responder.respond_with_error(error),
+                                    Err(error) => {
+                                        labels.log_error_answer(CLIENT_METHOD_NAMES.terminal_wait_for_exit, &session_id, &error);
+                                        responder.respond_with_error(error)
+                                    }
                                 }
                             }
                             () = cancellation.cancelled() => {
@@ -396,10 +452,15 @@ fn spawn_connection_task(
             .on_receive_request(
                 async move |request: KillTerminalRequest, responder, cx| {
                     let context = Arc::clone(&kill_context);
+                    let labels = Arc::clone(&kill_labels);
                     cx.spawn(async move {
+                        let session_id = request.session_id.0.to_string();
                         match handle_kill_terminal(&context.registry, request).await {
                             Ok(response) => responder.respond(response),
-                            Err(error) => responder.respond_with_error(error),
+                            Err(error) => {
+                                labels.log_error_answer(CLIENT_METHOD_NAMES.terminal_kill, &session_id, &error);
+                                responder.respond_with_error(error)
+                            }
                         }
                     })
                 },
@@ -408,10 +469,15 @@ fn spawn_connection_task(
             .on_receive_request(
                 async move |request: ReleaseTerminalRequest, responder, cx| {
                     let context = Arc::clone(&release_context);
+                    let labels = Arc::clone(&release_labels);
                     cx.spawn(async move {
+                        let session_id = request.session_id.0.to_string();
                         match handle_release_terminal(&context.registry, request).await {
                             Ok(response) => responder.respond(response),
-                            Err(error) => responder.respond_with_error(error),
+                            Err(error) => {
+                                labels.log_error_answer(CLIENT_METHOD_NAMES.terminal_release, &session_id, &error);
+                                responder.respond_with_error(error)
+                            }
                         }
                     })
                 },
@@ -420,10 +486,15 @@ fn spawn_connection_task(
             .on_receive_request(
                 async move |request: ReadTextFileRequest, responder, cx| {
                     let context = Arc::clone(&fs_read_context);
+                    let labels = Arc::clone(&fs_read_labels);
                     cx.spawn(async move {
+                        let session_id = request.session_id.0.to_string();
                         match handle_read_text_file(&context, request).await {
                             Ok(response) => responder.respond(response),
-                            Err(error) => responder.respond_with_error(error),
+                            Err(error) => {
+                                labels.log_error_answer(CLIENT_METHOD_NAMES.fs_read_text_file, &session_id, &error);
+                                responder.respond_with_error(error)
+                            }
                         }
                     })
                 },
@@ -432,10 +503,15 @@ fn spawn_connection_task(
             .on_receive_request(
                 async move |request: WriteTextFileRequest, responder, cx| {
                     let context = Arc::clone(&fs_write_context);
+                    let labels = Arc::clone(&fs_write_labels);
                     cx.spawn(async move {
+                        let session_id = request.session_id.0.to_string();
                         match handle_write_text_file(&context, request).await {
                             Ok(response) => responder.respond(response),
-                            Err(error) => responder.respond_with_error(error),
+                            Err(error) => {
+                                labels.log_error_answer(CLIENT_METHOD_NAMES.fs_write_text_file, &session_id, &error);
+                                responder.respond_with_error(error)
+                            }
                         }
                     })
                 },
@@ -473,6 +549,8 @@ fn spawn_connection_task(
                     .block_task()
                     .await
                     .map_err(|err| err.to_string());
+                // A failed send means `complete_initialize` already gave up (timeout) and
+                // reported the failure itself.
                 match response {
                     Ok(response) => {
                         // Hand the connection out so the bridge can dispatch
@@ -499,6 +577,7 @@ fn spawn_connection_task(
                 reason: AcpBridgeExitReason::Shutdown,
                 message: None,
                 exit_status: None,
+                signal: None,
             },
             Ok(()) => AcpBridgeExit {
                 pid: exit.pid,
@@ -506,18 +585,26 @@ fn spawn_connection_task(
                 reason: AcpBridgeExitReason::ConnectionEnded,
                 message: None,
                 exit_status: None,
+                signal: None,
             },
             Err(err) => {
-                tracing::warn!(error = ?err, "acp bridge connection task exited with error");
+                tracing::warn!(
+                    error = %crate::error::report(&err),
+                    agent_id = %connection_labels.agent_id,
+                    target_id = connection_labels.target_id.as_deref(),
+                    "acp bridge connection task exited with error",
+                );
                 AcpBridgeExit {
                     pid: exit.pid,
                     planned,
                     reason: AcpBridgeExitReason::ConnectionError,
-                    message: Some(err.to_string()),
+                    message: Some(crate::error::persisted_report(&err)),
                     exit_status: None,
+                    signal: None,
                 }
             }
         };
+        // Fails only once the bridge and every exit subscriber are gone.
         let _ = exit.tx.send(Some(bridge_exit));
     });
 
@@ -613,7 +700,7 @@ fn spawn_child_exit_watcher(child: Arc<TokioMutex<Option<Child>>>, exit: ExitRep
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(CHILD_EXIT_POLL_INTERVAL).await;
-            let exit_status = {
+            let status = {
                 let mut guard = child.lock().await;
                 let Some(child) = guard.as_mut() else {
                     return;
@@ -621,25 +708,31 @@ fn spawn_child_exit_watcher(child: Arc<TokioMutex<Option<Child>>>, exit: ExitRep
                 match child.try_wait() {
                     Ok(Some(status)) => {
                         *guard = None;
-                        Some(status.code())
+                        Some(status)
                     }
                     Ok(None) => None,
                     Err(err) => {
-                        tracing::warn!(error = ?err, "acp bridge child exit poll failed");
+                        tracing::warn!(
+                            error = %crate::error::report(&err),
+                            pid = exit.pid,
+                            "acp bridge child exit poll failed; polling again",
+                        );
                         None
                     }
                 }
             };
-            let Some(exit_status) = exit_status else {
+            let Some(status) = status else {
                 continue;
             };
             let planned = exit.planned_shutdown.load(Ordering::SeqCst);
+            // Fails only once the bridge and every exit subscriber are gone.
             let _ = exit.tx.send(Some(AcpBridgeExit {
                 pid: exit.pid,
                 planned,
                 reason: AcpBridgeExitReason::ProcessExited,
                 message: None,
-                exit_status,
+                exit_status: status.code(),
+                signal: exit_signal(&status),
             }));
             return;
         }
@@ -656,12 +749,26 @@ async fn fail_spawn(
     stderr: &agent_stderr::StderrCapture,
 ) {
     connection_task.abort();
-    let _ = connection_task.await;
+    if let Err(error) = connection_task.await
+        && !error.is_cancelled()
+    {
+        tracing::warn!(
+            error = %crate::error::report(&error),
+            pid = child.id(),
+            "acp bridge connection task panicked before initialize completed",
+        );
+    }
     kill_tokio_process_group(child);
     if let Some(cgroup) = cgroup {
         cgroup.kill();
     }
-    let _ = child.wait().await;
+    if let Err(error) = child.wait().await {
+        tracing::warn!(
+            error = %crate::error::report(&error),
+            pid = child.id(),
+            "failed to reap an agent that did not initialize",
+        );
+    }
     stderr.finish().await;
 }
 

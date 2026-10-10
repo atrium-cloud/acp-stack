@@ -360,36 +360,38 @@ pub(crate) fn resolve_session_cwd(raw: Option<String>, workspace_root: &str) -> 
     let candidate = raw.unwrap_or_else(|| workspace_root.to_owned());
     let root_path = PathBuf::from(workspace_root);
     let candidate_path = PathBuf::from(&candidate);
+    let invalid = |reason| StackError::SessionCwdInvalid {
+        reason,
+        source: None,
+    };
     if !candidate_path.is_absolute() {
-        return Err(StackError::PromptBodyInvalid(
-            "session cwd must be an absolute path".to_owned(),
-        ));
+        return Err(invalid("session cwd must be an absolute path"));
     }
     if candidate_path
         .components()
         .any(|component| matches!(component, std::path::Component::ParentDir))
     {
-        return Err(StackError::PromptBodyInvalid(
-            "session cwd must not contain `..` segments".to_owned(),
-        ));
+        return Err(invalid("session cwd must not contain `..` segments"));
     }
-    let canonical_root = root_path.canonicalize().map_err(|_| {
-        StackError::PromptBodyInvalid("workspace.root must be an existing directory".to_owned())
-    })?;
-    let canonical_candidate = candidate_path.canonicalize().map_err(|_| {
-        StackError::PromptBodyInvalid(
-            "session cwd must be an existing directory under workspace.root".to_owned(),
-        )
-    })?;
+    let canonical_root =
+        root_path
+            .canonicalize()
+            .map_err(|source| StackError::SessionCwdInvalid {
+                reason: "workspace.root must be an existing directory",
+                source: Some(source),
+            })?;
+    let canonical_candidate =
+        candidate_path
+            .canonicalize()
+            .map_err(|source| StackError::SessionCwdInvalid {
+                reason: "session cwd must be an existing directory under workspace.root",
+                source: Some(source),
+            })?;
     if !canonical_candidate.is_dir() {
-        return Err(StackError::PromptBodyInvalid(
-            "session cwd must be an existing directory".to_owned(),
-        ));
+        return Err(invalid("session cwd must be an existing directory"));
     }
     if !canonical_candidate.starts_with(&canonical_root) {
-        return Err(StackError::PromptBodyInvalid(format!(
-            "session cwd must be under workspace.root ({workspace_root})"
-        )));
+        return Err(invalid("session cwd must be under workspace.root"));
     }
     Ok(canonical_candidate.to_string_lossy().into_owned())
 }

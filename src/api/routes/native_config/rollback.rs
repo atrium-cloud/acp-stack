@@ -37,34 +37,46 @@ pub(super) async fn rollback_failed_apply(
     prior_config: &Config,
     prior_was_running: bool,
     home: &FsPath,
-    error_code: &str,
+    apply_error: &StackError,
 ) -> Result<ApplyStoredOutcome> {
+    // The operation record keeps only the code, so the cause is logged here.
+    tracing::error!(
+        error = %crate::error::report(apply_error),
+        operation_id,
+        "native config import apply failed; rolling back"
+    );
     mutate_operation_record(state, operation_id, |record| {
         record.operation.status = NativeConfigOperationStatus::Failed;
         record.operation.restart.queued = false;
         record.operation.error = Some(NativeConfigOperationError {
-            code: error_code.to_owned(),
+            code: apply_error.error_code().to_owned(),
         });
         record.updated_at = chrono::Utc::now();
         record.phase = NativeConfigOperationPhase::RollingBack;
     })
     .await?;
-    if persist_operation_record(state, operation_id).await.is_err() {
+    if let Err(error) = persist_operation_record(state, operation_id).await {
         tracing::warn!(
+            error = %crate::error::report(&error),
             operation_id,
             "failed to persist native config rollback marker; durable applying marker remains recoverable"
         );
     }
 
-    if restore_transaction_and_agent(state, snapshots, prior_config, prior_was_running, home)
-        .await
-        .is_err()
+    if let Err(error) =
+        restore_transaction_and_agent(state, snapshots, prior_config, prior_was_running, home).await
     {
+        tracing::error!(
+            error = %crate::error::report(&error),
+            operation_id,
+            "native config import rollback failed; queueing a rollback retry"
+        );
         let rollback_failed =
             queue_rollback_retry(state, operation_id, "agent.native_config_rollback_failed")
                 .await?;
-        if persist_operation_record(state, operation_id).await.is_err() {
+        if let Err(error) = persist_operation_record(state, operation_id).await {
             tracing::warn!(
+                error = %crate::error::report(&error),
                 operation_id,
                 "failed to persist native config rollback failure; durable applying or rollback marker remains recoverable"
             );
@@ -85,7 +97,12 @@ pub(super) async fn rollback_failed_apply(
         record.phase = NativeConfigOperationPhase::Terminal;
     })
     .await?;
-    if persist_operation_record(state, operation_id).await.is_err() {
+    if let Err(error) = persist_operation_record(state, operation_id).await {
+        tracing::warn!(
+            error = %crate::error::report(&error),
+            operation_id,
+            "failed to persist the settled native config rollback; queueing a rollback retry"
+        );
         replace_operation_record(state, applying_record.clone()).await?;
         let retry = queue_rollback_retry(
             state,
@@ -93,8 +110,9 @@ pub(super) async fn rollback_failed_apply(
             "agent.native_config_journal_persist_failed",
         )
         .await?;
-        if persist_operation_record(state, operation_id).await.is_err() {
+        if let Err(error) = persist_operation_record(state, operation_id).await {
             tracing::warn!(
+                error = %crate::error::report(&error),
                 operation_id,
                 "failed to persist native config rollback retry after restoring prior files"
             );
@@ -162,7 +180,7 @@ pub(super) async fn resume_pending_rollback_locked(
         }
     }
     let home = state.runtime_paths.home.clone();
-    if restore_transaction_and_agent(
+    if let Err(error) = restore_transaction_and_agent(
         state,
         &marker.rollback_snapshots,
         prior_config,
@@ -170,8 +188,12 @@ pub(super) async fn resume_pending_rollback_locked(
         &home,
     )
     .await
-    .is_err()
     {
+        tracing::error!(
+            error = %crate::error::report(&error),
+            operation_id,
+            "resumed native config import rollback failed; queueing a rollback retry"
+        );
         let operation =
             queue_rollback_retry(state, operation_id, "agent.native_config_rollback_failed")
                 .await?
@@ -185,7 +207,12 @@ pub(super) async fn resume_pending_rollback_locked(
     } else {
         finalize_failed_rollback(state, operation_id).await?
     };
-    if persist_operation_record(state, operation_id).await.is_err() {
+    if let Err(error) = persist_operation_record(state, operation_id).await {
+        tracing::warn!(
+            error = %crate::error::report(&error),
+            operation_id,
+            "failed to persist the settled native config rollback; queueing a rollback retry"
+        );
         replace_operation_record(state, marker.clone()).await?;
         let retry = queue_rollback_retry(
             state,
@@ -193,8 +220,9 @@ pub(super) async fn resume_pending_rollback_locked(
             "agent.native_config_journal_persist_failed",
         )
         .await?;
-        if persist_operation_record(state, operation_id).await.is_err() {
+        if let Err(error) = persist_operation_record(state, operation_id).await {
             tracing::warn!(
+                error = %crate::error::report(&error),
                 operation_id,
                 "failed to persist native config rollback retry after restoring prior files"
             );

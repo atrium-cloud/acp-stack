@@ -69,7 +69,7 @@ pub(super) fn spawn_session_notification_queue(
     sink: Arc<dyn SessionEventSink>,
 ) -> SessionNotificationSender {
     let (sender, mut receiver) = mpsc::unbounded_channel::<QueuedSessionNotification>();
-    tokio::spawn(async move {
+    let worker = tokio::spawn(async move {
         while let Some(notification) = receiver.recv().await {
             if sink
                 .capture_session_update(&notification.agent_session_id, &notification.update)
@@ -82,6 +82,14 @@ pub(super) fn spawn_session_notification_queue(
                 )
                 .await;
             }
+        }
+    });
+    tokio::spawn(async move {
+        if let Err(error) = worker.await {
+            tracing::error!(
+                error = %crate::error::report(&error),
+                "session/update worker panicked; this agent's later notifications are dropped",
+            );
         }
     });
     sender
@@ -433,7 +441,7 @@ pub(crate) async fn resolve_acp_permission(
     let detail = match serde_json::to_value(&request) {
         Ok(value) => value,
         Err(err) => {
-            tracing::warn!(error = %err, "failed to serialize permission request");
+            tracing::warn!(error = %crate::error::report(&err), "failed to serialize permission request");
             return Err(agent_client_protocol::Error::internal_error());
         }
     };
@@ -466,7 +474,7 @@ pub(crate) async fn resolve_acp_permission(
                 SelectedPermissionOutcome::new(PermissionOptionId::new(option_id)),
             )),
             Err(err) => {
-                tracing::warn!(error = %err, "permission service rejected a policy approval");
+                tracing::warn!(error = %crate::error::report(&err), "permission service rejected a policy approval");
                 Err(agent_client_protocol::Error::internal_error())
             }
         };
@@ -483,7 +491,7 @@ pub(crate) async fn resolve_acp_permission(
     {
         Ok(pair) => pair,
         Err(err) => {
-            tracing::warn!(error = %err, "permission service rejected ACP passthrough");
+            tracing::warn!(error = %crate::error::report(&err), "permission service rejected ACP passthrough");
             return Err(agent_client_protocol::Error::internal_error());
         }
     };
@@ -498,7 +506,7 @@ pub(crate) async fn resolve_acp_permission(
                 Ok(true) => return Err(agent_client_protocol::Error::request_cancelled()),
                 Ok(false) => rx.await,
                 Err(error) => {
-                    tracing::warn!(error = %error, permission_id = %record.id, "failed to persist ACP permission cancellation");
+                    tracing::warn!(error = %crate::error::report(&error), permission_id = %record.id, "failed to persist ACP permission cancellation");
                     return Err(agent_client_protocol::Error::internal_error());
                 }
             }
@@ -517,7 +525,7 @@ pub(crate) async fn resolve_acp_permission(
         }
         Ok(_) => Ok(RequestPermissionOutcome::Cancelled),
         Err(error) => {
-            tracing::warn!(error = %error, permission_id = %record.id, "ACP permission waiter closed before a decision");
+            tracing::warn!(error = %crate::error::report(&error), permission_id = %record.id, "ACP permission waiter closed before a decision");
             Err(agent_client_protocol::Error::internal_error())
         }
     }
@@ -682,7 +690,7 @@ pub(crate) async fn handle_write_text_file(
             "",
             &payload.to_string(),
         ) {
-            tracing::warn!(error = %error, "failed to record fs.write audit event");
+            tracing::warn!(error = %crate::error::report(&error), "failed to record fs.write audit event");
         }
     }
     Ok(WriteTextFileResponse::new())
@@ -734,7 +742,7 @@ pub(super) async fn enqueue_session_notification(
     let payload = match serde_json::to_string(&note) {
         Ok(payload) => payload,
         Err(err) => {
-            tracing::warn!(error = %err, "failed to serialize session/update; dropping");
+            tracing::warn!(error = %crate::error::report(&err), "failed to serialize session/update; dropping");
             return;
         }
     };

@@ -155,7 +155,7 @@ impl AgentModelCatalogManager {
         let client = match crate::http_client::client_builder().build() {
             Ok(client) => client,
             Err(error) => {
-                tracing::warn!(error = %error, "models.dev client build failed");
+                tracing::warn!(error = %crate::error::report(&error), "models.dev client build failed");
                 return;
             }
         };
@@ -291,17 +291,23 @@ async fn fetch_models_dev_catalog(
         .timeout(MODELS_DEV_CATALOG_FETCH_TIMEOUT)
         .send()
         .await
-        .map_err(|error| format!("request models.dev catalog: {error}"))?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "models.dev catalog returned HTTP {}",
-            response.status()
-        ));
+        .map_err(|error| {
+            format!(
+                "request models.dev catalog: {}",
+                crate::error::report(&error)
+            )
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = crate::http_client::error_response_body(response).await;
+        return Err(format!("models.dev catalog returned HTTP {status}: {body}"));
     }
-    let value = response
-        .json::<Value>()
-        .await
-        .map_err(|error| format!("parse models.dev catalog JSON: {error}"))?;
+    let value = response.json::<Value>().await.map_err(|error| {
+        format!(
+            "parse models.dev catalog JSON: {}",
+            crate::error::report(&error)
+        )
+    })?;
     let catalog = ModelsDevCatalog::from_value(value.clone())
         .map_err(|error| format!("parse models.dev catalog schema: {error}"))?;
     Ok(FetchedModelsDevCatalog {
@@ -362,7 +368,7 @@ fn write_cached_models_dev_catalog(
     path: &Path,
 ) -> std::result::Result<(), String> {
     if let Some(parent) = path.parent() {
-        create_dir_owner_only(parent).map_err(|error| error.to_string())?;
+        create_dir_owner_only(parent).map_err(|error| crate::error::report(&error))?;
     }
     let file = CachedModelsDevCatalogFile {
         version: MODELS_DEV_CATALOG_CACHE_VERSION,
@@ -372,7 +378,7 @@ fn write_cached_models_dev_catalog(
         models: Some(fetched.models_json.clone()),
     };
     let json = serde_json::to_vec_pretty(&file).map_err(|error| error.to_string())?;
-    atomic_write_owner_only(path, &json).map_err(|error| error.to_string())
+    atomic_write_owner_only(path, &json).map_err(|error| crate::error::report(&error))
 }
 
 fn record_failed_models_dev_catalog_refresh(
@@ -381,19 +387,36 @@ fn record_failed_models_dev_catalog_refresh(
     path: &Path,
 ) -> std::result::Result<(), String> {
     if let Some(parent) = path.parent() {
-        create_dir_owner_only(parent).map_err(|error| error.to_string())?;
+        create_dir_owner_only(parent).map_err(|error| crate::error::report(&error))?;
     }
     let mut file = match std::fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str::<CachedModelsDevCatalogFile>(&text)
-            .unwrap_or_else(|_| empty_cache_file(models_url)),
-        Err(_) => empty_cache_file(models_url),
+        Ok(text) => match serde_json::from_str::<CachedModelsDevCatalogFile>(&text) {
+            Ok(file) => file,
+            Err(error) => {
+                tracing::warn!(
+                    error = %crate::error::report(&error),
+                    path = %path.display(),
+                    "models.dev catalog cache is corrupt; resetting it"
+                );
+                empty_cache_file(models_url)
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => empty_cache_file(models_url),
+        Err(error) => {
+            tracing::warn!(
+                error = %crate::error::report(&error),
+                path = %path.display(),
+                "models.dev catalog cache unreadable; resetting it"
+            );
+            empty_cache_file(models_url)
+        }
     };
     if file.version != MODELS_DEV_CATALOG_CACHE_VERSION || file.source_url != models_url {
         file = empty_cache_file(models_url);
     }
     file.last_failed_refresh_attempt_at = Some(failed_at);
     let json = serde_json::to_vec_pretty(&file).map_err(|error| error.to_string())?;
-    atomic_write_owner_only(path, &json).map_err(|error| error.to_string())
+    atomic_write_owner_only(path, &json).map_err(|error| crate::error::report(&error))
 }
 
 fn empty_cache_file(models_url: &str) -> CachedModelsDevCatalogFile {
@@ -632,6 +655,40 @@ mod tests {
                 "input": input,
             },
         })
+    }
+
+    #[tokio::test]
+    async fn non_success_status_keeps_the_redacted_bounded_body() {
+        use axum::http::StatusCode;
+        use axum::routing::get;
+
+        let router = axum::Router::new().route(
+            "/models.json",
+            get(|| async {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!(
+                        "overloaded Bearer sk-modelsdev0123456789 {}",
+                        "v".repeat(2 * crate::redaction::HTTP_ERROR_BODY_MAX_BYTES)
+                    ),
+                )
+            }),
+        );
+        let server = crate::http_client::test_server::spawn(router);
+        let client = crate::http_client::client_builder()
+            .build()
+            .expect("client");
+        let error = fetch_models_dev_catalog(&client, &server.url("/models.json"))
+            .await
+            .expect_err("503 must fail");
+        assert!(
+            error.starts_with(
+                "models.dev catalog returned HTTP 503 Service Unavailable: overloaded"
+            ),
+            "{error}"
+        );
+        assert!(!error.contains("sk-modelsdev"), "{error}");
+        assert!(error.contains("[truncated"), "{error}");
     }
 
     #[test]

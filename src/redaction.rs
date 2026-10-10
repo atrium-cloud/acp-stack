@@ -15,6 +15,12 @@ pub const REDACTION_PLACEHOLDER: &str = "[redacted]";
 /// Shortest value treated as a secret; low-entropy settings are left alone.
 pub const MIN_REDACTED_SECRET_LEN: usize = 6;
 
+/// Cap on a non-2xx HTTP response body kept in an error.
+pub const HTTP_ERROR_BODY_MAX_BYTES: usize = 1024;
+
+/// serde quotes a rejected enum value in backticks after this marker.
+const UNKNOWN_VARIANT_MARKER: &str = "unknown variant `";
+
 /// Shortest leading fragment of a secret redacted at the head of a front-truncated text.
 const MIN_REDACTED_SECRET_FRAGMENT_LEN: usize = 8;
 
@@ -207,6 +213,58 @@ pub fn bounded(text: &str, max_bytes: usize) -> Cow<'_, str> {
     }
     let dropped = text.len() - cut;
     Cow::Owned(format!("{} [truncated {dropped} bytes]", &text[..cut]))
+}
+
+/// A non-2xx HTTP response body as kept in an error: redacted, then cut at
+/// [`HTTP_ERROR_BODY_MAX_BYTES`].
+pub fn error_body(text: &str) -> String {
+    bounded(&redact_text(text), HTTP_ERROR_BODY_MAX_BYTES).into_owned()
+}
+
+/// Replace the value literals serde echoes into its messages: `string "..."` (Debug-escaped) and
+/// the token after `unknown variant`. Field names and expected-value lists stay readable, so a
+/// parse error over caller input can be logged without echoing that input.
+pub fn strip_serde_value_literals(message: &str) -> String {
+    let mut stripped = String::with_capacity(message.len());
+    let mut rest = message;
+    loop {
+        let next_quote = rest.find('"').map(|index| (index, true));
+        let next_variant = rest
+            .find(UNKNOWN_VARIANT_MARKER)
+            .map(|index| (index, false));
+        let Some((index, is_quote)) = next_quote.into_iter().chain(next_variant).min() else {
+            stripped.push_str(rest);
+            return stripped;
+        };
+        if is_quote {
+            stripped.push_str(&rest[..index]);
+            stripped.push_str(REDACTION_PLACEHOLDER);
+            rest = skip_debug_string(&rest[index + 1..]);
+        } else {
+            let token_start = index + UNKNOWN_VARIANT_MARKER.len();
+            stripped.push_str(&rest[..token_start]);
+            stripped.push_str(REDACTION_PLACEHOLDER);
+            stripped.push('`');
+            rest = match rest[token_start..].find('`') {
+                Some(close) => &rest[token_start + close + 1..],
+                None => "",
+            };
+        }
+    }
+}
+
+/// The text after a Debug-escaped string's closing quote; empty when it never closes.
+fn skip_debug_string(after_open_quote: &str) -> &str {
+    let mut escaped = false;
+    for (index, character) in after_open_quote.char_indices() {
+        match character {
+            _ if escaped => escaped = false,
+            '\\' => escaped = true,
+            '"' => return &after_open_quote[index + 1..],
+            _ => {}
+        }
+    }
+    ""
 }
 
 /// Redact an explicit list of values from `text`. A front-truncated text can begin with the

@@ -217,6 +217,8 @@ pub struct AcpBridgeExit {
     pub reason: AcpBridgeExitReason,
     pub message: Option<String>,
     pub exit_status: Option<i32>,
+    /// Signal that killed the agent process, when it died on one.
+    pub signal: Option<String>,
 }
 
 #[derive(Default)]
@@ -312,7 +314,7 @@ impl AcpBridge {
         self.planned_shutdown.load(Ordering::SeqCst)
     }
 
-    pub async fn try_wait_child(&self) -> Result<Option<i32>> {
+    pub async fn try_wait_child(&self) -> Result<Option<std::process::ExitStatus>> {
         let mut guard = self.child.lock().await;
         let Some(child) = guard.as_mut() else {
             return Ok(None);
@@ -324,25 +326,25 @@ impl AcpBridge {
             return Ok(None);
         };
         *guard = None;
-        Ok(status.code())
+        Ok(Some(status))
     }
 
     /// Gracefully tear down the agent on a bounded timeline. Idempotent.
-    pub async fn shutdown(&self) -> Result<Option<i32>> {
+    pub async fn shutdown(&self) -> Result<Option<std::process::ExitStatus>> {
         self.teardown(false).await
     }
 
     /// Tear down a provisional probe by killing the process group before the
     /// client IO loop drops stdout, so one-shot discovery does not surface
     /// adapter-side broken-pipe stack traces after values were read.
-    pub async fn terminate_probe(&self) -> Result<Option<i32>> {
+    pub async fn terminate_probe(&self) -> Result<Option<std::process::ExitStatus>> {
         self.teardown(true).await
     }
 
     /// Shared teardown. `kill_first` SIGKILLs the process group before
     /// stopping the IO loop; the graceful path stops the loop first so the
     /// child can exit on stdin closure, escalating only if it does not.
-    async fn teardown(&self, kill_first: bool) -> Result<Option<i32>> {
+    async fn teardown(&self, kill_first: bool) -> Result<Option<std::process::ExitStatus>> {
         self.planned_shutdown.store(true, Ordering::SeqCst);
         // Clear the cloneable handle so any in-flight session calls fail
         // fast with `AgentNotRunning` rather than hanging on a dead IO loop.
@@ -367,9 +369,9 @@ impl AcpBridge {
                     Ok(Ok(status)) => Some(status),
                     Ok(Err(err)) => {
                         if kill_first {
-                            tracing::warn!(error = ?err, "acp bridge: wait failed after probe kill");
+                            tracing::warn!(error = %crate::error::report(&err), agent_id = %self.agent_id, "acp bridge: wait failed after probe kill");
                         } else {
-                            tracing::warn!(error = ?err, "acp bridge: wait failed");
+                            tracing::warn!(error = %crate::error::report(&err), agent_id = %self.agent_id, "acp bridge: wait failed");
                             self.kill_tree(&mut child);
                         }
                         None
@@ -378,7 +380,7 @@ impl AcpBridge {
                         if !kill_first {
                             self.kill_tree(&mut child);
                             if let Err(error) = child.wait().await {
-                                tracing::warn!(error = ?error, "acp bridge: wait after kill failed");
+                                tracing::warn!(error = %crate::error::report(&error), agent_id = %self.agent_id, "acp bridge: wait after kill failed");
                             }
                         }
                         None
@@ -397,7 +399,7 @@ impl AcpBridge {
             self.stop_connection_task().await;
         }
 
-        Ok(status.and_then(|s| s.code()))
+        Ok(status)
     }
 
     /// Process-group SIGKILL plus `cgroup.kill`, which reaches a different-uid agent the
@@ -410,8 +412,10 @@ impl AcpBridge {
     }
 
     async fn stop_connection_task(&self) {
-        if let Some(tx) = self.shutdown_tx.lock().await.take() {
-            let _ = tx.send(());
+        if let Some(tx) = self.shutdown_tx.lock().await.take()
+            && tx.send(()).is_err()
+        {
+            tracing::debug!("acp bridge connection task already ended before the shutdown signal");
         }
         self.wait_connection_task().await;
         self.flush_notifications().await;
@@ -430,12 +434,16 @@ impl AcpBridge {
             tokio::select! {
                 result = &mut task => {
                     if let Err(err) = result {
-                        tracing::warn!(error = ?err, "acp bridge task panicked on shutdown");
+                        tracing::warn!(error = %crate::error::report(&err), agent_id = %self.agent_id, "acp bridge task panicked on shutdown");
                     }
                 }
                 _ = &mut sleep => {
                     task.abort();
-                    let _ = task.await;
+                    if let Err(error) = task.await
+                        && !error.is_cancelled()
+                    {
+                        tracing::warn!(error = %crate::error::report(&error), agent_id = %self.agent_id, "acp bridge task panicked while being aborted on shutdown");
+                    }
                 }
             }
         }

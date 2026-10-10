@@ -1,6 +1,35 @@
 use super::*;
 
 #[test]
+fn json_data_errors_keep_location_but_drop_the_quoted_value() {
+    const SECRET: &str = "sk-live-should-not-leak-0123456789";
+    #[derive(Debug, Deserialize)]
+    struct Probe {
+        #[allow(dead_code)]
+        count: u32,
+    }
+    let parse_error = serde_json::from_str::<Probe>(&format!("{{\n  \"count\": \"{SECRET}\"\n}}"))
+        .expect_err("a string is not a u32");
+    // serde_json's own message quotes the offending value.
+    assert!(parse_error.to_string().contains(SECRET));
+
+    let error = json_parse_error("agent.native_config_journal_invalid", &parse_error);
+    let text = error.to_string();
+    assert_eq!(error.error_code(), "agent.native_config_journal_invalid");
+    assert_eq!(error.http_status(), http::StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(text.contains("JSON data error at line 2, column"), "{text}");
+    assert!(!text.contains(SECRET), "{text}");
+}
+
+#[test]
+fn toml_error_location_counts_lines_and_chars() {
+    assert_eq!(line_and_column("a\nbé c", 0), (1, 1));
+    assert_eq!(line_and_column("a\nbé c", 2), (2, 1));
+    assert_eq!(line_and_column("a\nbé c", "a\nbé ".len()), (2, 4));
+    assert_eq!(line_and_column("ab", 99), (1, 3));
+}
+
+#[test]
 fn native_config_paths_cover_every_importable_harness() {
     let home = Path::new("/home/u");
     for (harness, expected) in [

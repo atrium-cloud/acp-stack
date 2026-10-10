@@ -1,12 +1,13 @@
 //! Provider and ACP-advertised model discovery for the unified API.
 
+use agent_client_protocol::schema::v1::NewSessionResponse;
 use axum::extract::{Query, State};
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::envelope::ApiSuccess;
 use crate::error::{Result, StackError};
-use crate::redaction::redact_text;
+use crate::redaction::{bounded, redact_text};
 use crate::runtime::agent::acp_bridge::AgentSessionConfigCategory;
 use crate::runtime::agent::acp_codec::session_model_choices;
 use crate::runtime::agent::model_discovery::{
@@ -91,8 +92,9 @@ pub(crate) struct ModelsResponse {
     /// harness booted with. Empty when neither source reports any (or, on the
     /// catalog fallback path, when ACP discovery failed).
     efforts: Vec<String>,
-    /// Set when the provider declares a model listing endpoint but the
-    /// catalog is unavailable (fetch failed and no cache).
+    /// Set when the provider declares a model listing endpoint and the catalog
+    /// fetch failed: redacted and cut at 1024 bytes. `models` then comes from
+    /// the cached catalog when one exists, else from ACP discovery.
     #[serde(skip_serializing_if = "Option::is_none")]
     catalog_error: Option<String>,
 }
@@ -112,6 +114,8 @@ pub(crate) struct ModelJson {
 
 const MODELS_SOURCE_PROVIDER_CATALOG: &str = "provider_catalog";
 const MODELS_SOURCE_ACP_ADVERTISED: &str = "acp_advertised";
+/// Cap on `catalog_error`, which can carry the provider's response body.
+const CATALOG_ERROR_MAX_BYTES: usize = 1024;
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub(crate) struct ModelsParams {
@@ -204,9 +208,14 @@ pub(crate) async fn models_response_for_config(
         match refresh_provider_models(home, config).await {
             Ok(models) => models,
             Err(error) => {
-                let reason = redact_text(&error.to_string()).into_owned();
-                tracing::warn!(reason = %reason, "provider model catalog refresh failed");
-                catalog_error = Some(reason);
+                tracing::warn!(
+                    error = %crate::error::report(&error),
+                    provider_id = provider_id.as_deref().unwrap_or_default(),
+                    "provider model catalog refresh failed; serving the cached catalog or ACP-advertised models"
+                );
+                catalog_error = Some(
+                    bounded(&redact_text(&error.to_string()), CATALOG_ERROR_MAX_BYTES).into_owned(),
+                );
                 // A stale cache entry still serves through a provider outage.
                 provider_id
                     .as_deref()
@@ -231,14 +240,16 @@ pub(crate) async fn models_response_for_config(
             Ok(discovered) => {
                 let applied = discovered.applied();
                 (
-                    advertised_values_for_category(&applied, AgentSessionConfigCategory::Mode)
-                        .unwrap_or_default(),
-                    advertised_values_for_category(&applied, AgentSessionConfigCategory::Effort)
-                        .unwrap_or_default(),
+                    advertised_or_empty(&applied, AgentSessionConfigCategory::Mode),
+                    advertised_or_empty(&applied, AgentSessionConfigCategory::Effort),
                 )
             }
             Err(error) => {
-                tracing::warn!(error = %error, "config-option discovery failed; serving catalog models without modes or efforts");
+                tracing::warn!(
+                    error = %crate::error::report(&error),
+                    agent_id = %agent_id,
+                    "config-option discovery failed; serving catalog models without modes or efforts"
+                );
                 (Vec::new(), Vec::new())
             }
         };
@@ -274,7 +285,7 @@ pub(crate) async fn models_response_for_config(
                 .collect(),
             modes,
             efforts,
-            catalog_error: None,
+            catalog_error,
         });
     }
 
@@ -297,15 +308,17 @@ pub(crate) async fn models_response_for_config(
         Ok(choices) => choices,
         // Explicit-model agents may advertise no ACP model options at all.
         Err(error) if model_value_is_explicit_without_discovery(&config.agent) => {
-            tracing::warn!(error = %error, "no ACP model advertisement; serving empty model list");
+            tracing::warn!(
+                error = %crate::error::report(&error),
+                agent_id = %agent_id,
+                "no ACP model advertisement; serving empty model list"
+            );
             Vec::new()
         }
         Err(error) => return Err(error),
     };
-    let modes = advertised_values_for_category(&applied, AgentSessionConfigCategory::Mode)
-        .unwrap_or_default();
-    let efforts = advertised_values_for_category(&applied, AgentSessionConfigCategory::Effort)
-        .unwrap_or_default();
+    let modes = advertised_or_empty(&applied, AgentSessionConfigCategory::Mode);
+    let efforts = advertised_or_empty(&applied, AgentSessionConfigCategory::Effort);
 
     Ok(ModelsResponse {
         agent_id,
@@ -315,6 +328,15 @@ pub(crate) async fn models_response_for_config(
         efforts,
         catalog_error,
     })
+}
+
+/// The only error is the category's option being absent, which the response reports as the
+/// documented empty list rather than a failure.
+fn advertised_or_empty(
+    response: &NewSessionResponse,
+    category: AgentSessionConfigCategory,
+) -> Vec<String> {
+    advertised_values_for_category(response, category).unwrap_or_default()
 }
 
 /// Map advertised `(value, name)` choices to wire models. `display_name` is the

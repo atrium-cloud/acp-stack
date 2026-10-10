@@ -16,7 +16,7 @@ use crate::envelope::{ApiError, ErrorReport};
 
 // ----- Constants ------------------------------------------------------------
 
-const REQUEST_ID_HEADER: &str = "x-request-id";
+pub(crate) const REQUEST_ID_HEADER: &str = "x-request-id";
 
 /// Longest caller-supplied request id kept; longer ones are replaced with a UUID.
 const REQUEST_ID_MAX_BYTES: usize = 128;

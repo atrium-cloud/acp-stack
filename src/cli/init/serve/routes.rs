@@ -550,14 +550,7 @@ async fn session_native_config_cancel_handler(
     match outcome {
         Ok(Ok(operation)) => ApiSuccess::new(operation).into_response(),
         Ok(Err(error)) => error.into_response(),
-        Err(error) => StackError::NativeAgentConfig {
-            code: if error.is_panic() {
-                "agent.native_config_lock_task_panicked"
-            } else {
-                "agent.native_config_lock_task_cancelled"
-            },
-        }
-        .into_response(),
+        Err(error) => crate::error::native_config_lock_task_failed(&error).into_response(),
     }
 }
 

@@ -3,6 +3,7 @@
 //! notice lines shared by `acps init` and `acps deps apply`.
 
 use super::*;
+use crate::runtime::process_runner::{PROBE_STDERR_LOG_MAX_BYTES, spawn_capped_reader};
 
 /// `sudo -n` never prompts: it exits non-zero immediately when a password
 /// would be required, so neither the probe nor an escalated run can block
@@ -76,30 +77,73 @@ pub(crate) fn probe_privilege_escalation_with(
         .arg("true")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .env_clear()
         .envs(scrubbed_env(home));
     apply_non_interactive_env(&mut command);
     detach_into_new_session(&mut command);
-    let Ok(mut child) = command.spawn() else {
-        return PrivilegeEscalation::Unavailable { uid };
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            tracing::warn!(error = %crate::error::report(&error), sudo_path = %sudo_path.display(), "sudo probe spawn failed; system-scope actions will be skipped");
+            return PrivilegeEscalation::Unavailable { uid };
+        }
     };
+    let stderr_reader = child
+        .stderr
+        .take()
+        .map(|stream| spawn_capped_reader(stream, PROBE_STDERR_LOG_MAX_BYTES));
     match wait_with_timeout(&mut child, Instant::now() + SUDO_PROBE_TIMEOUT) {
         Ok(Some(status)) if status.success() => PrivilegeEscalation::Sudo { sudo_path, uid },
-        Ok(Some(_)) => PrivilegeEscalation::Unavailable { uid },
-        Ok(None) | Err(_) => {
-            // The probe child may still be alive; reap the group so it cannot
-            // outlive the probe.
-            kill_process_group(&mut child);
-            if reap_with_grace(&mut child, KILL_REAP_GRACE).is_none() {
-                tracing::warn!(
-                    "sudo probe outlived its timeout kill and was abandoned unreaped (pid={})",
-                    child.id(),
-                );
-            }
+        Ok(Some(status)) => {
+            tracing::warn!(
+                %status,
+                sudo_path = %sudo_path.display(),
+                stderr = %probe_stderr(stderr_reader),
+                "passwordless sudo probe failed; system-scope actions will be skipped",
+            );
+            PrivilegeEscalation::Unavailable { uid }
+        }
+        Ok(None) => {
+            kill_and_reap_probe(&mut child);
+            tracing::warn!(
+                timeout_secs = SUDO_PROBE_TIMEOUT.as_secs(),
+                sudo_path = %sudo_path.display(),
+                stderr = %probe_stderr(stderr_reader),
+                "sudo probe timed out; system-scope actions will be skipped",
+            );
+            PrivilegeEscalation::Unavailable { uid }
+        }
+        Err(error) => {
+            kill_and_reap_probe(&mut child);
+            tracing::warn!(
+                error = %crate::error::report(&error),
+                sudo_path = %sudo_path.display(),
+                stderr = %probe_stderr(stderr_reader),
+                "sudo probe wait failed; system-scope actions will be skipped",
+            );
             PrivilegeEscalation::Unavailable { uid }
         }
     }
+}
+
+/// The probe child may still be alive; reap the group so it cannot outlive the probe.
+fn kill_and_reap_probe(child: &mut std::process::Child) {
+    kill_process_group(child);
+    if reap_with_grace(child, KILL_REAP_GRACE).is_none() {
+        tracing::warn!(
+            "sudo probe outlived its timeout kill and was abandoned unreaped (pid={})",
+            child.id(),
+        );
+    }
+}
+
+/// The probe's captured stderr, already capped by its reader, trimmed for a log field.
+fn probe_stderr(reader: Option<std::thread::JoinHandle<String>>) -> String {
+    reader
+        .and_then(join_reader_bounded)
+        .map(|stderr| stderr.trim().to_owned())
+        .unwrap_or_default()
 }
 
 /// Probe only when a pending system-scope action exists, so a satisfied

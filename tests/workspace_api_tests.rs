@@ -26,6 +26,10 @@ struct Harness {
 
 impl Harness {
     async fn spawn() -> Self {
+        Self::spawn_with(|_| {}).await
+    }
+
+    async fn spawn_with(configure: impl FnOnce(&mut Config)) -> Self {
         let workspace_tempdir = tempfile::tempdir().expect("workspace tempdir");
         let workspace_root = workspace_tempdir.path().to_path_buf();
         let uploads_root = workspace_root.join("uploads");
@@ -34,6 +38,7 @@ impl Harness {
         let mut config = test_config();
         config.workspace.root = workspace_root.to_string_lossy().into_owned();
         config.workspace.uploads = uploads_root.to_string_lossy().into_owned();
+        configure(&mut config);
 
         let state_tempdir = tempfile::tempdir().expect("state tempdir");
         let state_path = state_tempdir.path().join("state.sqlite");
@@ -667,6 +672,53 @@ async fn upload_above_limit_returns_too_large() {
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     let body: Value = response.json().await.expect("json");
     assert_eq!(body["error"]["code"], "workspace.too_large");
+}
+
+// A chunked body carries no Content-Length, so the size limit cuts it mid-read inside the
+// multipart parser rather than at the limit layer.
+#[tokio::test]
+async fn chunked_upload_past_the_request_limit_returns_request_too_large() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const REQUEST_LIMIT_BYTES: u64 = 1024;
+    let harness = Harness::spawn_with(|config| {
+        config.api.max_request_bytes = REQUEST_LIMIT_BYTES;
+        config.security.http.max_request_bytes = REQUEST_LIMIT_BYTES;
+    })
+    .await;
+    let boundary = "acpsboundary";
+    let body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"path\"\r\n\r\nbig.bin\r\n\
+         --{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"big.bin\"\r\n\r\n{}\r\n\
+         --{boundary}--\r\n",
+        "x".repeat(4 * REQUEST_LIMIT_BYTES as usize)
+    );
+    let request = format!(
+        "POST /v1/files/upload HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {SESSION_KEY}\r\n\
+         Content-Type: multipart/form-data; boundary={boundary}\r\nTransfer-Encoding: chunked\r\n\
+         Connection: close\r\n\r\n{:x}\r\n{body}\r\n0\r\n\r\n",
+        body.len()
+    );
+
+    let address = harness.base_url.trim_start_matches("http://");
+    let mut stream = tokio::net::TcpStream::connect(address)
+        .await
+        .expect("connect");
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write request");
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .await
+        .expect("read response");
+    let response = String::from_utf8_lossy(&response);
+    assert!(response.starts_with("HTTP/1.1 413"), "response: {response}");
+    assert!(
+        response.contains("\"request.too_large\""),
+        "response: {response}"
+    );
 }
 
 #[tokio::test]

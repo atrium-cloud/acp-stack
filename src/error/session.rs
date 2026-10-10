@@ -1,8 +1,29 @@
 //! Session and prompt error helpers (`session.*`, `prompt.*` namespaces).
 
 use http::StatusCode;
+use serde_json::{Map, Value};
 
 use super::StackError;
+use crate::redaction::{bounded, redact_text, strip_serde_value_literals};
+
+// CONSTANTS
+
+/// Cap on `details.reason`; serde's text for a rejected content block can quote the caller's input.
+const PROMPT_BODY_REASON_MAX_BYTES: usize = 1024;
+
+pub(super) fn public_details(err: &StackError) -> Option<Map<String, Value>> {
+    let reason = match err {
+        StackError::PromptBodyInvalid(reason) => {
+            let reason = strip_serde_value_literals(reason);
+            bounded(&redact_text(&reason), PROMPT_BODY_REASON_MAX_BYTES).into_owned()
+        }
+        StackError::SessionCwdInvalid { reason, .. } => (*reason).to_owned(),
+        _ => return None,
+    };
+    let mut details = Map::new();
+    details.insert("reason".to_owned(), Value::String(reason));
+    Some(details)
+}
 
 pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
     use StackError::*;
@@ -16,7 +37,9 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         PromptNotFound { .. } => "prompt.not_found",
         PromptSessionMismatch { .. } => "prompt.session_mismatch",
         PromptBodyEmpty => "prompt.body_empty",
-        PromptBodyInvalid(_) => "prompt.body_invalid",
+        // The cwd rides in the same request bodies as the prompt and session payloads, so it
+        // shares their invalid-body code; `details.reason` names the check that failed.
+        PromptBodyInvalid(_) | SessionCwdInvalid { .. } => "prompt.body_invalid",
         PromptUnsupportedModality { .. } => "prompt.unsupported_modality",
         SessionTargetRenameConflict { .. } => "session.target_rename_conflict",
         _ => return None,
@@ -46,6 +69,7 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
         } => format!("session `{session_id}` does not own prompt `{prompt_id}`"),
         PromptBodyEmpty => "prompt body must include at least one content block".to_owned(),
         PromptBodyInvalid(_) => "prompt body is not valid ACP content".to_owned(),
+        SessionCwdInvalid { .. } => "session cwd is invalid".to_owned(),
         PromptUnsupportedModality { model, modality } => {
             format!("model `{model}` does not support `{modality}` prompt input")
         }
@@ -72,9 +96,10 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         SessionTargetRenameConflict { .. } => StatusCode::CONFLICT,
         SessionDeleted { .. } => StatusCode::GONE,
         SessionReattachUnsupported { .. } => StatusCode::NOT_IMPLEMENTED,
-        PromptBodyEmpty | PromptBodyInvalid(_) | PromptUnsupportedModality { .. } => {
-            StatusCode::BAD_REQUEST
-        }
+        PromptBodyEmpty
+        | PromptBodyInvalid(_)
+        | SessionCwdInvalid { .. }
+        | PromptUnsupportedModality { .. } => StatusCode::BAD_REQUEST,
         _ => return None,
     })
 }

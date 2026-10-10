@@ -184,6 +184,35 @@ pub async fn wait_for_terminal(harness: &Harness, id: &str) -> Value {
     }
 }
 
+/// Poll the command log until `id` has a `kind` event and return its parsed payload. The row
+/// turns terminal before its lifecycle event is appended, so a single query can miss it.
+pub async fn wait_for_command_event(harness: &Harness, id: &str, kind: &str) -> Value {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let response = auth(session_client().get(format!(
+            "{}/v1/logs/events?kind={kind}&command_id={id}",
+            harness.base_url
+        )))
+        .send()
+        .await
+        .expect("send");
+        if response.status() == StatusCode::OK {
+            let body: Value = response.json().await.expect("json");
+            if let Some(event) = body["data"]["events"]
+                .as_array()
+                .and_then(|events| events.first())
+            {
+                return serde_json::from_str(event["payload_json"].as_str().expect("payload"))
+                    .expect("payload json");
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("no {kind} event for command {id} in time");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 // ----- WebSocket -----------------------------------------------------------
 
 pub async fn open_ws(

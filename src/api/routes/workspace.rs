@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use axum::Extension;
 use axum::Json;
 use axum::body::Body;
+use axum::extract::multipart::MultipartError;
 use axum::extract::{Multipart, Query, State};
 use axum::response::Response;
 use futures::Stream;
@@ -142,9 +143,9 @@ pub(crate) async fn files_download_handler(
             state.shutdown.clone(),
             params.path.clone(),
         )))
-        .map_err(|_| StackError::WorkspaceIo {
+        .map_err(|source| StackError::WorkspaceIo {
             requested: params.path.clone(),
-            source: std::io::Error::other("failed to build download response"),
+            source: std::io::Error::other(source),
         })?;
     Ok(response)
 }
@@ -259,23 +260,16 @@ pub(crate) async fn files_upload_handler(
     let mut filename: Option<String> = None;
     let mut content: Option<Vec<u8>> = None;
 
-    while let Some(field) = multipart.next_field().await.map_err(|err| {
-        tracing::debug!(error = %err, "rejecting malformed multipart upload");
-        StackError::WorkspaceUploadInvalid {
-            reason: "multipart body is malformed",
-        }
-    })? {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|source| multipart_error("multipart body is malformed", source))?
+    {
         match field.name() {
             Some("path") => {
-                path =
-                    Some(
-                        field
-                            .text()
-                            .await
-                            .map_err(|_| StackError::WorkspaceUploadInvalid {
-                                reason: "multipart `path` field could not be read as text",
-                            })?,
-                    );
+                path = Some(field.text().await.map_err(|source| {
+                    multipart_error("multipart `path` field could not be read as text", source)
+                })?);
             }
             Some("file") => {
                 filename = field.file_name().map(|s| s.to_owned());
@@ -296,10 +290,11 @@ pub(crate) async fn files_upload_handler(
                             buffer.extend_from_slice(&chunk);
                         }
                         Ok(None) => break,
-                        Err(_) => {
-                            return Err(StackError::WorkspaceUploadInvalid {
-                                reason: "multipart `file` field could not be read",
-                            });
+                        Err(source) => {
+                            return Err(multipart_error(
+                                "multipart `file` field could not be read",
+                                source,
+                            ));
                         }
                     }
                 }
@@ -311,9 +306,11 @@ pub(crate) async fn files_upload_handler(
 
     let path = path.ok_or(StackError::WorkspaceUploadInvalid {
         reason: "multipart upload is missing the required `path` field",
+        source: None,
     })?;
     let content = content.ok_or(StackError::WorkspaceUploadInvalid {
         reason: "multipart upload is missing the required `file` field",
+        source: None,
     })?;
     let filename = filename.unwrap_or_default();
 
@@ -378,6 +375,19 @@ pub(crate) async fn files_delete_handler(
     }))
 }
 
+/// A multipart read the request body limit cut short is the caller's oversized body, not a
+/// malformed one.
+fn multipart_error(reason: &'static str, source: MultipartError) -> StackError {
+    if source.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        StackError::RequestTooLarge { source }
+    } else {
+        StackError::WorkspaceUploadInvalid {
+            reason,
+            source: Some(source),
+        }
+    }
+}
+
 fn decode_request_content(
     encoding: &str,
     content: &str,
@@ -430,9 +440,9 @@ async fn publish_workspace_mutation(
             serde_json::Value::Number(serde_json::Number::from(size)),
         );
     }
-    let payload_json = serde_json::to_string(&data).map_err(|_| StackError::WorkspaceIo {
+    let payload_json = serde_json::to_string(&data).map_err(|source| StackError::WorkspaceIo {
         requested: path.to_owned(),
-        source: std::io::Error::other("failed to serialize workspace event payload"),
+        source: std::io::Error::other(source),
     })?;
     let event = {
         let store = state.state.lock().await;

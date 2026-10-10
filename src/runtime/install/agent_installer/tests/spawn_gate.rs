@@ -245,6 +245,24 @@ fn declared_pin_keeps_step_gate_from_executing_binary() {
         matches!(err, StackError::AgentSha256Mismatch { .. }),
         "expected AgentSha256Mismatch (pin checked before any probe), got {err:?}",
     );
+    let actual = sha256_of_file(&binary_path).expect("hash binary");
+    let steps: Vec<(&str, &str)> = result
+        .rows
+        .iter()
+        .map(|row| (row.step.as_str(), row.status.as_str()))
+        .collect();
+    assert_eq!(
+        steps,
+        [(STEP_INSTALL, "ran"), (STEP_VERIFY, "failed")],
+        "final verification records its failure as its own row",
+    );
+    let verify_row = &result.rows[1];
+    assert_eq!(
+        verify_row.stderr,
+        format!("agent binary sha256 mismatch: expected deadbeef, got {actual}")
+    );
+    assert!(verify_row.finished_at.is_some());
+    assert_eq!(verify_row.method, None);
 }
 
 #[test]

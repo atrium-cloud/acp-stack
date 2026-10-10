@@ -87,7 +87,13 @@ async fn ws_connection(
                 if registration.disconnect_requested.load(Ordering::Relaxed) {
                     disconnect_reason = "operator_disconnect";
                     operator_reason = registration.operator_reason();
-                    let _ = socket.send(Message::Close(None)).await;
+                    if let Err(error) = socket.send(Message::Close(None)).await {
+                        tracing::debug!(
+                            connection_id = %connection_id,
+                            %error,
+                            "websocket ended before the operator close frame was sent"
+                        );
+                    }
                     break;
                 }
             }
@@ -95,8 +101,18 @@ async fn ws_connection(
                 let Some(inbound) = inbound else {
                     break;
                 };
-                let Ok(message) = inbound else {
-                    break;
+                let message = match inbound {
+                    Ok(message) => message,
+                    Err(error) => {
+                        // A client that drops without a close frame lands here; the
+                        // `ws.disconnected` row records the disconnect itself.
+                        tracing::debug!(
+                            connection_id = %connection_id,
+                            error = %crate::error::report(&error),
+                            "websocket receive failed; closing the connection"
+                        );
+                        break;
+                    }
                 };
                 state.ws_registry.touch(&registration.connection_id);
                 match message {
@@ -145,11 +161,17 @@ async fn ws_connection(
                 let payload = match serde_json::to_string(&event) {
                     Ok(payload) => payload,
                     Err(err) => {
-                        tracing::warn!(error = %err, event_id = %event.id, "failed to serialize websocket event");
+                        tracing::warn!(error = %crate::error::report(&err), event_id = %event.id, "failed to serialize websocket event");
                         continue;
                     }
                 };
-                if socket.send(Message::Text(payload.into())).await.is_err() {
+                if let Err(error) = socket.send(Message::Text(payload.into())).await {
+                    tracing::debug!(
+                        connection_id = %connection_id,
+                        event_id = %event.id,
+                        error = %crate::error::report(&error),
+                        "websocket send failed; closing the connection"
+                    );
                     break;
                 }
                 state.ws_registry.touch(&registration.connection_id);
@@ -212,7 +234,7 @@ async fn persist_ws_lifecycle_event(state: &AppState, kind: &str, payload: serde
         "",
         &payload_text,
     ) {
-        tracing::warn!(error = %err, kind, "failed to persist ws lifecycle event");
+        tracing::warn!(error = %crate::error::report(&err), kind, "failed to persist ws lifecycle event");
     }
 }
 

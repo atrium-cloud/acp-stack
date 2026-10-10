@@ -132,7 +132,7 @@ The testflight verifies that the agent works headless, so it selects its own ses
 
 The run respawns under the next advertised mode and tries again, up to six attempts, when an attempt fails in a way a mode causes: it blocked the write (`fs_check_missing`, `fs_check_empty`), refused the turn (`unexpected_stop_reason`), stalled (`progress_timeout`, `prompt_timeout`), or was rejected (`session_mode_failed`). When the seed and the advertised modes fail within the six-attempt budget, a final attempt runs under the agent's own default mode, so a registry `default_mode` the agent no longer advertises cannot fail an otherwise working agent. Failures that repeat identically in every mode (a bad credential, an unreadable config, a spawn or initialize error) abort at once. Each attempt is a fresh process, so a file one mode wrote is never credited to another.
 
-`mode_used` and `mode_attempts` report the outcome. The selected mode is never written back to config: real daemon sessions keep the operator's mode, where the permission service parks on operator decisions. `acps agent test --one-shot` opts out, running a single attempt against the configured mode.
+`mode_used` and `mode_attempts` report the outcome; on total failure the stderr error carries the first attempt's reason followed by each later attempt's mode, code and reason, and on a pass the failed attempts are logged as warnings. The selected mode is never written back to config: real daemon sessions keep the operator's mode, where the permission service parks on operator decisions. `acps agent test --one-shot` opts out, running a single attempt against the configured mode.
 
 ## Flag Reference
 

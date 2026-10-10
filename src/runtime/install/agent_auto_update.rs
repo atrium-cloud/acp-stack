@@ -42,7 +42,7 @@ impl AgentAutoUpdater {
                 let config = match Config::load_from_path(&config_path) {
                     Ok(config) => config,
                     Err(err) => {
-                        tracing::warn!(error = %err, "agent auto-update: failed to load config");
+                        tracing::warn!(error = %crate::error::report(&err), path = %config_path.display(), "agent auto-update: failed to load config; skipping this cycle");
                         continue;
                     }
                 };
@@ -68,7 +68,7 @@ impl AgentAutoUpdater {
                     )
                     .await
                     {
-                        tracing::warn!(error = %err, "agent auto-update: failed to record skip");
+                        tracing::warn!(error = %crate::error::report(&err), agent_id = %config.agent.id, "agent auto-update: failed to record skip");
                     }
                     continue;
                 }
@@ -80,8 +80,9 @@ impl AgentAutoUpdater {
                 )
                 .await
                 {
-                    tracing::warn!(error = %err, "agent auto-update: failed to record start");
+                    tracing::warn!(error = %crate::error::report(&err), agent_id = %config.agent.id, "agent auto-update: failed to record start");
                 }
+                let agent_id = config.agent.id.clone();
                 let home_for_task = home.clone();
                 let state_path_for_task = state_path.clone();
                 let result = tokio::task::spawn_blocking(move || {
@@ -107,29 +108,41 @@ impl AgentAutoUpdater {
                             &state,
                             event_kind,
                             event_message,
-                            serde_json::to_value(&report).unwrap_or_else(
-                                |_| serde_json::json!({ "agent_id": report.agent_id }),
-                            ),
+                            serde_json::to_value(&report).unwrap_or_else(|error| {
+                                tracing::warn!(
+                                    error = %crate::error::report(&error),
+                                    agent_id = %report.agent_id,
+                                    "agent auto-update: report serialization failed; recording the agent id only",
+                                );
+                                serde_json::json!({ "agent_id": report.agent_id })
+                            }),
                         )
                         .await
                         {
                             tracing::warn!(
-                                error = %err,
+                                error = %crate::error::report(&err),
+                                %agent_id,
                                 "agent auto-update: failed to record finish"
                             );
                         }
                     }
                     Ok(Err(err)) => {
+                        tracing::warn!(
+                            error = %crate::error::report(&err),
+                            %agent_id,
+                            "agent auto-update failed; retrying on the next cycle",
+                        );
                         if let Err(record_err) = append_update_lifecycle(
                             &state,
                             "agent.update.failed",
                             "agent update failed",
-                            serde_json::json!({ "error": err.to_string() }),
+                            serde_json::json!({ "error": crate::error::persisted_report(&err) }),
                         )
                         .await
                         {
                             tracing::warn!(
-                                error = %record_err,
+                                error = %crate::error::report(&record_err),
+                                %agent_id,
                                 "agent auto-update: failed to record failure"
                             );
                         }
@@ -141,16 +154,17 @@ impl AgentAutoUpdater {
                             &state,
                             "agent.update.failed",
                             "agent update failed",
-                            serde_json::json!({ "error": err.to_string() }),
+                            serde_json::json!({ "error": crate::error::persisted_report(&err) }),
                         )
                         .await
                         {
                             tracing::warn!(
-                                error = %record_err,
+                                error = %crate::error::report(&record_err),
+                                %agent_id,
                                 "agent auto-update: failed to record join failure"
                             );
                         }
-                        tracing::warn!(error = %err, "agent auto-update task join failed");
+                        tracing::error!(error = %crate::error::report(&err), %agent_id, "agent auto-update task join failed");
                     }
                 }
             }
@@ -171,7 +185,7 @@ impl AgentAutoUpdater {
         match tokio::time::timeout(SHUTDOWN_GRACE, handle).await {
             Ok(Ok(())) => {}
             Ok(Err(err)) => {
-                tracing::warn!(error = ?err, "agent auto-update task did not exit cleanly");
+                tracing::warn!(error = %crate::error::report(&err), "agent auto-update task did not exit cleanly");
             }
             Err(_) => {
                 tracing::warn!("agent auto-update still running at shutdown; abandoning the wait");
@@ -190,6 +204,7 @@ impl Drop for AgentAutoUpdater {
 }
 
 fn next_delay(config_path: &PathBuf) -> Duration {
+    // The cycle after the sleep loads the config again and logs the failure.
     let Ok(config) = Config::load_from_path(config_path) else {
         return DISABLED_POLL_INTERVAL;
     };
@@ -199,7 +214,17 @@ fn next_delay(config_path: &PathBuf) -> Duration {
     if !auto_update.enabled {
         return DISABLED_POLL_INTERVAL;
     }
-    parse_duration_string(&auto_update.frequency).unwrap_or(DISABLED_POLL_INTERVAL)
+    match parse_duration_string(&auto_update.frequency) {
+        Some(delay) => delay,
+        None => {
+            tracing::warn!(
+                frequency = %auto_update.frequency,
+                poll_secs = DISABLED_POLL_INTERVAL.as_secs(),
+                "agent auto-update: frequency is unparseable; polling again on the disabled interval",
+            );
+            DISABLED_POLL_INTERVAL
+        }
+    }
 }
 
 async fn append_update_lifecycle(

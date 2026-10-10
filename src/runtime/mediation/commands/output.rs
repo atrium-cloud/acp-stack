@@ -41,13 +41,24 @@ impl OutputCounter {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(super) enum Outcome {
-    /// `None` distinguishes a kernel-signal exit from a normal status code.
-    Exited(Option<i32>),
-    Canceled,
-    TimedOut,
-    SpawnError,
+    /// `code` is `None` for a kernel-signal exit, and `signal` names that signal.
+    Exited {
+        code: Option<i32>,
+        signal: Option<String>,
+    },
+    /// `signal` names the signal the cancelled or timed-out child died on, when known.
+    Canceled {
+        signal: Option<String>,
+    },
+    TimedOut {
+        signal: Option<String>,
+    },
+    /// `wait()` on the child failed; `reason` is the redacted, bounded error.
+    WaitFailed {
+        reason: String,
+    },
     PersistenceError,
 }
 
@@ -121,12 +132,20 @@ pub(crate) async fn read_stream<R>(
             Ok(0) => {
                 if !carryover.is_empty() {
                     let chunk = String::from_utf8_lossy(&carryover).into_owned();
-                    let _ = tx
+                    // A closed receiver is the normal teardown path on cancel/timeout.
+                    if tx
                         .send(OutputChunk {
                             stream: stream.to_owned(),
                             data: chunk,
                         })
-                        .await;
+                        .await
+                        .is_err()
+                    {
+                        tracing::debug!(
+                            stream,
+                            "command output receiver closed before the final chunk"
+                        );
+                    }
                 }
                 return;
             }

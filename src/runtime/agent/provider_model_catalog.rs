@@ -178,7 +178,11 @@ pub async fn refresh_provider_models(
             };
             // Best-effort: losing the marker only means the next poll retries sooner.
             if let Err(write_error) = record_fetch_failure(home, &provider.id, &reason) {
-                tracing::warn!(error = %write_error, "provider model catalog failure marker not recorded");
+                tracing::warn!(
+                    error = %crate::error::report(&write_error),
+                    provider = %provider.id,
+                    "provider model catalog failure marker not recorded; the next poll retries sooner"
+                );
             }
             Err(error)
         }
@@ -206,33 +210,51 @@ async fn fetch_provider_models(
     models_url: &str,
 ) -> Result<Vec<ProviderModel>> {
     let api_key = resolve_provider_api_key(home, config, provider_id)?;
+    let body = fetch_models_payload(provider_id, models_url, &api_key).await?;
+    parse_models_response(provider_id, &body)
+}
+
+async fn fetch_models_payload(provider_id: &str, models_url: &str, api_key: &str) -> Result<Value> {
     let client = crate::http_client::client_builder()
         .build()
-        .map_err(|error| catalog_error(provider_id, format!("client build failed: {error}")))?;
+        .map_err(|error| {
+            catalog_error(
+                provider_id,
+                format!("client build failed: {}", crate::error::report(&error)),
+            )
+        })?;
     let response = client
         .get(models_url)
         .bearer_auth(api_key)
         .timeout(PROVIDER_MODELS_FETCH_TIMEOUT)
         .send()
         .await
-        .map_err(|error| catalog_error(provider_id, format!("request failed: {error}")))?;
-    if !response.status().is_success() {
+        .map_err(|error| {
+            catalog_error(
+                provider_id,
+                format!("request failed: {}", crate::error::report(&error)),
+            )
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = crate::http_client::error_response_body(response).await;
         return Err(catalog_error(
             provider_id,
-            format!("endpoint returned HTTP {}", response.status()),
+            format!("endpoint returned HTTP {status}: {body}"),
         ));
     }
-    let body = response
-        .json::<Value>()
-        .await
-        .map_err(|error| catalog_error(provider_id, format!("invalid JSON: {error}")))?;
-    parse_models_response(provider_id, &body)
+    response.json::<Value>().await.map_err(|error| {
+        catalog_error(
+            provider_id,
+            format!("invalid JSON: {}", crate::error::report(&error)),
+        )
+    })
 }
 
 /// Best-effort refresh for provisioning flows: log and continue on failure.
 pub async fn refresh_provider_models_best_effort(home: &Path, config: &Config) {
     if let Err(error) = refresh_provider_models(home, config).await {
-        tracing::warn!(error = %error, "provider model catalog refresh skipped");
+        tracing::warn!(error = %crate::error::report(&error), "provider model catalog refresh skipped");
     }
 }
 
@@ -244,7 +266,7 @@ pub fn refresh_provider_models_best_effort_blocking(home: &Path, config: &Config
     {
         Ok(runtime) => runtime,
         Err(error) => {
-            tracing::warn!(error = %error, "provider model catalog refresh skipped");
+            tracing::warn!(error = %crate::error::report(&error), "provider model catalog refresh skipped");
             return;
         }
     };
@@ -852,6 +874,42 @@ mod tests {
             error.to_string().contains("boom"),
             "expected stored failure reason, got: {error}"
         );
+    }
+
+    #[tokio::test]
+    async fn non_success_status_keeps_the_redacted_bounded_body_in_the_reason() {
+        use axum::http::StatusCode;
+        use axum::routing::get;
+
+        let router = axum::Router::new().route(
+            "/api/v1/models",
+            get(|| async {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    format!(
+                        r#"{{"error":"invalid key sk-providercatalog0123456789"}} {}"#,
+                        "w".repeat(2 * crate::redaction::HTTP_ERROR_BODY_MAX_BYTES)
+                    ),
+                )
+            }),
+        );
+        let server = crate::http_client::test_server::spawn(router);
+        let error = fetch_models_payload(
+            "openrouter",
+            &server.url("/api/v1/models"),
+            "unused-test-key",
+        )
+        .await
+        .expect_err("401 must fail");
+        let StackError::ProviderModelCatalog { reason, .. } = &error else {
+            panic!("unexpected error: {error}");
+        };
+        assert!(
+            reason.starts_with("endpoint returned HTTP 401 Unauthorized: "),
+            "{reason}"
+        );
+        assert!(reason.contains("invalid key [redacted]"), "{reason}");
+        assert!(reason.contains("[truncated"), "{reason}");
     }
 
     fn codex_openrouter_config() -> Config {

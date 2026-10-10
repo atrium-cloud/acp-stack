@@ -289,10 +289,9 @@ fn resolve_selection(
                 reason: format!("env var `{env_name}` carries both an inline value and a ref"),
             });
         }
-        let value = store.get(ref_name).map_err(|_| StackError::InvalidParam {
-            field: "desired.selection.source_refs",
-            reason: format!("secret ref `{ref_name}` is not in the secret store"),
-        })?;
+        let value = store
+            .get(ref_name)
+            .map_err(|error| source_ref_error(ref_name, error))?;
         values.insert(env_name.clone(), value.to_owned());
     }
     if crate::runtime::agent::provider_keys::env_var_for_provider_id(&selection.provider_id)
@@ -337,6 +336,17 @@ fn resolve_selection(
         source_refs: selection.source_refs,
         base_url: selection.base_url,
     })
+}
+
+/// A missing ref is the caller's input error; any other store error propagates as itself.
+fn source_ref_error(ref_name: &str, error: StackError) -> StackError {
+    match error {
+        StackError::SecretNotFound { .. } => StackError::InvalidParam {
+            field: "desired.selection.source_refs",
+            reason: format!("secret ref `{ref_name}` is not in the secret store"),
+        },
+        other => other,
+    }
 }
 
 /// A provider endpoint override obeys the shared endpoint rule: https, or http to a
@@ -472,4 +482,37 @@ fn validate_bounded(field: &'static str, value: &str, max_bytes: usize) -> Resul
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_ref_error_maps_not_found_to_invalid_param() {
+        let error = source_ref_error(
+            "OPENAI_KEY",
+            StackError::SecretNotFound {
+                name: "OPENAI_KEY".to_owned(),
+            },
+        );
+        assert_eq!(error.error_code(), "request.invalid_param");
+        assert!(
+            error
+                .public_message()
+                .contains("secret ref `OPENAI_KEY` is not in the secret store")
+        );
+    }
+
+    #[test]
+    fn source_ref_error_passes_store_errors_through() {
+        let error = source_ref_error(
+            "OPENAI_KEY",
+            StackError::SecretStoreRead {
+                path: std::path::PathBuf::from("/state/secrets.age"),
+                source: std::io::ErrorKind::PermissionDenied.into(),
+            },
+        );
+        assert_eq!(error.error_code(), "secrets.read_failed");
+    }
 }

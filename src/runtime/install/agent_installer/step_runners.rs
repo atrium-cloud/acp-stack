@@ -345,13 +345,12 @@ pub(super) fn shell_step_with_creates(
             }
         }
         Err(err) => StepResult {
-            outcome: Err(err),
             row: InstallerRowDraft {
                 started_at,
                 finished_at: Some(finished_at),
                 status: "error".into(),
                 stdout: String::new(),
-                stderr: String::new(),
+                stderr: crate::error::persisted_report(&err),
                 exit_status: None,
                 step: step_label.to_owned(),
                 method,
@@ -360,6 +359,7 @@ pub(super) fn shell_step_with_creates(
                 persisted_run_id: None,
                 artifact: None,
             },
+            outcome: Err(err),
         },
     }
 }
@@ -418,7 +418,7 @@ pub(super) fn github_release_step(
             }
         }
         Err(err) => {
-            let stderr = err.to_string();
+            let stderr = crate::error::persisted_report(&err);
             StepResult {
                 outcome: Err(err),
                 row: InstallerRowDraft {
@@ -520,13 +520,12 @@ pub(super) fn finalize_shell_step(
             InstallerResult { outcome, row }
         }
         Err(err) => InstallerResult {
-            outcome: Err(err),
             row: InstallerRowDraft {
                 started_at,
                 finished_at: Some(finished_at),
                 status: "error".into(),
                 stdout: String::new(),
-                stderr: String::new(),
+                stderr: crate::error::persisted_report(&err),
                 exit_status: None,
                 step: step_label.to_owned(),
                 method: Some(INSTALL_METHOD_SHELL.to_owned()),
@@ -535,6 +534,7 @@ pub(super) fn finalize_shell_step(
                 persisted_run_id: None,
                 artifact: None,
             },
+            outcome: Err(err),
         },
     }
 }
@@ -681,13 +681,12 @@ fn resolve_npm_package_version(
             }))
         }
         Err(err) => Err(Box::new(StepResult {
-            outcome: Err(err),
             row: InstallerRowDraft {
                 started_at,
                 finished_at: Some(current_timestamp()),
                 status: "failed".into(),
                 stdout: String::new(),
-                stderr: String::new(),
+                stderr: crate::error::persisted_report(&err),
                 exit_status: None,
                 step: step_label.to_owned(),
                 method: Some(INSTALL_METHOD_NPM.to_owned()),
@@ -696,6 +695,7 @@ fn resolve_npm_package_version(
                 persisted_run_id: None,
                 artifact: None,
             },
+            outcome: Err(err),
         })),
     }
 }

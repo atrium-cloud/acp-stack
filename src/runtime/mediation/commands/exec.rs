@@ -17,6 +17,11 @@ use crate::runtime::sandbox::WorkloadCgroup;
 use super::policy::ResolvedCommandCwd;
 use super::process::send_terminate;
 
+// CONSTANTS
+
+/// Signal recorded for a child the grace window ran out on.
+pub(crate) const GRACE_ESCALATION_SIGNAL: &str = "SIGKILL";
+
 /// Resolve the program + argv to spawn, wrapping it in the sandbox backend so
 /// a mediated child cannot read the daemon's secrets.
 pub(crate) fn sandboxed_program(
@@ -198,7 +203,7 @@ pub(crate) async fn kill_with_grace(
                 cgroup.kill();
             }
             if let Err(error) = child.wait().await {
-                tracing::warn!(error = %error, "wait after SIGKILL failed while escalating child termination");
+                tracing::warn!(error = %crate::error::report(&error), "wait after SIGKILL failed while escalating child termination");
             }
             GraceKillOutcome::KilledAfterGrace
         }

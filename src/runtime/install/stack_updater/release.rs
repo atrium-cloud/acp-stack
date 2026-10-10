@@ -17,24 +17,31 @@ pub(super) fn fetch_release(options: &StackUpdateOptions) -> Result<ReleaseRespo
             });
         }
     };
-    build_client(REPOSITORY)?
-        .get(url)
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .map_err(|source| StackError::GithubReleaseFetch {
-            repo: REPOSITORY.to_owned(),
-            source,
-        })?
-        .error_for_status()
-        .map_err(|source| StackError::GithubReleaseFetch {
-            repo: REPOSITORY.to_owned(),
-            source,
-        })?
-        .json::<ReleaseResponse>()
-        .map_err(|source| StackError::GithubReleaseFetch {
-            repo: REPOSITORY.to_owned(),
-            source,
-        })
+    send_checked(
+        build_client(REPOSITORY)?
+            .get(url)
+            .header("Accept", "application/vnd.github+json"),
+    )?
+    .json::<ReleaseResponse>()
+    .map_err(|source| fetch_error(source, None))
+}
+
+fn fetch_error(source: reqwest::Error, body: Option<String>) -> StackError {
+    StackError::GithubReleaseFetch {
+        repo: REPOSITORY.to_owned(),
+        source,
+        body,
+    }
+}
+
+/// Send `request` and turn a non-2xx answer into a fetch error that keeps the response body.
+fn send_checked(request: reqwest::blocking::RequestBuilder) -> Result<reqwest::blocking::Response> {
+    let response = request.send().map_err(|source| fetch_error(source, None))?;
+    if let Err(source) = response.error_for_status_ref() {
+        let body = crate::http_client::blocking_error_response_body(response);
+        return Err(fetch_error(source, Some(body)));
+    }
+    Ok(response)
 }
 
 pub(super) fn fetch_manifest(release: &ReleaseResponse) -> Result<StackReleaseManifest> {
@@ -204,25 +211,14 @@ pub(super) fn parse_checksum_line(line: &str, asset_name: &str) -> Option<String
 }
 
 pub(super) fn download_bytes(url: &str) -> Result<Vec<u8>> {
-    let response = build_client(REPOSITORY)?
-        .get(url)
-        .header("Accept", "application/octet-stream")
-        .send()
-        .map_err(|source| StackError::GithubReleaseFetch {
-            repo: REPOSITORY.to_owned(),
-            source,
-        })?
-        .error_for_status()
-        .map_err(|source| StackError::GithubReleaseFetch {
-            repo: REPOSITORY.to_owned(),
-            source,
-        })?;
+    let response = send_checked(
+        build_client(REPOSITORY)?
+            .get(url)
+            .header("Accept", "application/octet-stream"),
+    )?;
     Ok(response
         .bytes()
-        .map_err(|source| StackError::GithubReleaseFetch {
-            repo: REPOSITORY.to_owned(),
-            source,
-        })?
+        .map_err(|source| fetch_error(source, None))?
         .to_vec())
 }
 
@@ -231,4 +227,36 @@ pub(super) fn github_api_base() -> String {
         return value.trim_end_matches('/').to_owned();
     }
     GITHUB_API_BASE.to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::StatusCode;
+    use axum::routing::get;
+
+    #[test]
+    fn non_success_download_keeps_the_redacted_bounded_body() {
+        let router = axum::Router::new().route(
+            "/manifest.json",
+            get(|| async {
+                (
+                    StatusCode::FORBIDDEN,
+                    format!(
+                        "denied sk-stackupdater0123456789 {}",
+                        "z".repeat(2 * crate::redaction::HTTP_ERROR_BODY_MAX_BYTES)
+                    ),
+                )
+            }),
+        );
+        let server = crate::http_client::test_server::spawn(router);
+        let error = download_bytes(&server.url("/manifest.json")).expect_err("403 must fail");
+        let StackError::GithubReleaseFetch { body, .. } = &error else {
+            panic!("unexpected error: {error}");
+        };
+        let body = body.as_deref().expect("body kept");
+        assert!(body.starts_with("denied [redacted]"), "{body}");
+        assert!(body.contains("[truncated"), "{body}");
+        assert!(error.to_string().contains("403"), "{error}");
+    }
 }

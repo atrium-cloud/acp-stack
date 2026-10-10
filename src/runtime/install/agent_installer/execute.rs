@@ -156,18 +156,12 @@ pub fn install_resolved_capture(
                     progress,
                 )
             });
-            let harness_chain = harness_thread.join().unwrap_or_else(|_| FallbackChain {
-                rows: vec![InstallerRowDraft::config_error(STEP_HARNESS)],
-                terminal_error: Some(StackError::AgentInitializeFailed {
-                    reason: "harness installer thread panicked".to_owned(),
-                }),
-            });
-            let adapter_chain = adapter_thread.join().unwrap_or_else(|_| FallbackChain {
-                rows: vec![InstallerRowDraft::config_error(STEP_ADAPTER)],
-                terminal_error: Some(StackError::AgentInitializeFailed {
-                    reason: "adapter installer thread panicked".to_owned(),
-                }),
-            });
+            let harness_chain = harness_thread
+                .join()
+                .unwrap_or_else(|payload| panicked_chain(&entry.id, STEP_HARNESS, payload));
+            let adapter_chain = adapter_thread
+                .join()
+                .unwrap_or_else(|payload| panicked_chain(&entry.id, STEP_ADAPTER, payload));
             (harness_chain, adapter_chain)
         });
         rows.extend(harness_chain.rows);
@@ -233,6 +227,27 @@ pub fn install_resolved_capture(
     final_verification(agent, entry, host, dest_dir, rows)
 }
 
+/// The chain a panicked installer thread leaves. The payload is logged and kept out of the error,
+/// whose reason reaches the API.
+fn panicked_chain(
+    agent_id: &str,
+    step_label: &'static str,
+    payload: Box<dyn std::any::Any + Send>,
+) -> FallbackChain {
+    tracing::error!(
+        agent_id,
+        step = step_label,
+        panic = %crate::runtime::init_runner::panic_payload_message(payload.as_ref()),
+        "installer thread panicked; the step is recorded as failed",
+    );
+    FallbackChain {
+        rows: vec![InstallerRowDraft::config_error(step_label)],
+        terminal_error: Some(StackError::AgentInitializeFailed {
+            reason: format!("{step_label} installer thread panicked"),
+        }),
+    }
+}
+
 struct KeptHarness {
     row: InstallerRowDraft,
     outcome: Result<InstalledArtifact>,
@@ -275,7 +290,7 @@ fn keep_existing_harness(
         }
         Err(err) => {
             row.status = "failed".to_owned();
-            row.stderr = err.to_string();
+            row.stderr = crate::error::persisted_report(err);
         }
     }
     KeptHarness { row, outcome }

@@ -26,6 +26,11 @@ mod workspace_source;
 
 pub use self::agent_runtime::{AcpErrorDetail, AgentRequestContext};
 
+// CONSTANTS
+
+/// Cap on an error report kept in a persisted row or event payload.
+pub const PERSISTED_ERROR_MAX_BYTES: usize = 2048;
+
 use self::agent_install::stack_update_rollback_suffix;
 use self::workspace::workspace_command_failed_message;
 
@@ -77,6 +82,12 @@ pub enum StackError {
 
     #[error("native Agent config import failed ({code})")]
     NativeAgentConfig { code: &'static str },
+
+    /// `detail` is internal context for the daemon log and CLI output, kept out of the public
+    /// message: a parse error's category and location, or the cause a bare code would drop. It
+    /// never carries native config values.
+    #[error("native Agent config import failed ({code}): {detail}")]
+    NativeAgentConfigDetailed { code: &'static str, detail: String },
 
     #[error("native Agent config import failed ({code})")]
     NativeAgentConfigOperationFailed { code: String },
@@ -412,8 +423,13 @@ pub enum StackError {
     #[error("download URL `{url}` is not allowed (only https:// is permitted)")]
     SafeDownloadInsecureRedirect { url: String },
 
-    #[error("download from {url} failed with HTTP status {status}")]
-    SafeDownloadHttpStatus { url: String, status: u16 },
+    /// `body` is the redacted, bounded response body.
+    #[error("download from {url} failed with HTTP status {status}: {body}")]
+    SafeDownloadHttpStatus {
+        url: String,
+        status: u16,
+        body: String,
+    },
 
     #[error("download from {url} failed: {reason}")]
     SafeDownloadFailed { url: String, reason: String },
@@ -626,18 +642,22 @@ pub enum StackError {
         retry_after_secs: u64,
     },
 
-    #[error("failed to query GitHub Releases for {repo}: {source}")]
+    /// `body` is the redacted, bounded body of a non-2xx response; it precedes `source` so
+    /// [`report`] still recognizes the trailing source.
+    #[error("failed to query GitHub Releases for {repo}{}: {source}", response_body_note(.body))]
     GithubReleaseFetch {
         repo: String,
         #[source]
         source: reqwest::Error,
+        body: Option<String>,
     },
 
-    #[error("failed to query npm registry for `{package}`: {source}")]
+    #[error("failed to query npm registry for `{package}`{}: {source}", response_body_note(.body))]
     NpmRegistryFetch {
         package: String,
         #[source]
         source: reqwest::Error,
+        body: Option<String>,
     },
 
     #[error("npm registry returned an empty version for `{package}`")]
@@ -821,6 +841,13 @@ pub enum StackError {
     #[error("prompt body is not valid ACP content: {0}")]
     PromptBodyInvalid(String),
 
+    #[error("session cwd is invalid: {reason}")]
+    SessionCwdInvalid {
+        reason: &'static str,
+        #[source]
+        source: Option<std::io::Error>,
+    },
+
     #[error("model `{model}` does not support prompt input modality `{modality}`")]
     PromptUnsupportedModality { model: String, modality: String },
 
@@ -841,7 +868,11 @@ pub enum StackError {
     WorkspaceTooLarge { limit: u64 },
 
     #[error("workspace upload is invalid: {reason}")]
-    WorkspaceUploadInvalid { reason: &'static str },
+    WorkspaceUploadInvalid {
+        reason: &'static str,
+        #[source]
+        source: Option<axum::extract::multipart::MultipartError>,
+    },
 
     #[error("permission denied for workspace path `{requested}`: {source}")]
     WorkspacePermissionDenied {
@@ -981,6 +1012,12 @@ pub enum StackError {
     #[error("Origin `{origin}` is not in the configured allowlist")]
     OriginNotAllowed { origin: String },
 
+    #[error("request body exceeds the configured size limit")]
+    RequestTooLarge {
+        #[source]
+        source: axum::extract::multipart::MultipartError,
+    },
+
     // === config import shape ===
     #[error("config import exceeds {limit}-byte size limit ({actual} bytes)")]
     ImportTooLarge { limit: usize, actual: usize },
@@ -1051,6 +1088,12 @@ pub enum StackError {
 
 pub type Result<T> = std::result::Result<T, StackError>;
 
+fn response_body_note(body: &Option<String>) -> String {
+    body.as_deref()
+        .map(|body| format!(" (response body: {body})"))
+        .unwrap_or_default()
+}
+
 /// `error`'s Display text followed by each `source()` in its chain, joined by `: `. A source the
 /// report already ends with is skipped, since many variants end in `: {source}`; a source that
 /// merely appears elsewhere is kept, as repeating a cause beats dropping one.
@@ -1066,6 +1109,28 @@ pub fn report(error: &(dyn std::error::Error + 'static)) -> String {
         source = cause.source();
     }
     text
+}
+
+/// A failed native config lock task, with the panic or cancellation kept in the report.
+pub fn native_config_lock_task_failed(error: &tokio::task::JoinError) -> StackError {
+    StackError::NativeAgentConfigDetailed {
+        code: if error.is_panic() {
+            "agent.native_config_lock_task_panicked"
+        } else {
+            "agent.native_config_lock_task_cancelled"
+        },
+        detail: report(error),
+    }
+}
+
+/// [`report`] as kept in a persisted row or event payload: redacted, then cut at
+/// [`PERSISTED_ERROR_MAX_BYTES`]. Rows and events outlive the daemon log and reach API readers.
+pub fn persisted_report(error: &(dyn std::error::Error + 'static)) -> String {
+    crate::redaction::bounded(
+        &crate::redaction::redact_text(&report(error)),
+        PERSISTED_ERROR_MAX_BYTES,
+    )
+    .into_owned()
 }
 
 #[cfg(test)]

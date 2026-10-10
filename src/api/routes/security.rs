@@ -111,9 +111,17 @@ pub(crate) async fn security_check_handler(
     );
     let process_euid = ownership::process_euid();
     let runtime_user_name = state.config.workspace.runtime_user.as_str();
-    let runtime_user_uid = ownership::resolve_runtime_user_uid(runtime_user_name)
-        .ok()
-        .flatten();
+    let runtime_user_uid = match ownership::resolve_runtime_user_uid(runtime_user_name) {
+        Ok(uid) => uid,
+        Err(error) => {
+            tracing::warn!(
+                error = %crate::error::report(&error),
+                runtime_user = runtime_user_name,
+                "runtime user lookup failed; reporting the user as unresolved"
+            );
+            None
+        }
+    };
     let workspace_writable = ownership::workspace_writable(Path::new(&state.config.workspace.root));
     let railway_platform = railway_platform_detected();
     let inputs_snapshot = redacted_inputs_snapshot(
@@ -355,8 +363,17 @@ fn recent_cloudflare_origin_counts(
     })?;
     let mut counts = RecentOriginCounts::default();
     for event in events {
-        let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json) else {
-            continue;
+        let payload = match serde_json::from_str::<serde_json::Value>(&event.payload_json) {
+            Ok(payload) => payload,
+            Err(error) => {
+                tracing::warn!(
+                    error = %crate::error::report(&error),
+                    event_id = %event.id,
+                    kind = %event.kind,
+                    "event payload is not valid JSON; leaving it out of the origin counts"
+                );
+                continue;
+            }
         };
         let Some(origin_kind) = payload_origin_kind(&payload) else {
             continue;

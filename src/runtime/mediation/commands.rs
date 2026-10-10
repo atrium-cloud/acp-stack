@@ -23,6 +23,8 @@ use crate::state::{CommandRecord, NewCommandRecord, StateStore};
 use self::policy::{PolicyDecision, evaluate_policy, resolve_cwd_under_workspace};
 use self::supervisor::SupervisorTask;
 
+// CONSTANTS
+
 /// Decision reasons recorded when command teardown settles a still-pending
 /// permission row; only `PERMISSION_REASON_WAITER_LOST` names a real anomaly.
 pub(crate) const PERMISSION_REASON_COMMAND_CANCELED: &str = "command-cancelled";
@@ -240,7 +242,17 @@ impl CommandGateway {
             review_flagged,
             permission_rx: pending_permission,
         };
-        tokio::spawn(task.run());
+        let supervisor = tokio::spawn(task.run());
+        let command_id = record.id.clone();
+        tokio::spawn(async move {
+            if let Err(error) = supervisor.await {
+                tracing::error!(
+                    error = %crate::error::report(&error),
+                    command_id = %command_id,
+                    "command supervisor task panicked; the row stays running until the startup sweep fails it",
+                );
+            }
+        });
 
         Ok(record)
     }
@@ -275,7 +287,7 @@ impl CommandGateway {
                 .await
         {
             tracing::warn!(
-                error = %error,
+                error = %crate::error::report(&error),
                 command_id = %id,
                 permission_id = %perm_id,
                 "failed to cancel pending permission alongside command cancel",
@@ -289,7 +301,7 @@ impl CommandGateway {
             Some(tx) => {
                 if let Err(error) = tx.send(true) {
                     tracing::warn!(
-                        error = %error,
+                        error = %crate::error::report(&error),
                         command_id = %id,
                         "command cancel signal could not be delivered",
                     );

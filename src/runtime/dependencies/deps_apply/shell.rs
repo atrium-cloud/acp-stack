@@ -90,9 +90,17 @@ pub(crate) fn reap_with_grace(
     child: &mut std::process::Child,
     grace: Duration,
 ) -> Option<std::process::ExitStatus> {
-    wait_with_timeout(child, Instant::now() + grace)
-        .ok()
-        .flatten()
+    match wait_with_timeout(child, Instant::now() + grace) {
+        Ok(status) => status,
+        Err(error) => {
+            tracing::warn!(
+                error = %crate::error::report(&error),
+                pid = child.id(),
+                "deps apply: reaping the killed process group failed; treating it as still alive",
+            );
+            None
+        }
+    }
 }
 
 pub(crate) fn cap_stream(value: &str) -> String {

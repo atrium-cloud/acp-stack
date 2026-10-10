@@ -1,5 +1,6 @@
 //! Process-control helpers for the command supervisor: SIGTERM to the child's
-//! process group, and SIGKILL by captured pid after the child has been reaped.
+//! process group, SIGKILL by captured pid after the child has been reaped, and
+//! the signal name a reaped child died on.
 
 use tokio::sync::oneshot;
 
@@ -18,8 +19,14 @@ pub(crate) fn send_terminate(child: &tokio::process::Child) {
 }
 
 #[cfg(not(unix))]
-pub(crate) fn send_terminate(child: &tokio::process::Child) {
-    let _ = child.start_kill();
+pub(crate) fn send_terminate(child: &mut tokio::process::Child) {
+    if let Err(error) = child.start_kill() {
+        tracing::warn!(
+            error = %crate::error::report(&error),
+            pid = child.id(),
+            "command terminate failed; the timeout kill follows",
+        );
+    }
 }
 
 /// SIGKILL the process group for a pid captured before `child.wait()`, which
@@ -36,6 +43,34 @@ pub(crate) fn kill_process_group_pid(pid: i32) {
 
 #[cfg(not(unix))]
 pub(crate) fn kill_process_group_pid(_pid: i32) {}
+
+/// Name of the signal that ended a reaped process, or `None` when it exited with a code.
+#[cfg(unix)]
+pub(crate) fn exit_signal(status: &std::process::ExitStatus) -> Option<String> {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal().map(signal_name)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn exit_signal(_status: &std::process::ExitStatus) -> Option<String> {
+    None
+}
+
+#[cfg(unix)]
+fn signal_name(signal: i32) -> String {
+    match signal {
+        libc::SIGHUP => "SIGHUP".to_owned(),
+        libc::SIGINT => "SIGINT".to_owned(),
+        libc::SIGQUIT => "SIGQUIT".to_owned(),
+        libc::SIGABRT => "SIGABRT".to_owned(),
+        libc::SIGKILL => "SIGKILL".to_owned(),
+        libc::SIGSEGV => "SIGSEGV".to_owned(),
+        libc::SIGPIPE => "SIGPIPE".to_owned(),
+        libc::SIGALRM => "SIGALRM".to_owned(),
+        libc::SIGTERM => "SIGTERM".to_owned(),
+        other => format!("SIG{other}"),
+    }
+}
 
 // Reserved for callers that want to bridge into the gateway via an oneshot.
 #[allow(dead_code)]

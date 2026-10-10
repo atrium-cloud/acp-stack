@@ -183,7 +183,15 @@ pub fn capture_native_config_snapshots(
                 Some(content) => {
                     let root = match serde_json::from_slice::<JsonValue>(&content) {
                         Ok(JsonValue::Object(root)) => root,
-                        _ => return Err(native_error("agent.native_config_claude_state_invalid")),
+                        Ok(_) => {
+                            return Err(native_error("agent.native_config_claude_state_invalid"));
+                        }
+                        Err(error) => {
+                            return Err(json_parse_error(
+                                "agent.native_config_claude_state_invalid",
+                                &error,
+                            ));
+                        }
                     };
                     let value = match root.get("hasCompletedOnboarding") {
                         Some(JsonValue::Bool(value)) => Some(*value),
@@ -241,7 +249,13 @@ pub fn restore_native_config_snapshots(
                         })?;
                 let mut root = match serde_json::from_slice::<JsonValue>(&content) {
                     Ok(JsonValue::Object(root)) => root,
-                    _ => return Err(native_error("agent.native_config_claude_state_invalid")),
+                    Ok(_) => return Err(native_error("agent.native_config_claude_state_invalid")),
+                    Err(error) => {
+                        return Err(json_parse_error(
+                            "agent.native_config_claude_state_invalid",
+                            &error,
+                        ));
+                    }
                 };
                 match value {
                     Some(value) => {
@@ -311,7 +325,13 @@ fn native_config_file_digest(path: &Path, files: NativeConfigFiles<'_>) -> Resul
     }
     let root = match serde_json::from_slice::<JsonValue>(&content) {
         Ok(JsonValue::Object(root)) => root,
-        _ => return Err(native_error("agent.native_config_claude_state_invalid")),
+        Ok(_) => return Err(native_error("agent.native_config_claude_state_invalid")),
+        Err(error) => {
+            return Err(json_parse_error(
+                "agent.native_config_claude_state_invalid",
+                &error,
+            ));
+        }
     };
     let owned_value = match root.get("hasCompletedOnboarding") {
         Some(JsonValue::Bool(true)) => b"true".as_slice(),

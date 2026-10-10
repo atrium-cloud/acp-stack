@@ -108,7 +108,10 @@ pub(crate) async fn config_import_handler(
                 "config imported via /v1/config/import",
                 &payload_text,
             ) {
-                tracing::warn!(error = %err, "failed to record server.config_imported audit event");
+                tracing::warn!(
+                    error = %crate::error::report(&err),
+                    "failed to record server.config_imported audit event"
+                );
             }
         }
         Err(err) => {

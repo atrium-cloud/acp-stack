@@ -563,7 +563,7 @@ async fn models_degrades_to_empty_for_hermes_on_catalog_outage() {
 }
 
 #[tokio::test]
-async fn models_serves_stale_cache_without_catalog_error() {
+async fn models_serves_stale_cache_with_the_refresh_catalog_error() {
     let tempdir = TempDir::new().expect("tempdir");
     let home = tempdir.path().join("home");
     seed_provider_credential(&home, "openrouter", &["OPENROUTER_API_KEY"]);
@@ -605,9 +605,12 @@ async fn models_serves_stale_cache_without_catalog_error() {
     assert_eq!(status, StatusCode::OK, "body: {body_text}");
     let body: Value = serde_json::from_str(&body_text).expect("models json");
     assert_eq!(body["data"]["source"], "provider_catalog");
+    let catalog_error = body["data"]["catalog_error"]
+        .as_str()
+        .expect("a failed refresh reports catalog_error alongside the cached models");
     assert!(
-        body["data"].get("catalog_error").is_none(),
-        "stale cache must serve without catalog_error: {body}"
+        !catalog_error.is_empty() && catalog_error.len() <= 1024 + 64,
+        "catalog_error should describe the failure within its cap: {catalog_error}"
     );
     let models = body["data"]["models"].as_array().expect("models array");
     assert!(

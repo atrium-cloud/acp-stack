@@ -20,13 +20,13 @@ use tokio::time::Instant;
 
 use crate::events::EventHub;
 use crate::runtime::mediation::commands::exec::{
-    GraceKillOutcome, kill_with_grace, sandboxed_program, spawn_child,
+    GRACE_ESCALATION_SIGNAL, GraceKillOutcome, kill_with_grace, sandboxed_program, spawn_child,
 };
 use crate::runtime::mediation::commands::output::{
     OutputChunk, POST_WAIT_DRAIN_BUDGET, read_stream,
 };
 use crate::runtime::mediation::commands::policy::resolve_cwd_under_workspace;
-use crate::runtime::mediation::commands::process::kill_process_group_pid;
+use crate::runtime::mediation::commands::process::{exit_signal, kill_process_group_pid};
 use crate::runtime::sandbox::WorkloadCgroup;
 use crate::state::{
     CommandOrigin, CommandStatus, EVENT_KIND_TERMINAL_FINISHED, EVENT_SOURCE_ACP,
@@ -62,6 +62,16 @@ pub(crate) const TERMINAL_FINISHED_OUTPUT_TAIL_BYTES: u64 = 8 * 1024;
 /// `message` column of the session-scoped finalize event; the payload's
 /// `status` carries the verdict.
 const TERMINAL_FINISHED_MESSAGE: &str = "terminal finished";
+
+/// `commands.{id}` event for a terminal whose sandbox wrapper or spawn failed, matching the
+/// gateway's kind for the same failure.
+const TERMINAL_SPAWN_FAILED_EVENT_KIND: &str = "command.spawn_failed";
+
+/// `commands.{id}` event for a terminal that spawned but could not be started or registered.
+const TERMINAL_FAILED_EVENT_KIND: &str = "command.failed";
+
+const TERMINAL_REGISTRY_CLOSED_REASON: &str =
+    "agent bridge is shutting down; terminal registry closed";
 
 /// Rolling output buffer for one terminal; `truncated` latches once any byte
 /// has been dropped.
@@ -162,6 +172,8 @@ struct TerminalFinished<'a> {
     status: CommandStatus,
     exit_status: Option<i32>,
     signal: Option<&'a str>,
+    /// Redacted, bounded spawn or wait error, for a terminal that failed without an exit status.
+    reason: Option<&'a str>,
     duration_ms: Option<i64>,
     output_tail: &'a str,
     output_tail_truncated: bool,
@@ -308,12 +320,17 @@ async fn own_terminal(
     // Distinguishes owner-caused exits (recorded `cancelled`) from natural
     // signal deaths like OOM kill or segfault (recorded `failed`).
     let mut canceled = false;
+    let mut failure_reason = None;
+    let command_id = persistence
+        .as_ref()
+        .map(|persistence| persistence.command_id.as_str());
     let status = loop {
         tokio::select! {
             wait_result = child.wait() => break match wait_result {
                 Ok(status) => exit_status_of(status),
                 Err(error) => {
-                    tracing::warn!(error = %error, "terminal child wait failed");
+                    tracing::warn!(error = %crate::error::report(&error), command_id, "terminal child wait failed; recording the terminal as failed");
+                    failure_reason = Some(crate::error::persisted_report(&error));
                     TerminalExitStatus::new()
                 }
             },
@@ -326,12 +343,13 @@ async fn own_terminal(
                     // A wait error after SIGTERM is an anomaly, not a clean
                     // cancellation.
                     GraceKillOutcome::ExitedWithinGrace(Err(error)) => {
-                        tracing::warn!(error = %error, "terminal child wait failed after SIGTERM");
+                        tracing::warn!(error = %crate::error::report(&error), command_id, "terminal child wait failed after SIGTERM; recording the terminal as failed");
+                        failure_reason = Some(crate::error::persisted_report(&error));
                         TerminalExitStatus::new().signal("SIGTERM".to_owned())
                     }
                     GraceKillOutcome::KilledAfterGrace => {
                         canceled = true;
-                        TerminalExitStatus::new().signal("SIGKILL".to_owned())
+                        TerminalExitStatus::new().signal(GRACE_ESCALATION_SIGNAL.to_owned())
                     }
                 };
             }
@@ -386,7 +404,7 @@ async fn own_terminal(
     if drained_within_budget {
         for handle in reader_handles {
             if let Err(error) = handle.await {
-                tracing::warn!(error = %error, "terminal output reader task did not exit cleanly");
+                tracing::warn!(error = %crate::error::report(&error), "terminal output reader task did not exit cleanly");
             }
         }
     } else {
@@ -425,12 +443,15 @@ async fn own_terminal(
         match finish_result {
             Ok(()) => {
                 publish_lifecycle_event(
-                    persistence,
+                    &persistence.command_log,
+                    &persistence.command_id,
                     event_kind,
                     serde_json::json!({
                         "command_id": persistence.command_id,
                         "status": command_status.as_str(),
                         "exit_status": exit_code,
+                        "signal": status.signal,
+                        "reason": failure_reason,
                         "duration_ms": duration_ms,
                     }),
                 )
@@ -451,6 +472,7 @@ async fn own_terminal(
                         status: command_status,
                         exit_status: exit_code,
                         signal: status.signal.as_deref(),
+                        reason: failure_reason.as_deref(),
                         duration_ms,
                         output_tail: &output_tail,
                         output_tail_truncated,
@@ -460,7 +482,7 @@ async fn own_terminal(
             }
             Err(error) => {
                 tracing::warn!(
-                    error = %error,
+                    error = %crate::error::report(&error),
                     command_id = %persistence.command_id,
                     "failed to finalize terminal command row",
                 );
@@ -508,7 +530,7 @@ async fn append_chunk(
             }
             Err(error) => {
                 tracing::warn!(
-                    error = %error,
+                    error = %crate::error::report(&error),
                     command_id = %persistence.command_id,
                     "failed to persist terminal output chunk to command log",
                 );
@@ -533,6 +555,7 @@ async fn publish_terminal_finished_event(
         "status": finished.status.as_str(),
         "exit_status": finished.exit_status,
         "signal": finished.signal,
+        "reason": finished.reason,
         "duration_ms": finished.duration_ms,
         "output_tail": finished.output_tail,
         "output_tail_truncated": finished.output_tail_truncated,
@@ -552,7 +575,7 @@ async fn publish_terminal_finished_event(
         &payload,
     ) {
         tracing::warn!(
-            error = %error,
+            error = %crate::error::report(&error),
             command_id = %finished.command_id,
             terminal_id = %finished.terminal_id,
             session_id = %session_id,
@@ -563,27 +586,27 @@ async fn publish_terminal_finished_event(
 
 /// Persist and publish a terminal lifecycle transition on `commands.{id}`.
 async fn publish_lifecycle_event(
-    persistence: &TerminalPersistence,
+    command_log: &TerminalCommandLog,
+    command_id: &str,
     kind: &'static str,
     data: serde_json::Value,
 ) {
     let payload_text = data.to_string();
     let event_result = {
-        let store = persistence.command_log.state.lock().await;
+        let store = command_log.state.lock().await;
         store.append_event_with_source("info", kind, EVENT_SOURCE_COMMAND, "", &payload_text)
     };
     match event_result {
         Ok(event) => {
-            persistence.command_log.event_hub.publish_command_event(
-                &persistence.command_id,
-                &event,
-                data,
-            );
+            command_log
+                .event_hub
+                .publish_command_event(command_id, &event, data);
         }
         Err(error) => {
             tracing::warn!(
-                error = %error,
-                command_id = %persistence.command_id,
+                error = %crate::error::report(&error),
+                command_id = %command_id,
+                event_kind = kind,
                 "failed to persist terminal lifecycle event",
             );
         }
@@ -655,15 +678,6 @@ pub(crate) async fn handle_create_terminal(
     let env = terminal_environment(&context.home, &context.sandbox, &request.env);
     let (requested_program, requested_args) =
         terminal_invocation(&context.shell, &request.command, &request.args);
-    let (program, args) = sandboxed_program(
-        &requested_program,
-        &requested_args,
-        &context.sandbox,
-        context.network_provider.as_ref(),
-        &context.workspace_root,
-        &context.home,
-    )
-    .map_err(AcpError::into_internal_error)?;
 
     // Minted before the row is inserted so the command carries its terminal id
     // from the start, and a terminal that exits before `register` returns can
@@ -671,8 +685,8 @@ pub(crate) async fn handle_create_terminal(
     let terminal_id = context.registry.mint_terminal_id();
     let cwd_display = resolved_cwd.display_path();
 
-    // Insert the durable row before spawning so even a failed spawn leaves an
-    // audit trail.
+    // Insert the durable row before resolving the sandbox wrapper and spawning,
+    // so a terminal that never starts still leaves an audit trail with its reason.
     let command_id = match &context.command_log {
         Some(command_log) => {
             let rendered = render_command_line(&request.command, &request.args);
@@ -693,7 +707,9 @@ pub(crate) async fn handle_create_terminal(
         None => None,
     };
 
-    let mark_failed = async |reason: &str| {
+    // `reason` is already redacted and bounded; it lands on the `commands.{id}`
+    // event and on the session-scoped finalize event.
+    let mark_failed = async |kind: &'static str, reason: &str| {
         if let (Some(command_log), Some(command_id)) = (&context.command_log, &command_id) {
             let finish_result = {
                 let store = command_log.state.lock().await;
@@ -701,12 +717,28 @@ pub(crate) async fn handle_create_terminal(
             };
             if let Err(finish_error) = finish_result {
                 tracing::warn!(
-                    error = %finish_error,
+                    error = %crate::error::report(&finish_error),
                     command_id = %command_id,
-                    "failed to record terminal {reason}",
+                    terminal_failure = %reason,
+                    event_kind = kind,
+                    "failed to record a terminal that never started",
                 );
                 return;
             }
+            publish_lifecycle_event(
+                command_log,
+                command_id,
+                kind,
+                serde_json::json!({
+                    "command_id": command_id,
+                    "status": CommandStatus::Failed.as_str(),
+                    "exit_status": null,
+                    "signal": null,
+                    "reason": reason,
+                    "duration_ms": null,
+                }),
+            )
+            .await;
             // A terminal that never ran still belongs on the transcript, or the
             // tool call the agent already announced never resolves there.
             publish_terminal_finished_event(
@@ -719,12 +751,32 @@ pub(crate) async fn handle_create_terminal(
                     status: CommandStatus::Failed,
                     exit_status: None,
                     signal: None,
+                    reason: Some(reason),
                     duration_ms: None,
                     output_tail: "",
                     output_tail_truncated: false,
                 },
             )
             .await;
+        }
+    };
+
+    let (program, args) = match sandboxed_program(
+        &requested_program,
+        &requested_args,
+        &context.sandbox,
+        context.network_provider.as_ref(),
+        &context.workspace_root,
+        &context.home,
+    ) {
+        Ok(wrapped) => wrapped,
+        Err(error) => {
+            mark_failed(
+                TERMINAL_SPAWN_FAILED_EVENT_KIND,
+                &crate::error::persisted_report(&error),
+            )
+            .await;
+            return Err(AcpError::into_internal_error(error));
         }
     };
 
@@ -739,7 +791,11 @@ pub(crate) async fn handle_create_terminal(
     let (child, cgroup) = match spawn_result {
         Ok(spawned) => spawned,
         Err(error) => {
-            mark_failed("spawn failure").await;
+            mark_failed(
+                TERMINAL_SPAWN_FAILED_EVENT_KIND,
+                &crate::error::persisted_report(&error),
+            )
+            .await;
             return Err(AcpError::into_internal_error(error));
         }
     };
@@ -753,7 +809,11 @@ pub(crate) async fn handle_create_terminal(
             if let Err(error) = start_result {
                 // Finalize the pending row before surfacing the error, or it
                 // stays `pending` forever.
-                mark_failed("start failure").await;
+                mark_failed(
+                    TERMINAL_FAILED_EVENT_KIND,
+                    &crate::error::persisted_report(&error),
+                )
+                .await;
                 return Err(AcpError::into_internal_error(error));
             }
             Some(TerminalPersistence {
@@ -780,9 +840,9 @@ pub(crate) async fn handle_create_terminal(
         )
         .await;
     if !registered {
-        mark_failed("create during bridge shutdown").await;
+        mark_failed(TERMINAL_FAILED_EVENT_KIND, TERMINAL_REGISTRY_CLOSED_REASON).await;
         return Err(AcpError::internal_error().data(serde_json::json!({
-            "reason": "agent bridge is shutting down; terminal registry closed",
+            "reason": TERMINAL_REGISTRY_CLOSED_REASON,
         })));
     }
     Ok(CreateTerminalResponse::new(TerminalId::new(terminal_id)))
@@ -959,30 +1019,10 @@ fn exit_status_of(status: std::process::ExitStatus) -> TerminalExitStatus {
     if let Some(code) = status.code() {
         result = result.exit_code(u32::try_from(code).ok());
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt;
-        if let Some(signal) = status.signal() {
-            result = result.signal(signal_name(signal));
-        }
+    if let Some(signal) = exit_signal(&status) {
+        result = result.signal(signal);
     }
     result
-}
-
-#[cfg(unix)]
-fn signal_name(signal: i32) -> String {
-    match signal {
-        libc::SIGHUP => "SIGHUP".to_owned(),
-        libc::SIGINT => "SIGINT".to_owned(),
-        libc::SIGQUIT => "SIGQUIT".to_owned(),
-        libc::SIGABRT => "SIGABRT".to_owned(),
-        libc::SIGKILL => "SIGKILL".to_owned(),
-        libc::SIGSEGV => "SIGSEGV".to_owned(),
-        libc::SIGPIPE => "SIGPIPE".to_owned(),
-        libc::SIGALRM => "SIGALRM".to_owned(),
-        libc::SIGTERM => "SIGTERM".to_owned(),
-        other => format!("SIG{other}"),
-    }
 }
 
 #[cfg(test)]

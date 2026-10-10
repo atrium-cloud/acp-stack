@@ -236,14 +236,22 @@ pub(super) fn apply_for_init(
             record.updated_at = chrono::Utc::now();
             record.phase = NativeConfigOperationPhase::RollingBack;
             persist_native_config_operation(state_path, config_path, workload_home, record)?;
-            if restore_native_config_snapshots(&record.rollback_snapshots, files).is_err() {
+            if let Err(restore_error) =
+                restore_native_config_snapshots(&record.rollback_snapshots, files)
+            {
                 record.operation.error = Some(NativeConfigOperationError {
                     code: "agent.native_config_rollback_failed".to_owned(),
                 });
                 record.updated_at = chrono::Utc::now();
                 persist_native_config_operation(state_path, config_path, workload_home, record)?;
-                return Err(StackError::NativeAgentConfig {
+                return Err(StackError::NativeAgentConfigDetailed {
                     code: "agent.native_config_rollback_failed",
+                    detail: format!(
+                        "operation {}: rollback: {}; apply: {}",
+                        record.operation.operation_id,
+                        crate::error::report(&restore_error),
+                        crate::error::report(&error)
+                    ),
                 });
             }
             reset_for_retry(record);

@@ -17,6 +17,9 @@ pub const READER_JOIN_GRACE: Duration = Duration::from_secs(2);
 /// Upper bound for any install timeout, since `run_captured`'s `Instant::now() + timeout` panics on overflow.
 pub const MAX_INSTALL_TIMEOUT_SECS: u64 = 86_400;
 
+/// Cap on a failed probe's stderr carried into its log line.
+pub const PROBE_STDERR_LOG_MAX_BYTES: usize = 1024;
+
 /// The runtime-owned, otherwise empty directory under the state directory that host-side probes,
 /// installs and updates run in.
 const HOST_EXEC_DIR_NAME: &str = "host-exec";
@@ -80,7 +83,7 @@ impl HostExec {
 
     /// [`HostExec::search_dirs`] joined for `Command::env("PATH", _)`.
     pub fn path_env(&self, extra_path_dirs: &[&Path]) -> Option<OsString> {
-        std::env::join_paths(self.search_dirs(extra_path_dirs)).ok()
+        join_path_env(self.search_dirs(extra_path_dirs))
     }
 
     /// An absolute path, or a bare name resolved on [`HostExec::search_dirs`], vetted by
@@ -194,7 +197,17 @@ pub fn managed_search_dirs(home: &Path, extra_path_dirs: &[&Path]) -> Vec<PathBu
 
 /// [`managed_search_dirs`] joined for `Command::env("PATH", _)`.
 pub fn managed_path_env(home: &Path, extra_path_dirs: &[&Path]) -> Option<OsString> {
-    std::env::join_paths(managed_search_dirs(home, extra_path_dirs)).ok()
+    join_path_env(managed_search_dirs(home, extra_path_dirs))
+}
+
+fn join_path_env(dirs: Vec<PathBuf>) -> Option<OsString> {
+    match std::env::join_paths(dirs) {
+        Ok(joined) => Some(joined),
+        Err(error) => {
+            tracing::warn!(error = %crate::error::report(&error), "managed PATH could not be joined; the child runs without PATH");
+            None
+        }
+    }
 }
 
 /// Resolve a bare command name against the daemon's PATH; slash-containing paths pass through.
@@ -351,18 +364,44 @@ pub(crate) fn resolved_python_interpreter_with_timeout(
     if let Some(home) = home {
         probe.env("HOME", home);
     }
-    let outcome = run_captured(&mut probe, timeout, PYTHON_PROBE_STREAM_CAP).ok()?;
+    let outcome = match run_captured(&mut probe, timeout, PYTHON_PROBE_STREAM_CAP) {
+        Ok(outcome) => outcome,
+        // No `python3` on PATH is an ordinary host state, not a failure.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            tracing::warn!(error = %crate::error::report(&error), "python3 probe spawn failed; npm_config_python stays unset");
+            return None;
+        }
+    };
     let stdout = match outcome {
         CaptureOutcome::Exited { status, stdout, .. } if status.success() => stdout,
-        CaptureOutcome::Exited { .. } => return None,
+        CaptureOutcome::Exited {
+            status,
+            stderr_tail,
+            ..
+        } => {
+            tracing::warn!(
+                %status,
+                stderr = %crate::redaction::bounded(stderr_tail.trim(), PROBE_STDERR_LOG_MAX_BYTES),
+                "python3 probe exited unsuccessfully; npm_config_python stays unset",
+            );
+            return None;
+        }
         CaptureOutcome::TimedOut { mut child, .. } => {
+            tracing::warn!(
+                timeout_secs = timeout.as_secs(),
+                "python3 probe timed out; npm_config_python stays unset"
+            );
             kill_process_group(&mut child);
             if let Err(error) = child.wait() {
                 tracing::debug!(%error, "timed-out python probe reap failed");
             }
             return None;
         }
-        CaptureOutcome::WaitFailed { mut child, .. } => {
+        CaptureOutcome::WaitFailed {
+            source, mut child, ..
+        } => {
+            tracing::warn!(error = %crate::error::report(&source), "python3 probe wait failed; npm_config_python stays unset");
             kill_process_group(&mut child);
             if let Err(error) = child.wait() {
                 tracing::debug!(%error, "unwaitable python probe reap failed");
@@ -392,7 +431,9 @@ pub fn kill_process_group(child: &mut std::process::Child) {
 
 #[cfg(not(unix))]
 pub fn kill_process_group(child: &mut std::process::Child) {
-    let _ = child.kill();
+    if let Err(error) = child.kill() {
+        tracing::warn!(error = %crate::error::report(&error), pid = child.id(), "child kill failed");
+    }
 }
 
 /// Tokio equivalent of [`kill_process_group`] for async children. Same
@@ -409,7 +450,9 @@ pub fn kill_tokio_process_group(child: &mut tokio::process::Child) {
 
 #[cfg(not(unix))]
 pub fn kill_tokio_process_group(child: &mut tokio::process::Child) {
-    let _ = child.start_kill();
+    if let Err(error) = child.start_kill() {
+        tracing::warn!(error = %crate::error::report(&error), pid = ?child.id(), "child kill failed");
+    }
 }
 
 /// Poll a synchronous child until it exits or `deadline` elapses; `Ok(None)`
@@ -454,15 +497,26 @@ pub fn read_to_cap<R: Read>(mut reader: R, cap_bytes: usize) -> String {
                     let remaining = cap_bytes.saturating_sub(buf.len());
                     buf.extend_from_slice(&chunk[..remaining]);
                     let mut sink = std::io::sink();
-                    let _ = std::io::copy(&mut reader, &mut sink);
+                    if let Err(error) = std::io::copy(&mut reader, &mut sink) {
+                        tracing::warn!(error = %crate::error::report(&error), "draining a child stream past its cap failed; the child may block on a full pipe");
+                    }
                     break;
                 }
                 buf.extend_from_slice(&chunk[..n]);
             }
-            Err(_) => break,
+            // A raw pipe `read` does not retry EINTR on its own.
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                log_truncated_read(&error);
+                break;
+            }
         }
     }
     String::from_utf8_lossy(&buf).into_owned()
+}
+
+fn log_truncated_read(error: &std::io::Error) {
+    tracing::warn!(error = %crate::error::report(error), "child stream read failed; the captured output is truncated");
 }
 
 /// Same cap as [`read_to_cap`], plus a rolling buffer of the LAST `tail_bytes`
@@ -496,7 +550,11 @@ pub fn read_to_cap_with_tail<R: Read>(
                     tail.push_back(*byte);
                 }
             }
-            Err(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                log_truncated_read(&error);
+                break;
+            }
         }
     }
     let prefix_string = String::from_utf8_lossy(&prefix).into_owned();
@@ -593,16 +651,28 @@ pub fn run_captured(
 }
 
 /// Poll-join a thread up to [`READER_JOIN_GRACE`], returning `None` if it did
-/// not finish in time.
+/// not finish in time or panicked.
 pub fn join_reader_bounded<T>(handle: JoinHandle<T>) -> Option<T> {
     let deadline = Instant::now() + READER_JOIN_GRACE;
     while !handle.is_finished() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }
-    if handle.is_finished() {
-        handle.join().ok()
-    } else {
-        None
+    if !handle.is_finished() {
+        tracing::warn!(
+            grace_secs = READER_JOIN_GRACE.as_secs(),
+            "child stream reader did not finish within its grace; the captured output is dropped"
+        );
+        return None;
+    }
+    match handle.join() {
+        Ok(value) => Some(value),
+        Err(payload) => {
+            tracing::error!(
+                panic = %crate::runtime::init_runner::panic_payload_message(payload.as_ref()),
+                "child stream reader panicked; the captured output is dropped",
+            );
+            None
+        }
     }
 }
 

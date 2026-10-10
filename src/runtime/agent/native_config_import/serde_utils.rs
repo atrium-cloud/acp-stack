@@ -2,10 +2,75 @@
 
 use super::*;
 
+// Native configs carry secrets and parser messages can quote the input, so these parse errors keep
+// only the format, the error category and the location.
+pub(super) fn json_parse_error(code: &'static str, error: &serde_json::Error) -> StackError {
+    let category = match error.classify() {
+        serde_json::error::Category::Io => "I/O",
+        serde_json::error::Category::Syntax => "syntax",
+        serde_json::error::Category::Data => "data",
+        serde_json::error::Category::Eof => "unexpected end of input",
+    };
+    StackError::NativeAgentConfigDetailed {
+        code,
+        detail: format!(
+            "JSON {category} error at line {}, column {}",
+            error.line(),
+            error.column()
+        ),
+    }
+}
+
+pub(super) fn toml_parse_error(
+    code: &'static str,
+    content: &str,
+    error: &toml::de::Error,
+) -> StackError {
+    let detail = match error.span() {
+        Some(span) => {
+            let (line, column) = line_and_column(content, span.start);
+            format!("TOML syntax error at line {line}, column {column}")
+        }
+        None => "TOML syntax error".to_owned(),
+    };
+    StackError::NativeAgentConfigDetailed { code, detail }
+}
+
+pub(super) fn yaml_parse_error(code: &'static str, error: &serde_norway::Error) -> StackError {
+    let detail = match error.location() {
+        Some(location) => format!(
+            "YAML syntax error at line {}, column {}",
+            location.line(),
+            location.column()
+        ),
+        None => "YAML syntax error".to_owned(),
+    };
+    StackError::NativeAgentConfigDetailed { code, detail }
+}
+
+/// One-based line and column (in chars) of a byte offset.
+pub(super) fn line_and_column(content: &str, offset: usize) -> (usize, usize) {
+    let mut line = 1;
+    let mut column = 1;
+    for (_, character) in content
+        .char_indices()
+        .take_while(|(index, _)| *index < offset)
+    {
+        if character == '\n' {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+    (line, column)
+}
+
 pub(super) fn parse_json_object(content: &str) -> Result<JsonMap<String, JsonValue>> {
     match serde_json::from_str::<JsonValue>(content) {
         Ok(JsonValue::Object(root)) => Ok(root),
-        _ => Err(native_error("agent.native_config_invalid")),
+        Ok(_) => Err(native_error("agent.native_config_invalid")),
+        Err(error) => Err(json_parse_error("agent.native_config_invalid", &error)),
     }
 }
 
@@ -18,15 +83,20 @@ pub(super) fn parse_jsonc_object(content: &str) -> Result<JsonMap<String, JsonVa
 pub(super) fn parse_toml_table(content: &str) -> Result<TomlMap<String, TomlValue>> {
     match toml::from_str::<TomlValue>(content) {
         Ok(TomlValue::Table(root)) => Ok(root),
-        _ => Err(native_error("agent.native_config_invalid")),
+        Ok(_) => Err(native_error("agent.native_config_invalid")),
+        Err(error) => Err(toml_parse_error(
+            "agent.native_config_invalid",
+            content,
+            &error,
+        )),
     }
 }
 
 /// Parse a YAML config root into a JSON object for the JSON-shaped classification
 /// pipeline; a non-string YAML mapping key is rejected as invalid.
 pub(super) fn parse_yaml_root(content: &str) -> Result<JsonMap<String, JsonValue>> {
-    let value: YamlValue =
-        serde_norway::from_str(content).map_err(|_| native_error("agent.native_config_invalid"))?;
+    let value: YamlValue = serde_norway::from_str(content)
+        .map_err(|error| yaml_parse_error("agent.native_config_invalid", &error))?;
     match yaml_value_to_json(value)? {
         JsonValue::Object(root) => Ok(root),
         _ => Err(native_error("agent.native_config_invalid")),

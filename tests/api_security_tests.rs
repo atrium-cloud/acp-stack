@@ -773,6 +773,31 @@ async fn allowed_http_origin_succeeds_with_cors_header() {
             .and_then(|value| value.to_str().ok()),
         Some("https://allowed.example")
     );
+    assert_eq!(
+        response
+            .headers()
+            .get("access-control-expose-headers")
+            .and_then(|value| value.to_str().ok()),
+        Some("x-request-id")
+    );
+
+    let preflight = reqwest::Client::new()
+        .request(
+            reqwest::Method::OPTIONS,
+            format!("{}/v1/status", harness.base_url),
+        )
+        .header("Origin", "https://allowed.example")
+        .header("Access-Control-Request-Method", "GET")
+        .header("Access-Control-Request-Headers", "x-request-id")
+        .send()
+        .await
+        .expect("preflight");
+    let allowed = preflight
+        .headers()
+        .get("access-control-allow-headers")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    assert!(allowed.contains("x-request-id"), "allow-headers: {allowed}");
 }
 
 #[tokio::test]

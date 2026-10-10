@@ -1303,6 +1303,40 @@ fn goose_invalid_yaml_and_non_string_keys_are_redacted_errors() {
 }
 
 #[test]
+fn parse_errors_keep_line_and_column_without_echoing_values() {
+    const SECRET: &str = "sk-live-should-not-leak-0123456789";
+    for (harness, filename, content, expected) in [
+        (
+            "opencode",
+            "opencode.json",
+            format!("{{\n  \"theme\": \"dark\",\n  \"apiKey\": \"{SECRET}\" \"x\"\n}}"),
+            "JSON syntax error at line 3, column",
+        ),
+        (
+            "codex",
+            "config.toml",
+            format!("model = \"gpt-5.5\"\napi_key = \"{SECRET}\" trailing\n"),
+            "TOML syntax error at line 2, column",
+        ),
+        (
+            "goose",
+            "config.yaml",
+            format!("GOOSE_MODEL: gpt-5.5\nGOOSE_API_KEY: [{SECRET}\n"),
+            "YAML syntax error at line",
+        ),
+    ] {
+        let error = inspect_native_config(harness, Some(filename), &content)
+            .err()
+            .expect("invalid config rejected");
+        let text = error.to_string();
+        assert_eq!(error.error_code(), "agent.native_config_invalid", "{text}");
+        assert!(text.contains(expected), "{harness}: {text}");
+        assert!(!text.contains(SECRET), "{harness}: {text}");
+        assert_eq!(error.public_message(), "native Agent config import failed");
+    }
+}
+
+#[test]
 fn opencode_accepts_jsonc_and_normalizes_to_json() {
     let inspected = inspect_native_config(
         "opencode",

@@ -280,13 +280,7 @@ impl AppState {
             acquire_agent_config_mutation_file_lock(&config_path)
         })
         .await
-        .map_err(|error| StackError::NativeAgentConfig {
-            code: if error.is_panic() {
-                "agent.native_config_lock_task_panicked"
-            } else {
-                "agent.native_config_lock_task_cancelled"
-            },
-        })??;
+        .map_err(|error| crate::error::native_config_lock_task_failed(&error))??;
         Ok(AgentConfigMutationGuard {
             _local: local,
             _process: process,
@@ -423,9 +417,7 @@ impl AppState {
         }
         // Resolved once here so every handler reading `config.agent.adapter` agrees.
         // Non-fatal: an agent unknown to the registry simply has no adapter metadata.
-        if let Ok(registry) = load_active_registry_for_home(&runtime_paths.home) {
-            populate_agent_adapter_from_registry(&mut config, &registry);
-        }
+        populate_agent_adapter_from_active_registry(&mut config, &runtime_paths.home);
         let api_cap = config.api.max_request_bytes;
         let security_cap = config.security.http.max_request_bytes;
         let cap = api_cap.min(security_cap);
@@ -510,10 +502,19 @@ pub(crate) fn load_active_registry_for_home(home: &Path) -> Result<RegistryCatal
 /// `AppState`.
 pub(crate) fn load_runtime_config_from_disk(config_path: &Path, home: &Path) -> Result<Config> {
     let mut config = crate::config::load_for_runtime_reload(config_path)?;
-    if let Ok(registry) = load_active_registry_for_home(home) {
-        populate_agent_adapter_from_registry(&mut config, &registry);
-    }
+    populate_agent_adapter_from_active_registry(&mut config, home);
     Ok(config)
+}
+
+fn populate_agent_adapter_from_active_registry(config: &mut Config, home: &Path) {
+    match load_active_registry_for_home(home) {
+        Ok(registry) => populate_agent_adapter_from_registry(config, &registry),
+        Err(error) => tracing::warn!(
+            error = %crate::error::report(&error),
+            path = %registry_override_path(home).display(),
+            "agent registry load failed; agents carry no adapter metadata"
+        ),
+    }
 }
 
 fn registry_override_path(home: &Path) -> PathBuf {
@@ -542,7 +543,11 @@ fn populate_agent_adapter(agent: &mut AgentConfig, registry: &RegistryCatalog) {
         match crate::runtime::install::agent_registry::effective_registry_entry(entry, agent) {
             Ok(entry) => entry,
             Err(error) => {
-                tracing::warn!(agent = %agent.id, %error, "skipping adapter metadata population");
+                tracing::warn!(
+                    agent = %agent.id,
+                    error = %crate::error::report(&error),
+                    "skipping adapter metadata population"
+                );
                 return;
             }
         };
@@ -561,6 +566,13 @@ fn populate_agent_adapter(agent: &mut AgentConfig, registry: &RegistryCatalog) {
                     "adapter.github",
                     github,
                 )
+                .inspect_err(|error| {
+                    tracing::warn!(
+                        agent = %agent.id,
+                        error = %crate::error::report(error),
+                        "registry adapter.github is invalid; omitting the adapter source URL"
+                    );
+                })
                 .ok()
             }),
         });

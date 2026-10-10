@@ -189,6 +189,25 @@ fn redact_then_bound_leaves_no_secret_prefix() {
 }
 
 #[test]
+fn error_body_redacts_then_bounds() {
+    assert_eq!(error_body("not found"), "not found");
+
+    let secret_body = r#"{"error":"bad key sk-errorbody0123456789"}"#;
+    let redacted = error_body(secret_body);
+    assert!(!redacted.contains("sk-errorbody"), "{redacted}");
+    assert!(redacted.contains(REDACTION_PLACEHOLDER), "{redacted}");
+
+    let long_body = "x".repeat(HTTP_ERROR_BODY_MAX_BYTES + 10);
+    assert_eq!(
+        error_body(&long_body),
+        format!(
+            "{} [truncated 10 bytes]",
+            "x".repeat(HTTP_ERROR_BODY_MAX_BYTES)
+        )
+    );
+}
+
+#[test]
 fn screen_subsets_of_the_prefix_table_are_pinned() {
     let config: Vec<&str> = CREDENTIAL_PREFIXES
         .iter()
@@ -276,4 +295,22 @@ fn redact_values_replaces_a_nesting_value_before_the_nested_one() {
     redact_values(&mut text, &secrets, false);
 
     assert_eq!(text, format!("token {REDACTION_PLACEHOLDER} leaked"));
+}
+
+#[test]
+fn serde_value_literals_are_replaced_and_names_kept() {
+    assert_eq!(
+        strip_serde_value_literals(
+            "invalid type: string \"a \\\"quoted\\\" secret\", expected u16 for key `api.port`"
+        ),
+        "invalid type: string [redacted], expected u16 for key `api.port`"
+    );
+    assert_eq!(
+        strip_serde_value_literals("unknown variant `hunter2`, expected `on` or `off`"),
+        "unknown variant `[redacted]`, expected `on` or `off`"
+    );
+    assert_eq!(
+        strip_serde_value_literals("missing field `listen`"),
+        "missing field `listen`"
+    );
 }

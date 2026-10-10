@@ -333,7 +333,7 @@ async fn probe_daemon_status_async(config: &Config) -> DaemonStatus {
     .await;
     let body = match result {
         Ok(Ok((_status, body))) => body,
-        Ok(Err(err)) => return DaemonStatus::Unavailable(err.public_message()),
+        Ok(Err(err)) => return DaemonStatus::Unavailable(crate::error::report(&err)),
         Err(_) => return DaemonStatus::Unavailable("request timed out".to_owned()),
     };
     let data = body.get("data").unwrap_or(&body);

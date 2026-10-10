@@ -71,7 +71,7 @@ pub fn download_to_file(url: &str, dest: &Path, opts: &DownloadOpts) -> Result<D
         .send()
         .map_err(|source| StackError::SafeDownloadFailed {
             url: url.to_owned(),
-            reason: source.to_string(),
+            reason: crate::error::report(&source),
         })?;
 
     let final_url = response.url().to_string();
@@ -87,6 +87,7 @@ pub fn download_to_file(url: &str, dest: &Path, opts: &DownloadOpts) -> Result<D
         return Err(StackError::SafeDownloadHttpStatus {
             url: final_url,
             status: status.as_u16(),
+            body: crate::http_client::blocking_error_response_body(response),
         });
     }
 
@@ -163,7 +164,7 @@ fn build_client(opts: &DownloadOpts) -> Result<reqwest::blocking::Client> {
         .build()
         .map_err(|source| StackError::SafeDownloadFailed {
             url: String::new(),
-            reason: source.to_string(),
+            reason: crate::error::report(&source),
         })
 }
 
@@ -247,9 +248,14 @@ fn enforce_scheme(url: &str, allowed: &[String]) -> Result<()> {
 }
 
 fn cleanup_partial(dest: &Path) {
-    if dest.exists() {
-        // Best-effort cleanup; the caller will report a more specific error.
-        let _ = std::fs::remove_file(dest);
+    if dest.exists()
+        && let Err(error) = std::fs::remove_file(dest)
+    {
+        tracing::warn!(
+            error = %crate::error::report(&error),
+            path = %dest.display(),
+            "partial download cleanup failed; leaving the partial file"
+        );
     }
 }
 
@@ -272,69 +278,16 @@ mod tests {
     use axum::http::{HeaderMap, StatusCode as AxumStatus, header};
     use axum::response::{IntoResponse, Redirect, Response};
     use axum::routing::get;
-    use std::net::SocketAddr;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio::sync::oneshot;
+
+    use crate::http_client::test_server::spawn as spawn_test_server;
 
     fn http_opts() -> DownloadOpts {
         // Tests serve over plain HTTP; production callers use the HTTPS-only default.
         DownloadOpts {
             allowed_schemes: vec!["http".to_owned(), "https".to_owned()],
             ..DownloadOpts::default()
-        }
-    }
-
-    struct TestServer {
-        addr: SocketAddr,
-        shutdown: Option<oneshot::Sender<()>>,
-        handle: Option<std::thread::JoinHandle<()>>,
-    }
-
-    impl TestServer {
-        fn url(&self, path: &str) -> String {
-            format!("http://{}{path}", self.addr)
-        }
-    }
-
-    impl Drop for TestServer {
-        fn drop(&mut self) {
-            if let Some(tx) = self.shutdown.take() {
-                let _ = tx.send(());
-            }
-            if let Some(handle) = self.handle.take() {
-                let _ = handle.join();
-            }
-        }
-    }
-
-    fn spawn_test_server(router: Router) -> TestServer {
-        let (addr_tx, addr_rx) = std::sync::mpsc::sync_channel(1);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let handle = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("build runtime");
-            rt.block_on(async move {
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                    .await
-                    .expect("bind test server");
-                let addr = listener.local_addr().expect("local addr");
-                addr_tx.send(addr).expect("send addr");
-                axum::serve(listener, router)
-                    .with_graceful_shutdown(async move {
-                        let _ = shutdown_rx.await;
-                    })
-                    .await
-                    .expect("serve");
-            });
-        });
-        let addr = addr_rx.recv().expect("addr from test server");
-        TestServer {
-            addr,
-            shutdown: Some(shutdown_tx),
-            handle: Some(handle),
         }
     }
 
@@ -477,9 +430,38 @@ mod tests {
         let dest = dest_dir.path().join("download.bin");
         let err = download_to_file(&server.url("/nope"), &dest, &http_opts()).expect_err("404");
         match err {
-            StackError::SafeDownloadHttpStatus { status, .. } => assert_eq!(status, 404),
+            StackError::SafeDownloadHttpStatus { status, body, .. } => {
+                assert_eq!(status, 404);
+                assert_eq!(body, "missing");
+            }
             other => panic!("unexpected: {other}"),
         }
+    }
+
+    #[test]
+    fn http_status_error_body_is_redacted_and_bounded() {
+        let router = Router::new().route(
+            "/denied",
+            get(|| async {
+                let body = format!(
+                    "denied for sk-safedownload0123456789 {}",
+                    "x".repeat(4 * crate::redaction::HTTP_ERROR_BODY_MAX_BYTES)
+                );
+                (AxumStatus::FORBIDDEN, body).into_response()
+            }),
+        );
+        let server = spawn_test_server(router);
+        let dest_dir = tempfile::tempdir().expect("tempdir");
+        let dest = dest_dir.path().join("download.bin");
+        let err = download_to_file(&server.url("/denied"), &dest, &http_opts()).expect_err("403");
+        let StackError::SafeDownloadHttpStatus { status, body, .. } = &err else {
+            panic!("unexpected: {err}");
+        };
+        assert_eq!(*status, 403);
+        assert!(body.starts_with("denied for [redacted]"), "{body}");
+        assert!(body.contains("[truncated"), "{body}");
+        assert!(err.to_string().contains("denied for [redacted]"), "{err}");
+        assert!(!dest.exists());
     }
 
     #[test]

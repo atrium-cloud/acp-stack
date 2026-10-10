@@ -340,6 +340,11 @@ pub(crate) async fn recover_native_config_imports(state: &AppState) -> Result<()
             Err(error) => {
                 let record = operation_record(state, &operation_id).await?;
                 if record.phase == NativeConfigOperationPhase::Staged {
+                    tracing::warn!(
+                        error = %crate::error::report(&error),
+                        operation_id,
+                        "recovered native config import failed; marking it failed"
+                    );
                     mark_failed(state, &operation_id, error.error_code()).await?;
                     persist_operation_record(state, &operation_id).await?;
                 } else {
@@ -382,7 +387,12 @@ async fn process_pending_operation_once(
             let _mutation = state.lock_agent_config_mutation().await?;
             let marker = operation_record(state, operation_id).await?;
             let operation = finalize_queued_cancellation(state, operation_id).await?;
-            if persist_operation_record(state, operation_id).await.is_err() {
+            if let Err(error) = persist_operation_record(state, operation_id).await {
+                tracing::warn!(
+                    error = %crate::error::report(&error),
+                    operation_id,
+                    "failed to persist the queued native config cancellation; the worker will retry"
+                );
                 replace_operation_record(state, marker.clone()).await?;
                 return Ok(ApplyStoredOutcome::Blocked(marker.operation));
             }
@@ -418,25 +428,26 @@ fn spawn_queued_worker(state: AppState, operation_id: String) {
                     let record = match operation_record(&state, &operation_id).await {
                         Ok(record) => record,
                         Err(record_error) => {
-                            tracing::warn!(error = %record_error, operation_id, "native config import worker lost its operation");
+                            tracing::warn!(error = %crate::error::report(&record_error), operation_id, "native config import worker lost its operation");
                             return;
                         }
                     };
                     if record.phase == NativeConfigOperationPhase::Staged {
+                        tracing::warn!(error = %crate::error::report(&error), operation_id, "queued native config import failed; marking it failed");
                         if let Err(mark_error) =
                             mark_failed(&state, &operation_id, error.error_code()).await
                         {
-                            tracing::warn!(error = %mark_error, operation_id, "failed to record queued native config import failure");
+                            tracing::warn!(error = %crate::error::report(&mark_error), operation_id, "failed to record queued native config import failure");
                             return;
                         }
                         if let Err(persist_error) =
                             persist_operation_record(&state, &operation_id).await
                         {
-                            tracing::warn!(error = %persist_error, operation_id, "failed to persist queued native config import failure");
+                            tracing::warn!(error = %crate::error::report(&persist_error), operation_id, "failed to persist queued native config import failure");
                         }
                         return;
                     }
-                    tracing::warn!(error = %error, operation_id, "native config import recovery will retry");
+                    tracing::warn!(error = %crate::error::report(&error), operation_id, "native config import recovery will retry");
                 }
             }
         }
