@@ -127,6 +127,10 @@ impl AcpBridge {
             terminal_context,
             fs_context,
             exit.clone(),
+            crate::runtime::agent::acp_trace::TraceLabels {
+                agent_id: agent.id.clone(),
+                target_id: target_id.map(str::to_owned),
+            },
         );
 
         let (capabilities, connection, task) =
@@ -299,8 +303,9 @@ fn spawn_connection_task(
     terminal_context: Arc<TerminalHandlerContext>,
     fs_context: Arc<AcpFsContext>,
     exit: ExitReporter,
+    trace_labels: crate::runtime::agent::acp_trace::TraceLabels,
 ) -> ConnectionTask {
-    let transport = agent_client_protocol::ByteStreams::new(stdin.compat_write(), stdout.compat());
+    let transport = crate::runtime::agent::acp_trace::traced_lines(stdin, stdout, trace_labels);
     let (init_tx, connection_rx) = oneshot::channel::<InitializeOutcome>();
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 

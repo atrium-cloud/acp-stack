@@ -192,6 +192,44 @@ async fn spawn_placebo(args: &[&str]) -> AcpBridge {
     .expect("spawn")
 }
 
+// The trace tap's frame classification is covered by the `acp_trace` unit tests; this checks
+// that a traced connection carries a full session and prompt round trip unchanged.
+#[tokio::test]
+async fn a_traced_connection_round_trips_a_session_and_prompt() {
+    use agent_client_protocol::schema::v1::{ContentBlock, PromptRequest, TextContent};
+
+    // Turns the process-wide flag back off even when an assertion panics.
+    struct TraceOn;
+    impl Drop for TraceOn {
+        fn drop(&mut self) {
+            acp_stack::runtime::agent::acp_trace::set_enabled(false);
+        }
+    }
+
+    acp_stack::runtime::agent::acp_trace::set_enabled(true);
+    let trace_on = TraceOn;
+    let bridge = spawn_placebo(&[]).await;
+    let session = bridge
+        .new_session(std::env::temp_dir(), vec![])
+        .await
+        .expect("session/new");
+    let response = bridge
+        .prompt_session(PromptRequest::new(
+            session.session_id,
+            vec![ContentBlock::Text(TextContent::new("hello"))],
+        ))
+        .await;
+    drop(trace_on);
+    assert!(
+        matches!(
+            response.expect("session/prompt").stop_reason,
+            agent_client_protocol::schema::v1::StopReason::EndTurn
+        ),
+        "prompt must complete over the traced transport"
+    );
+    bridge.shutdown().await.expect("shutdown ok");
+}
+
 #[tokio::test]
 async fn new_session_failure_names_the_agent_and_carries_the_acp_error() {
     let bridge = spawn_placebo(&["--session-new-error"]).await;

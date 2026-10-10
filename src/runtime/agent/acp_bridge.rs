@@ -28,7 +28,6 @@ use tokio::process::{Child, Command};
 use tokio::sync::{Mutex as TokioMutex, Notify, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
-use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::config::AgentConfig;
 use crate::error::{Result, StackError};

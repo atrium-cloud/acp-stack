@@ -328,6 +328,7 @@ pub(crate) fn starter_config(args: &InitArgs) -> Result<String> {
         logging: LoggingConfig {
             level: STARTER_LOG_LEVEL.to_owned(),
             local_retention_days: STARTER_LOCAL_RETENTION_DAYS,
+            acp_trace: false,
             supabase: Some(starter_supabase_config(args)),
         },
         agent: agent.clone(),

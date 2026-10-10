@@ -47,8 +47,9 @@ pub(crate) struct ConfigImportQuery {
 /// a `server.config_imported` audit event.
 /// Most of the running daemon retains its old `AppState`; the client must
 /// restart the daemon for general config changes to take effect. Local
-/// session-tier auth is the exception because it is a runtime gate that this
-/// handler updates immediately after the canonical config write succeeds.
+/// session-tier auth and `[logging].acp_trace` are the exceptions because they
+/// are runtime gates that this handler updates immediately after the canonical
+/// config write succeeds.
 ///
 /// Query params:
 /// - `dry_run=true`: validates, canonicalizes, and reports metadata without
@@ -90,6 +91,7 @@ pub(crate) async fn config_import_handler(
     state
         .set_local_session_auth(incoming.local.session_auth)
         .await;
+    crate::runtime::agent::acp_trace::set_enabled(incoming.logging.acp_trace);
 
     let payload = serde_json::json!({
         "path": target.to_string_lossy(),

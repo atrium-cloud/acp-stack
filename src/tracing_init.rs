@@ -1,13 +1,16 @@
 use std::io::{self, Write};
 
-use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::filter::{LevelFilter, Targets};
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+use crate::runtime::agent::acp_trace::ACP_TRACE_TARGET;
+
 // CONSTANTS
 
-const LOG_LEVEL: LevelFilter = LevelFilter::WARN;
+/// Level every target logs at except the ACP trace, which `[logging].acp_trace` gates itself.
+const DEFAULT_LOG_LEVEL: LevelFilter = LevelFilter::WARN;
 
 pub fn init() {
     let result = log_subscriber(io::stderr).try_init();
@@ -28,7 +31,13 @@ where
                 .with_ansi(false)
                 .with_writer(RedactingMakeWriter { inner: writer }),
         )
-        .with(LOG_LEVEL)
+        .with(log_filter())
+}
+
+fn log_filter() -> Targets {
+    Targets::new()
+        .with_default(DEFAULT_LOG_LEVEL)
+        .with_target(ACP_TRACE_TARGET, LevelFilter::INFO)
 }
 
 /// Redacts each formatted event before it reaches the inner writer, so no log line can carry a
@@ -120,12 +129,14 @@ mod tests {
     }
 
     #[test]
-    fn info_lines_are_filtered_out() {
+    fn filter_keeps_warn_by_default_and_acp_trace_at_info() {
         let output = capture_events(|| {
-            tracing::info!("info line");
-            tracing::warn!("warn line");
+            tracing::info!("default target info line");
+            tracing::info!(target: ACP_TRACE_TARGET, "trace target info line");
+            tracing::warn!("default target warn line");
         });
-        assert!(!output.contains("info line"), "{output}");
-        assert!(output.contains("warn line"), "{output}");
+        assert!(!output.contains("default target info line"), "{output}");
+        assert!(output.contains("trace target info line"), "{output}");
+        assert!(output.contains("default target warn line"), "{output}");
     }
 }

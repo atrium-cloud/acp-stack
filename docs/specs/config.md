@@ -64,6 +64,7 @@ max_output_bytes = 1048576
 [logging]
 level = "info"
 local_retention_days = 30
+acp_trace = false
 
 [[mcp.servers]]
 type = "http"
@@ -235,6 +236,8 @@ Provider and model fields are documented in [agents/config.md](agents/config.md)
 - `[commands].env_allowlist` is the only non-secret environment forwarded into mediated shell commands. Secret refs are injected only through explicit agent or MCP configuration.
 
 ## Logging
+
+`[logging].acp_trace = true` makes the daemon log every ACP JSON-RPC frame it exchanges with its agents (see [Daemon Log](state-logging.md#daemon-log)). It defaults to `false`. `acps serve` reads it at start, and `POST /v1/config/import` applies it at once, without an agent restart. `acps agent test` and other CLI-run agents leave it off.
 
 `[logging.supabase]` mirrors selected local state rows to Supabase when enabled:
 

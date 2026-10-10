@@ -188,8 +188,10 @@ admin_key_ref = "ACP_STACK_ADMIN_KEY"
     assert!(events.is_empty(), "dry-run must not audit config import");
 }
 
+// The only test here that imports for real: `acp_trace` is a process-wide flag, so a second
+// importing test running in parallel would race this one's assertion on it.
 #[tokio::test]
-async fn config_import_applies_local_session_auth_to_runtime() {
+async fn config_import_applies_local_session_auth_and_acp_trace_to_runtime() {
     let harness = ServerHarness::spawn().await;
     assert_eq!(
         *harness.local_session_auth.read().await,
@@ -198,7 +200,11 @@ async fn config_import_applies_local_session_auth_to_runtime() {
 
     let toml = format!(
         "{}\n[local]\nsession_auth = \"keyless\"\n",
-        include_str!("fixtures/valid-placebo-stack.toml")
+        include_str!("fixtures/valid-placebo-stack.toml").replacen(
+            "[logging]\n",
+            "[logging]\nacp_trace = true\n",
+            1
+        )
     );
     let response = reqwest::Client::new()
         .post(format!("{}/v1/config/import", harness.base_url))
@@ -215,6 +221,8 @@ async fn config_import_applies_local_session_auth_to_runtime() {
         *harness.local_session_auth.read().await,
         LocalSessionAuth::Keyless
     );
+    assert!(acp_stack::runtime::agent::acp_trace::enabled());
+    acp_stack::runtime::agent::acp_trace::set_enabled(false);
 }
 
 #[tokio::test]

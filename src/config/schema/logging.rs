@@ -12,6 +12,11 @@ pub struct LoggingConfig {
     /// Retention window in days for local log records. Not currently read by
     /// the runtime.
     pub local_retention_days: u64,
+    /// Log every ACP JSON-RPC frame between the daemon and its agents at `info` under the
+    /// `acp_trace` target, redacted and bounded. Takes effect on start and on config import,
+    /// without an agent restart.
+    #[serde(default)]
+    pub acp_trace: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supabase: Option<SupabaseLoggingConfig>,
 }

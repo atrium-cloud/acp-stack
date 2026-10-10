@@ -73,6 +73,7 @@ flowchart LR
 
 - Logging: local event history, metrics, and optional external sink.
 - Redaction: a process-wide registry of secret values the secret store decrypts, plus one shared credential-shape list, applied to text that is persisted, returned, or logged (`src/redaction.rs`).
+- ACP trace: the opt-in `[logging].acp_trace` tap on each agent connection's line transport, logging every JSON-RPC frame redacted and bounded (`src/runtime/agent/acp_trace.rs`).
 - Edge: reverse-proxy/tunnel artifacts and optional Cloudflare provisioning.
 
 ### Dev-only

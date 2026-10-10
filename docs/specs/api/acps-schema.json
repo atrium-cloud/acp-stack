@@ -8492,6 +8492,11 @@
             "minimum": 0,
             "description": "Retention window in days for local log records. Not currently read by\nthe runtime."
           },
+          "acp_trace": {
+            "type": "boolean",
+            "description": "Log every ACP JSON-RPC frame between the daemon and its agents at `info` under the\n`acp_trace` target, redacted and bounded. Takes effect on start and on config import,\nwithout an agent restart.",
+            "default": false
+          },
           "supabase": {
             "anyOf": [
               {

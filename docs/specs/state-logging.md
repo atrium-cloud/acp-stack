@@ -340,7 +340,7 @@ The `security_category` filter clusters the flat `security.*` kinds into operato
 
 ## Daemon Log
 
-The daemon writes diagnostic lines to stderr at `warn` and above. Every line passes through the shared redactor, which replaces registered secret values and credential-shaped tokens with `[redacted]`.
+The daemon writes diagnostic lines to stderr at `warn` and above, plus `info` lines under the `acp_trace` target when `[logging].acp_trace` is on. Every line passes through the shared redactor, which replaces registered secret values and credential-shaped tokens with `[redacted]`.
 
 - Each failed request logs one `request failed` line with `request_id`, `method`, `route`, `path`, `status`, `code`, and `error`. `error` is the internal error text with its source chain, which the public envelope omits. Server errors log at `error`, client errors at `warn`.
 - On `agent.request_failed`, `error` names the agent and, when known, its target and the agent session id. It then gives the agent's JSON-RPC error code, message, and `data` when the agent sent an error, and acp-stack's own description otherwise.
@@ -350,6 +350,13 @@ The daemon writes diagnostic lines to stderr at `warn` and above. Every line pas
     - At most 200 lines log per 10 seconds. The rest are counted, and one line reports the count with the next logged line after the window ends, or when the agent's stderr closes.
     - The newest 4 KiB of whole lines are kept as a tail. A failed agent start appends the tail to the `agent.initialize_failed` error text, which the daemon log and the `agent.spawn_failed` event's `reason` carry. `agent.exited` carries the tail as `stderr_tail` (`null` when the agent wrote nothing).
 - A 4xx that no runtime error produced logs no line: auth rejections, which `auth_failures` rows and security events record, and framework rejections such as an unknown route, a wrong method, an oversized body, or an unparseable request body.
+- With `[logging].acp_trace` on, each ACP JSON-RPC frame between the daemon and an agent logs one `acp frame` line under the `acp_trace` target with these fields:
+    - `agent_id` and `target_id`
+    - `direction`: `client->agent` or `agent->client`
+    - `kind`: `request`, `notification`, `response`, `unrecognized` (JSON outside the JSON-RPC message shapes), or `unparsed` (not JSON)
+    - `method`, `id`, and `session_id`, each cut at 256 bytes; a response takes `method` and `session_id` from the request it answers, or `session_id` from its result
+    - `outcome` (`ok` or `error`) and `elapsed_ms` on a response; `elapsed_ms` is absent when the response matches no traced request
+    - `payload`: an error response from either side, the agent's result to a daemon request, or an unparsed line, redacted and cut at 4096 bytes. Params and the daemon's results to agent requests, which carry workspace content such as file reads and terminal output, stay out of the log.
 
 ## External Logging
 
