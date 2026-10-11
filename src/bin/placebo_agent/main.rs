@@ -23,7 +23,7 @@ use agent_client_protocol::schema::v1::{
     ToolCallUpdateFields, ToolKind, Usage, WaitForTerminalExitRequest, WriteTextFileRequest,
 };
 use agent_client_protocol::schema::v1::{PermissionOption, PermissionOptionKind};
-use agent_client_protocol::{Agent, Client, ConnectionTo, Dispatch, Error, Handled, Responder};
+use agent_client_protocol::{Agent, Client, ConnectionTo, Error, Responder};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio::sync::Mutex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -203,21 +203,6 @@ async fn run_acp(args: AcpArgs) -> agent_client_protocol::Result<()> {
                 }
             },
             agent_client_protocol::on_receive_notification!(),
-        )
-        .on_receive_dispatch(
-            // Only claim unhandled REQUESTS: swallowing a response here would
-            // poison the placebo's own outbound requests.
-            async move |message: Dispatch, connection: ConnectionTo<Client>| match message {
-                Dispatch::Request(..) => {
-                    message.respond_with_error(Error::method_not_found(), connection)?;
-                    Ok(Handled::Yes)
-                }
-                other => Ok(Handled::No {
-                    message: other,
-                    retry: false,
-                }),
-            },
-            agent_client_protocol::on_receive_dispatch!(),
         )
         .connect_to(agent_client_protocol::ByteStreams::new(
             tokio::io::stdout().compat_write(),

@@ -35,7 +35,7 @@ The initialize request advertises the client capabilities `acp-stack` implements
 | `terminal`              | yes        | All five `terminal/*` methods, backed by the terminal registry below                                    |
 | `session.configOptions` | yes        | Without the `boolean` sub-capability: `session/set_config_option` currently sends value-id options only |
 | `auth.terminal`         | no         | Interactive login flows are excluded by the headless scope                                              |
-| `elicitation`           | no         | Unstable upstream                                                                                       |
+| `elicitation`           | no         | No agent-to-client handler                                                                              |
 | `mcp/*` over ACP        | no         | Unstable upstream                                                                                       |
 
 ## Client terminals
