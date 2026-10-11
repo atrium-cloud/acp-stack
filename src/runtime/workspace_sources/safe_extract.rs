@@ -265,7 +265,12 @@ fn extract_zip(archive: &Path, dest: &Path, opts: &ExtractOpts) -> Result<Extrac
             .map_err(|source| StackError::ArchiveReadFailed {
                 reason: format!("zip entry {index}: {source}"),
             })?;
-        let raw_name = entry.name().to_owned();
+        let raw_name = entry
+            .name()
+            .map_err(|source| StackError::ArchiveReadFailed {
+                reason: format!("zip entry {index} name: {source}"),
+            })?
+            .into_owned();
         if entry.is_symlink() {
             return Err(StackError::ArchiveUnsafeEntry {
                 kind: "symlink",
@@ -558,7 +563,7 @@ mod tests {
         let bytes = write_tar_gz(|t| {
             // tar::Header::set_path refuses `..`; build the header manually.
             let mut header = tar::Header::new_old();
-            let name_bytes = header.as_old_mut().name.as_mut();
+            let name_bytes: &mut [u8] = header.as_old_mut().name.as_mut();
             name_bytes.fill(0);
             let traversal = b"../escape.txt";
             name_bytes[..traversal.len()].copy_from_slice(traversal);
@@ -594,7 +599,7 @@ mod tests {
             h.set_path("etc/passwd").unwrap();
             h.set_size(3);
             h.set_mode(0o644);
-            let name_bytes = h.as_old_mut().name.as_mut();
+            let name_bytes: &mut [u8] = h.as_old_mut().name.as_mut();
             name_bytes.fill(0);
             let abs = b"/etc/passwd";
             name_bytes[..abs.len()].copy_from_slice(abs);
@@ -718,6 +723,22 @@ mod tests {
         assert!(matches!(
             err,
             StackError::ArchiveUnsafeEntry { kind, .. } if kind == "parent-traversal"
+        ));
+    }
+
+    #[test]
+    fn rejects_zip_with_symlink() {
+        let bytes = write_zip(|z| {
+            let options: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default();
+            z.add_symlink("link", "../target", options).unwrap();
+        });
+        let (_dir, archive) = write_archive_to_tmp(&bytes, "sym.zip");
+        let dest = tempdir().expect("dest");
+        let err =
+            extract_archive(&archive, dest.path(), &ExtractOpts::default()).expect_err("rejected");
+        assert!(matches!(
+            err,
+            StackError::ArchiveUnsafeEntry { kind, .. } if kind == "symlink"
         ));
     }
 
