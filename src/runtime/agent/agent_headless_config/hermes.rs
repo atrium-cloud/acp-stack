@@ -701,7 +701,7 @@ mod tests {
             .expect("provision with override");
 
         let value = hermes_config_value(tempdir.path());
-        assert_eq!(value["model"]["provider"], "opencode");
+        assert_eq!(value["model"]["provider"], "opencode-zen");
         assert!(value["providers"].is_null(), "{value:?}");
         assert!(
             value["model"]
@@ -721,7 +721,7 @@ mod tests {
             .expect("the native lane leaves transport selection to hermes");
 
         let value = hermes_config_value(tempdir.path());
-        assert_eq!(value["model"]["provider"], "opencode");
+        assert_eq!(value["model"]["provider"], "opencode-zen");
         assert_eq!(value["model"]["default"], "gemini-3-flash");
     }
 

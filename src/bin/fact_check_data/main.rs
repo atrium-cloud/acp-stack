@@ -1,5 +1,7 @@
 //! Dev tool: fact-check shipped data files against external metadata sources.
 
+mod agent_sources;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::process::ExitCode;
@@ -13,10 +15,10 @@ use acp_stack::runtime::install::skill_registry::SkillCatalog;
 use serde::Deserialize;
 use serde_json::Value;
 
-const AGENTS_TOML: &str = include_str!("../../data/agents.toml");
-const ENV_VARS_TOML: &str = include_str!("../../data/env_vars.toml");
-const PROVIDERS_TOML: &str = include_str!("../../data/providers.toml");
-const SKILLS_TOML: &str = include_str!("../../data/skills.toml");
+const AGENTS_TOML: &str = include_str!("../../../data/agents.toml");
+const ENV_VARS_TOML: &str = include_str!("../../../data/env_vars.toml");
+const PROVIDERS_TOML: &str = include_str!("../../../data/providers.toml");
+const SKILLS_TOML: &str = include_str!("../../../data/skills.toml");
 
 const ACP_REGISTRY_REPO: &str = "agentclientprotocol/registry";
 const ACP_REGISTRY_ASSET: &str = "registry.json";
@@ -30,6 +32,7 @@ const AMP_ACP_README_URL: &str =
     "https://raw.githubusercontent.com/tao12345666333/amp-acp/main/README.md";
 const OPENCODE_PROVIDER_DOC_URL: &str = "https://opencode.ai/docs/providers/";
 const GITHUB_API_BASE: &str = "https://api.github.com";
+const GITHUB_RAW_BASE: &str = "https://raw.githubusercontent.com";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const USER_AGENT: &str = concat!("acp-stack-fact-check/", env!("CARGO_PKG_VERSION"));
 
@@ -263,17 +266,18 @@ fn check_provider_sources(
     let amp_acp_readme = http.get_text(AMP_ACP_README_URL)?;
     let opencode_doc = http.get_text(OPENCODE_PROVIDER_DOC_URL)?;
 
-    let mut primary_doc = BTreeSet::new();
-    check_pi_env_api_keys(mapping, &pi_env_api_keys, &mut primary_doc, report);
+    let mut verified = BTreeSet::new();
+    check_pi_env_api_keys(mapping, &pi_env_api_keys, &mut verified, report);
+    agent_sources::check_hermes_sources(http, mapping, &mut verified, report)?;
     check_agent_env_doc(
         "amp-code",
         "amp-acp README",
         "AMP_API_KEY",
         &amp_acp_readme,
-        &mut primary_doc,
+        &mut verified,
         report,
     );
-    check_opencode_doc(&opencode_doc, &mut primary_doc, report);
+    check_opencode_doc(&opencode_doc, &mut verified, report);
 
     let mut models_dev_tier = BTreeSet::new();
     for provider in models_dev_scoped_providers(mapping) {
@@ -306,14 +310,14 @@ fn check_provider_sources(
         .flat_map(|provider| provider.ids().iter().cloned())
         .collect();
     let manual: Vec<_> = all_provider_ids
-        .difference(&primary_doc)
+        .difference(&verified)
         .filter(|id| !models_dev_tier.contains(*id))
         .cloned()
         .collect();
 
     report.info(format!(
-        "provider confidence tiers: primary-doc={}, models-dev={}, manual={}",
-        primary_doc.len(),
+        "provider confidence tiers: verified={}, models-dev={}, manual={}",
+        verified.len(),
         models_dev_tier.len(),
         manual.len()
     ));
@@ -329,7 +333,7 @@ fn check_provider_sources(
 fn check_pi_env_api_keys(
     mapping: &ProviderKeyMapping,
     source: &str,
-    primary_doc: &mut BTreeSet<String>,
+    verified: &mut BTreeSet<String>,
     report: &mut Report,
 ) {
     let pi_env_vars = pi_provider_env_vars(source);
@@ -351,7 +355,7 @@ fn check_pi_env_api_keys(
         match pi_env_vars.get(native_id) {
             Some(env_vars) if env_vars.contains(env_var) => {
                 for provider_id in provider.ids() {
-                    primary_doc.insert(provider_id.clone());
+                    verified.insert(provider_id.clone());
                 }
                 report.ok(format!(
                     "Pi env-api-keys.ts verifies `{native_id}` uses `{env_var}`"
@@ -442,11 +446,11 @@ fn check_agent_env_doc(
     label: &str,
     env_var: &str,
     body: &str,
-    primary_doc: &mut BTreeSet<String>,
+    verified: &mut BTreeSet<String>,
     report: &mut Report,
 ) {
     if body.contains(env_var) {
-        primary_doc.insert(provider_id.to_owned());
+        verified.insert(provider_id.to_owned());
         report.ok(format!("{label} docs verify direct env ref `{env_var}`"));
     } else {
         report.fail(format!(
@@ -455,10 +459,10 @@ fn check_agent_env_doc(
     }
 }
 
-fn check_opencode_doc(body: &str, primary_doc: &mut BTreeSet<String>, report: &mut Report) {
+fn check_opencode_doc(body: &str, verified: &mut BTreeSet<String>, report: &mut Report) {
     for (provider_id, label) in [("opencode", "OpenCode Zen"), ("opencode-go", "OpenCode Go")] {
         if body.contains(label) {
-            primary_doc.insert(provider_id.to_owned());
+            verified.insert(provider_id.to_owned());
             report.ok(format!("OpenCode docs verify `{label}`"));
         } else {
             report.fail(format!("OpenCode docs do not verify `{label}`"));
@@ -739,8 +743,25 @@ impl Http {
     }
 
     fn get_text(&self, url: &str) -> Result<String, Box<dyn Error>> {
-        self.client
-            .get(url)
+        Self::text_response(self.client.get(url), url)
+    }
+
+    /// A file on a repository's default branch; the token lifts the unauthenticated rate limit
+    /// that per-file source checks otherwise hit.
+    fn github_raw_text(&self, repo: &str, path: &str) -> Result<String, Box<dyn Error>> {
+        let url = format!("{GITHUB_RAW_BASE}/{repo}/HEAD/{path}");
+        let mut request = self.client.get(&url);
+        if let Some(token) = &self.github_token {
+            request = request.bearer_auth(token);
+        }
+        Self::text_response(request, &url)
+    }
+
+    fn text_response(
+        request: reqwest::blocking::RequestBuilder,
+        url: &str,
+    ) -> Result<String, Box<dyn Error>> {
+        request
             .send()
             .map_err(|source| format!("failed to GET {url}: {source}"))?
             .error_for_status()

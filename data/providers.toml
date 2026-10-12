@@ -7,6 +7,8 @@
 # [Amp manual](https://ampcode.com/manual)
 # [models.dev](https://models.dev/api.json)
 # [Hermes Agent providers docs](https://hermes-agent.nousresearch.com/docs/integrations/providers)
+# [Hermes auth.py provider registry](https://github.com/NousResearch/hermes-agent/blob/main/hermes_cli/auth.py)
+# [Hermes model-provider plugins](https://github.com/NousResearch/hermes-agent/tree/main/plugins/model-providers)
 # Last updated on 2026-10-12
 #
 # A `[providers.claude_code]` sub-table carries Claude Code-specific headless
@@ -81,10 +83,13 @@ agents = ["pi", "opencode"]
 optional_env_vars = ["AZURE_RESOURCE_NAME"]
 
 [[providers]]
-id = ["openai"]
+id = ["openai", "openai-api"]
 name = "OpenAI"
 agents = ["pi", "opencode", "goose", "codex", "hermes", "kimi"]
 base_url = "https://api.openai.com/v1"
+
+[providers.provider_ids]
+openai-api = "hermes"
 
 [providers.hermes]
 api_mode = "codex_responses"
@@ -114,10 +119,13 @@ api_mode = "chat_completions"
 provider_type = "openai"
 
 [[providers]]
-id = ["google"]
+id = ["google", "gemini"]
 name = "Google AI Studio"
 agents = ["pi", "opencode", "hermes", "antigravity"]
 base_url = "https://generativelanguage.googleapis.com/v1beta"
+
+[providers.provider_ids]
+gemini = "hermes"
 
 [providers.hermes]
 api_mode = "chat_completions"
@@ -245,7 +253,7 @@ name = "Z.AI Coding Plan (China)"
 agents = ["pi"]
 
 [[providers]]
-id = ["opencode"]
+id = ["opencode", "opencode-zen"]
 name = "OpenCode Zen"
 # does not appear to have a status page
 agents = ["pi", "opencode", "hermes", "kimi"]
@@ -253,6 +261,9 @@ base_url = "https://opencode.ai/zen/v1"
 # Verified 2026-08-20: 200 with the standard {"data":[{"id":...}]} shape,
 # served even unauthenticated.
 models_url = "https://opencode.ai/zen/v1/models"
+
+[providers.provider_ids]
+opencode-zen = "hermes"
 
 [providers.api_key_env_vars]
 hermes = "OPENCODE_ZEN_API_KEY"
@@ -306,7 +317,7 @@ api_mode = "chat_completions"
 provider_type = "openai"
 
 [[providers]]
-id = ["fireworks", "fireworks-ai", "fw"]
+id = ["fireworks", "fireworks-ai"]
 name = "Fireworks"
 agents = ["pi", "opencode", "hermes"]
 base_url = "https://api.fireworks.ai/inference/v1"
@@ -314,12 +325,8 @@ base_url = "https://api.fireworks.ai/inference/v1"
 # the best-effort fetch degrades to a logged skip if it turns out wrong.
 models_url = "https://api.fireworks.ai/inference/v1/models"
 
-# Hermes' own `fireworks`/`fireworks-ai` ids are already claimed by pi and
-# opencode above; `fw` is its remaining documented alias.
 [providers.provider_ids]
-fireworks = "pi"
 fireworks-ai = "opencode"
-fw = "hermes"
 
 [providers.hermes]
 api_mode = "chat_completions"
@@ -355,10 +362,8 @@ set_subagent_model = true
 env = { CLAUDE_CODE_EFFORT_LEVEL = "high", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "262144", CLAUDE_CODE_MAX_CONTEXT_TOKENS = "262144" }
 
 [providers.provider_ids]
-kimi-coding = "pi"
 kimi-for-coding = "opencode"
 kimi-coding-plan = "claude"
-kimi = "hermes"
 kimi-code = "kimi"
 
 [providers.hermes]
@@ -850,13 +855,16 @@ name = "GitLab Duo"
 agents = ["opencode"]
 
 [[providers]]
-id = ["gmicloud"]
+id = ["gmicloud", "gmi"]
 name = "GMI Cloud"
 agents = ["opencode", "hermes"]
 base_url = "https://api.gmi-serving.com/v1"
 # Probed 2026-08-20: 401 unauthenticated, so the response shape is unverified;
 # the best-effort fetch degrades to a logged skip if it turns out wrong.
 models_url = "https://api.gmi-serving.com/v1/models"
+
+[providers.provider_ids]
+gmi = "hermes"
 
 [providers.hermes]
 api_mode = "chat_completions"
@@ -1112,13 +1120,16 @@ agents = ["opencode"]
 base_url = "https://api.nova.amazon.com/v1"
 
 [[providers]]
-id = ["novita-ai"]
+id = ["novita-ai", "novita"]
 name = "NovitaAI"
 agents = ["opencode", "hermes", "kimi"]
 base_url = "https://api.novita.ai/openai"
 # Verified 2026-08-20: 200 with the standard {"data":[{"id":...}]} shape,
 # served even unauthenticated. Note the /openai base, not /v1.
 models_url = "https://api.novita.ai/openai/models"
+
+[providers.provider_ids]
+novita = "hermes"
 
 [providers.hermes]
 api_mode = "chat_completions"

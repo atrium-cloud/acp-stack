@@ -37,16 +37,12 @@ const GOOSE_PROVIDER_HOST_ENV: [(&str, &str); 4] = [
     ("openrouter", "OPENROUTER_HOST"),
     ("xai", "XAI_HOST"),
 ];
-/// Hermes' per-provider base-URL env override, keyed by the hermes-native provider id. Each
-/// native overlay resolves its endpoint as the explicit config value, then this variable, then
-/// the overlay default, so exporting it reroutes the provider without displacing its identity.
+/// Hermes' per-provider base-URL env override, keyed by the hermes-native provider id. Hermes
+/// resolves a registry provider's endpoint as the explicit config value, then this variable, then
+/// the row default, so exporting it reroutes the provider without displacing its identity.
 ///
-/// Only pairs whose hermes-native provider id matches a hermes overlay that declares the
-/// variable are listed. The remaining hermes-enabled providers stay on the managed named-entry
-/// lane: their overlay declares no base-url env var (anthropic, ai-gateway, fw, google, meta-ai,
-/// commandcode), or the overlay declaring one goes by a different id than the hermes-native id
-/// acps writes (openai vs openai-api, kimi vs kimi-for-coding, kilocode vs kilo, novita-ai vs
-/// novita, gmicloud vs gmi).
+/// fact-check-data verifies each pair against the provider's row in Hermes' registry. The
+/// remaining hermes-enabled providers stay on the managed named-entry lane.
 const HERMES_PROVIDER_BASE_URL_ENV: [(&str, &str); 18] = [
     ("actual", "ACTUAL_BASE_URL"),
     ("alibaba", "DASHSCOPE_BASE_URL"),
@@ -58,8 +54,8 @@ const HERMES_PROVIDER_BASE_URL_ENV: [(&str, &str); 18] = [
     ("minimax-cn", "MINIMAX_CN_BASE_URL"),
     ("nvidia", "NVIDIA_BASE_URL"),
     ("ollama-cloud", "OLLAMA_BASE_URL"),
-    ("opencode", "OPENCODE_ZEN_BASE_URL"),
     ("opencode-go", "OPENCODE_GO_BASE_URL"),
+    ("opencode-zen", "OPENCODE_ZEN_BASE_URL"),
     ("openrouter", "OPENROUTER_BASE_URL"),
     ("stepfun", "STEPFUN_BASE_URL"),
     ("tencent-tokenhub", "TOKENHUB_BASE_URL"),
@@ -104,6 +100,8 @@ pub struct ProviderEnvMapping {
     pub agents: Vec<String>,
     #[serde(default)]
     pub api_key_env_vars: BTreeMap<String, String>,
+    /// Native provider id to agent, for agents whose id differs from the primary id; an
+    /// unmapped agent uses the primary id.
     #[serde(default)]
     pub provider_ids: BTreeMap<String, String>,
     #[serde(default)]
@@ -407,19 +405,6 @@ impl ProviderKeyMapping {
                     return provider_mapping_error(format!(
                         "provider `{primary_id}` has multiple native provider ids for agent `{agent_id}`"
                     ));
-                }
-            }
-            if !mapping.provider_ids.is_empty() {
-                for agent_id in &mapping.agents {
-                    if !mapping
-                        .provider_ids
-                        .values()
-                        .any(|mapped| mapped == agent_id)
-                    {
-                        return provider_mapping_error(format!(
-                            "provider `{primary_id}` has no native provider id for agent `{agent_id}`"
-                        ));
-                    }
                 }
             }
             // A base may only template the companions this provider's credential stores.

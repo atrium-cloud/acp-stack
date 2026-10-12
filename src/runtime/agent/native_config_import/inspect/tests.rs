@@ -1128,14 +1128,17 @@ fn hermes_model_aliases_managed_ref_and_custom_lanes() {
     let precedence = inspect_native_config(
         "hermes",
         Some("config.yaml"),
-        "model:\n  provider: kimi\n  name: from-name\n  model: from-model\n  default: from-default\n",
+        "model:\n  provider: kimi-coding\n  name: from-name\n  model: from-model\n  default: from-default\n",
     )
     .expect("inspect");
     assert_eq!(
         model_candidate(&precedence),
-        Some(("from-default".to_owned(), Some("kimi".to_owned())))
+        Some(("from-default".to_owned(), Some("kimi-coding".to_owned())))
     );
-    assert_eq!(provider_candidate(&precedence), Some("kimi".to_owned()));
+    assert_eq!(
+        provider_candidate(&precedence),
+        Some("kimi-coding".to_owned())
+    );
     assert!(
         !std::str::from_utf8(precedence.residual())
             .expect("utf8")

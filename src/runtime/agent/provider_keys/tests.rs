@@ -64,6 +64,7 @@ fn provider_ids_collect_from_configured_secret_refs() {
             "cloudflare-ai-gateway",
             "cloudflare-workers-ai",
             "openai",
+            "openai-api",
             "vercel",
             "vercel-ai-gateway"
         ]
@@ -314,7 +315,47 @@ fn agent_native_provider_ids_are_data_driven() {
         agent_provider_id_for_provider_id("opencode", "kimi-coding"),
         Some("kimi-for-coding")
     );
+    assert_eq!(
+        agent_provider_id_for_provider_id("hermes", "openai"),
+        Some("openai-api")
+    );
+    assert_eq!(
+        agent_provider_id_for_provider_id("pi", "openai"),
+        Some("openai")
+    );
+    assert_eq!(
+        agent_provider_id_for_provider_id("hermes", "fireworks-ai"),
+        Some("fireworks")
+    );
+    assert_eq!(
+        agent_provider_id_for_provider_id("hermes", "kimi"),
+        Some("kimi-coding")
+    );
     assert_eq!(agent_provider_id_for_provider_id("amp", "openai"), None);
+}
+
+#[test]
+fn partial_native_mapping_leaves_unmapped_agents_on_primary_id() {
+    let mapping = ProviderKeyMapping::from_toml(
+        r#"
+[[api_keys]]
+env_var = "FIRST_API_KEY"
+provider_ids = ["known"]
+
+[[providers]]
+id = ["known", "alias"]
+name = "Known"
+agents = ["pi", "opencode"]
+
+[providers.provider_ids]
+alias = "opencode"
+"#,
+    )
+    .expect("a mapping may cover only some agents");
+    let provider = mapping.provider_mapping("known").expect("provider");
+
+    assert_eq!(provider.agent_native_provider_id("opencode"), Some("alias"));
+    assert_eq!(provider.agent_native_provider_id("pi"), Some("known"));
 }
 
 #[test]
