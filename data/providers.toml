@@ -9,6 +9,10 @@
 # [Hermes Agent providers docs](https://hermes-agent.nousresearch.com/docs/integrations/providers)
 # [Hermes auth.py provider registry](https://github.com/NousResearch/hermes-agent/blob/main/hermes_cli/auth.py)
 # [Hermes model-provider plugins](https://github.com/NousResearch/hermes-agent/tree/main/plugins/model-providers)
+# [Goose declarative provider definitions](https://github.com/aaif-goose/goose/tree/main/crates/goose-providers/src/declarative/definitions)
+# [Codex built-in model providers](https://github.com/openai/codex/blob/main/codex-rs/model-provider-info/src/lib.rs)
+# [Kimi Code provider definitions](https://github.com/MoonshotAI/kimi-code/blob/main/packages/agent-core-v2/src/llm-adapter/provider/provider-definition.ts)
+# [Kilo provider overlay](https://github.com/Kilo-Org/kilocode/blob/main/packages/opencode/src/provider/models.ts)
 # Last updated on 2026-10-12
 #
 # A `[providers.claude_code]` sub-table carries Claude Code-specific headless
@@ -342,7 +346,7 @@ together = "pi"
 togetherai = "opencode"
 
 [[providers]]
-id = ["kimi-coding", "kimi-for-coding", "kimi-coding-plan", "kimi", "kimi-code"]
+id = ["kimi-coding", "kimi-code-plan-cn", "kimi-coding-plan", "kimi", "kimi-code"]
 name = "Kimi For Coding"
 agents = ["pi", "opencode", "claude", "hermes", "kimi"]
 base_url = "https://api.kimi.com/coding/v1"
@@ -362,7 +366,7 @@ set_subagent_model = true
 env = { CLAUDE_CODE_EFFORT_LEVEL = "high", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "262144", CLAUDE_CODE_MAX_CONTEXT_TOKENS = "262144" }
 
 [providers.provider_ids]
-kimi-for-coding = "opencode"
+kimi-code-plan-cn = "opencode"
 kimi-coding-plan = "claude"
 kimi-code = "kimi"
 
@@ -380,15 +384,15 @@ pi = "https://api.kimi.com/coding"
 hermes = "https://api.kimi.com/coding"
 
 [[providers]]
-id = ["kimi-coding-global"]
+id = ["kimi-coding-global", "kimi-code-plan-global"]
 name = "Kimi For Coding (Global)"
-agents = ["kimi"]
-base_url = "https://api.kimi.com/coding/v1"
-# Same coding surface as the main row: Kimi documents api.kimi.com as the
-# only coding host, so this lane shares the KIMI_API_KEY credential and has
-# no model-list route either.
+agents = ["opencode", "kimi"]
+base_url = "https://api.kimi.ai/coding/v1"
+# Kimi Code's global region host (packages/oauth/src/region.ts); the main row's
+# api.kimi.com is its mainland-cn host. Both read KIMI_API_KEY.
 
 [providers.provider_ids]
+kimi-code-plan-global = "opencode"
 kimi-coding-global = "kimi"
 
 [providers.kimi]

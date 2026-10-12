@@ -23,16 +23,17 @@ const SKILLS_TOML: &str = include_str!("../../../data/skills.toml");
 const ACP_REGISTRY_REPO: &str = "agentclientprotocol/registry";
 const ACP_REGISTRY_ASSET: &str = "registry.json";
 const MODELS_DEV_API_URL: &str = "https://models.dev/api.json";
+const OPENCODE_AGENT_ID: &str = "opencode";
+const PI_REPO: &str = "earendil-works/pi";
 // Pi's provider doc lists display names, not ids; this source is the id-to-env map Pi runs.
-const PI_ENV_API_KEYS_URL: &str =
-    "https://raw.githubusercontent.com/earendil-works/pi/main/packages/ai/src/env-api-keys.ts";
+const PI_ENV_API_KEYS_PATH: &str = "packages/ai/src/env-api-keys.ts";
+const AMP_ACP_REPO: &str = "tao12345666333/amp-acp";
 // The Amp manual dropped its env-var appendix; the amp-acp adapter README is the
 // document that names the headless credential acp-stack actually injects.
-const AMP_ACP_README_URL: &str =
-    "https://raw.githubusercontent.com/tao12345666333/amp-acp/main/README.md";
+const AMP_ACP_README_PATH: &str = "README.md";
 const OPENCODE_PROVIDER_DOC_URL: &str = "https://opencode.ai/docs/providers/";
 const GITHUB_API_BASE: &str = "https://api.github.com";
-const GITHUB_RAW_BASE: &str = "https://raw.githubusercontent.com";
+const GITHUB_RAW_MEDIA_TYPE: &str = "application/vnd.github.raw";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const USER_AGENT: &str = concat!("acp-stack-fact-check/", env!("CARGO_PKG_VERSION"));
 
@@ -262,13 +263,18 @@ fn check_provider_sources(
 ) -> Result<(), Box<dyn Error>> {
     let models_dev: Value = http.get_json(MODELS_DEV_API_URL)?;
     let models_dev_providers = models_dev_provider_names(&models_dev);
-    let pi_env_api_keys = http.get_text(PI_ENV_API_KEYS_URL)?;
-    let amp_acp_readme = http.get_text(AMP_ACP_README_URL)?;
+    let models_dev_env_vars = models_dev_provider_env_vars(&models_dev);
+    let pi_env_api_keys = http.github_raw_text(PI_REPO, PI_ENV_API_KEYS_PATH)?;
+    let amp_acp_readme = http.github_raw_text(AMP_ACP_REPO, AMP_ACP_README_PATH)?;
     let opencode_doc = http.get_text(OPENCODE_PROVIDER_DOC_URL)?;
 
     let mut verified = BTreeSet::new();
     check_pi_env_api_keys(mapping, &pi_env_api_keys, &mut verified, report);
     agent_sources::check_hermes_sources(http, mapping, &mut verified, report)?;
+    agent_sources::check_goose_sources(http, mapping, &mut verified, report)?;
+    agent_sources::check_codex_sources(http, mapping, &mut verified, report)?;
+    agent_sources::check_kimi_sources(http, report)?;
+    agent_sources::check_kilo_sources(http, mapping, &models_dev_env_vars, &mut verified, report)?;
     check_agent_env_doc(
         "amp-code",
         "amp-acp README",
@@ -303,6 +309,7 @@ fn check_provider_sources(
             }
         }
     }
+    check_opencode_models_dev_ids(mapping, &models_dev_env_vars, &mut models_dev_tier, report);
 
     let all_provider_ids: BTreeSet<_> = mapping
         .providers()
@@ -470,11 +477,47 @@ fn check_opencode_doc(body: &str, verified: &mut BTreeSet<String>, report: &mut 
     }
 }
 
+/// OpenCode resolves the `provider.<id>` acp-stack writes against models.dev, so every other
+/// OpenCode-enabled row's native id must be a models.dev provider. The key travels as
+/// `options.apiKey`, which leaves models.dev's env names out of this contract.
+fn check_opencode_models_dev_ids(
+    mapping: &ProviderKeyMapping,
+    models_dev_providers: &BTreeMap<String, Vec<String>>,
+    models_dev_tier: &mut BTreeSet<String>,
+    report: &mut Report,
+) {
+    let opencode_only: BTreeSet<&str> = models_dev_scoped_providers(mapping)
+        .into_iter()
+        .flat_map(|provider| provider.ids().iter().map(String::as_str))
+        .collect();
+    let mut listed = 0;
+    for provider in mapping.providers() {
+        let Some(native_id) = native_provider_id(provider, OPENCODE_AGENT_ID) else {
+            continue;
+        };
+        if opencode_only.contains(native_id) {
+            continue;
+        }
+        if models_dev_providers.contains_key(native_id) {
+            listed += 1;
+            models_dev_tier.extend(provider.ids().iter().cloned());
+        } else {
+            report.fail(format!(
+                "models.dev does not list `{native_id}`, the OpenCode provider id acp-stack writes for `{}`",
+                provider.ids().first().map_or(native_id, String::as_str)
+            ));
+        }
+    }
+    report.ok(format!(
+        "models.dev lists the OpenCode provider id of {listed} rows outside the OpenCode-only name check"
+    ));
+}
+
 fn models_dev_scoped_providers(mapping: &ProviderKeyMapping) -> Vec<&ProviderEnvMapping> {
     mapping
         .providers()
         .iter()
-        .filter(|provider| provider.agents.len() == 1 && provider.agents[0] == "opencode")
+        .filter(|provider| provider.agents.len() == 1 && provider.agents[0] == OPENCODE_AGENT_ID)
         .filter(|provider| {
             provider
                 .ids()
@@ -587,17 +630,39 @@ fn github_asset_patterns(pattern: &str, install: &GithubInstall) -> BTreeSet<Str
     patterns
 }
 
-fn models_dev_provider_names(value: &Value) -> BTreeMap<String, String> {
-    let provider_object = value
+fn models_dev_provider_object(value: &Value) -> Option<&serde_json::Map<String, Value>> {
+    value
         .get("providers")
         .and_then(Value::as_object)
-        .or_else(|| value.as_object());
-    let Some(provider_object) = provider_object else {
+        .or_else(|| value.as_object())
+}
+
+fn models_dev_provider_names(value: &Value) -> BTreeMap<String, String> {
+    let Some(provider_object) = models_dev_provider_object(value) else {
         return BTreeMap::new();
     };
     provider_object
         .iter()
         .filter_map(|(id, provider)| provider_display_name(provider).map(|name| (id.clone(), name)))
+        .collect()
+}
+
+/// Each provider's `env` array, the key env vars OpenCode-family agents read for it.
+fn models_dev_provider_env_vars(value: &Value) -> BTreeMap<String, Vec<String>> {
+    models_dev_provider_object(value)
+        .into_iter()
+        .flatten()
+        .map(|(id, provider)| {
+            let env_vars = provider
+                .get("env")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect();
+            (id.clone(), env_vars)
+        })
         .collect()
 }
 
@@ -746,11 +811,15 @@ impl Http {
         Self::text_response(self.client.get(url), url)
     }
 
-    /// A file on a repository's default branch; the token lifts the unauthenticated rate limit
-    /// that per-file source checks otherwise hit.
+    /// A file on a repository's default branch, read through the contents API, whose rate limit
+    /// follows the token; raw.githubusercontent.com throttles per-file source checks even when
+    /// authenticated.
     fn github_raw_text(&self, repo: &str, path: &str) -> Result<String, Box<dyn Error>> {
-        let url = format!("{GITHUB_RAW_BASE}/{repo}/HEAD/{path}");
-        let mut request = self.client.get(&url);
+        let url = format!("{GITHUB_API_BASE}/repos/{repo}/contents/{path}");
+        let mut request = self
+            .client
+            .get(&url)
+            .header("Accept", GITHUB_RAW_MEDIA_TYPE);
         if let Some(token) = &self.github_token {
             request = request.bearer_auth(token);
         }
@@ -925,6 +994,58 @@ mod tests {
             providers.get("github-models"),
             Some(&"GitHub Models".to_owned())
         );
+    }
+
+    #[test]
+    fn models_dev_provider_env_vars_reads_env_arrays() {
+        let env_vars = models_dev_provider_env_vars(&json!({
+            "openrouter": { "name": "OpenRouter", "env": ["OPENROUTER_API_KEY"] },
+            "lmstudio": { "name": "LMStudio" }
+        }));
+
+        assert_eq!(env_vars["openrouter"], ["OPENROUTER_API_KEY"]);
+        assert!(env_vars["lmstudio"].is_empty());
+    }
+
+    #[test]
+    fn opencode_models_dev_ids_fail_for_an_unlisted_native_id() {
+        let mapping = ProviderKeyMapping::from_toml(
+            r#"
+[[api_keys]]
+env_var = "LISTED_API_KEY"
+provider_ids = ["listed"]
+
+[[api_keys]]
+env_var = "RENAMED_API_KEY"
+provider_ids = ["renamed"]
+
+[[providers]]
+id = ["listed"]
+name = "Listed"
+agents = ["pi", "opencode"]
+
+[[providers]]
+id = ["renamed", "renamed-native"]
+name = "Renamed"
+agents = ["pi", "opencode"]
+
+[providers.provider_ids]
+renamed-native = "opencode"
+"#,
+        )
+        .expect("mapping");
+        let models_dev = models_dev_provider_env_vars(&json!({
+            "listed": { "name": "Listed" },
+            "renamed": { "name": "Renamed" }
+        }));
+        let mut models_dev_tier = BTreeSet::new();
+        let mut report = Report::default();
+
+        check_opencode_models_dev_ids(&mapping, &models_dev, &mut models_dev_tier, &mut report);
+
+        assert_eq!(report.failures.len(), 1);
+        assert!(report.failures[0].contains("`renamed-native`"));
+        assert_eq!(models_dev_tier, BTreeSet::from(["listed".to_owned()]));
     }
 
     #[test]

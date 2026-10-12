@@ -72,6 +72,24 @@ const HERMES_API_MODES: [&str; 3] = ["chat_completions", "anthropic_messages", "
 /// `KIMI_MODEL_PROVIDER_TYPE` values; `kimi` is Kimi Code's own wire and is never exported.
 pub const KIMI_PROVIDER_TYPES: [&str; 4] = ["kimi", "anthropic", "openai", "openai_responses"];
 pub const KIMI_NATIVE_PROVIDER_TYPE: &str = "kimi";
+pub const KIMI_MODEL_API_KEY_ENV: &str = "KIMI_MODEL_API_KEY";
+pub const KIMI_MODEL_NAME_ENV: &str = "KIMI_MODEL_NAME";
+pub const KIMI_MODEL_BASE_URL_ENV: &str = "KIMI_MODEL_BASE_URL";
+pub const KIMI_MODEL_PROVIDER_TYPE_ENV: &str = "KIMI_MODEL_PROVIDER_TYPE";
+pub const KIMI_MODEL_MAX_CONTEXT_SIZE_ENV: &str = "KIMI_MODEL_MAX_CONTEXT_SIZE";
+pub const KIMI_MODEL_MAX_OUTPUT_SIZE_ENV: &str = "KIMI_MODEL_MAX_OUTPUT_SIZE";
+pub const KIMI_MODEL_DISPLAY_NAME_ENV: &str = "KIMI_MODEL_DISPLAY_NAME";
+/// Every launch env var acp-stack builds Kimi's headless model from; fact-check-data verifies
+/// that Kimi still reads each one.
+pub const KIMI_MODEL_ENV_VARS: [&str; 7] = [
+    KIMI_MODEL_API_KEY_ENV,
+    KIMI_MODEL_NAME_ENV,
+    KIMI_MODEL_BASE_URL_ENV,
+    KIMI_MODEL_PROVIDER_TYPE_ENV,
+    KIMI_MODEL_MAX_CONTEXT_SIZE_ENV,
+    KIMI_MODEL_MAX_OUTPUT_SIZE_ENV,
+    KIMI_MODEL_DISPLAY_NAME_ENV,
+];
 /// Env-name fragments that mark an optional provider env ref as key material.
 const CREDENTIAL_ENV_NAME_MARKERS: [&str; 4] = ["KEY", "SECRET", "TOKEN", "PASSWORD"];
 

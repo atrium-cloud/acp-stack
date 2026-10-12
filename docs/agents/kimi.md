@@ -32,7 +32,7 @@ model = "k3"
 
 Kimi Code runs every provider row in [../../data/providers.toml](../../data/providers.toml) that lists `kimi` under `agents`. Each row's `[providers.kimi]` sub-table declares the wire Kimi speaks to the row's base (`provider_type`: `kimi`, `anthropic`, `openai`, or `openai_responses`) and an optional `default_model`; the credential comes from [../../data/env_vars.toml](../../data/env_vars.toml). The runtime derives the endpoint, key, and wire from the row at launch.
 
-- Kimi For Coding (`kimi-for-coding`, `kimi-code`, and aliases) and Kimi For Coding (Global) (`kimi-coding-global`): the subscription surfaces, on the `kimi` wire with `kimi-for-coding` as the default model.
+- Kimi For Coding (`kimi-coding`, `kimi-code`, and aliases) on `api.kimi.com` and Kimi For Coding (Global) (`kimi-coding-global`) on `api.kimi.ai`: the subscription surfaces for kimi.com and kimi.ai accounts, on the `kimi` wire with `kimi-for-coding` as the default model.
 - Moonshot AI (`moonshotai`; `moonshotai-cn` for the China endpoint): the pay-as-you-go platform, on the `kimi` wire with `kimi-k3` as the default model.
 - OpenAI-compatible rows (`openrouter`, `deepseek`, `zai`, `opencode`, `opencode-go`, and the rest of the `openai` / `openai_responses` rows) and Anthropic-wire rows (`anthropic`, `minimax`, `minimax-cn`): no default model, so `--model` is required.
 

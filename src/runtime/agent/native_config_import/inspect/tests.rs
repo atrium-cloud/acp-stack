@@ -866,6 +866,14 @@ max_context_size = 262144
         Some(("some-model".to_owned(), Some("kimi-code".to_owned())))
     );
 
+    // The global region's host selects its own row.
+    let global = inspect("type = \"kimi\"\nbase_url = \"https://api.kimi.ai/coding/v1\"");
+    assert_eq!(provider_of(&global), Some(true));
+    assert_eq!(
+        provider_candidate(&global),
+        Some("kimi-coding-global".to_owned())
+    );
+
     let anthropic = inspect("type = \"anthropic\"\nbase_url = \"https://api.anthropic.com\"");
     assert_eq!(provider_of(&anthropic), Some(true));
     assert_eq!(provider_candidate(&anthropic), Some("anthropic".to_owned()));

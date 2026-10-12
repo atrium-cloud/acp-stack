@@ -2,7 +2,9 @@ use super::*;
 
 use crate::runtime::agent::agent_headless_config::reroute_base_url;
 use crate::runtime::agent::provider_keys::{
-    HERMES_AGENT_ID, KIMI_NATIVE_PROVIDER_TYPE, agent_provider_id_for_provider_id,
+    HERMES_AGENT_ID, KIMI_MODEL_API_KEY_ENV, KIMI_MODEL_BASE_URL_ENV, KIMI_MODEL_DISPLAY_NAME_ENV,
+    KIMI_MODEL_MAX_CONTEXT_SIZE_ENV, KIMI_MODEL_MAX_OUTPUT_SIZE_ENV, KIMI_MODEL_NAME_ENV,
+    KIMI_MODEL_PROVIDER_TYPE_ENV, KIMI_NATIVE_PROVIDER_TYPE, agent_provider_id_for_provider_id,
     env_var_for_agent_provider_id, hermes_base_url_env_for_native_provider_id,
     kimi_profile_for_provider_id, providers_for_agent, resolve_base_url_template,
     vendor_base_url_for_agent_provider_id,
@@ -13,13 +15,6 @@ pub(crate) const KIMI_CODE_AGENT_ID: &str = "kimi";
 /// the tests below assert against it directly.
 #[cfg(test)]
 pub(crate) const KIMI_API_KEY_ENV: &str = "KIMI_API_KEY";
-pub(super) const KIMI_MODEL_API_KEY_ENV: &str = "KIMI_MODEL_API_KEY";
-pub(super) const KIMI_MODEL_NAME_ENV: &str = "KIMI_MODEL_NAME";
-pub(super) const KIMI_MODEL_BASE_URL_ENV: &str = "KIMI_MODEL_BASE_URL";
-pub(super) const KIMI_MODEL_PROVIDER_TYPE_ENV: &str = "KIMI_MODEL_PROVIDER_TYPE";
-pub(super) const KIMI_MODEL_MAX_CONTEXT_SIZE_ENV: &str = "KIMI_MODEL_MAX_CONTEXT_SIZE";
-pub(super) const KIMI_MODEL_MAX_OUTPUT_SIZE_ENV: &str = "KIMI_MODEL_MAX_OUTPUT_SIZE";
-pub(super) const KIMI_MODEL_DISPLAY_NAME_ENV: &str = "KIMI_MODEL_DISPLAY_NAME";
 /// The row a config predating `[agent.provider]` launches on: the Kimi For Coding subscription.
 pub(crate) const KIMI_DEFAULT_LANE_PROVIDER_ID: &str = "kimi-coding";
 
@@ -335,13 +330,14 @@ mod tests {
     use std::collections::HashMap;
 
     const KIMI_CODE_BASE_URL: &str = "https://api.kimi.com/coding/v1";
+    const KIMI_CODE_GLOBAL_BASE_URL: &str = "https://api.kimi.ai/coding/v1";
     const KIMI_MOONSHOT_BASE_URL: &str = "https://api.moonshot.ai/v1";
     const KIMI_MOONSHOT_CN_BASE_URL: &str = "https://api.moonshot.cn/v1";
     const KIMI_CODE_DEFAULT_MODEL: &str = "kimi-for-coding";
     const KIMI_MOONSHOT_DEFAULT_MODEL: &str = "kimi-k3";
     const KIMI_SUBSCRIPTION_PROVIDER_IDS: [&str; 5] = [
         "kimi-coding",
-        "kimi-for-coding",
+        "kimi-code-plan-cn",
         "kimi-coding-plan",
         "kimi",
         "kimi-code",
@@ -693,7 +689,7 @@ mod tests {
     }
 
     #[test]
-    fn kimi_process_env_global_subscription_shares_the_coding_endpoint() {
+    fn kimi_process_env_global_subscription_targets_the_global_region_host() {
         let env = HashMap::from([(KIMI_API_KEY_ENV.to_owned(), "secret".to_owned())]);
         let agent = kimi_agent_with_provider("kimi-coding-global", None);
 
@@ -701,7 +697,7 @@ mod tests {
 
         assert_eq!(
             prepared.get(KIMI_MODEL_BASE_URL_ENV).map(String::as_str),
-            Some(KIMI_CODE_BASE_URL)
+            Some(KIMI_CODE_GLOBAL_BASE_URL)
         );
         assert_eq!(
             prepared.get(KIMI_MODEL_API_KEY_ENV).map(String::as_str),
@@ -825,19 +821,23 @@ mod tests {
 
     #[test]
     fn kimi_process_env_provider_less_config_ignores_an_override_for_another_lane() {
-        let env = HashMap::from([(KIMI_API_KEY_ENV.to_owned(), "secret".to_owned())]);
+        // The global-region row is another lane: it shares the key but not the host.
+        for provider_id in ["moonshotai", "kimi-coding-global"] {
+            let env = HashMap::from([(KIMI_API_KEY_ENV.to_owned(), "secret".to_owned())]);
 
-        let prepared = super::build_kimi_process_env(
-            &kimi_agent(None),
-            env,
-            Some(&override_for("moonshotai")),
-        )
-        .expect("Kimi env");
+            let prepared = super::build_kimi_process_env(
+                &kimi_agent(None),
+                env,
+                Some(&override_for(provider_id)),
+            )
+            .expect("Kimi env");
 
-        assert_eq!(
-            prepared.get(KIMI_MODEL_BASE_URL_ENV).map(String::as_str),
-            Some(KIMI_CODE_BASE_URL)
-        );
+            assert_eq!(
+                prepared.get(KIMI_MODEL_BASE_URL_ENV).map(String::as_str),
+                Some(KIMI_CODE_BASE_URL),
+                "override under `{provider_id}` must leave the default lane alone"
+            );
+        }
     }
 
     #[test]

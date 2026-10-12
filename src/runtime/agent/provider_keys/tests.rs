@@ -167,7 +167,9 @@ fn provider_lookup_works_for_every_collapsed_provider_id() {
         "together",
         "togetherai",
         "kimi-coding",
-        "kimi-for-coding",
+        "kimi-code-plan-cn",
+        "kimi-coding-global",
+        "kimi-code-plan-global",
     ] {
         let provider = mapping
             .provider_mapping(provider_id)
@@ -258,7 +260,9 @@ fn provider_metadata_scopes_supported_agents() {
         Some("MOONSHOT_API_KEY")
     );
     assert!(provider_id_supports_agent("kimi-coding", "claude"));
-    assert!(provider_id_supports_agent("kimi-for-coding", "claude"));
+    assert!(provider_id_supports_agent("kimi-code-plan-cn", "claude"));
+    assert!(provider_id_supports_agent("kimi-coding-global", "opencode"));
+    assert!(!provider_id_supports_agent("kimi-coding-global", "claude"));
     assert_eq!(
         agent_provider_id_for_provider_id("claude", "kimi-coding"),
         Some("kimi-coding-plan")
@@ -268,11 +272,15 @@ fn provider_metadata_scopes_supported_agents() {
         Some("KIMI_API_KEY")
     );
     assert_eq!(
-        env_var_for_agent_provider_id("claude", "kimi-for-coding"),
+        env_var_for_agent_provider_id("claude", "kimi-code-plan-cn"),
         Some("KIMI_API_KEY")
     );
     assert_eq!(
-        env_var_for_agent_provider_id("opencode", "kimi-for-coding"),
+        env_var_for_agent_provider_id("opencode", "kimi-code-plan-cn"),
+        Some("KIMI_API_KEY")
+    );
+    assert_eq!(
+        env_var_for_agent_provider_id("opencode", "kimi-code-plan-global"),
         Some("KIMI_API_KEY")
     );
     assert_eq!(
@@ -308,12 +316,20 @@ fn agent_native_provider_ids_are_data_driven() {
         Some("togetherai")
     );
     assert_eq!(
-        agent_provider_id_for_provider_id("pi", "kimi-for-coding"),
+        agent_provider_id_for_provider_id("pi", "kimi-code-plan-cn"),
         Some("kimi-coding")
     );
     assert_eq!(
         agent_provider_id_for_provider_id("opencode", "kimi-coding"),
-        Some("kimi-for-coding")
+        Some("kimi-code-plan-cn")
+    );
+    assert_eq!(
+        agent_provider_id_for_provider_id("opencode", "kimi-coding-global"),
+        Some("kimi-code-plan-global")
+    );
+    assert_eq!(
+        agent_provider_id_for_provider_id("kimi", "kimi-code-plan-global"),
+        Some("kimi-coding-global")
     );
     assert_eq!(
         agent_provider_id_for_provider_id("hermes", "openai"),
@@ -1213,6 +1229,10 @@ fn provider_id_for_agent_vendor_base_url_matches_rows_by_base() {
     assert_eq!(
         provider_id_for_agent_vendor_base_url("kimi", "https://api.kimi.com/coding/v1"),
         Some("kimi-coding")
+    );
+    assert_eq!(
+        provider_id_for_agent_vendor_base_url("kimi", "https://api.kimi.ai/coding/v1"),
+        Some("kimi-coding-global")
     );
     assert_eq!(
         provider_id_for_agent_vendor_base_url("kimi", "https://api.anthropic.com"),
