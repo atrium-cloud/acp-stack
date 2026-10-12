@@ -200,10 +200,17 @@ fn azure_provider_refs_include_base_url_and_documented_options() {
         [
             "AZURE_OPENAI_RESOURCE_NAME",
             "AZURE_OPENAI_API_VERSION",
-            "AZURE_OPENAI_DEPLOYMENT_NAME_MAP",
-            "AZURE_RESOURCE_NAME"
+            "AZURE_OPENAI_DEPLOYMENT_NAME_MAP"
         ]
     );
+    assert_eq!(
+        base_url_env_for_provider_id("azure"),
+        Some("AZURE_OPENAI_BASE_URL")
+    );
+    assert_eq!(base_url_env_for_provider_id("openai"), None);
+    assert!(!agent_provider_accepts_endpoint_override(
+        "opencode", "azure"
+    ));
     assert!(provider_id_supports_agent("azure", "pi"));
     assert!(provider_id_supports_agent("azure", "opencode"));
 }
@@ -524,6 +531,54 @@ agents = ["pi"]
     .expect_err("duplicate provider id fails");
 
     assert!(err.to_string().contains("duplicate provider id `same`"));
+}
+
+#[test]
+fn invalid_mapping_rejects_base_url_env_outside_the_companions() {
+    let err = ProviderKeyMapping::from_toml(
+        r#"
+[[api_keys]]
+env_var = "RESOURCE_API_KEY"
+provider_ids = ["resource"]
+companion_env_vars = ["RESOURCE_BASE_URL"]
+
+[[providers]]
+id = ["resource"]
+name = "Resource"
+agents = ["pi", "opencode"]
+base_url_env = "OTHER_BASE_URL"
+"#,
+    )
+    .expect_err("an endpoint env that is not a companion fails");
+
+    assert!(err.to_string().contains(
+        "provider `resource` base_url_env `OTHER_BASE_URL` is not one of its companion env vars"
+    ));
+}
+
+#[test]
+fn invalid_mapping_rejects_base_url_env_beside_a_vendor_base() {
+    let err = ProviderKeyMapping::from_toml(
+        r#"
+[[api_keys]]
+env_var = "RESOURCE_API_KEY"
+provider_ids = ["resource"]
+companion_env_vars = ["RESOURCE_BASE_URL"]
+
+[[providers]]
+id = ["resource"]
+name = "Resource"
+agents = ["pi", "opencode"]
+base_url = "https://api.resource.example/v1"
+base_url_env = "RESOURCE_BASE_URL"
+"#,
+    )
+    .expect_err("a fixed base beside an endpoint env fails");
+
+    assert!(
+        err.to_string()
+            .contains("provider `resource` declares both a vendor base URL and base_url_env")
+    );
 }
 
 #[test]

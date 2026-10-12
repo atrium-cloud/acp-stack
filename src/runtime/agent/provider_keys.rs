@@ -42,7 +42,10 @@ const GOOSE_PROVIDER_HOST_ENV: [(&str, &str); 4] = [
 /// the row default, so exporting it reroutes the provider without displacing its identity.
 ///
 /// fact-check-data verifies each pair against the provider's row in Hermes' registry. The
-/// remaining hermes-enabled providers stay on the managed named-entry lane.
+/// remaining hermes-enabled providers stay on the managed named-entry lane, including those whose
+/// registry row declares a base-URL env too (fact-check-data lists them): several of those names
+/// (`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`) are generic ones other Hermes code paths also read,
+/// so moving a provider here waits on a real prompt test.
 const HERMES_PROVIDER_BASE_URL_ENV: [(&str, &str); 18] = [
     ("actual", "ACTUAL_BASE_URL"),
     ("alibaba", "DASHSCOPE_BASE_URL"),
@@ -137,6 +140,10 @@ pub struct ProviderEnvMapping {
     /// `base_url` (pi's Anthropic client appends `/v1/messages` itself, for example).
     #[serde(default)]
     pub base_urls: BTreeMap<String, String>,
+    /// The companion env var carrying the endpoint of a provider with no fixed vendor base (one
+    /// Azure resource per operator); agents configured by file get an env reference to it.
+    #[serde(default)]
+    pub base_url_env: Option<String>,
     #[serde(default)]
     pub claude_code: Option<ClaudeCodeProviderProfile>,
     #[serde(default)]
@@ -445,6 +452,23 @@ impl ProviderKeyMapping {
                     base_url,
                     &placeholder_env_vars,
                 )?;
+            }
+            if let Some(base_url_env) = mapping.base_url_env.as_deref() {
+                validate_token(
+                    &format!("providers.{primary_id}.base_url_env"),
+                    base_url_env,
+                )?;
+                if mapping.base_url.is_some() || !mapping.base_urls.is_empty() {
+                    return provider_mapping_error(format!(
+                        "provider `{primary_id}` declares both a vendor base URL and base_url_env"
+                    ));
+                }
+                // A companion is required alongside the key, so the referenced endpoint is set.
+                if !placeholder_env_vars.contains(base_url_env) {
+                    return provider_mapping_error(format!(
+                        "provider `{primary_id}` base_url_env `{base_url_env}` is not one of its companion env vars"
+                    ));
+                }
             }
             for (agent, base_url) in &mapping.base_urls {
                 if !mapping.agents.iter().any(|supported| supported == agent) {
@@ -797,8 +821,7 @@ pub fn kimi_profile_for_provider_id(provider_id: &str) -> Option<&'static KimiPr
 }
 
 /// The primary id of the first row `agent_id` runs whose vendor base equals `base_url`; a
-/// trailing slash on either side does not distinguish two endpoints. Rows sharing a base (the
-/// Kimi For Coding subscription and its Global variant) resolve to whichever is listed first.
+/// trailing slash on either side does not distinguish two endpoints.
 pub fn provider_id_for_agent_vendor_base_url(
     agent_id: &str,
     base_url: &str,
@@ -833,6 +856,14 @@ pub fn vendor_base_url_for_agent_provider_id(
     ProviderKeyMapping::load_embedded()
         .provider_mapping(provider_id)
         .and_then(|provider| provider.vendor_base_url(agent_id))
+}
+
+/// The companion env var holding `provider_id`'s endpoint when the provider has no fixed vendor
+/// base.
+pub fn base_url_env_for_provider_id(provider_id: &str) -> Option<&'static str> {
+    ProviderKeyMapping::load_embedded()
+        .provider_mapping(provider_id)
+        .and_then(|provider| provider.base_url_env.as_deref())
 }
 
 /// Goose reads a host-only endpoint per native provider from `config.yaml`, appending its own

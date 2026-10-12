@@ -491,6 +491,7 @@ fn check_opencode_models_dev_ids(
         .flat_map(|provider| provider.ids().iter().map(String::as_str))
         .collect();
     let mut listed = 0;
+    let mut unlisted = 0;
     for provider in mapping.providers() {
         let Some(native_id) = native_provider_id(provider, OPENCODE_AGENT_ID) else {
             continue;
@@ -502,15 +503,18 @@ fn check_opencode_models_dev_ids(
             listed += 1;
             models_dev_tier.extend(provider.ids().iter().cloned());
         } else {
+            unlisted += 1;
             report.fail(format!(
                 "models.dev does not list `{native_id}`, the OpenCode provider id acp-stack writes for `{}`",
                 provider.ids().first().map_or(native_id, String::as_str)
             ));
         }
     }
-    report.ok(format!(
-        "models.dev lists the OpenCode provider id of {listed} rows outside the OpenCode-only name check"
-    ));
+    if unlisted == 0 {
+        report.ok(format!(
+            "models.dev lists the OpenCode provider id of all {listed} rows outside the OpenCode-only name check"
+        ));
+    }
 }
 
 fn models_dev_scoped_providers(mapping: &ProviderKeyMapping) -> Vec<&ProviderEnvMapping> {
@@ -1045,6 +1049,7 @@ renamed-native = "opencode"
 
         assert_eq!(report.failures.len(), 1);
         assert!(report.failures[0].contains("`renamed-native`"));
+        assert!(report.ok.is_empty(), "no summary pass beside a failure");
         assert_eq!(models_dev_tier, BTreeSet::from(["listed".to_owned()]));
     }
 

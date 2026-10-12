@@ -1,4 +1,5 @@
 use super::*;
+use crate::runtime::agent::provider_keys::base_url_env_for_provider_id;
 
 pub(crate) const OPENCODE_AGENT_ID: &str = "opencode";
 // OpenCode treats an empty `small_model` as unset and still falls back to its
@@ -186,11 +187,22 @@ fn write_opencode_provider_config(
     options.insert("apiKey".to_owned(), json!(format!("{{env:{api_key_ref}}}")));
     // acps owns `options.baseURL` for a mapped provider: removing it on a
     // re-provision without an override is what restores the vendor endpoint.
-    match base_url_override {
-        Some(base_url) => {
+    // A provider with no fixed vendor base reads its endpoint from the
+    // companion env instead.
+    match (
+        base_url_override,
+        base_url_env_for_provider_id(&provider.id),
+    ) {
+        (Some(base_url), _) => {
             options.insert("baseURL".to_owned(), json!(base_url));
         }
-        None => {
+        (None, Some(base_url_env)) => {
+            options.insert(
+                "baseURL".to_owned(),
+                json!(format!("{{env:{base_url_env}}}")),
+            );
+        }
+        (None, None) => {
             options.remove("baseURL");
         }
     }
@@ -445,6 +457,28 @@ mod tests {
             custom: None,
         });
         config
+    }
+
+    #[test]
+    fn opencode_provider_without_a_vendor_base_reads_its_endpoint_env() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
+        let mut config = config_with_agent(
+            "opencode",
+            &["AZURE_OPENAI_API_KEY", "AZURE_OPENAI_BASE_URL"],
+        );
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "azure".to_owned(),
+            model: Some("azure/gpt-5.5".to_owned()),
+            api_key_ref: Some("AZURE_OPENAI_API_KEY".to_owned()),
+            custom: None,
+        });
+
+        provision_opencode_config(&config, &workload, None).expect("provision");
+
+        let options = &opencode_config_value(tempdir.path())["provider"]["azure"]["options"];
+        assert_eq!(options["apiKey"], "{env:AZURE_OPENAI_API_KEY}");
+        assert_eq!(options["baseURL"], "{env:AZURE_OPENAI_BASE_URL}");
     }
 
     #[test]

@@ -61,8 +61,8 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.149", features = ["raw_value"] }
 serde_norway = "0.9.42"
-# Derives the published /v1 JSON Schema from the wire DTOs (mirrors the ACP SDK,
-# which already pulls schemars 1.x into the tree). The `generate-api-schema` bin
+# Derives the published /v1 JSON Schema from the wire DTOs; some embed ACP SDK
+# types, hence the SDK's `schemars` feature below. The `generate-api-schema` bin
 # and the schema_export module are dev-tools-gated; only the derive ships.
 # `chrono04` covers the `DateTime<Utc>` fields on native-config responses.
 schemars = { version = "1.2", features = ["derive", "chrono04", "raw_value"] }

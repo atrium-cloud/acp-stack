@@ -39,6 +39,11 @@
 # clients append `/v1/messages` themselves). Claude Code lanes use the
 # `[providers.claude_code]` base_url.
 #
+# `base_url_env` names the companion env var that carries the endpoint of a
+# provider with no fixed vendor base. Agents that read it natively get it in
+# their launch env; agents configured by file get an env reference to it
+# (OpenCode `options.baseURL = "{env:VAR}"`). Such a row cannot be rerouted.
+#
 # A `[providers.kimi]` sub-table carries Kimi Code launch metadata and is
 # required on every kimi-enabled row: `provider_type` is the wire Kimi speaks
 # to the row's base (`kimi`, `anthropic`, `openai`, or `openai_responses`,
@@ -83,8 +88,9 @@ agents = ["pi"]
 id = ["azure"]
 name = "Azure OpenAI"
 agents = ["pi", "opencode"]
-# OpenCode's Azure client reads its resource from env; acps writes no resourceName.
-optional_env_vars = ["AZURE_RESOURCE_NAME"]
+# One resource per operator: `https://<resource>.openai.azure.com/openai/v1`,
+# which Pi's and OpenCode's Azure clients both take as the base.
+base_url_env = "AZURE_OPENAI_BASE_URL"
 
 [[providers]]
 id = ["openai", "openai-api"]

@@ -24,7 +24,7 @@ The `[agent]` config block is generated from the `hermes` entry in `data/agents.
 
 ### Endpoint overrides: the native base-URL env lane
 
-A mapped provider whose Hermes overlay declares a base-URL environment variable keeps its native identity: `model.provider` stays the provider-native id, and `acp-stack` exports the rerouted endpoint into the agent launch environment under that variable (`openrouter` → `OPENROUTER_BASE_URL`, `zai` → `GLM_BASE_URL`, and the rest of the table in `src/runtime/agent/provider_keys.rs`). Hermes resolves an api-key provider's base URL as the explicit config value, then this variable, then the overlay default, so only the endpoint changes and the adapter keeps advertising `<native>/<model>` option ids.
+A mapped provider listed in the base-URL env table in `src/runtime/agent/provider_keys.rs` (`openrouter` → `OPENROUTER_BASE_URL`, `zai` → `GLM_BASE_URL`, and the rest) keeps its native identity: `model.provider` stays the provider-native id, and `acp-stack` exports the rerouted endpoint into the agent launch environment under that variable. Hermes resolves an api-key provider's base URL as the explicit config value, then this variable, then the overlay default, so only the endpoint changes and the adapter keeps advertising `<native>/<model>` option ids.
 
 Nothing is persisted for this lane. The value is derived from the stored override at every launch, so clearing the override simply stops exporting it and the overlay falls back to its vendor endpoint. Declaring the variable in `[agent].env` is refused, because it is runtime-managed.
 

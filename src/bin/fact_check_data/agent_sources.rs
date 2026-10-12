@@ -77,6 +77,16 @@ const KILO_ENV_FIELD: &str = "env";
 
 const TYPESCRIPT_ID_FIELD: &str = "id";
 const CONST_KEYWORD: &str = "const";
+/// Words that sit right before a function's name in a Rust or TypeScript definition.
+const DEFINITION_KEYWORDS: [&str; 7] = [
+    "fn",
+    "function",
+    "async",
+    "static",
+    "private",
+    "protected",
+    "public",
+];
 const GITHUB_CONTENT_DIR_KIND: &str = "dir";
 const GITHUB_CONTENT_FILE_KIND: &str = "file";
 
@@ -146,13 +156,7 @@ pub(super) fn check_hermes_sources(
         return Ok(());
     }
 
-    let mut shipped = BTreeSet::new();
-    let mut managed_lane_candidates = Vec::new();
-    for provider in agent_providers(mapping, HERMES_AGENT_ID) {
-        let Some(native_id) = native_provider_id(provider, HERMES_AGENT_ID) else {
-            continue;
-        };
-        shipped.insert(native_id.to_owned());
+    for native_id in agent_native_ids(mapping, HERMES_AGENT_ID) {
         if !providers.contains_key(native_id) && plugin_dirs.contains(native_id) {
             let plugin_source = http.github_raw_text(
                 HERMES_REPO,
@@ -162,7 +166,51 @@ pub(super) fn check_hermes_sources(
                 providers.insert(native_id.to_owned(), plugin);
             }
         }
-        let Some(upstream) = providers.get(native_id) else {
+    }
+    let own_rung_literals = if agent_native_ids(mapping, HERMES_AGENT_ID)
+        .any(|native_id| native_id == HERMES_OWN_RUNG_PROVIDER)
+    {
+        strings(&tokens(
+            &http.github_raw_text(HERMES_REPO, HERMES_RUNTIME_PROVIDER_PATH)?,
+            Syntax::Python,
+        ))
+        .into_iter()
+        .collect()
+    } else {
+        BTreeSet::new()
+    };
+    let upstream = HermesUpstream {
+        providers,
+        plugin_dirs,
+        own_rung_literals,
+    };
+    evaluate_hermes(mapping, &upstream, verified, report);
+    Ok(())
+}
+
+/// What the Hermes check compares against: registry rows plus the plugin profiles mirrored in for
+/// shipped ids the rows lack, every plugin directory, and the string literals of the OpenRouter
+/// rung.
+struct HermesUpstream {
+    providers: BTreeMap<String, HermesProvider>,
+    plugin_dirs: BTreeSet<String>,
+    own_rung_literals: BTreeSet<String>,
+}
+
+fn evaluate_hermes(
+    mapping: &ProviderKeyMapping,
+    upstream: &HermesUpstream,
+    verified: &mut BTreeSet<String>,
+    report: &mut Report,
+) {
+    let mut shipped = BTreeSet::new();
+    let mut managed_lane_candidates = Vec::new();
+    for provider in agent_providers(mapping, HERMES_AGENT_ID) {
+        let Some(native_id) = native_provider_id(provider, HERMES_AGENT_ID) else {
+            continue;
+        };
+        shipped.insert(native_id.to_owned());
+        let Some(upstream_provider) = upstream.providers.get(native_id) else {
             report.fail(format!(
                 "Hermes has no provider `{native_id}` in its registry rows or model-provider plugins"
             ));
@@ -171,24 +219,24 @@ pub(super) fn check_hermes_sources(
         let Some(env_var) = env_var_for_agent_provider(mapping, HERMES_AGENT_ID, native_id) else {
             continue;
         };
-        if !upstream.key_env_vars.iter().any(|key| key == env_var) {
+        if !upstream_provider
+            .key_env_vars
+            .iter()
+            .any(|key| key == env_var)
+        {
             report.fail(format!(
                 "Hermes provider `{native_id}` reads {}, shipped data has `{env_var}`",
-                upstream.key_env_vars.join(", ")
+                upstream_provider.key_env_vars.join(", ")
             ));
             continue;
         }
         let expected_base_url_env = hermes_base_url_env_for_native_provider_id(native_id);
         let upstream_base_url_env = if native_id == HERMES_OWN_RUNG_PROVIDER {
-            let runtime = tokens(
-                &http.github_raw_text(HERMES_REPO, HERMES_RUNTIME_PROVIDER_PATH)?,
-                Syntax::Python,
-            );
             expected_base_url_env
-                .filter(|env_var| runtime.contains(&Token::Str((*env_var).to_owned())))
+                .filter(|env_var| upstream.own_rung_literals.contains(*env_var))
                 .map(str::to_owned)
         } else {
-            upstream.base_url_env_var.clone()
+            upstream_provider.base_url_env_var.clone()
         };
         match (expected_base_url_env, upstream_base_url_env.as_deref()) {
             (Some(expected), Some(actual)) if expected == actual => {}
@@ -210,9 +258,10 @@ pub(super) fn check_hermes_sources(
         ));
     }
 
-    let unshipped: BTreeSet<&str> = providers
+    let unshipped: BTreeSet<&str> = upstream
+        .providers
         .keys()
-        .chain(plugin_dirs.iter())
+        .chain(upstream.plugin_dirs.iter())
         .map(String::as_str)
         .filter(|id| !shipped.contains(*id))
         .collect();
@@ -228,7 +277,6 @@ pub(super) fn check_hermes_sources(
             managed_lane_candidates.join(", ")
         ));
     }
-    Ok(())
 }
 
 /// Verifies every shipped Goose provider against the source `GOOSE_PROVIDER` resolves through:
@@ -255,12 +303,9 @@ pub(super) fn check_goose_sources(
         return Ok(());
     }
 
-    let mut shipped_definitions = BTreeSet::new();
-    for provider in agent_providers(mapping, GOOSE_AGENT_ID) {
-        let Some(native_id) = native_provider_id(provider, GOOSE_AGENT_ID) else {
-            continue;
-        };
-        let upstream = match GOOSE_RUST_PROVIDERS.iter().find(|(id, _)| *id == native_id) {
+    let mut providers = BTreeMap::new();
+    for native_id in agent_native_ids(mapping, GOOSE_AGENT_ID) {
+        let provider = match GOOSE_RUST_PROVIDERS.iter().find(|(id, _)| *id == native_id) {
             Some((_, paths)) => {
                 let sources = paths
                     .iter()
@@ -269,21 +314,50 @@ pub(super) fn check_goose_sources(
                 goose_rust_provider(&sources)
             }
             None => {
-                let stem = native_id.replace('-', "_");
+                let stem = goose_definition_stem(native_id);
                 if !definitions.contains(&stem) {
-                    report.fail(format!(
-                        "Goose has no provider `{native_id}`: no declarative definition `{stem}{GOOSE_DEFINITION_EXTENSION}` and no GOOSE_RUST_PROVIDERS entry"
-                    ));
                     continue;
                 }
                 let path = format!("{GOOSE_DEFINITIONS_DIR}/{stem}{GOOSE_DEFINITION_EXTENSION}");
                 let definition: GooseDefinition =
                     serde_json::from_str(&http.github_raw_text(GOOSE_REPO, &path)?)
                         .map_err(|source| format!("failed to parse Goose {path}: {source}"))?;
-                shipped_definitions.insert(stem);
                 definition.into()
             }
         };
+        providers.insert(native_id.to_owned(), provider);
+    }
+    evaluate_goose(mapping, &definitions, &providers, verified, report);
+    Ok(())
+}
+
+/// A declarative definition's file stem for a goose provider id.
+fn goose_definition_stem(native_id: &str) -> String {
+    native_id.replace('-', "_")
+}
+
+/// Compares shipped Goose rows against the upstream providers keyed by goose id; `definitions`
+/// holds every declarative definition stem, for the providers acp-stack does not ship.
+fn evaluate_goose(
+    mapping: &ProviderKeyMapping,
+    definitions: &BTreeSet<String>,
+    providers: &BTreeMap<String, GooseProvider>,
+    verified: &mut BTreeSet<String>,
+    report: &mut Report,
+) {
+    let mut shipped_definitions = BTreeSet::new();
+    for provider in agent_providers(mapping, GOOSE_AGENT_ID) {
+        let Some(native_id) = native_provider_id(provider, GOOSE_AGENT_ID) else {
+            continue;
+        };
+        let stem = goose_definition_stem(native_id);
+        let Some(upstream) = providers.get(native_id) else {
+            report.fail(format!(
+                "Goose has no provider `{native_id}`: no declarative definition `{stem}{GOOSE_DEFINITION_EXTENSION}` and no GOOSE_RUST_PROVIDERS entry"
+            ));
+            continue;
+        };
+        shipped_definitions.insert(stem);
         let Some(env_var) = env_var_for_agent_provider(mapping, GOOSE_AGENT_ID, native_id) else {
             continue;
         };
@@ -326,7 +400,6 @@ pub(super) fn check_goose_sources(
             unshipped.join(", ")
         ));
     }
-    Ok(())
 }
 
 /// Codex builds in a handful of providers and takes every other one from `[model_providers]`
@@ -341,17 +414,28 @@ pub(super) fn check_codex_sources(
 ) -> Result<(), Box<dyn Error>> {
     let built_ins =
         codex_built_in_provider_ids(&http.github_raw_text(CODEX_REPO, CODEX_PROVIDER_INFO_PATH)?);
-    if built_ins.is_empty() {
-        report.fail("Codex `built_in_model_providers` yielded no providers; its format changed");
-        return Ok(());
-    }
     let key_env_vars = codex_acp_key_env_vars(
         &http.github_raw_text(CODEX_ACP_REPO, CODEX_ACP_AUTH_METHOD_PATH)?,
         &http.github_raw_text(CODEX_ACP_REPO, CODEX_ACP_CLIENT_PATH)?,
     );
+    evaluate_codex(mapping, &built_ins, &key_env_vars, verified, report);
+    Ok(())
+}
+
+fn evaluate_codex(
+    mapping: &ProviderKeyMapping,
+    built_ins: &BTreeSet<String>,
+    key_env_vars: &[String],
+    verified: &mut BTreeSet<String>,
+    report: &mut Report,
+) {
+    if built_ins.is_empty() {
+        report.fail("Codex `built_in_model_providers` yielded no providers; its format changed");
+        return;
+    }
     if key_env_vars.is_empty() {
         report.fail("codex-acp `readApiKeyFromEnv` yielded no env vars; its format changed");
-        return Ok(());
+        return;
     }
 
     let mut shipped = BTreeSet::new();
@@ -405,7 +489,6 @@ pub(super) fn check_codex_sources(
             unshipped.join(", ")
         ));
     }
-    Ok(())
 }
 
 /// Kimi Code runs any vendor through the launch env acp-stack builds, so its source pins that
@@ -419,6 +502,15 @@ pub(super) fn check_kimi_sources(http: &Http, report: &mut Report) -> Result<(),
             Syntax::TypeScript,
         )));
     }
+    let registered =
+        kimi_provider_types(&http.github_raw_text(KIMI_REPO, KIMI_PROVIDER_DEFINITION_PATH)?);
+    evaluate_kimi(&literals, &registered, report);
+    Ok(())
+}
+
+/// `literals` are the string literals of the files that read the launch env; `registered` the
+/// provider types Kimi registers.
+fn evaluate_kimi(literals: &BTreeSet<String>, registered: &BTreeSet<String>, report: &mut Report) {
     let unread: Vec<&str> = KIMI_MODEL_ENV_VARS
         .into_iter()
         .filter(|env_var| !literals.contains(*env_var))
@@ -435,11 +527,9 @@ pub(super) fn check_kimi_sources(http: &Http, report: &mut Report) -> Result<(),
         ));
     }
 
-    let registered =
-        kimi_provider_types(&http.github_raw_text(KIMI_REPO, KIMI_PROVIDER_DEFINITION_PATH)?);
     if registered.is_empty() {
         report.fail("Kimi provider-definition.ts yielded no provider types; its format changed");
-        return Ok(());
+        return;
     }
     let unregistered: Vec<&str> = KIMI_PROVIDER_TYPES
         .into_iter()
@@ -467,7 +557,6 @@ pub(super) fn check_kimi_sources(http: &Http, report: &mut Report) -> Result<(),
             unused.join(", ")
         ));
     }
-    Ok(())
 }
 
 /// Kilo's provider set is models.dev plus the gateway overlay in its `models.ts`, which replaces
@@ -480,9 +569,20 @@ pub(super) fn check_kilo_sources(
     report: &mut Report,
 ) -> Result<(), Box<dyn Error>> {
     let overlay = kilo_overlay_env_vars(&http.github_raw_text(KILO_REPO, KILO_MODELS_PATH)?);
+    evaluate_kilo(mapping, &overlay, models_dev_env_vars, verified, report);
+    Ok(())
+}
+
+fn evaluate_kilo(
+    mapping: &ProviderKeyMapping,
+    overlay: &BTreeMap<String, Vec<String>>,
+    models_dev_env_vars: &BTreeMap<String, Vec<String>>,
+    verified: &mut BTreeSet<String>,
+    report: &mut Report,
+) {
     if overlay.is_empty() {
         report.fail("Kilo models.ts yielded no provider overlay; its format changed");
-        return Ok(());
+        return;
     }
     for provider in agent_providers(mapping, KILO_AGENT_ID) {
         let Some(native_id) = native_provider_id(provider, KILO_AGENT_ID) else {
@@ -514,7 +614,6 @@ pub(super) fn check_kilo_sources(
             "Kilo {source} verifies `{native_id}` reads `{env_var}`"
         ));
     }
-    Ok(())
 }
 
 fn agent_providers<'a>(
@@ -525,6 +624,14 @@ fn agent_providers<'a>(
         .providers()
         .iter()
         .filter(move |provider| provider.agents.iter().any(|agent| agent == agent_id))
+}
+
+fn agent_native_ids<'a>(
+    mapping: &'a ProviderKeyMapping,
+    agent_id: &'a str,
+) -> impl Iterator<Item = &'a str> {
+    agent_providers(mapping, agent_id)
+        .filter_map(move |provider| native_provider_id(provider, agent_id))
 }
 
 fn github_directory_entries(
@@ -804,11 +911,20 @@ fn string_constants(tokens: &[Token]) -> BTreeMap<String, String> {
     constants
 }
 
-/// The brace-delimited body of the function named `name`. Its definition is the occurrence whose
-/// parameter list runs into a return type or the body, which skips call sites.
+/// The brace-delimited body of the function named `name`. Its definition is the occurrence that
+/// follows a definition keyword or starts a statement or class member, and whose parameter list
+/// runs into a return type or the body; a call site fails one of the two.
 fn function_body<'a>(tokens: &'a [Token], name: &str) -> Option<&'a [Token]> {
     tokens.iter().enumerate().find_map(|(index, token)| {
         if !matches!(token, Token::Word(word) if word == name) {
+            return None;
+        }
+        let opens_definition = match index.checked_sub(1).map(|previous| &tokens[previous]) {
+            Some(Token::Word(previous)) => DEFINITION_KEYWORDS.contains(&previous.as_str()),
+            Some(Token::Punct('{' | '}' | ';')) | None => true,
+            Some(_) => false,
+        };
+        if !opens_definition {
             return None;
         }
         let parameters_end = index + 1 + balanced_group_len(&tokens[index + 1..])?;
@@ -1314,6 +1430,9 @@ pub const LEGACY_OLLAMA_CHAT_PROVIDER_ID: &str = "ollama-chat";
 pub const OLLAMA_OSS_PROVIDER_ID: &str = "ollama";
 
 fn defaults() -> HashMap<String, ModelProviderInfo> {
+    for (id, _) in built_in_model_providers(None) {
+        let _ = (id, LEGACY_OLLAMA_CHAT_PROVIDER_ID);
+    }
     built_in_model_providers(None)
 }
 
@@ -1363,6 +1482,8 @@ import {CODEX_API_KEY_ENV_VAR, OPENAI_API_KEY_ENV_VAR} from "./CodexAuthMethod";
 export class CodexAcpClient {
     async authenticate(authRequest: AuthenticateRequest): Promise<boolean> {
         const apiKey = authRequest._meta?.["api-key"]?.apiKey ?? this.readApiKeyFromEnv();
+        const fallback = useEnv ? this.readApiKeyFromEnv() : "";
+        if (fallback) { console.log(UNRELATED_ENV_VAR); }
         return apiKey.length > 0;
     }
 
@@ -1460,5 +1581,339 @@ const get = Effect.fn("ModelsDev.get")(function* () {
         assert_eq!(overlay["apertis"], ["APERTIS_API_KEY"]);
         assert_eq!(overlay.len(), 2);
         assert!(kilo_overlay_env_vars("export const layer = Layer.empty").is_empty());
+    }
+
+    /// One `[[api_keys]]` and one `[[providers]]` entry per `(provider id, key env)`, each run by
+    /// `agent` alone; `profile` is appended to every provider entry.
+    fn single_agent_mapping(
+        agent: &str,
+        rows: &[(&str, &str)],
+        profile: &str,
+    ) -> ProviderKeyMapping {
+        let mut body = String::new();
+        for (provider_id, env_var) in rows {
+            body.push_str(&format!(
+                "[[api_keys]]\nenv_var = \"{env_var}\"\nprovider_ids = [\"{provider_id}\"]\n\n"
+            ));
+        }
+        for (provider_id, _) in rows {
+            body.push_str(&format!(
+                "[[providers]]\nid = [\"{provider_id}\"]\nname = \"{provider_id}\"\nagents = [\"{agent}\"]\n{profile}\n"
+            ));
+        }
+        ProviderKeyMapping::from_toml(&body).expect("fixture mapping")
+    }
+
+    fn strings_of(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    fn failures_mentioning(report: &Report, needles: &[&str]) {
+        assert_eq!(
+            report.failures.len(),
+            needles.len(),
+            "failures: {:?}",
+            report.failures
+        );
+        for needle in needles {
+            assert!(
+                report
+                    .failures
+                    .iter()
+                    .any(|failure| failure.contains(needle)),
+                "no failure mentions {needle}: {:?}",
+                report.failures
+            );
+        }
+    }
+
+    #[test]
+    fn hermes_evaluation_fails_unknown_ids_key_and_base_url_mismatches() {
+        let mapping = single_agent_mapping(
+            HERMES_AGENT_ID,
+            &[
+                ("deepseek", "DEEPSEEK_API_KEY"),
+                ("anthropic", "ANTHROPIC_API_KEY"),
+                ("xai", "XAI_API_KEY"),
+                ("gemini", "GEMINI_API_KEY"),
+                ("openrouter", "OPENROUTER_API_KEY"),
+                ("gone", "GONE_API_KEY"),
+            ],
+            "[providers.hermes]\n",
+        );
+        let mut upstream = HermesUpstream {
+            providers: BTreeMap::from([
+                (
+                    "deepseek".to_owned(),
+                    provider(&["DEEPSEEK_API_KEY"], Some("DEEPSEEK_BASE_URL")),
+                ),
+                ("anthropic".to_owned(), provider(&["ANTHROPIC_TOKEN"], None)),
+                (
+                    "xai".to_owned(),
+                    provider(&["XAI_API_KEY"], Some("XAI_API_BASE")),
+                ),
+                (
+                    "gemini".to_owned(),
+                    provider(
+                        &["GOOGLE_API_KEY", "GEMINI_API_KEY"],
+                        Some("GEMINI_BASE_URL"),
+                    ),
+                ),
+                (
+                    "openrouter".to_owned(),
+                    provider(&["OPENROUTER_API_KEY"], None),
+                ),
+                ("nous".to_owned(), provider(&[], None)),
+            ]),
+            plugin_dirs: owned(&["commandcode", "openrouter"]),
+            own_rung_literals: owned(&["OPENROUTER_BASE_URL"]),
+        };
+        let mut verified = BTreeSet::new();
+        let mut report = Report::default();
+
+        evaluate_hermes(&mapping, &upstream, &mut verified, &mut report);
+
+        failures_mentioning(
+            &report,
+            &[
+                "no provider `gone`",
+                "`anthropic` reads ANTHROPIC_TOKEN",
+                "`xai` reads base URL env `XAI_API_BASE`",
+            ],
+        );
+        assert_eq!(verified, owned(&["deepseek", "gemini", "openrouter"]));
+        assert!(
+            report
+                .info
+                .iter()
+                .any(|line| line.ends_with(": commandcode, nous"))
+        );
+        assert!(
+            report
+                .info
+                .iter()
+                .any(|line| line.contains("gemini (GEMINI_BASE_URL)"))
+        );
+
+        upstream.own_rung_literals.clear();
+        let mut report = Report::default();
+        evaluate_hermes(&mapping, &upstream, &mut BTreeSet::new(), &mut report);
+        assert!(
+            report
+                .failures
+                .iter()
+                .any(|failure| failure.contains("`openrouter` reads base URL env (none)"))
+        );
+    }
+
+    #[test]
+    fn goose_evaluation_fails_missing_providers_names_keys_and_host_settings() {
+        let mapping = single_agent_mapping(
+            GOOSE_AGENT_ID,
+            &[
+                ("openai", "OPENAI_API_KEY"),
+                ("mistral", "MISTRAL_API_KEY"),
+                ("groq", "GROQ_API_KEY"),
+                ("xai", "XAI_API_KEY"),
+                ("cerebras", "CEREBRAS_API_KEY"),
+                ("together", "TOGETHER_API_KEY"),
+            ],
+            "",
+        );
+        let goose = |names: &[&str], config_keys: &[&str]| GooseProvider {
+            names: owned(names),
+            config_keys: owned(config_keys),
+        };
+        let providers = BTreeMap::from([
+            (
+                "openai".to_owned(),
+                goose(&["openai"], &["OPENAI_API_KEY", "OPENAI_HOST"]),
+            ),
+            (
+                "mistral".to_owned(),
+                goose(&["mistral"], &["MISTRAL_API_KEY"]),
+            ),
+            ("xai".to_owned(), goose(&["xai"], &["XAI_API_KEY"])),
+            (
+                "cerebras".to_owned(),
+                goose(&["cerebras_ai"], &["CEREBRAS_API_KEY"]),
+            ),
+            (
+                "together".to_owned(),
+                goose(&["together"], &["TOGETHER_KEY"]),
+            ),
+        ]);
+        let mut verified = BTreeSet::new();
+        let mut report = Report::default();
+
+        evaluate_goose(
+            &mapping,
+            &owned(&["cerebras", "deepseek", "mistral", "together"]),
+            &providers,
+            &mut verified,
+            &mut report,
+        );
+
+        failures_mentioning(
+            &report,
+            &[
+                "no provider `groq`",
+                "no `XAI_HOST` setting",
+                "`cerebras` declares provider name cerebras_ai",
+                "`together` reads TOGETHER_KEY",
+            ],
+        );
+        assert_eq!(verified, owned(&["mistral", "openai"]));
+        assert!(report.info.iter().any(|line| line.ends_with(": deepseek")));
+    }
+
+    #[test]
+    fn codex_evaluation_fails_lost_built_ins_collisions_and_key_mismatches() {
+        let mapping = single_agent_mapping(
+            CODEX_AGENT_ID,
+            &[
+                ("openai", "OPENAI_API_KEY"),
+                ("openrouter", "OPENROUTER_API_KEY"),
+            ],
+            "",
+        );
+        let reader = strings_of(&["CODEX_API_KEY", "OPENAI_API_KEY"]);
+
+        let mut verified = BTreeSet::new();
+        let mut report = Report::default();
+        evaluate_codex(
+            &mapping,
+            &owned(&["ollama", "openai"]),
+            &reader,
+            &mut verified,
+            &mut report,
+        );
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(verified, owned(&["openai"]));
+        assert!(report.info.iter().any(|line| line.ends_with(": ollama")));
+
+        let mut report = Report::default();
+        evaluate_codex(
+            &mapping,
+            &owned(&["ollama", "openrouter"]),
+            &reader,
+            &mut BTreeSet::new(),
+            &mut report,
+        );
+        failures_mentioning(
+            &report,
+            &[
+                "no longer builds in provider `openai`",
+                "builds in provider `openrouter`",
+            ],
+        );
+
+        let mut report = Report::default();
+        evaluate_codex(
+            &mapping,
+            &owned(&["openai"]),
+            &strings_of(&["CODEX_API_KEY"]),
+            &mut BTreeSet::new(),
+            &mut report,
+        );
+        failures_mentioning(&report, &["shipped data has `OPENAI_API_KEY`"]);
+
+        let mut report = Report::default();
+        evaluate_codex(
+            &mapping,
+            &BTreeSet::new(),
+            &reader,
+            &mut BTreeSet::new(),
+            &mut report,
+        );
+        failures_mentioning(&report, &["yielded no providers"]);
+    }
+
+    #[test]
+    fn kimi_evaluation_fails_unread_env_vars_and_unregistered_types() {
+        let all_env_vars: BTreeSet<String> =
+            KIMI_MODEL_ENV_VARS.into_iter().map(str::to_owned).collect();
+        let mut literals = all_env_vars.clone();
+        literals.remove("KIMI_MODEL_DISPLAY_NAME");
+
+        let mut report = Report::default();
+        evaluate_kimi(
+            &literals,
+            &owned(&["anthropic", "kimi", "openai"]),
+            &mut report,
+        );
+        failures_mentioning(
+            &report,
+            &[
+                "no longer reads KIMI_MODEL_DISPLAY_NAME",
+                "no provider type openai_responses",
+            ],
+        );
+
+        let mut report = Report::default();
+        evaluate_kimi(
+            &all_env_vars,
+            &owned(&[
+                "anthropic",
+                "google-genai",
+                "kimi",
+                "openai",
+                "openai_responses",
+            ]),
+            &mut report,
+        );
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert!(
+            report
+                .info
+                .iter()
+                .any(|line| line.ends_with(": google-genai"))
+        );
+
+        let mut report = Report::default();
+        evaluate_kimi(&all_env_vars, &BTreeSet::new(), &mut report);
+        failures_mentioning(&report, &["yielded no provider types"]);
+    }
+
+    #[test]
+    fn kilo_evaluation_fails_unknown_providers_and_env_mismatches() {
+        let mapping = single_agent_mapping(
+            KILO_AGENT_ID,
+            &[
+                ("kilo", "KILO_API_KEY"),
+                ("openrouter", "OPENROUTER_API_KEY"),
+                ("venice", "VENICE_API_KEY"),
+                ("zenmux", "ZENMUX_API_KEY"),
+            ],
+            "",
+        );
+        let overlay = BTreeMap::from([("kilo".to_owned(), strings_of(&["KILO_API_KEY"]))]);
+        let models_dev = BTreeMap::from([
+            ("openrouter".to_owned(), strings_of(&["OPENROUTER_API_KEY"])),
+            ("venice".to_owned(), strings_of(&["VENICE_KEY"])),
+        ]);
+        let mut verified = BTreeSet::new();
+        let mut report = Report::default();
+
+        evaluate_kilo(&mapping, &overlay, &models_dev, &mut verified, &mut report);
+
+        failures_mentioning(
+            &report,
+            &[
+                "no provider `zenmux`",
+                "models.dev maps `venice` to VENICE_KEY",
+            ],
+        );
+        assert_eq!(verified, owned(&["kilo", "openrouter"]));
+
+        let mut report = Report::default();
+        evaluate_kilo(
+            &mapping,
+            &BTreeMap::new(),
+            &models_dev,
+            &mut BTreeSet::new(),
+            &mut report,
+        );
+        failures_mentioning(&report, &["yielded no provider overlay"]);
     }
 }
