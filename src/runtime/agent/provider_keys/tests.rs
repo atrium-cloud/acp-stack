@@ -189,17 +189,20 @@ fn models_dev_only_providers_are_opencode_scoped_without_default_env_refs() {
 #[test]
 fn azure_provider_refs_include_base_url_and_documented_options() {
     assert_eq!(
-        required_env_refs_for_provider_id("azure-openai-responses", "AZURE_OPENAI_API_KEY"),
+        required_env_refs_for_provider_id("azure", "AZURE_OPENAI_API_KEY"),
         ["AZURE_OPENAI_API_KEY", "AZURE_OPENAI_BASE_URL"]
     );
     assert_eq!(
-        optional_env_refs_for_provider_id("azure-openai-responses"),
+        optional_env_refs_for_provider_id("azure"),
         [
             "AZURE_OPENAI_RESOURCE_NAME",
             "AZURE_OPENAI_API_VERSION",
-            "AZURE_OPENAI_DEPLOYMENT_NAME_MAP"
+            "AZURE_OPENAI_DEPLOYMENT_NAME_MAP",
+            "AZURE_RESOURCE_NAME"
         ]
     );
+    assert!(provider_id_supports_agent("azure", "pi"));
+    assert!(provider_id_supports_agent("azure", "opencode"));
 }
 
 #[test]
@@ -649,19 +652,18 @@ fn env_keyed_values_reject_key_outside_contract() {
 
 #[test]
 fn env_keyed_values_allow_optional_env_vars() {
-    let optional = optional_env_refs_for_provider_id("azure-openai-responses");
+    let optional = optional_env_refs_for_provider_id("azure");
     assert!(
         !optional.is_empty(),
         "fixture provider must have optional env vars"
     );
-    let primary = env_var_for_provider_id("azure-openai-responses")
-        .expect("azure-openai-responses has a canonical env var");
+    let primary = env_var_for_provider_id("azure").expect("azure has a canonical env var");
     let mut values = BTreeMap::from([(primary.to_owned(), "az-key".to_owned())]);
-    for companion in companion_env_refs_for_provider_id("azure-openai-responses") {
+    for companion in companion_env_refs_for_provider_id("azure") {
         values.insert(companion.to_owned(), "companion-value".to_owned());
     }
     values.insert(optional[0].to_owned(), "optional-value".to_owned());
-    validate_env_keyed_credential_values("azure-openai-responses", &values, "test.values")
+    validate_env_keyed_credential_values("azure", &values, "test.values")
         .expect("optional env vars are allowed");
 }
 

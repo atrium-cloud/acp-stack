@@ -311,14 +311,14 @@ fn agent_provider_use_rejects_provider_not_supported_by_agent() {
             "agent",
             "provider",
             "use",
-            "azure-openai-responses",
+            "ant-ling",
             "--model",
-            "azure-openai-responses/test-model",
+            "ant-ling/test-model",
         ])
         .assert()
         .failure()
         .stderr(predicates::str::contains(
-            "provider `azure-openai-responses` is not supported for agent `opencode`",
+            "provider `ant-ling` is not supported for agent `opencode`",
         ));
 
     let after =

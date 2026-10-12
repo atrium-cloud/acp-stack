@@ -170,7 +170,7 @@ mod tests {
             "--agent",
             "opencode",
             "--provider",
-            "azure-openai-responses",
+            "ant-ling",
         ]);
         let registry = RegistryCatalog::load_embedded().expect("registry");
         let mut config = crate::config::load_config_from_str(include_str!(

@@ -21,7 +21,9 @@ const SKILLS_TOML: &str = include_str!("../../data/skills.toml");
 const ACP_REGISTRY_REPO: &str = "agentclientprotocol/registry";
 const ACP_REGISTRY_ASSET: &str = "registry.json";
 const MODELS_DEV_API_URL: &str = "https://models.dev/api.json";
-const PI_PROVIDER_DOC_URL: &str = "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/docs/providers.md";
+// Pi's provider doc lists display names, not ids; this source is the id-to-env map Pi runs.
+const PI_ENV_API_KEYS_URL: &str =
+    "https://raw.githubusercontent.com/earendil-works/pi/main/packages/ai/src/env-api-keys.ts";
 // The Amp manual dropped its env-var appendix; the amp-acp adapter README is the
 // document that names the headless credential acp-stack actually injects.
 const AMP_ACP_README_URL: &str =
@@ -257,12 +259,12 @@ fn check_provider_sources(
 ) -> Result<(), Box<dyn Error>> {
     let models_dev: Value = http.get_json(MODELS_DEV_API_URL)?;
     let models_dev_providers = models_dev_provider_names(&models_dev);
-    let pi_doc = http.get_text(PI_PROVIDER_DOC_URL)?;
+    let pi_env_api_keys = http.get_text(PI_ENV_API_KEYS_URL)?;
     let amp_acp_readme = http.get_text(AMP_ACP_README_URL)?;
     let opencode_doc = http.get_text(OPENCODE_PROVIDER_DOC_URL)?;
 
     let mut primary_doc = BTreeSet::new();
-    check_pi_provider_doc(mapping, &pi_doc, &mut primary_doc, report);
+    check_pi_env_api_keys(mapping, &pi_env_api_keys, &mut primary_doc, report);
     check_agent_env_doc(
         "amp-code",
         "amp-acp README",
@@ -324,12 +326,17 @@ fn check_provider_sources(
     Ok(())
 }
 
-fn check_pi_provider_doc(
+fn check_pi_env_api_keys(
     mapping: &ProviderKeyMapping,
-    pi_doc: &str,
+    source: &str,
     primary_doc: &mut BTreeSet<String>,
     report: &mut Report,
 ) {
+    let pi_env_vars = pi_provider_env_vars(source);
+    if pi_env_vars.is_empty() {
+        report.fail("Pi env-api-keys.ts yielded no provider env mappings; its format changed");
+        return;
+    }
     for provider in mapping
         .providers()
         .iter()
@@ -341,22 +348,93 @@ fn check_pi_provider_doc(
         let Some(env_var) = env_var_for_agent_provider(mapping, "pi", native_id) else {
             continue;
         };
-        let matching_line = pi_doc
-            .lines()
-            .find(|line| line.contains(native_id) && line.contains(env_var));
-        if matching_line.is_some() {
-            for provider_id in provider.ids() {
-                primary_doc.insert(provider_id.clone());
+        match pi_env_vars.get(native_id) {
+            Some(env_vars) if env_vars.contains(env_var) => {
+                for provider_id in provider.ids() {
+                    primary_doc.insert(provider_id.clone());
+                }
+                report.ok(format!(
+                    "Pi env-api-keys.ts verifies `{native_id}` uses `{env_var}`"
+                ));
             }
-            report.ok(format!(
-                "Pi provider docs verify `{native_id}` uses `{env_var}`"
-            ));
-        } else {
-            report.fail(format!(
-                "Pi provider docs do not verify provider `{native_id}` with env ref `{env_var}`"
-            ));
+            Some(env_vars) => report.fail(format!(
+                "Pi env-api-keys.ts maps `{native_id}` to {}, shipped data has `{env_var}`",
+                env_vars.iter().cloned().collect::<Vec<_>>().join(", ")
+            )),
+            None => report.fail(format!(
+                "Pi env-api-keys.ts has no provider `{native_id}` (shipped env ref `{env_var}`)"
+            )),
         }
     }
+}
+
+/// Reads the provider-to-env-var table out of Pi's `getApiKeyEnvVars`: the `envMap`
+/// entries plus the `if (provider === "...")` early returns, whose arrays may name
+/// exported string constants.
+fn pi_provider_env_vars(source: &str) -> BTreeMap<String, BTreeSet<String>> {
+    let constants: BTreeMap<&str, &str> = source
+        .lines()
+        .filter_map(|line| {
+            let (name, value) = line
+                .trim()
+                .strip_prefix("export const ")?
+                .split_once(" = ")?;
+            Some((name, quoted_env_var(value.trim_end_matches(';'))?))
+        })
+        .collect();
+    let mut env_vars: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut early_return_provider: Option<&str> = None;
+    for line in source.lines().map(str::trim) {
+        if let Some(provider_id) = early_return_provider.take()
+            && let Some(items) = line
+                .strip_prefix("return [")
+                .and_then(|rest| rest.strip_suffix("];"))
+        {
+            let resolved = items.split(',').filter_map(|item| {
+                let item = item.trim();
+                quoted_env_var(item).or_else(|| constants.get(item).copied())
+            });
+            env_vars
+                .entry(provider_id.to_owned())
+                .or_default()
+                .extend(resolved.map(str::to_owned));
+            continue;
+        }
+        if let Some((_, rest)) = line.split_once("provider === \"") {
+            early_return_provider = rest.split_once('"').map(|(provider_id, _)| provider_id);
+            continue;
+        }
+        let Some((key, value)) = line.trim_end_matches(',').split_once(": ") else {
+            continue;
+        };
+        let key = key
+            .strip_prefix('"')
+            .and_then(|key| key.strip_suffix('"'))
+            .unwrap_or(key);
+        let key_is_provider_id = !key.is_empty()
+            && key
+                .chars()
+                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-');
+        if !key_is_provider_id {
+            continue;
+        }
+        if let Some(env_var) = quoted_env_var(value) {
+            env_vars
+                .entry(key.to_owned())
+                .or_default()
+                .insert(env_var.to_owned());
+        }
+    }
+    env_vars
+}
+
+fn quoted_env_var(value: &str) -> Option<&str> {
+    let inner = value.strip_prefix('"')?.strip_suffix('"')?;
+    let is_env_var = !inner.is_empty()
+        && inner
+            .chars()
+            .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_');
+    is_env_var.then_some(inner)
 }
 
 fn check_agent_env_doc(
@@ -826,6 +904,47 @@ mod tests {
             providers.get("github-models"),
             Some(&"GitHub Models".to_owned())
         );
+    }
+
+    #[test]
+    fn pi_provider_env_vars_reads_env_map_and_early_returns() {
+        let source = r#"
+export const ANTHROPIC_AUTH_TOKEN_ENV = "ANTHROPIC_AUTH_TOKEN";
+export const ANTHROPIC_API_KEY_ENV = "ANTHROPIC_API_KEY";
+function getApiKeyEnvVars(provider: string): readonly string[] | undefined {
+	if (provider === "github-copilot") {
+		return ["COPILOT_GITHUB_TOKEN"];
+	}
+	if (provider === "anthropic") {
+		return [ANTHROPIC_AUTH_TOKEN_ENV, ANTHROPIC_API_KEY_ENV];
+	}
+	const envMap: Record<string, string> = {
+		"ant-ling": "ANT_LING_API_KEY",
+		azure: "AZURE_OPENAI_API_KEY",
+	};
+}
+	if (provider === "google-vertex") {
+		const hasCredentials = hasVertexAdcCredentials(env);
+		return "<authenticated>";
+	}
+"#;
+
+        let env_vars = pi_provider_env_vars(source);
+
+        let expected = |values: &[&str]| -> BTreeSet<String> {
+            values.iter().map(|value| (*value).to_owned()).collect()
+        };
+        assert_eq!(
+            env_vars["github-copilot"],
+            expected(&["COPILOT_GITHUB_TOKEN"])
+        );
+        assert_eq!(
+            env_vars["anthropic"],
+            expected(&["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"])
+        );
+        assert_eq!(env_vars["ant-ling"], expected(&["ANT_LING_API_KEY"]));
+        assert_eq!(env_vars["azure"], expected(&["AZURE_OPENAI_API_KEY"]));
+        assert_eq!(env_vars.len(), 4);
     }
 
     #[test]

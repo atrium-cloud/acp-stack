@@ -3,11 +3,12 @@
 # Curated from:
 # [OpenCode Docs - Providers](https://opencode.ai/docs/providers/)
 # [Pi Agent Docs - Providers](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/providers.md)
+# [Pi env-api-keys.ts](https://github.com/earendil-works/pi/blob/main/packages/ai/src/env-api-keys.ts)
 # [Amp manual](https://ampcode.com/manual)
 # [Kimi Code environment variables](https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/env-vars.html)
 # [Hermes Agent providers docs](https://hermes-agent.nousresearch.com/docs/integrations/providers)
 # [models.dev](https://models.dev/api.json)
-# Last updated on 2026-08-20
+# Last updated on 2026-10-12
 
 # Provider env vars
 
@@ -25,7 +26,7 @@ optional_env_vars = []
 
 [[api_keys]]
 env_var = "AZURE_OPENAI_API_KEY"
-provider_ids = ["azure-openai-responses"]
+provider_ids = ["azure"]
 companion_env_vars = ["AZURE_OPENAI_BASE_URL"]
 optional_env_vars = [
   "AZURE_OPENAI_RESOURCE_NAME",
