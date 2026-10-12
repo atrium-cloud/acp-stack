@@ -372,10 +372,10 @@ impl HostedInitSession {
     }
 
     pub(super) fn ws_disconnected(&self) {
-        // `fetch_update` only errs when the counter was already 0, which the
+        // `try_update` only errs when the counter was already 0, which the
         // ConnectionGuard pairing makes unreachable.
         self.connected_ws
-            .fetch_update(
+            .try_update(
                 std::sync::atomic::Ordering::Relaxed,
                 std::sync::atomic::Ordering::Relaxed,
                 |count| count.checked_sub(1),
