@@ -2,7 +2,7 @@
 //! runtime event lands here, tagged with a `source` so queries can scope by origin.
 
 use crate::error::Result;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 
 use super::core::StateStore;
 use super::ids::{current_timestamp, next_event_id};
@@ -190,11 +190,10 @@ impl StateStore {
     pub fn latest_event_timestamp(&self) -> Result<Option<String>> {
         Ok(self
             .connection()
-            .query_row(
-                "SELECT created_at FROM events ORDER BY created_at DESC, id DESC LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?)
+            .query_row(LATEST_EVENT_TIMESTAMP_SQL, [], |row| row.get(0))?)
     }
 }
+
+/// `MAX` answers from the end of `idx_events_created_kind`; ordering by `created_at, id`
+/// instead sorts the whole table, since no index covers that pair.
+pub(super) const LATEST_EVENT_TIMESTAMP_SQL: &str = "SELECT MAX(created_at) FROM events";

@@ -1,8 +1,9 @@
 use acp_stack::state::{
-    EVENT_SOURCE_ACP, EVENT_SOURCE_SYSTEM, ListedSessionRecord, NewPermissionRequest,
-    NewPromptRecord, NewSessionRecord, PromptRecord, PromptStatus, SESSION_ACTIVITY_ACTOR_AGENT,
-    SESSION_ACTIVITY_ACTOR_USER, SESSION_STATUS_ACTIVE, SESSION_STATUS_AVAILABLE,
-    SESSION_STATUS_CLOSED, SessionAvailableCommand, SessionEventCursor, StateStore,
+    EVENT_KIND_SESSION_AVAILABLE, EVENT_SOURCE_ACP, EVENT_SOURCE_SYSTEM, ListedSessionRecord,
+    NewPermissionRequest, NewPromptRecord, NewSessionRecord, PromptRecord, PromptStatus,
+    SESSION_ACTIVITY_ACTOR_AGENT, SESSION_ACTIVITY_ACTOR_USER, SESSION_STATUS_ACTIVE,
+    SESSION_STATUS_AVAILABLE, SESSION_STATUS_CLOSED, SessionAvailableCommand, SessionEventCursor,
+    StateStore,
 };
 
 mod common;
@@ -858,6 +859,97 @@ fn session_status_window_reports_latest_prompt_and_stream_start() {
         rows[0].prompt_stream_started_at.as_deref(),
         Some(event.created_at.as_str())
     );
+}
+
+#[test]
+fn session_status_window_reports_the_newest_event_and_its_actor() {
+    let (_dir, store) = fresh_state("session_status_newest_event.sqlite");
+    store
+        .insert_session(NewSessionRecord {
+            id: "sess_events".to_owned(),
+            agent_id: "fake".to_owned(),
+            cwd: "/tmp/events".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("session inserted");
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    store
+        .append_session_event_with_source(
+            "sess_events",
+            "info",
+            "session.update",
+            EVENT_SOURCE_SYSTEM,
+            "user chunk",
+            "{}",
+        )
+        .expect("system event");
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let agent_event = store
+        .append_session_event_with_source(
+            "sess_events",
+            "info",
+            "session.update",
+            EVENT_SOURCE_ACP,
+            "agent chunk",
+            "{}",
+        )
+        .expect("agent event");
+
+    let rows = store
+        .query_session_status_window("1970-01-01T00:00:00.000000000Z", None, 10)
+        .expect("status rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].last_activity_at, agent_event.created_at);
+    assert_eq!(rows[0].last_activity_from, SESSION_ACTIVITY_ACTOR_AGENT);
+}
+
+#[test]
+fn session_status_window_skips_demotions_and_activity_before_the_window() {
+    let (_dir, store) = fresh_state("session_status_window_bounds.sqlite");
+    store
+        .insert_session(NewSessionRecord {
+            id: "sess_old".to_owned(),
+            agent_id: "fake".to_owned(),
+            cwd: "/tmp/old".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("session inserted");
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let since = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    store
+        .append_session_event_with_source(
+            "sess_old",
+            "info",
+            EVENT_KIND_SESSION_AVAILABLE,
+            EVENT_SOURCE_SYSTEM,
+            "session demoted",
+            "{}",
+        )
+        .expect("demotion event");
+
+    let rows = store
+        .query_session_status_window(&since, None, 10)
+        .expect("status rows");
+    assert!(rows.is_empty(), "a demotion alone is not activity");
+
+    let event = store
+        .append_session_event_with_source(
+            "sess_old",
+            "info",
+            "session.update",
+            EVENT_SOURCE_ACP,
+            "agent chunk",
+            "{}",
+        )
+        .expect("agent event");
+    let rows = store
+        .query_session_status_window(&since, None, 10)
+        .expect("status rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].last_activity_at, event.created_at);
 }
 
 #[test]

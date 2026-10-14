@@ -42,6 +42,14 @@ const STATE_JOURNAL_SIZE_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
 /// Savepoint each job of a batch runs under, so a failing job rolls back alone.
 const WRITE_JOB_SAVEPOINT: &str = "acps_job";
 
+/// Rows `ANALYZE` samples per index, SQLite's recommended bound for `PRAGMA optimize`.
+const STATE_ANALYSIS_LIMIT: u32 = 400;
+
+/// `0x10002` analyzes every table whose statistics are missing or stale, not only the
+/// tables this connection has queried, since a fresh connection has queried none.
+/// Readers open after it runs, so they plan with the same statistics.
+const STATE_OPTIMIZE_PRAGMA: &str = "PRAGMA optimize = 0x10002;";
+
 const WRITER_THREAD_NAME: &str = "acps-state-writer";
 const CHECKPOINTER_THREAD_NAME: &str = "acps-state-checkpoint";
 
@@ -102,8 +110,14 @@ impl StateHandle {
         store.set_feed_epoch(feed_epoch.clone());
         store.connection().execute_batch(&format!(
             "PRAGMA wal_autocheckpoint = {WRITER_WAL_AUTOCHECKPOINT_PAGES}; \
-             PRAGMA journal_size_limit = {STATE_JOURNAL_SIZE_LIMIT_BYTES};"
+             PRAGMA journal_size_limit = {STATE_JOURNAL_SIZE_LIMIT_BYTES}; \
+             PRAGMA analysis_limit = {STATE_ANALYSIS_LIMIT};"
         ))?;
+        // Takes the write lock, so another process holding it past the busy timeout
+        // costs only stale planner statistics, not the daemon start.
+        if let Err(error) = store.connection().execute_batch(STATE_OPTIMIZE_PRAGMA) {
+            tracing::warn!(%error, "state planner statistics refresh failed");
+        }
         let path = store.path().to_path_buf();
         let checkpoint_connection = open_checkpoint_connection(&path)?;
         let (sender, receiver) = mpsc::channel(queue_capacity);

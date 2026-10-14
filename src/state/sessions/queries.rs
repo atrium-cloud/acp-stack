@@ -4,6 +4,185 @@ use std::collections::HashMap;
 
 use super::*;
 
+/// `query_session_status_window`'s statement, kept apart so its query plan is testable.
+/// ?1 window start, ?2 user actor, ?3 agent actor, ?4 ACP event source, ?5 target id or
+/// NULL, ?6 row limit, ?7 the demotion event kind.
+pub(super) const SESSION_STATUS_WINDOW_SQL: &str = r#"
+            WITH scoped_sessions AS (
+                SELECT id, updated_at
+                FROM sessions
+                WHERE (?5 IS NULL OR target_id = ?5)
+            ),
+            -- Created prompts and events contribute only their newest in-window row per
+            -- session, found by an index seek on that session, so a streaming turn's
+            -- events are never read as a whole window.
+            activity AS (
+                SELECT id AS session_id,
+                       updated_at AS activity_at,
+                       ?2 AS actor,
+                       0 AS priority
+                FROM scoped_sessions
+                WHERE updated_at >= ?1
+                UNION ALL
+                SELECT session_id, activity_at, ?2 AS actor, 1 AS priority
+                FROM (
+                    SELECT ss.id AS session_id,
+                           (
+                               SELECT MAX(p.created_at)
+                               FROM prompts p
+                               WHERE p.session_id = ss.id
+                                 AND p.created_at >= ?1
+                           ) AS activity_at
+                    FROM scoped_sessions ss
+                )
+                WHERE activity_at IS NOT NULL
+                UNION ALL
+                -- No index leads with (session_id, updated_at), so this branch walks the
+                -- window on prompts_updated_at_idx instead of every prompt per session.
+                SELECT p.session_id,
+                       p.updated_at AS activity_at,
+                       ?3 AS actor,
+                       2 AS priority
+                FROM prompts p
+                JOIN scoped_sessions ss ON ss.id = p.session_id
+                WHERE p.status <> 'pending'
+                  AND p.updated_at >= ?1
+                UNION ALL
+                SELECT ss.id AS session_id,
+                       e.created_at AS activity_at,
+                       CASE WHEN e.source = ?4 THEN ?3 ELSE ?2 END AS actor,
+                       3 AS priority
+                FROM scoped_sessions ss
+                JOIN events e ON e.rowid = (
+                    SELECT latest.rowid
+                    FROM events latest INDEXED BY events_session_id_idx
+                    WHERE latest.session_id = ss.id
+                      AND latest.created_at >= ?1
+                      -- A demotion is bookkeeping, not activity: without this
+                      -- exclusion a bulk startup reconcile would stamp every
+                      -- historical session into the window as user activity.
+                      AND latest.kind <> ?7
+                    ORDER BY latest.created_at DESC, latest.id DESC
+                    LIMIT 1
+                )
+                UNION ALL
+                SELECT pr.subject_id AS session_id,
+                       pr.created_at AS activity_at,
+                       ?3 AS actor,
+                       4 AS priority
+                FROM permission_requests pr
+                JOIN scoped_sessions ss ON ss.id = pr.subject_id
+                WHERE pr.status = 'pending'
+                  AND pr.source = 'acp'
+                  AND pr.subject_id IS NOT NULL
+                  AND pr.created_at >= ?1
+            ),
+            ranked_activity AS (
+                SELECT session_id,
+                       activity_at,
+                       actor,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY session_id
+                           ORDER BY activity_at DESC, priority DESC
+                       ) AS row_number
+                FROM activity
+            ),
+            window_sessions AS (
+                SELECT session_id,
+                       activity_at,
+                       actor
+                FROM ranked_activity
+                WHERE row_number = 1
+            ),
+            latest_prompts AS (
+                SELECT id, session_id, created_at, updated_at, status,
+                       stop_reason, error_code, error_message, message_id,
+                       message_id_acknowledged
+                FROM (
+                    SELECT p.id, p.session_id, p.created_at, p.updated_at, p.status,
+                           p.stop_reason, p.error_code, p.error_message, p.message_id,
+                           p.message_id_acknowledged,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY p.session_id
+                               ORDER BY
+                                   CASE WHEN p.status IN ('pending', 'running') THEN 0 ELSE 1 END ASC,
+                                   CASE WHEN p.status IN ('pending', 'running') THEN p.created_at END ASC,
+                                   CASE WHEN p.status IN ('pending', 'running') THEN p.id END ASC,
+                                   CASE WHEN p.status NOT IN ('pending', 'running') THEN p.created_at END DESC,
+                                   CASE WHEN p.status NOT IN ('pending', 'running') THEN p.id END DESC
+                           ) AS row_number
+                    FROM prompts p
+                    JOIN window_sessions ws ON ws.session_id = p.session_id
+                    JOIN sessions owner ON owner.id = p.session_id
+                    -- A fork child's inherited prompts predate the child; its
+                    -- state starts from its own first prompt.
+                    WHERE p.created_at >= owner.created_at
+                )
+                WHERE row_number = 1
+            ),
+            pending_acp_permissions AS (
+                SELECT id, session_id, created_at, updated_at
+                FROM (
+                    SELECT pr.id, pr.subject_id AS session_id, pr.created_at, pr.updated_at,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY pr.subject_id
+                               ORDER BY pr.created_at ASC, pr.id ASC
+                           ) AS row_number
+                    FROM permission_requests pr
+                    JOIN window_sessions ws ON ws.session_id = pr.subject_id
+                    WHERE pr.status = 'pending'
+                      AND pr.source = 'acp'
+                      AND pr.subject_id IS NOT NULL
+                )
+                WHERE row_number = 1
+            )
+            SELECT s.id AS session_id,
+                   s.target_id AS target_id,
+                   s.agent_session_id,
+                   s.created_at,
+                   s.updated_at,
+                   s.status,
+                   s.agent_id,
+                   s.cwd,
+                   s.title,
+                   r.activity_at,
+                   r.actor,
+                   lp.id,
+                   lp.created_at,
+                   lp.updated_at,
+                   lp.status,
+                   lp.stop_reason,
+                   lp.error_code,
+                   lp.error_message,
+                   lp.message_id,
+                   lp.message_id_acknowledged,
+                   pp.id,
+                   pp.created_at,
+                   pp.updated_at,
+                   (
+                       SELECT e.created_at
+                       FROM events e INDEXED BY events_session_id_idx
+                       WHERE e.session_id = s.id
+                         AND e.created_at >= lp.created_at
+                         AND e.kind = 'session.update'
+                         AND e.source = ?4
+                       ORDER BY e.created_at ASC
+                       LIMIT 1
+                   ) AS prompt_stream_started_at,
+                   s.change_seq,
+                   (
+                       SELECT COALESCE(MAX(e.seq), 0)
+                       FROM events e
+                       WHERE e.session_id = s.id
+                   ) AS event_seq
+            FROM sessions s
+            JOIN window_sessions r ON r.session_id = s.id
+            LEFT JOIN latest_prompts lp ON lp.session_id = s.id
+            LEFT JOIN pending_acp_permissions pp ON pp.session_id = s.id
+            ORDER BY r.activity_at DESC, s.id DESC
+            LIMIT ?6
+            "#;
+
 /// The sync event [`StateStore::record_session_list_sync`] writes with the rows it changes.
 struct ListSyncEvent<'a> {
     agent_id: &'a str,
@@ -358,168 +537,7 @@ impl StateStore {
         target_id: Option<&str>,
         limit: u32,
     ) -> Result<Vec<SessionStatusRecord>> {
-        let mut statement = self.connection().prepare(
-            r#"
-            WITH scoped_sessions AS (
-                SELECT id
-                FROM sessions
-                WHERE (?5 IS NULL OR target_id = ?5)
-            ),
-            activity AS (
-                SELECT s.id AS session_id,
-                       s.updated_at AS activity_at,
-                       ?2 AS actor,
-                       0 AS priority
-                FROM sessions s
-                JOIN scoped_sessions ss ON ss.id = s.id
-                WHERE s.updated_at >= ?1
-                UNION ALL
-                SELECT p.session_id,
-                       p.created_at AS activity_at,
-                       ?2 AS actor,
-                       1 AS priority
-                FROM prompts p
-                JOIN scoped_sessions ss ON ss.id = p.session_id
-                WHERE p.created_at >= ?1
-                UNION ALL
-                SELECT p.session_id,
-                       p.updated_at AS activity_at,
-                       ?3 AS actor,
-                       2 AS priority
-                FROM prompts p
-                JOIN scoped_sessions ss ON ss.id = p.session_id
-                WHERE p.status <> 'pending'
-                  AND p.updated_at >= ?1
-                UNION ALL
-                SELECT e.session_id,
-                       e.created_at AS activity_at,
-                       CASE WHEN e.source = ?4 THEN ?3 ELSE ?2 END AS actor,
-                       3 AS priority
-                FROM events e
-                JOIN scoped_sessions ss ON ss.id = e.session_id
-                WHERE e.session_id IS NOT NULL
-                  AND e.created_at >= ?1
-                  -- A demotion is bookkeeping, not activity: without this
-                  -- exclusion a bulk startup reconcile would stamp every
-                  -- historical session into the window as user activity.
-                  AND e.kind <> ?7
-                UNION ALL
-                SELECT pr.subject_id AS session_id,
-                       pr.created_at AS activity_at,
-                       ?3 AS actor,
-                       4 AS priority
-                FROM permission_requests pr
-                JOIN scoped_sessions ss ON ss.id = pr.subject_id
-                WHERE pr.status = 'pending'
-                  AND pr.source = 'acp'
-                  AND pr.subject_id IS NOT NULL
-                  AND pr.created_at >= ?1
-            ),
-            ranked_activity AS (
-                SELECT session_id,
-                       activity_at,
-                       actor,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY session_id
-                           ORDER BY activity_at DESC, priority DESC
-                       ) AS row_number
-                FROM activity
-            ),
-            window_sessions AS (
-                SELECT session_id,
-                       activity_at,
-                       actor
-                FROM ranked_activity
-                WHERE row_number = 1
-            ),
-            latest_prompts AS (
-                SELECT id, session_id, created_at, updated_at, status,
-                       stop_reason, error_code, error_message, message_id,
-                       message_id_acknowledged
-                FROM (
-                    SELECT p.id, p.session_id, p.created_at, p.updated_at, p.status,
-                           p.stop_reason, p.error_code, p.error_message, p.message_id,
-                           p.message_id_acknowledged,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY p.session_id
-                               ORDER BY
-                                   CASE WHEN p.status IN ('pending', 'running') THEN 0 ELSE 1 END ASC,
-                                   CASE WHEN p.status IN ('pending', 'running') THEN p.created_at END ASC,
-                                   CASE WHEN p.status IN ('pending', 'running') THEN p.id END ASC,
-                                   CASE WHEN p.status NOT IN ('pending', 'running') THEN p.created_at END DESC,
-                                   CASE WHEN p.status NOT IN ('pending', 'running') THEN p.id END DESC
-                           ) AS row_number
-                    FROM prompts p
-                    JOIN window_sessions ws ON ws.session_id = p.session_id
-                    JOIN sessions owner ON owner.id = p.session_id
-                    -- A fork child's inherited prompts predate the child; its
-                    -- state starts from its own first prompt.
-                    WHERE p.created_at >= owner.created_at
-                )
-                WHERE row_number = 1
-            ),
-            pending_acp_permissions AS (
-                SELECT id, session_id, created_at, updated_at
-                FROM (
-                    SELECT pr.id, pr.subject_id AS session_id, pr.created_at, pr.updated_at,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY pr.subject_id
-                               ORDER BY pr.created_at ASC, pr.id ASC
-                           ) AS row_number
-                    FROM permission_requests pr
-                    JOIN window_sessions ws ON ws.session_id = pr.subject_id
-                    WHERE pr.status = 'pending'
-                      AND pr.source = 'acp'
-                      AND pr.subject_id IS NOT NULL
-                )
-                WHERE row_number = 1
-            )
-            SELECT s.id AS session_id,
-                   s.target_id AS target_id,
-                   s.agent_session_id,
-                   s.created_at,
-                   s.updated_at,
-                   s.status,
-                   s.agent_id,
-                   s.cwd,
-                   s.title,
-                   r.activity_at,
-                   r.actor,
-                   lp.id,
-                   lp.created_at,
-                   lp.updated_at,
-                   lp.status,
-                   lp.stop_reason,
-                   lp.error_code,
-                   lp.error_message,
-                   lp.message_id,
-                   lp.message_id_acknowledged,
-                   pp.id,
-                   pp.created_at,
-                   pp.updated_at,
-                   (
-                       SELECT MIN(e.created_at)
-                       FROM events e
-                       WHERE e.session_id = s.id
-                         AND e.kind = 'session.update'
-                         AND e.source = ?4
-                         AND lp.id IS NOT NULL
-                         AND e.created_at >= lp.created_at
-                   ) AS prompt_stream_started_at,
-                   s.change_seq,
-                   (
-                       SELECT COALESCE(MAX(e.seq), 0)
-                       FROM events e
-                       WHERE e.session_id = s.id
-                   ) AS event_seq
-            FROM sessions s
-            JOIN window_sessions r ON r.session_id = s.id
-            LEFT JOIN latest_prompts lp ON lp.session_id = s.id
-            LEFT JOIN pending_acp_permissions pp ON pp.session_id = s.id
-            ORDER BY r.activity_at DESC, s.id DESC
-            LIMIT ?6
-            "#,
-        )?;
+        let mut statement = self.connection().prepare(SESSION_STATUS_WINDOW_SQL)?;
         let rows = statement.query_map(
             params![
                 since,
@@ -1191,4 +1209,93 @@ fn normalize_listed_session_timestamp(raw: &str) -> Result<String> {
     Ok(parsed
         .with_timezone(&Utc)
         .to_rfc3339_opts(SecondsFormat::Nanos, true))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::events::LATEST_EVENT_TIMESTAMP_SQL;
+
+    fn query_plan(store: &StateStore, sql: &str, bindings: &[&dyn rusqlite::ToSql]) -> Vec<String> {
+        let mut statement = store
+            .connection()
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .expect("prepare plan");
+        statement
+            .query_map(bindings, |row| row.get::<_, String>(3))
+            .expect("query plan")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("plan rows")
+    }
+
+    fn migrated_store(dir: &tempfile::TempDir) -> StateStore {
+        let store = StateStore::open(dir.path().join("state.sqlite")).expect("open state");
+        store.migrate().expect("migrate");
+        store
+    }
+
+    #[test]
+    fn the_status_window_seeks_events_and_prompts_per_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = migrated_store(&dir);
+        for target_id in [None, Some("codex")] {
+            let plan = query_plan(
+                &store,
+                SESSION_STATUS_WINDOW_SQL,
+                rusqlite::params![
+                    "2026-01-01T00:00:00.000000000Z",
+                    SESSION_ACTIVITY_ACTOR_USER,
+                    SESSION_ACTIVITY_ACTOR_AGENT,
+                    EVENT_SOURCE_ACP,
+                    target_id,
+                    10_i64,
+                    EVENT_KIND_SESSION_AVAILABLE,
+                ],
+            );
+            for step in &plan {
+                // A full scan prints as `SCAN <alias>`, with or without a `USING` suffix.
+                let mut tokens = step.split(' ');
+                if tokens.next() == Some("SCAN") {
+                    assert!(
+                        !matches!(tokens.next(), Some("e" | "latest" | "p")),
+                        "full scan in {plan:#?}"
+                    );
+                }
+                // Both indexes lead with columns that span every session, so using
+                // either walks the whole window instead of one session's rows.
+                for cross_session_index in ["idx_events_created_kind", "idx_events_kind_created"] {
+                    assert!(
+                        !step.contains(cross_session_index),
+                        "cross-session walk in {plan:#?}"
+                    );
+                }
+                // A session-only prefix reads that session's whole prompt history.
+                assert!(
+                    !step.ends_with("prompts_session_idx (session_id=?)"),
+                    "unbounded per-session prompt read in {plan:#?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_latest_event_timestamp_reads_one_index_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = migrated_store(&dir);
+        let plan = query_plan(&store, LATEST_EVENT_TIMESTAMP_SQL, &[]);
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("idx_events_created_kind"))
+                && !plan.iter().any(|step| step.contains("TEMP B-TREE")),
+            "latest event read sorts instead of seeking: {plan:#?}"
+        );
+        assert_eq!(store.latest_event_timestamp().expect("empty"), None);
+        let event = store
+            .append_event("info", "test.event", "test", "{}")
+            .expect("append");
+        assert_eq!(
+            store.latest_event_timestamp().expect("latest"),
+            Some(event.created_at)
+        );
+    }
 }
