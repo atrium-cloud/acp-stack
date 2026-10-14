@@ -115,9 +115,8 @@ impl StateStore {
             insert_unscoped_event_row(conn, &event)
         })?;
 
-        if let Some(hub) = self.event_hub() {
-            hub.publish_log_event(&event);
-        }
+        let published = event.clone();
+        self.publish(move |hub| hub.publish_log_event(&published));
 
         Ok(event)
     }

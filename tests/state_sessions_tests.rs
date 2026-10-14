@@ -2005,7 +2005,7 @@ fn session_event_cursors_page_the_same_after_the_database_reopens() {
 
 #[test]
 fn a_fork_child_and_its_inherited_rows_are_queued_for_the_mirror() {
-    let (_dir, mut store) = fresh_state("fork_outbox.sqlite");
+    let (_dir, store) = fresh_state("fork_outbox.sqlite");
     let [first, second, _] = seed_fork_parent(&store);
     store.set_external_logging_enabled(true);
 

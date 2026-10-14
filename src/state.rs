@@ -1,5 +1,6 @@
 //! Durable runtime state backed by SQLite, with one leaf module per domain
-//! table and the `StateStore` connection lifecycle in `core`.
+//! table, the `StateStore` connection lifecycle in `core`, and the daemon's
+//! shared writer-and-readers `StateHandle` in `handle`.
 
 mod agent;
 mod auth;
@@ -7,6 +8,7 @@ mod commands;
 mod core;
 mod deps_apply;
 mod events;
+mod handle;
 mod ids;
 mod init;
 mod metrics;
@@ -41,6 +43,7 @@ pub use events::{
     EVENT_SOURCE_ACP, EVENT_SOURCE_API, EVENT_SOURCE_CLI, EVENT_SOURCE_COMMAND, EVENT_SOURCE_LOCAL,
     EVENT_SOURCE_PERMISSION, EVENT_SOURCE_SYSTEM, Event,
 };
+pub use handle::StateHandle;
 pub use ids::{
     next_command_id, next_deps_apply_run_id, next_permission_decision_id,
     next_permission_request_id, next_prompt_id, next_prompt_message_id, next_session_id,

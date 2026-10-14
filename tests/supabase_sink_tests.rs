@@ -143,7 +143,7 @@ fn find_double_crlf(buf: &[u8]) -> Option<usize> {
 
 async fn fresh_store_with_external_logging() -> (tempfile::TempDir, Arc<TokioMutex<StateStore>>) {
     let dir = tempdir().expect("tempdir");
-    let mut store = StateStore::open(dir.path().join("state.sqlite")).expect("open");
+    let store = StateStore::open(dir.path().join("state.sqlite")).expect("open");
     store.migrate().expect("migrate");
     store.set_external_logging_enabled(true);
     (dir, Arc::new(TokioMutex::new(store)))

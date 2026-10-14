@@ -7,7 +7,7 @@ use super::StackError;
 pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
     use StackError::*;
     Some(match err {
-        State(_) => "state.error",
+        State(_) | StateWriterStopped | StateAccessFailed { .. } => "state.error",
         IncompatibleStateSchema { .. } => "state.incompatible_schema",
         UnmanagedStateTable { .. } => "state.unmanaged_table",
         MigrationManifestParse(_) => "state.migration_manifest_invalid",
@@ -24,7 +24,9 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
 pub(super) fn public_message(err: &StackError) -> Option<String> {
     use StackError::*;
     Some(match err {
-        State(_) => "state database error".to_owned(),
+        State(_) | StateWriterStopped | StateAccessFailed { .. } => {
+            "state database error".to_owned()
+        }
         IncompatibleStateSchema { .. } => {
             "state schema is newer than this binary supports".to_owned()
         }
@@ -53,6 +55,8 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
     Some(match err {
         InvalidEventPayload | InvalidAuthFailurePayload => StatusCode::BAD_REQUEST,
         State(_)
+        | StateWriterStopped
+        | StateAccessFailed { .. }
         | IncompatibleStateSchema { .. }
         | UnmanagedStateTable { .. }
         | MigrationManifestParse(_)

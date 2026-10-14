@@ -135,7 +135,7 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
     let state_dir = parent_dir(&state_path)?;
     create_dir_owner_only(state_dir)?;
     pre_create_owner_only(&state_path)?;
-    let mut store = StateStore::open(&state_path)?;
+    let store = StateStore::open(&state_path)?;
     store.migrate()?;
     set_owner_only_file(&state_path)?;
     match ensure_auth_verifier_pair(&store, loaded_config.legacy_auth.as_ref(), &home)? {

@@ -887,8 +887,8 @@ impl StateStore {
             }
         }
         tx.commit()?;
-        if let (Some(event), Some(hub)) = (&event, self.event_hub()) {
-            hub.publish_log_event(event);
+        if let Some(event) = event {
+            self.publish(move |hub| hub.publish_log_event(&event));
         }
         Ok(counts)
     }

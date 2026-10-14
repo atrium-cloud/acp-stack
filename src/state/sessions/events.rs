@@ -164,13 +164,15 @@ impl StateStore {
     }
 
     fn publish_session_event(&self, session_id: &str, event: &Event) {
-        if let Some(hub) = self.event_hub() {
+        let session_id = session_id.to_owned();
+        let event = event.clone();
+        self.publish(move |hub| {
             // Both publishes are required: dropping the second strands
             // session-scoped events on the logs topic only, which breaks
             // reconnect/live-tail flows.
-            hub.publish_log_event(event);
-            hub.publish_session_update(session_id, event, &event.payload_json);
-        }
+            hub.publish_log_event(&event);
+            hub.publish_session_update(&session_id, &event, &event.payload_json);
+        });
     }
 
     /// Forward page of session events in log (`seq`) order.

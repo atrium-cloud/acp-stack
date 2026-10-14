@@ -155,7 +155,7 @@ fn status_reports_sink_open_failures_when_supabase_configured() {
     let state_path = default_state_path(tempdir.path());
     fs::create_dir_all(state_path.parent().expect("state parent dir"))
         .expect("state dir should be created");
-    let mut store = StateStore::open(&state_path).expect("state should open");
+    let store = StateStore::open(&state_path).expect("state should open");
     store.migrate().expect("migration should pass");
     store.set_external_logging_enabled(true);
     let now = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);

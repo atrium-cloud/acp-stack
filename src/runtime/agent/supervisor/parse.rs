@@ -236,7 +236,9 @@ fn usage_reported_event(usage: &Usage, prompt_id: Option<&str>) -> TerminalSessi
 fn failure_class_for_prompt_error(err: &StackError) -> Option<FailureClass> {
     match err {
         StackError::AgentRequestFailed { .. } => Some(FailureClass::AgentRequest),
-        StackError::State(_) => Some(FailureClass::Sqlite),
+        StackError::State(_)
+        | StackError::StateWriterStopped
+        | StackError::StateAccessFailed { .. } => Some(FailureClass::Sqlite),
         StackError::AgentSpawnFailed { .. }
         | StackError::AgentAlreadyRunning
         | StackError::AgentNotRunning

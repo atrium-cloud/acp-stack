@@ -77,17 +77,13 @@ impl StateStore {
     pub fn query_session_changes(&self, after: u64, limit: u32) -> Result<SessionChangesPage> {
         // A position beyond SQLite's integer range is past every stored value.
         let after = i64::try_from(after).unwrap_or(i64::MAX);
-        let transaction = rusqlite::Transaction::new_unchecked(
-            self.connection(),
-            rusqlite::TransactionBehavior::Deferred,
-        )?;
-        let (head, pruned_through) = transaction.query_row(
-            "SELECT change_seq, pruned_through FROM session_change_counter WHERE id = 1",
-            [],
-            |row| Ok((sequence_column(row, 0)?, sequence_column(row, 1)?)),
-        )?;
-        let changes = {
-            let mut statement = transaction.prepare(
+        let (head, pruned_through, changes) = self.with_read_snapshot(|connection| {
+            let (head, pruned_through) = connection.query_row(
+                "SELECT change_seq, pruned_through FROM session_change_counter WHERE id = 1",
+                [],
+                |row| Ok((sequence_column(row, 0)?, sequence_column(row, 1)?)),
+            )?;
+            let mut statement = connection.prepare(
                 r#"
                 SELECT id, change_seq, 0 AS deleted
                 FROM sessions
@@ -107,9 +103,9 @@ impl StateStore {
                     deleted: row.get::<_, i64>(2)? != 0,
                 })
             })?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        transaction.commit()?;
+            let changes = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok((head, pruned_through, changes))
+        })?;
         Ok(SessionChangesPage {
             changes,
             head,

@@ -2,7 +2,7 @@
 
 use crate::auth::{AuthVerifier, KeyKind};
 use crate::error::{Result, StackError};
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{Connection, params};
 
 use super::core::StateStore;
 use super::ids::{current_timestamp, next_auth_failure_id};
@@ -269,7 +269,7 @@ fn auth_key_record_to_verifier(key_kind: KeyKind, record: AuthKeyRecord) -> Resu
 }
 
 fn upsert_auth_key_in_transaction(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     key_kind: KeyKind,
     verifier: &AuthVerifier,
     now: &str,
@@ -297,7 +297,7 @@ fn upsert_auth_key_in_transaction(
 }
 
 fn insert_auth_key_in_transaction(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     key_kind: KeyKind,
     verifier: &AuthVerifier,
     now: &str,

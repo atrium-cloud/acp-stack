@@ -826,7 +826,7 @@ async fn health_ready_marks_sink_failing_when_open_failures_exist() {
     }
     let harness = ServerHarness::spawn_with_config(config).await;
     {
-        let mut guard = harness.state.lock().await;
+        let guard = harness.state.lock().await;
         guard.set_external_logging_enabled(true);
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
         guard

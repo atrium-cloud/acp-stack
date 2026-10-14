@@ -207,6 +207,12 @@ pub enum StackError {
     #[error("state database error: {0}")]
     State(#[from] rusqlite::Error),
 
+    #[error("state writer is stopped")]
+    StateWriterStopped,
+
+    #[error("state access failed: {reason}")]
+    StateAccessFailed { reason: String },
+
     #[error("state schema version {found} is newer than supported version {supported}")]
     IncompatibleStateSchema { found: i64, supported: i64 },
 
