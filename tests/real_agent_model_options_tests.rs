@@ -251,7 +251,7 @@ async fn real_terminal_uname_probe(agent: AgentConfig, env: HashMap<String, Stri
     let store = acp_stack::state::StateStore::open(state_dir.path().join("state.sqlite"))
         .expect("state open");
     store.migrate().expect("migrate");
-    let state = Arc::new(tokio::sync::Mutex::new(store));
+    let state = acp_stack::state::StateHandle::start(store).expect("start state handle");
 
     let bridge = AcpBridge::spawn(
         &real_home(),
@@ -311,12 +311,13 @@ async fn real_terminal_uname_probe(agent: AgentConfig, env: HashMap<String, Stri
     bridge.shutdown().await.expect("real ACP agent shutdown");
 
     let commands = state
-        .lock()
-        .await
-        .query_commands(acp_stack::state::CommandFilter {
-            limit: 50,
-            ..Default::default()
+        .read(|store| {
+            store.query_commands(acp_stack::state::CommandFilter {
+                limit: 50,
+                ..Default::default()
+            })
         })
+        .await
         .expect("query commands");
     let acp_rows: Vec<_> = commands.iter().filter(|row| row.origin == "acp").collect();
     println!(

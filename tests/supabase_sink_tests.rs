@@ -1,17 +1,15 @@
 //! Integration test for the Supabase logging sink against a hand-rolled local HTTP
 //! server: batching, header shape, redaction, and the merge-duplicates header.
 
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use acp_stack::config::{SupabaseLoggingBackend, SupabaseLoggingConfig};
 use acp_stack::events::EventHub;
 use acp_stack::runtime::logging::supabase_sink::{SupabaseSink, SupabaseSinkCredential};
-use acp_stack::state::{NewCommandRecord, NewSessionRecord, StateStore};
+use acp_stack::state::{NewCommandRecord, NewSessionRecord, StateHandle, StateStore};
 use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::mpsc;
 
 /// One captured request observed by the fake Supabase server.
@@ -141,12 +139,12 @@ fn find_double_crlf(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
-async fn fresh_store_with_external_logging() -> (tempfile::TempDir, Arc<TokioMutex<StateStore>>) {
+async fn fresh_store_with_external_logging() -> (tempfile::TempDir, StateHandle) {
     let dir = tempdir().expect("tempdir");
     let store = StateStore::open(dir.path().join("state.sqlite")).expect("open");
     store.migrate().expect("migrate");
     store.set_external_logging_enabled(true);
-    (dir, Arc::new(TokioMutex::new(store)))
+    (dir, StateHandle::start(store).expect("start state handle"))
 }
 
 fn supabase_config(url: &str) -> SupabaseLoggingConfig {
@@ -195,43 +193,36 @@ async fn happy_path_uploads_grouped_batches_and_marks_sent() {
     .expect("sink spawn");
 
     // The sink groups by table and issues one POST per group.
-    {
-        let guard = state.lock().await;
-        guard
-            .insert_session(NewSessionRecord {
+    state
+        .write(|store| {
+            store.insert_session(NewSessionRecord {
                 id: "sess_1".to_owned(),
                 agent_id: "agent_a".to_owned(),
                 cwd: "/var/secrets/repo".to_owned(),
                 title: Some("secret meeting notes".to_owned()),
                 metadata_json: r#"{"agent_id":"agent_a","internal":"sk-meta"}"#.to_owned(),
-            })
-            .expect("insert session");
-        guard
-            .append_event("info", "test.kind", "hello", "{}")
-            .expect("append event");
-        guard
-            .append_event("info", "test.kind", "world", "{}")
-            .expect("append event 2");
-        guard
-            .append_auth_failure(
+            })?;
+            store.append_event("info", "test.kind", "hello", "{}")?;
+            store.append_event("info", "test.kind", "world", "{}")?;
+            store.append_auth_failure(
                 "session",
                 "bad-key",
                 Some("127.0.0.1"),
                 Some("/v1/secrets/sk-route-secret"),
                 "{}",
-            )
-            .expect("append auth failure");
-        guard
-            .append_command(NewCommandRecord {
+            )?;
+            store.append_command(NewCommandRecord {
                 command: "printf hello",
                 cwd: Some("/var/secrets/repo"),
                 env_json: Some(r#"{"TOKEN":"sk-command"}"#),
                 origin: acp_stack::state::CommandOrigin::Acp,
                 session_id: Some("sess_1"),
                 terminal_id: Some("term_0"),
-            })
-            .expect("append command");
-    }
+            })?;
+            Ok(())
+        })
+        .await
+        .expect("seed session, events, auth failure and command");
 
     let captured = drain_at_least(&mut rx, 4).await;
     sink.shutdown().await;
@@ -334,9 +325,8 @@ async fn happy_path_uploads_grouped_batches_and_marks_sent() {
     );
 
     let pending_after = state
-        .lock()
+        .write(|store| store.next_sink_outbox_batch(100, "2099-01-01T00:00:00Z"))
         .await
-        .next_sink_outbox_batch(100, "2099-01-01T00:00:00Z")
         .expect("query");
     assert!(
         pending_after.is_empty(),
@@ -359,17 +349,17 @@ async fn payload_never_contains_plaintext_secret() {
 
     // Mimics a buggy upstream that stuffed a token into an events row; the redactor
     // must drop the offending keys before the body leaves the daemon.
-    {
-        let guard = state.lock().await;
-        guard
-            .append_event(
+    state
+        .write(|store| {
+            store.append_event(
                 "info",
                 "test.kind",
                 "leaky",
                 r#"{"api_key":"sk-leak","Authorization":"Bearer leak","session_id":"sess_1"}"#,
             )
-            .expect("append leaky event");
-    }
+        })
+        .await
+        .expect("append leaky event");
 
     let captured = drain_at_least(&mut rx, 1).await;
     sink.shutdown().await;
@@ -415,12 +405,10 @@ async fn permanent_4xx_failure_does_not_retry_immediately() {
     )
     .expect("sink spawn");
 
-    {
-        let guard = state.lock().await;
-        guard
-            .append_event("info", "test.kind", "hello", "{}")
-            .expect("append");
-    }
+    state
+        .write(|store| store.append_event("info", "test.kind", "hello", "{}"))
+        .await
+        .expect("append");
 
     let captured = drain_at_least(&mut rx, 1).await;
     assert_eq!(captured.len(), 1, "401 must not trigger immediate retries");
@@ -434,6 +422,9 @@ async fn permanent_4xx_failure_does_not_retry_immediately() {
     );
     sink.shutdown().await;
 
-    let count = state.lock().await.sink_open_failure_count().expect("count");
+    let count = state
+        .read(|store| store.sink_open_failure_count())
+        .await
+        .expect("count");
     assert_eq!(count, 1, "outbox should hold one failed row");
 }

@@ -53,12 +53,12 @@ async fn submit_prompt(harness: &Harness, session_id: &str, text: &str) -> Strin
 async fn await_tool_call_persisted(harness: &Harness, session_id: &str) {
     let deadline = tokio::time::Instant::now() + POLL_BUDGET;
     loop {
-        let events = {
-            let state = harness.state.lock().await;
-            state
-                .query_session_events(session_id, None, 100)
-                .expect("session events")
-        };
+        let query_session_id = session_id.to_owned();
+        let events = harness
+            .state
+            .read(move |store| store.query_session_events(&query_session_id, None, 100))
+            .await
+            .expect("session events");
         let persisted = events.iter().any(|event| {
             event.source == "acp"
                 && serde_json::from_str::<Value>(&event.payload_json)
@@ -78,13 +78,13 @@ async fn await_tool_call_persisted(harness: &Harness, session_id: &str) {
 async fn await_terminal_prompt(harness: &Harness, prompt_id: &str, want: &str) -> PromptRecord {
     let deadline = tokio::time::Instant::now() + POLL_BUDGET;
     loop {
-        let record = {
-            let state = harness.state.lock().await;
-            state
-                .get_prompt(prompt_id)
-                .expect("prompt lookup")
-                .expect("prompt exists")
-        };
+        let lookup_prompt_id = prompt_id.to_owned();
+        let record = harness
+            .state
+            .read(move |store| store.get_prompt(&lookup_prompt_id))
+            .await
+            .expect("prompt lookup")
+            .expect("prompt exists");
         if record.status == want {
             return record;
         }
@@ -97,9 +97,11 @@ async fn await_terminal_prompt(harness: &Harness, prompt_id: &str, want: &str) -
 }
 
 async fn session_event_kinds(harness: &Harness, session_id: &str) -> Vec<(String, Value)> {
-    let state = harness.state.lock().await;
-    state
-        .query_session_events(session_id, None, 200)
+    let session_id = session_id.to_owned();
+    harness
+        .state
+        .read(move |store| store.query_session_events(&session_id, None, 200))
+        .await
         .expect("session events")
         .into_iter()
         .map(|event| {
@@ -122,17 +124,17 @@ async fn a_silent_tool_call_keeps_its_prompt_from_stalling() {
     let prompt_id = submit_prompt(&harness, &session_id, "run a long command").await;
     await_tool_call_persisted(&harness, &session_id).await;
 
-    {
-        let state = harness.state.lock().await;
-        let (stuck, _) = state
-            .count_stuck_prompts(open_tool_call_thresholds())
-            .expect("count stuck prompts");
-        assert_eq!(stuck, 0, "an open tool call must not read as stuck");
-        let stalled = state
-            .mark_stalled_prompts(open_tool_call_thresholds(), SWEEP_REASON)
-            .expect("sweep");
-        assert!(stalled.is_empty(), "swept {stalled:?}");
-    }
+    let ((stuck, _), stalled) = harness
+        .state
+        .write(|store| {
+            let stuck = store.count_stuck_prompts(open_tool_call_thresholds())?;
+            let stalled = store.mark_stalled_prompts(open_tool_call_thresholds(), SWEEP_REASON)?;
+            Ok((stuck, stalled))
+        })
+        .await
+        .expect("count stuck prompts and sweep");
+    assert_eq!(stuck, 0, "an open tool call must not read as stuck");
+    assert!(stalled.is_empty(), "swept {stalled:?}");
 
     let record = await_terminal_prompt(&harness, &prompt_id, "completed").await;
     assert_eq!(record.stop_reason.as_deref(), Some("end_turn"));
@@ -158,14 +160,15 @@ async fn the_agent_result_replaces_a_stall() {
     let prompt_id = submit_prompt(&harness, &session_id, "run a long command").await;
     await_tool_call_persisted(&harness, &session_id).await;
 
-    {
-        let state = harness.state.lock().await;
-        let stalled = state
-            .mark_stalled_prompts(uniform_stale_thresholds(Duration::ZERO), SWEEP_REASON)
-            .expect("sweep");
-        assert_eq!(stalled.len(), 1, "swept {stalled:?}");
-        assert_eq!(stalled[0].prompt_id, prompt_id);
-    }
+    let stalled = harness
+        .state
+        .write(|store| {
+            store.mark_stalled_prompts(uniform_stale_thresholds(Duration::ZERO), SWEEP_REASON)
+        })
+        .await
+        .expect("sweep");
+    assert_eq!(stalled.len(), 1, "swept {stalled:?}");
+    assert_eq!(stalled[0].prompt_id, prompt_id);
 
     let record = await_terminal_prompt(&harness, &prompt_id, "completed").await;
     assert_eq!(record.stop_reason.as_deref(), Some("end_turn"));

@@ -13,7 +13,7 @@ use agent_client_protocol::schema::v1::{
     SessionId as AcpSessionId, SessionNotification, SessionUpdate, WriteTextFileRequest,
     WriteTextFileResponse,
 };
-use tokio::sync::{Mutex as TokioMutex, mpsc};
+use tokio::sync::mpsc;
 
 use crate::config::AcpPromptAction;
 use crate::error::{Result, StackError};
@@ -28,7 +28,7 @@ use crate::runtime::mediation::permissions::{
 /// Stable audit reason shared by the durable permission decision and its
 /// published cancellation event when ACP `$/cancel_request` wins the race.
 const ACP_REQUEST_CANCELLED_REASON: &str = "acp-request-cancelled";
-use crate::state::{EVENT_KIND_SESSION_UPDATE, StateStore};
+use crate::state::{EVENT_KIND_SESSION_UPDATE, StateHandle};
 
 use super::acp_bridge::{NotificationDrain, NotificationGuard};
 
@@ -617,7 +617,7 @@ pub(crate) struct AcpFsContext {
     pub(crate) sandbox: crate::runtime::sandbox::SandboxProfile,
     /// `None` (e.g. discovery probes) means writes leave no `fs.write` audit
     /// event behind.
-    pub(crate) state: Option<Arc<TokioMutex<StateStore>>>,
+    pub(crate) state: Option<StateHandle>,
     pub(crate) sink: Arc<dyn SessionEventSink>,
 }
 
@@ -707,15 +707,20 @@ pub(crate) async fn handle_write_text_file(
             "session_id": local_session_id,
             "path": path.to_string_lossy(),
             "bytes": metadata.size,
-        });
-        let store = state.lock().await;
-        if let Err(error) = store.append_event_with_source(
-            "info",
-            "fs.write",
-            crate::state::EVENT_SOURCE_ACP,
-            "",
-            &payload.to_string(),
-        ) {
+        })
+        .to_string();
+        let recorded = state
+            .write(move |store| {
+                store.append_event_with_source(
+                    "info",
+                    "fs.write",
+                    crate::state::EVENT_SOURCE_ACP,
+                    "",
+                    &payload,
+                )
+            })
+            .await;
+        if let Err(error) = recorded {
             tracing::warn!(error = %crate::error::report(&error), "failed to record fs.write audit event");
         }
     }

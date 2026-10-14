@@ -28,8 +28,9 @@ use crate::runtime::agent::switch::{
     adapter_from_registry_entry, plan_agent_switch,
 };
 use crate::runtime::install::agent_installer::{
-    HarnessInstall, InstallProgress, InstallerSequenceResult, SharedInstallerSink,
-    install_resolved_capture, persist_untracked_installer_row, run_installer_capture,
+    HarnessInstall, InstallProgress, InstallerRowDraft, InstallerSequenceResult,
+    SharedInstallerSink, install_resolved_capture, persist_step_logs_to_disk,
+    persist_untracked_installer_row, run_installer_capture,
 };
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::runtime::install::skill_installer::{
@@ -191,7 +192,7 @@ async fn install_agent_for_config(
         let agent_command = config.agent.command.clone();
         let store_handle = state.state.clone();
         let step_log_base = log_base.clone();
-        let mut result = tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             let sink = SharedInstallerSink::new(store_handle);
             let progress = InstallProgress {
                 sink: &sink,
@@ -212,16 +213,8 @@ async fn install_agent_for_config(
         .map_err(|err| StackError::AgentInitializeFailed {
             reason: format!("installer thread join failed: {err}"),
         })?;
-        {
-            let store = state.state.lock().await;
-            persist_untracked_installer_row(
-                &store,
-                &mut result.row,
-                &config.agent.id,
-                crate::state::INSTALLER_OPERATION_INSTALL,
-                Some(&log_base),
-            )?;
-        }
+        persist_untracked_installer_rows(state, vec![result.row], &config.agent.id, &log_base)
+            .await?;
         result.outcome?
     } else {
         // Registry-resolved install: one row for native, two for adapter-backed, plus a
@@ -233,7 +226,7 @@ async fn install_agent_for_config(
         let agent_id = config.agent.id.clone();
         let store_handle = state.state.clone();
         let step_log_base = log_base.clone();
-        let mut result: InstallerSequenceResult = tokio::task::spawn_blocking(move || {
+        let result: InstallerSequenceResult = tokio::task::spawn_blocking(move || {
             let sink = SharedInstallerSink::new(store_handle);
             let progress = InstallProgress {
                 sink: &sink,
@@ -255,18 +248,7 @@ async fn install_agent_for_config(
         .map_err(|err| StackError::AgentInitializeFailed {
             reason: format!("installer thread join failed: {err}"),
         })?;
-        {
-            let store = state.state.lock().await;
-            for row in result.rows.iter_mut() {
-                persist_untracked_installer_row(
-                    &store,
-                    row,
-                    &config.agent.id,
-                    crate::state::INSTALLER_OPERATION_INSTALL,
-                    Some(&log_base),
-                )?;
-            }
-        }
+        persist_untracked_installer_rows(state, result.rows, &config.agent.id, &log_base).await?;
         result.outcome?
     };
 
@@ -278,6 +260,49 @@ async fn install_agent_for_config(
         path,
         sha256,
     })
+}
+
+/// Write the step logs of every row the progress sink did not finalize, then append
+/// those rows in one state write. The log files land first so the store job does no
+/// file IO; the stamped `log_dir` carries the path into the row. Rows before a failing
+/// one, at either stage, stay committed, so the audit trail keeps every step that was
+/// recorded.
+async fn persist_untracked_installer_rows(
+    state: &AppState,
+    mut rows: Vec<InstallerRowDraft>,
+    agent_id: &str,
+    log_base: &std::path::Path,
+) -> Result<()> {
+    let mut log_result = Ok(());
+    let mut logged_rows = rows.len();
+    for (index, row) in rows.iter_mut().enumerate() {
+        if row.persisted_run_id.is_some() {
+            continue;
+        }
+        if let Err(error) = persist_step_logs_to_disk(row, agent_id, Some(log_base)) {
+            log_result = Err(error);
+            logged_rows = index;
+            break;
+        }
+    }
+    rows.truncate(logged_rows);
+    let row_agent_id = agent_id.to_owned();
+    state
+        .state
+        .write(move |store| {
+            let appended = rows.iter_mut().try_for_each(|row| {
+                persist_untracked_installer_row(
+                    store,
+                    row,
+                    &row_agent_id,
+                    crate::state::INSTALLER_OPERATION_INSTALL,
+                    None,
+                )
+            });
+            Ok(appended)
+        })
+        .await??;
+    log_result
 }
 
 pub(crate) fn open_agent_env(
@@ -379,10 +404,11 @@ async fn capabilities_agent_target(
     let agent = target.live_agent_config.lock().await.clone();
     let agent_id = agent.id.clone();
     let snapshot: AgentSnapshot = target.supervisor.snapshot().await;
-    let store = state.state.lock().await;
-    let record = store.latest_agent_capabilities(&agent_id)?;
-    drop(store);
-    let record = record.ok_or(StackError::AgentNotInitialized)?;
+    let record = state
+        .state
+        .read(move |store| store.latest_agent_capabilities(&agent_id))
+        .await?
+        .ok_or(StackError::AgentNotInitialized)?;
     let capabilities: AgentCapabilitiesDto = serde_json::from_str(&record.capabilities_json)
         .map_err(|err| StackError::AgentInitializeFailed {
             reason: format!("stored capabilities are unparseable: {err}"),

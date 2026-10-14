@@ -42,21 +42,24 @@ pub(crate) async fn sessions_events_handler(
 ) -> std::result::Result<ApiSuccess<SessionsEventsResponse>, StackError> {
     let limit = params.limit.min(MAX_LOGS_LIMIT);
     let cursor = params.cursor()?;
-    let store = state.state.lock().await;
-    let record = store.require_live_session(&id)?;
-    if let Some(asserted) = params.target_id.as_deref()
-        && asserted != record.target_id
-    {
-        return Err(StackError::InvalidParam {
-            field: "target",
-            reason: format!(
-                "session `{}` belongs to target `{}`, not `{asserted}`",
-                record.id, record.target_id
-            ),
-        });
-    }
-    let events = store.query_session_events(&id, cursor.as_ref(), limit)?;
-    drop(store);
+    let events = state
+        .state
+        .read(move |store| {
+            let record = store.require_live_session(&id)?;
+            if let Some(asserted) = params.target_id.as_deref()
+                && asserted != record.target_id
+            {
+                return Err(StackError::InvalidParam {
+                    field: "target",
+                    reason: format!(
+                        "session `{}` belongs to target `{}`, not `{asserted}`",
+                        record.id, record.target_id
+                    ),
+                });
+            }
+            store.query_session_events(&id, cursor.as_ref(), limit)
+        })
+        .await?;
     Ok(ApiSuccess::new(SessionsEventsResponse {
         events: events.into_iter().map(LogEventJson::from).collect(),
     }))
@@ -101,22 +104,26 @@ pub(crate) async fn sessions_snapshot_handler(
     Path(id): Path<String>,
     Query(params): Query<SessionsTargetParams>,
 ) -> std::result::Result<ApiSuccess<SessionSnapshotResponse>, StackError> {
-    let store = state.state.lock().await;
-    let session = store.require_live_session(&id)?;
-    if let Some(asserted) = params.target_id.as_deref()
-        && asserted != session.target_id
-    {
-        return Err(StackError::InvalidParam {
-            field: "target",
-            reason: format!(
-                "session `{}` belongs to target `{}`, not `{asserted}`",
-                session.id, session.target_id
-            ),
-        });
-    }
-    let in_flight = store.in_flight_prompts_for_session(&id)?;
-    let recent = store.latest_session_events(&id, SNAPSHOT_RECENT_EVENTS_LIMIT)?;
-    drop(store);
+    let (session, in_flight, recent) = state
+        .state
+        .read(move |store| {
+            let session = store.require_live_session(&id)?;
+            if let Some(asserted) = params.target_id.as_deref()
+                && asserted != session.target_id
+            {
+                return Err(StackError::InvalidParam {
+                    field: "target",
+                    reason: format!(
+                        "session `{}` belongs to target `{}`, not `{asserted}`",
+                        session.id, session.target_id
+                    ),
+                });
+            }
+            let in_flight = store.in_flight_prompts_for_session(&id)?;
+            let recent = store.latest_session_events(&id, SNAPSHOT_RECENT_EVENTS_LIMIT)?;
+            Ok((session, in_flight, recent))
+        })
+        .await?;
     let available_commands = stored_available_commands(&session.metadata_json)
         .map(|stored| {
             stored

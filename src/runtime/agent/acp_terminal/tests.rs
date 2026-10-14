@@ -1,4 +1,5 @@
 use super::*;
+use crate::state::StateStore;
 
 /// Stands in for `[workspace].default_shell` in contexts whose subject is not
 /// the shell choice itself.
@@ -277,7 +278,7 @@ async fn create_terminal_start_failure_finalizes_command_row() {
         )
         .expect("trigger installed");
     }
-    let state = Arc::new(TokioMutex::new(store));
+    let state = StateHandle::start(store).expect("start state handle");
 
     let context = TerminalHandlerContext {
         registry: Arc::new(TerminalRegistry::default()),
@@ -299,14 +300,7 @@ async fn create_terminal_start_failure_finalizes_command_row() {
 
     // The row must not be left `pending`: the handler finalizes it as
     // `failed` before returning.
-    let commands = state
-        .lock()
-        .await
-        .query_commands(crate::state::CommandFilter {
-            limit: 10,
-            ..Default::default()
-        })
-        .expect("query commands");
+    let commands = query_all_commands(&state).await;
     assert_eq!(commands.len(), 1);
     assert_eq!(commands[0].status, "failed");
 }
@@ -318,7 +312,7 @@ async fn kill_finalizes_command_row_as_canceled() {
     let state_dir = tempfile::tempdir().expect("tempdir");
     let store = StateStore::open(state_dir.path().join("state.sqlite")).expect("state open");
     store.migrate().expect("migrate");
-    let state = Arc::new(TokioMutex::new(store));
+    let state = StateHandle::start(store).expect("start state handle");
 
     let context = TerminalHandlerContext {
         registry: Arc::new(TerminalRegistry::default()),
@@ -350,28 +344,16 @@ async fn kill_finalizes_command_row_as_canceled() {
 
     // Kill-intent exits finalize as `cancelled` with no exit status, matching
     // the gateway's operator-cancel mapping.
-    let guard = state.lock().await;
-    let commands = guard
-        .query_commands(crate::state::CommandFilter {
-            limit: 10,
-            ..Default::default()
-        })
-        .expect("query commands");
+    let commands = query_all_commands(&state).await;
     assert_eq!(commands.len(), 1);
     assert_eq!(commands[0].status, "cancelled");
     assert_eq!(commands[0].exit_status, None);
-    let events = guard
-        .query_events(crate::state::LogFilter {
-            limit: 10,
-            kind: Some("command.cancelled"),
-            ..Default::default()
-        })
-        .expect("query events");
+    let events = query_events_of_kind(&state, "command.cancelled").await;
     assert_eq!(events.len(), 1, "expected one command.cancelled event");
 
     // The transcript's view: one session-scoped finalize event naming the
     // terminal, with no exit status and the signal that ended it.
-    let finished = terminal_finished_payload(&guard, "sess_agent");
+    let finished = terminal_finished_payload(&state, "sess_agent").await;
     assert_eq!(finished["terminal_id"], response.terminal_id.0.as_ref());
     assert_eq!(finished["command_id"], commands[0].id);
     assert_eq!(finished["status"], "cancelled");
@@ -379,10 +361,37 @@ async fn kill_finalizes_command_row_as_canceled() {
     assert_eq!(finished["signal"], "SIGTERM");
 }
 
+async fn query_all_commands(state: &StateHandle) -> Vec<crate::state::CommandRecord> {
+    state
+        .read(|store| {
+            store.query_commands(crate::state::CommandFilter {
+                limit: 10,
+                ..Default::default()
+            })
+        })
+        .await
+        .expect("query commands")
+}
+
+async fn query_events_of_kind(state: &StateHandle, kind: &'static str) -> Vec<crate::state::Event> {
+    state
+        .read(move |store| {
+            store.query_events(crate::state::LogFilter {
+                limit: 10,
+                kind: Some(kind),
+                ..Default::default()
+            })
+        })
+        .await
+        .expect("query events")
+}
+
 /// The single session-scoped finalize event for `session_id`, as parsed JSON.
-fn terminal_finished_payload(store: &StateStore, session_id: &str) -> serde_json::Value {
-    let events = store
-        .query_session_events(session_id, None, 50)
+async fn terminal_finished_payload(state: &StateHandle, session_id: &str) -> serde_json::Value {
+    let session_id = session_id.to_owned();
+    let events = state
+        .read(move |store| store.query_session_events(&session_id, None, 50))
+        .await
         .expect("query session events");
     let finished: Vec<&crate::state::Event> = events
         .iter()
@@ -395,7 +404,7 @@ fn terminal_finished_payload(store: &StateStore, session_id: &str) -> serde_json
 
 /// A context whose command log writes to `state`, with the workspace rooted at
 /// the system temp dir.
-fn logging_context(state: Arc<TokioMutex<StateStore>>) -> TerminalHandlerContext {
+fn logging_context(state: StateHandle) -> TerminalHandlerContext {
     TerminalHandlerContext {
         registry: Arc::new(TerminalRegistry::default()),
         workspace_root: std::env::temp_dir(),
@@ -411,11 +420,14 @@ fn logging_context(state: Arc<TokioMutex<StateStore>>) -> TerminalHandlerContext
     }
 }
 
-fn logging_state() -> (tempfile::TempDir, Arc<TokioMutex<StateStore>>) {
+fn logging_state() -> (tempfile::TempDir, StateHandle) {
     let state_dir = tempfile::tempdir().expect("tempdir");
     let store = StateStore::open(state_dir.path().join("state.sqlite")).expect("state open");
     store.migrate().expect("migrate");
-    (state_dir, Arc::new(TokioMutex::new(store)))
+    (
+        state_dir,
+        StateHandle::start(store).expect("start state handle"),
+    )
 }
 
 #[tokio::test]
@@ -438,13 +450,7 @@ async fn natural_exit_links_the_terminal_to_its_command_on_the_session_stream() 
         .expect("handle");
     handle.wait_for_exit().await;
 
-    let guard = state.lock().await;
-    let commands = guard
-        .query_commands(crate::state::CommandFilter {
-            limit: 10,
-            ..Default::default()
-        })
-        .expect("query commands");
+    let commands = query_all_commands(&state).await;
     assert_eq!(commands.len(), 1);
     // The join key a transcript follows from a tool call's `terminalId`.
     assert_eq!(
@@ -452,7 +458,7 @@ async fn natural_exit_links_the_terminal_to_its_command_on_the_session_stream() 
         Some(response.terminal_id.0.as_ref())
     );
 
-    let finished = terminal_finished_payload(&guard, "sess_agent");
+    let finished = terminal_finished_payload(&state, "sess_agent").await;
     assert_eq!(finished["terminal_id"], response.terminal_id.0.as_ref());
     assert_eq!(finished["command_id"], commands[0].id);
     assert_eq!(finished["status"], "failed");
@@ -487,8 +493,7 @@ async fn the_output_tail_respects_the_cap_and_cuts_at_a_utf8_boundary() {
         .expect("handle");
     handle.wait_for_exit().await;
 
-    let guard = state.lock().await;
-    let finished = terminal_finished_payload(&guard, "sess_agent");
+    let finished = terminal_finished_payload(&state, "sess_agent").await;
     let tail = finished["output_tail"].as_str().expect("tail is a string");
     assert!(
         tail.len() as u64 <= TERMINAL_FINISHED_OUTPUT_TAIL_BYTES,
@@ -516,17 +521,11 @@ async fn spawn_failure_still_records_the_session_event() {
         .await
         .expect_err("spawn failure must surface as an error");
 
-    let guard = state.lock().await;
-    let commands = guard
-        .query_commands(crate::state::CommandFilter {
-            limit: 10,
-            ..Default::default()
-        })
-        .expect("query commands");
+    let commands = query_all_commands(&state).await;
     assert_eq!(commands.len(), 1);
     assert_eq!(commands[0].status, "failed");
 
-    let finished = terminal_finished_payload(&guard, "sess_agent");
+    let finished = terminal_finished_payload(&state, "sess_agent").await;
     assert_eq!(finished["command_id"], commands[0].id);
     assert_eq!(finished["status"], "failed");
     assert_eq!(finished["exit_status"], serde_json::Value::Null);
@@ -537,13 +536,7 @@ async fn spawn_failure_still_records_the_session_event() {
     assert!(!reason.is_empty());
 
     // The command log carries the same reason on its own lifecycle event.
-    let events = guard
-        .query_events(crate::state::LogFilter {
-            limit: 10,
-            kind: Some("command.spawn_failed"),
-            ..Default::default()
-        })
-        .expect("query events");
+    let events = query_events_of_kind(&state, "command.spawn_failed").await;
     assert_eq!(events.len(), 1, "expected one command.spawn_failed event");
     let payload: serde_json::Value =
         serde_json::from_str(&events[0].payload_json).expect("payload is json");
@@ -570,14 +563,7 @@ async fn natural_signal_death_records_the_signal_on_the_command_event() {
         .expect("handle");
     handle.wait_for_exit().await;
 
-    let guard = state.lock().await;
-    let events = guard
-        .query_events(crate::state::LogFilter {
-            limit: 10,
-            kind: Some("command.failed"),
-            ..Default::default()
-        })
-        .expect("query events");
+    let events = query_events_of_kind(&state, "command.failed").await;
     assert_eq!(events.len(), 1, "expected one command.failed event");
     let payload: serde_json::Value =
         serde_json::from_str(&events[0].payload_json).expect("payload is json");
@@ -720,7 +706,7 @@ async fn create_terminal_rejects_a_blank_command() {
     let state_dir = tempfile::tempdir().expect("tempdir");
     let store = StateStore::open(state_dir.path().join("state.sqlite")).expect("state open");
     store.migrate().expect("migrate");
-    let state = Arc::new(TokioMutex::new(store));
+    let state = StateHandle::start(store).expect("start state handle");
 
     let root = tempfile::tempdir().expect("workspace root");
     let context = TerminalHandlerContext {
@@ -746,14 +732,7 @@ async fn create_terminal_rejects_a_blank_command() {
     assert_eq!(error.code, AcpError::invalid_params().code);
 
     // Refused before any row or child exists, so nothing is left behind.
-    let commands = state
-        .lock()
-        .await
-        .query_commands(crate::state::CommandFilter {
-            limit: 10,
-            ..Default::default()
-        })
-        .expect("query commands");
+    let commands = query_all_commands(&state).await;
     assert!(commands.is_empty(), "blank command must not log a row");
 }
 
@@ -764,7 +743,7 @@ async fn shell_wrapped_terminal_logs_the_agent_requested_command() {
     let state_dir = tempfile::tempdir().expect("tempdir");
     let store = StateStore::open(state_dir.path().join("state.sqlite")).expect("state open");
     store.migrate().expect("migrate");
-    let state = Arc::new(TokioMutex::new(store));
+    let state = StateHandle::start(store).expect("start state handle");
 
     let root = tempfile::tempdir().expect("workspace root");
     let context = TerminalHandlerContext {
@@ -795,14 +774,7 @@ async fn shell_wrapped_terminal_logs_the_agent_requested_command() {
 
     // The audit row is the agent's intent, not the interpreter the runtime
     // chose to run it under.
-    let commands = state
-        .lock()
-        .await
-        .query_commands(crate::state::CommandFilter {
-            limit: 10,
-            ..Default::default()
-        })
-        .expect("query commands");
+    let commands = query_all_commands(&state).await;
     assert_eq!(commands.len(), 1);
     assert_eq!(commands[0].command, "printf audited");
 }

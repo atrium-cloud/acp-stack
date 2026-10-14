@@ -111,14 +111,13 @@ async fn cancelled_permission_does_not_block_dispatch_and_is_persisted() {
     use acp_stack::config::{AcpPromptAction, PermissionTimeoutAction};
     use acp_stack::events::EventHub;
     use acp_stack::runtime::mediation::permissions::PermissionService;
-    use acp_stack::state::StateStore;
+    use acp_stack::state::{StateHandle, StateStore};
     use agent_client_protocol::schema::v1::{ContentBlock, PromptRequest, SessionId, TextContent};
-    use tokio::sync::Mutex as TokioMutex;
 
     let state_dir = tempfile::tempdir().expect("state tempdir");
     let store = StateStore::open(state_dir.path().join("state.sqlite")).expect("open state");
     store.migrate().expect("migrate state");
-    let state = Arc::new(TokioMutex::new(store));
+    let state = StateHandle::start(store).expect("start state handle");
     let events = EventHub::new();
     let mut event_rx = events.subscribe();
     let permissions = PermissionService::new(

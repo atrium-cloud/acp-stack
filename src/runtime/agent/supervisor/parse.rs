@@ -18,8 +18,8 @@ impl Outcome {
 }
 
 /// Owned fields the spawned prompt task hands to the state store on settle.
-/// Built BEFORE awaiting the state mutex so the lock is never held while
-/// constructing JSON payloads.
+/// Built before the settle write job so the writer thread never constructs
+/// JSON payloads.
 pub(super) struct TerminalOutcome {
     pub(super) status: PromptStatus,
     pub(super) stop_reason: Option<String>,

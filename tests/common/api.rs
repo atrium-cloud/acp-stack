@@ -10,19 +10,31 @@ use acp_stack::api::{self, AppState, RuntimePaths};
 use acp_stack::auth::AuthVerifierSet;
 use acp_stack::config::{AgentAdapterConfig, Config, LocalSessionAuth, load_config_from_str};
 use acp_stack::secrets::SecretStore;
-use acp_stack::state::{AuthFailureFilter, StateStore};
+use acp_stack::state::{AuthFailureFilter, StateHandle, StateStore};
 use rusqlite::Connection;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
-use tokio::sync::Mutex as TokioMutex;
 use tokio::task::JoinHandle;
 
 pub const SESSION_KEY: &str = "acps_session_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 pub const ADMIN_KEY: &str = "acps_admin_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
+/// Lets a test's own connection wait out the daemon writer's open batch.
+const RAW_CONNECTION_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A direct connection to a running harness's state database, for fixture writes the
+/// store API does not expose.
+pub fn open_state_connection(path: &Path) -> Connection {
+    let connection = Connection::open(path).expect("open sqlite directly");
+    connection
+        .busy_timeout(RAW_CONNECTION_BUSY_TIMEOUT)
+        .expect("set busy timeout");
+    connection
+}
+
 pub struct ServerHarness {
     pub base_url: String,
-    pub state: Arc<TokioMutex<StateStore>>,
+    pub state: StateHandle,
     pub local_session_auth: Arc<tokio::sync::RwLock<LocalSessionAuth>>,
     pub config_path: PathBuf,
     pub state_path: PathBuf,
@@ -110,7 +122,8 @@ impl ServerHarness {
             ADMIN_KEY.to_owned(),
             effective_bind,
             runtime_paths,
-        );
+        )
+        .expect("app state");
         let state = app_state.state.clone();
         let local_session_auth = app_state.local_session_auth.clone();
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -129,40 +142,39 @@ impl ServerHarness {
     }
 
     pub async fn auth_failure_count(&self) -> usize {
-        let guard = self.state.lock().await;
-        guard
-            .query_auth_failures(AuthFailureFilter {
-                limit: 100,
-                ..AuthFailureFilter::default()
+        self.state
+            .read(|store| {
+                store.query_auth_failures(AuthFailureFilter {
+                    limit: 100,
+                    ..AuthFailureFilter::default()
+                })
             })
+            .await
             .expect("query auth failures")
             .len()
     }
 
     pub async fn latest_auth_failure(&self) -> (String, String) {
-        let guard = self.state.lock().await;
-        let rows = guard
-            .query_auth_failures(AuthFailureFilter {
-                limit: 1,
-                ..AuthFailureFilter::default()
-            })
-            .expect("query auth failures");
-        let row = rows.into_iter().next().expect("at least one auth failure");
+        let row = self.latest_auth_failure_row().await;
         (row.key_kind, row.reason)
     }
 
     pub async fn latest_auth_failure_client_ip(&self) -> Option<String> {
-        let guard = self.state.lock().await;
-        let rows = guard
-            .query_auth_failures(AuthFailureFilter {
-                limit: 1,
-                ..AuthFailureFilter::default()
+        self.latest_auth_failure_row().await.client_ip
+    }
+
+    async fn latest_auth_failure_row(&self) -> acp_stack::state::AuthFailure {
+        let rows = self
+            .state
+            .read(|store| {
+                store.query_auth_failures(AuthFailureFilter {
+                    limit: 1,
+                    ..AuthFailureFilter::default()
+                })
             })
+            .await
             .expect("query auth failures");
-        rows.into_iter()
-            .next()
-            .expect("at least one auth failure")
-            .client_ip
+        rows.into_iter().next().expect("at least one auth failure")
     }
 }
 
@@ -215,7 +227,7 @@ pub fn codex_adapter() -> AgentAdapterConfig {
 }
 
 pub fn seed_session(path: &Path, id: &str, status: &str, created_at: &str, updated_at: &str) {
-    let connection = Connection::open(path).expect("open sqlite for seed");
+    let connection = open_state_connection(path);
     connection
         .execute(
             r#"
@@ -236,7 +248,7 @@ pub fn seed_command(
     created_at: &str,
     updated_at: &str,
 ) {
-    let connection = Connection::open(path).expect("open sqlite for seed");
+    let connection = open_state_connection(path);
     connection
         .execute(
             r#"
@@ -249,7 +261,7 @@ pub fn seed_command(
 }
 
 pub fn seed_auth_failure(path: &Path, id: &str, created_at: &str, reason: &str) {
-    let connection = Connection::open(path).expect("open sqlite for seed");
+    let connection = open_state_connection(path);
     connection
         .execute(
             r#"

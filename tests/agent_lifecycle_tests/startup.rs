@@ -130,14 +130,14 @@ creates = "opencode"
 
     // The fake install records no versions (shell recipe); seed versioned rows so the
     // capture at start has something to pair the handshake with.
-    {
-        let store = harness.state.lock().await;
-        for (started_at, step, version) in [
-            ("2026-05-21T00:00:00.000000000Z", "harness", "1.2.3"),
-            ("2026-05-21T00:00:01.000000000Z", "adapter", "0.4.0"),
-        ] {
-            store
-                .append_installer_run(acp_stack::state::InstallerRunInput {
+    harness
+        .state
+        .write(|store| {
+            for (started_at, step, version) in [
+                ("2026-05-21T00:00:00.000000000Z", "harness", "1.2.3"),
+                ("2026-05-21T00:00:01.000000000Z", "adapter", "0.4.0"),
+            ] {
+                store.append_installer_run(acp_stack::state::InstallerRunInput {
                     agent_id: "opencode",
                     started_at,
                     finished_at: Some(started_at),
@@ -153,10 +153,12 @@ creates = "opencode"
                     apply_run_id: None,
                     path: None,
                     sha256: None,
-                })
-                .expect("seed installer run");
-        }
-    }
+                })?;
+            }
+            Ok(())
+        })
+        .await
+        .expect("seed installer run");
 
     let start = client
         .post(format!("{}/v1/agent/start", harness.base_url))
@@ -203,9 +205,11 @@ creates = "opencode"
         .expect("send stop");
     assert_eq!(stop.status(), StatusCode::OK);
 
-    let store = harness.state.lock().await;
-    let lifecycle = store.query_agent_lifecycle(20).expect("lifecycle query");
-    drop(store);
+    let lifecycle = harness
+        .state
+        .read(|store| store.query_agent_lifecycle(20))
+        .await
+        .expect("lifecycle query");
     let kinds: Vec<&str> = lifecycle.iter().map(|r| r.event_kind.as_str()).collect();
     assert!(kinds.contains(&"agent.starting"), "kinds: {kinds:?}");
     assert!(kinds.contains(&"agent.started"), "kinds: {kinds:?}");
@@ -266,15 +270,16 @@ async fn agent_stop_demotes_active_sessions_to_available() {
         .expect("send stop");
     assert_eq!(stop.status(), StatusCode::OK);
 
-    let store = harness.state.lock().await;
-    let record = store
-        .get_session(&session_id)
-        .expect("session lookup")
-        .expect("session exists");
-    let events = store
-        .latest_session_events(&session_id, 20)
-        .expect("session events");
-    drop(store);
+    let (record, events) = harness
+        .state
+        .read(move |store| {
+            let record = store.get_session(&session_id)?;
+            let events = store.latest_session_events(&session_id, 20)?;
+            Ok((record, events))
+        })
+        .await
+        .expect("session lookup and events");
+    let record = record.expect("session exists");
     assert_eq!(record.status, "available");
     assert!(
         events.iter().any(|event| event.kind == "session.available"),

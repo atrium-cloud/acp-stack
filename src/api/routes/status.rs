@@ -102,7 +102,7 @@ impl ServerInfo {
 /// the status route answers while an apply runs) OR a live `deps_apply_runs`
 /// row, which also observes applies the daemon did not start (CLI, detached
 /// init child). Read through a fresh store connection, never the shared
-/// mutex; read failures degrade to the lock-only signal rather than erroring
+/// state handle; read failures degrade to the lock-only signal rather than erroring
 /// the status route.
 fn deps_apply_in_flight(state: &AppState) -> bool {
     if state.deps_apply_lock.try_lock().is_err() {
@@ -128,10 +128,10 @@ fn deps_apply_in_flight(state: &AppState) -> bool {
 pub(crate) async fn status_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<StatusResponse>, StackError> {
-    let store = state.state.lock().await;
-    let schema_version = store.schema_version()?;
-    let latest_event = store.latest_event_timestamp()?;
-    drop(store);
+    let (schema_version, latest_event) = state
+        .state
+        .read(|store| Ok((store.schema_version()?, store.latest_event_timestamp()?)))
+        .await?;
     Ok(ApiSuccess::new(StatusResponse {
         schema_version,
         latest_event,
@@ -273,10 +273,15 @@ pub(crate) async fn status_agent_handler(
         &configured_provider_snapshot,
     );
     let agent = target.live_agent_config.lock().await.clone();
-    let store = state.state.lock().await;
-    let lifecycle_events = store.query_agent_lifecycle(default_logs_limit())?;
-    let latest_failure = store.latest_agent_failure(&agent.id)?;
-    drop(store);
+    let agent_id = agent.id.clone();
+    let (lifecycle_events, latest_failure) = state
+        .state
+        .read(move |store| {
+            let lifecycle_events = store.query_agent_lifecycle(default_logs_limit())?;
+            let latest_failure = store.latest_agent_failure(&agent_id)?;
+            Ok((lifecycle_events, latest_failure))
+        })
+        .await?;
     Ok(ApiSuccess::new(StatusAgentResponse {
         configured: true,
         agent: AgentStatusJson {

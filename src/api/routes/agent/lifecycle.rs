@@ -260,13 +260,14 @@ async fn restart_blockers_for_target(
     target_id: &str,
 ) -> std::result::Result<ApiSuccess<AgentRestartBlockersResponse>, StackError> {
     state.refresh_array_runtime_from_disk().await?;
-    let blockers = {
-        let store = state.state.lock().await;
-        store.query_restart_blockers(Some(target_id))?
-    }
-    .into_iter()
-    .map(AgentRestartBlockerResponse::from)
-    .collect();
+    let blocker_target_id = target_id.to_owned();
+    let blockers = state
+        .state
+        .read(move |store| store.query_restart_blockers(Some(&blocker_target_id)))
+        .await?
+        .into_iter()
+        .map(AgentRestartBlockerResponse::from)
+        .collect();
     Ok(ApiSuccess::new(AgentRestartBlockersResponse {
         target_id: target_id.to_owned(),
         blockers,
@@ -450,10 +451,11 @@ pub(crate) async fn cancel_pending_acp_permissions_for_target(
     target_id: &str,
     reason: &str,
 ) {
-    let permission_ids_result = {
-        let store = state.state.lock().await;
-        store.query_pending_acp_permission_ids_for_target(target_id)
-    };
+    let permission_target_id = target_id.to_owned();
+    let permission_ids_result = state
+        .state
+        .read(move |store| store.query_pending_acp_permission_ids_for_target(&permission_target_id))
+        .await;
     let permission_ids: Vec<String> = match permission_ids_result {
         Ok(rows) => rows,
         Err(err) => {

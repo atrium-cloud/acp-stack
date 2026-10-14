@@ -280,10 +280,11 @@ pub(crate) async fn agent_update_status_handler(
         }
         Err(error) => return Err(error),
     };
-    let installed_rows = {
-        let store = state.state.lock().await;
-        store.latest_successful_installer_runs_for_agent(&agent_id)?
-    };
+    let installed_agent_id = agent_id.clone();
+    let installed_rows = state
+        .state
+        .read(move |store| store.latest_successful_installer_runs_for_agent(&installed_agent_id))
+        .await?;
     // Upstream lookups are blocking HTTP; a failure degrades that component to
     // `unknown` in the report rather than failing the route.
     let agent_config = config.agent.clone();
@@ -321,8 +322,16 @@ async fn append_update_lifecycle(
     payload: serde_json::Value,
 ) {
     let payload = payload.to_string();
-    let store = state.state.lock().await;
-    if let Err(err) = store.append_agent_lifecycle(kind, message, &payload) {
+    let lifecycle_kind = kind.to_owned();
+    let lifecycle_message = message.to_owned();
+    let appended = state
+        .state
+        .write(move |store| {
+            store.append_agent_lifecycle(&lifecycle_kind, &lifecycle_message, &payload)?;
+            Ok(())
+        })
+        .await;
+    if let Err(err) = appended {
         tracing::warn!(error = %err, kind, "agent update: failed to record lifecycle event");
     }
 }

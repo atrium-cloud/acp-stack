@@ -253,6 +253,7 @@ mod tests {
             "acps_session_local_router".to_owned(),
             "acps_admin_local_router".to_owned(),
         )
+        .expect("app state")
     }
 
     fn test_config() -> Config {

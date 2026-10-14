@@ -98,7 +98,7 @@ fn extract_execute_tool_call_ignores_other_updates() {
     assert!(super::extract_execute_tool_call("s", &chunk).is_none());
 }
 
-use crate::state::{NewPromptRecord, NewSessionRecord, PromptStatus, StateStore};
+use crate::state::{NewPromptRecord, NewSessionRecord, PromptStatus, StateHandle, StateStore};
 use rusqlite::params;
 
 const STREAMED_CHUNK: &str = r#"{"sessionId":"agent_sess","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}}"#;
@@ -205,8 +205,6 @@ fn a_streamed_update_without_an_in_flight_prompt_still_appends() {
 #[tokio::test]
 async fn writer_persists_derived_tool_execute_event() {
     use crate::runtime::agent::session_sink::{SessionEventSink, StateStoreSessionSink};
-    use std::sync::Arc;
-    use tokio::sync::Mutex as TokioMutex;
 
     let tempdir = tempfile::tempdir().expect("tempdir");
     let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state open");
@@ -224,21 +222,23 @@ async fn writer_persists_derived_tool_execute_event() {
             },
         )
         .expect("session inserted");
-    let state = Arc::new(TokioMutex::new(store));
+    let state = StateHandle::start(store).expect("start state handle");
 
     let sink = StateStoreSessionSink::new("target_a".to_owned(), state.clone());
     let payload = r#"{"sessionId":"agent_sess_1","update":{"sessionUpdate":"tool_call","toolCallId":"call_1","title":"uname -a","kind":"execute","status":"in_progress","rawInput":{"command":"uname -a"}}}"#;
     sink.append("agent_sess_1", "session.update", payload).await;
     sink.flush().await;
 
-    let guard = state.lock().await;
-    let derived = guard
-        .query_events(crate::state::LogFilter {
-            limit: 10,
-            kind: Some("tool.execute"),
-            source: Some("acp"),
-            ..Default::default()
+    let derived = state
+        .read(|store| {
+            store.query_events(crate::state::LogFilter {
+                limit: 10,
+                kind: Some("tool.execute"),
+                source: Some("acp"),
+                ..Default::default()
+            })
         })
+        .await
         .expect("query derived events");
     assert_eq!(derived.len(), 1, "expected one derived tool.execute event");
     assert!(derived[0].payload_json.contains("\"command\":\"uname -a\""));
@@ -247,13 +247,16 @@ async fn writer_persists_derived_tool_execute_event() {
             .payload_json
             .contains("\"session_id\":\"sess_local\"")
     );
-    let verbatim = guard
-        .query_events(crate::state::LogFilter {
-            limit: 10,
-            kind: Some("session.update"),
-            source: Some("acp"),
-            ..Default::default()
+    let verbatim = state
+        .read(|store| {
+            store.query_events(crate::state::LogFilter {
+                limit: 10,
+                kind: Some("session.update"),
+                source: Some("acp"),
+                ..Default::default()
+            })
         })
+        .await
         .expect("query verbatim events");
     assert_eq!(verbatim.len(), 1, "expected the verbatim session.update");
 }
@@ -261,8 +264,6 @@ async fn writer_persists_derived_tool_execute_event() {
 #[tokio::test]
 async fn writer_persists_normalized_standard_usage_event() {
     use crate::runtime::agent::session_sink::{SessionEventSink, StateStoreSessionSink};
-    use std::sync::Arc;
-    use tokio::sync::Mutex as TokioMutex;
 
     let tempdir = tempfile::tempdir().expect("tempdir");
     let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state open");
@@ -280,20 +281,22 @@ async fn writer_persists_normalized_standard_usage_event() {
             },
         )
         .expect("session inserted");
-    let state = Arc::new(TokioMutex::new(store));
+    let state = StateHandle::start(store).expect("start state handle");
     let sink = StateStoreSessionSink::new("target_a".to_owned(), state.clone());
     let payload = r#"{"sessionId":"agent_sess_1","update":{"sessionUpdate":"usage_update","used":2048,"size":8192,"cost":{"amount":0.75,"currency":"EUR"}}}"#;
     sink.append("agent_sess_1", "session.update", payload).await;
     sink.flush().await;
 
-    let guard = state.lock().await;
-    let events = guard
-        .query_events(crate::state::LogFilter {
-            limit: 10,
-            kind: Some("usage.reported"),
-            source: Some("acp"),
-            ..Default::default()
+    let events = state
+        .read(|store| {
+            store.query_events(crate::state::LogFilter {
+                limit: 10,
+                kind: Some("usage.reported"),
+                source: Some("acp"),
+                ..Default::default()
+            })
         })
+        .await
         .expect("query usage events");
     assert_eq!(events.len(), 1);
     let usage: serde_json::Value =
@@ -672,8 +675,6 @@ fn available_commands_projection_ignores_other_updates_and_truncates_over_cap() 
 #[tokio::test]
 async fn writer_projects_available_commands_and_keeps_raw_event() {
     use crate::runtime::agent::session_sink::{SessionEventSink, StateStoreSessionSink};
-    use std::sync::Arc;
-    use tokio::sync::Mutex as TokioMutex;
 
     let tempdir = tempfile::tempdir().expect("tempdir");
     let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state open");
@@ -691,25 +692,28 @@ async fn writer_projects_available_commands_and_keeps_raw_event() {
             },
         )
         .expect("session inserted");
-    let state = Arc::new(TokioMutex::new(store));
+    let state = StateHandle::start(store).expect("start state handle");
     let sink = StateStoreSessionSink::new("target_a".to_owned(), state.clone());
     let payload = r#"{"sessionId":"agent_sess_1","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"compact","description":"Summarize","input":{"hint":"optional"}}]}}"#;
 
     sink.append("agent_sess_1", "session.update", payload).await;
     sink.flush().await;
 
-    let guard = state.lock().await;
-    let events = guard
-        .query_events(crate::state::LogFilter {
-            limit: 10,
-            kind: Some("session.update"),
-            source: Some("acp"),
-            ..Default::default()
+    let events = state
+        .read(|store| {
+            store.query_events(crate::state::LogFilter {
+                limit: 10,
+                kind: Some("session.update"),
+                source: Some("acp"),
+                ..Default::default()
+            })
         })
+        .await
         .expect("query raw events");
     assert_eq!(events.len(), 1);
-    let session = guard
-        .get_session("sess_local")
+    let session = state
+        .read(|store| store.get_session("sess_local"))
+        .await
         .expect("session lookup")
         .expect("session exists");
     let metadata: serde_json::Value =
@@ -725,8 +729,6 @@ async fn writer_projects_available_commands_and_keeps_raw_event() {
 #[tokio::test]
 async fn writer_keeps_raw_session_info_when_projection_fails() {
     use crate::runtime::agent::session_sink::{SessionEventSink, StateStoreSessionSink};
-    use std::sync::Arc;
-    use tokio::sync::Mutex as TokioMutex;
 
     let tempdir = tempfile::tempdir().expect("tempdir");
     let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state open");
@@ -744,25 +746,28 @@ async fn writer_keeps_raw_session_info_when_projection_fails() {
             },
         )
         .expect("session inserted");
-    let state = Arc::new(TokioMutex::new(store));
+    let state = StateHandle::start(store).expect("start state handle");
     let sink = StateStoreSessionSink::new("target_a".to_owned(), state.clone());
     let payload = r#"{"sessionId":"agent_sess_1","update":{"sessionUpdate":"session_info_update","title":"renamed"}}"#;
 
     sink.append("agent_sess_1", "session.update", payload).await;
     sink.flush().await;
 
-    let guard = state.lock().await;
-    let events = guard
-        .query_events(crate::state::LogFilter {
-            limit: 10,
-            kind: Some("session.update"),
-            source: Some("acp"),
-            ..Default::default()
+    let events = state
+        .read(|store| {
+            store.query_events(crate::state::LogFilter {
+                limit: 10,
+                kind: Some("session.update"),
+                source: Some("acp"),
+                ..Default::default()
+            })
         })
+        .await
         .expect("query raw events");
     assert_eq!(events.len(), 1);
-    let session = guard
-        .get_session("sess_local")
+    let session = state
+        .read(|store| store.get_session("sess_local"))
+        .await
         .expect("session lookup")
         .expect("session exists");
     assert_eq!(session.title.as_deref(), Some("original"));
@@ -771,8 +776,6 @@ async fn writer_keeps_raw_session_info_when_projection_fails() {
 #[tokio::test]
 async fn drain_makes_every_earlier_append_durable_and_keeps_the_sink_open() {
     use crate::runtime::agent::session_sink::{SessionEventSink, StateStoreSessionSink};
-    use std::sync::Arc;
-    use tokio::sync::Mutex as TokioMutex;
 
     let tempdir = tempfile::tempdir().expect("tempdir");
     let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state open");
@@ -790,7 +793,7 @@ async fn drain_makes_every_earlier_append_durable_and_keeps_the_sink_open() {
             },
         )
         .expect("session inserted");
-    let state = Arc::new(TokioMutex::new(store));
+    let state = StateHandle::start(store).expect("start state handle");
     let sink = StateStoreSessionSink::new("target_a".to_owned(), state.clone());
     let payload = r#"{"sessionId":"agent_sess_1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"tail"}}}"#;
 
@@ -798,41 +801,37 @@ async fn drain_makes_every_earlier_append_durable_and_keeps_the_sink_open() {
     sink.append("agent_sess_1", "session.update", payload).await;
     sink.drain().await;
 
-    let count_rows = |guard: &StateStore| {
-        guard
-            .query_events(crate::state::LogFilter {
-                limit: 10,
-                kind: Some("session.update"),
-                source: Some("acp"),
-                ..Default::default()
-            })
-            .expect("query raw events")
-            .len()
+    let count_rows = || {
+        let state = state.clone();
+        async move {
+            state
+                .read(|store| {
+                    store.query_events(crate::state::LogFilter {
+                        limit: 10,
+                        kind: Some("session.update"),
+                        source: Some("acp"),
+                        ..Default::default()
+                    })
+                })
+                .await
+                .expect("query raw events")
+                .len()
+        }
     };
-    assert_eq!(count_rows(&*state.lock().await), 2, "rows durable at drain");
+    assert_eq!(count_rows().await, 2, "rows durable at drain");
 
     sink.append("agent_sess_1", "session.update", payload).await;
     sink.drain().await;
-    assert_eq!(
-        count_rows(&*state.lock().await),
-        3,
-        "sink accepts appends after drain"
-    );
+    assert_eq!(count_rows().await, 3, "sink accepts appends after drain");
 
     sink.flush().await;
     sink.drain().await;
-    assert_eq!(
-        count_rows(&*state.lock().await),
-        3,
-        "drain on a flushed sink returns"
-    );
+    assert_eq!(count_rows().await, 3, "drain on a flushed sink returns");
 }
 
 #[tokio::test]
 async fn session_cwd_resolves_local_session_record() {
     use crate::runtime::agent::session_sink::{SessionEventSink, StateStoreSessionSink};
-    use std::sync::Arc;
-    use tokio::sync::Mutex as TokioMutex;
 
     let tempdir = tempfile::tempdir().expect("tempdir");
     let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state open");
@@ -850,7 +849,7 @@ async fn session_cwd_resolves_local_session_record() {
             },
         )
         .expect("session inserted");
-    let state = Arc::new(TokioMutex::new(store));
+    let state = StateHandle::start(store).expect("start state handle");
     let sink = StateStoreSessionSink::new("target_a".to_owned(), state);
 
     assert_eq!(
@@ -867,8 +866,6 @@ async fn change_capture_maps_same_agent_session_id_to_each_array_target() {
     use agent_client_protocol::schema::v1::{
         Diff, SessionUpdate, ToolCall, ToolCallContent, ToolKind,
     };
-    use std::sync::Arc;
-    use tokio::sync::Mutex as TokioMutex;
 
     let tempdir = tempfile::tempdir().expect("tempdir");
     let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state open");
@@ -888,7 +885,7 @@ async fn change_capture_maps_same_agent_session_id_to_each_array_target() {
             )
             .expect("session inserted");
     }
-    let state = Arc::new(TokioMutex::new(store));
+    let state = StateHandle::start(store).expect("start state handle");
     let changes = SessionChangesHandle::new();
     let sink_a = StateStoreSessionSink::with_session_changes(
         "target_a".to_owned(),
@@ -938,13 +935,14 @@ async fn change_capture_accepts_non_tool_updates_without_a_session_lookup() {
     use agent_client_protocol::schema::v1::{
         ContentBlock, ContentChunk, SessionUpdate, TextContent,
     };
-    use std::sync::Arc;
-    use tokio::sync::Mutex as TokioMutex;
 
     let tempdir = tempfile::tempdir().expect("tempdir");
     let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state open");
     store.migrate().expect("migrate");
-    let sink = StateStoreSessionSink::new("target".to_owned(), Arc::new(TokioMutex::new(store)));
+    let sink = StateStoreSessionSink::new(
+        "target".to_owned(),
+        StateHandle::start(store).expect("start state handle"),
+    );
 
     let chunk = SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
         TextContent::new("hello"),
@@ -961,13 +959,14 @@ async fn the_last_stamped_chunk_id_is_taken_once_per_session() {
     use agent_client_protocol::schema::v1::{
         ContentBlock, ContentChunk, MessageId, SessionUpdate, TextContent,
     };
-    use std::sync::Arc;
-    use tokio::sync::Mutex as TokioMutex;
 
     let tempdir = tempfile::tempdir().expect("tempdir");
     let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state open");
     store.migrate().expect("migrate");
-    let sink = StateStoreSessionSink::new("target".to_owned(), Arc::new(TokioMutex::new(store)));
+    let sink = StateStoreSessionSink::new(
+        "target".to_owned(),
+        StateHandle::start(store).expect("start state handle"),
+    );
     let stamped = |id: &str| {
         SessionUpdate::AgentMessageChunk(
             ContentChunk::new(ContentBlock::Text(TextContent::new("hi")))

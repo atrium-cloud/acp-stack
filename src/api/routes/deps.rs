@@ -91,10 +91,9 @@ pub(crate) async fn deps_apply_handler(
     // while `deps_apply_lock` is the in-process fast path so a concurrent request 409s
     // instead of racing the claim. Never a queue.
     //
-    // The daemon's shared StateStore mutex is taken only for `migrate()` and released
-    // before any install snippet runs; held across the apply it would park every route
-    // that reads or writes state. Audit rows go through a second short-lived connection
-    // instead.
+    // The daemon's shared state writer runs only `migrate()` and is free before any
+    // install snippet runs; held across the apply it would park every route that writes
+    // state. Audit rows go through a second short-lived connection instead.
     let Ok(apply_guard) = state.deps_apply_lock.clone().try_lock_owned() else {
         // Best-effort id lookup for the 409 body.
         let running = match StateStore::open(&state.runtime_paths.state_path)
@@ -124,11 +123,8 @@ pub(crate) async fn deps_apply_handler(
             let _apply_guard = apply_guard;
             // Migrate under the shared handle: the schema must be current before the
             // first audit row, or an install snippet could run unrecorded.
-            let state_path = {
-                let store = store_handle.blocking_lock();
-                store.migrate()?;
-                store.path().to_path_buf()
-            };
+            store_handle.blocking_write(|store| store.migrate())?;
+            let state_path = store_handle.path().to_path_buf();
             let apply_store = StateStore::open(&state_path)?;
             // Holding the guard proves no in-process apply is live, so a self-owned
             // `running` row is a prior apply whose terminal write failed. Its pid stays
@@ -295,8 +291,7 @@ pub(crate) struct DepsApplyRunDetailResponse {
 }
 
 /// Open a fresh read connection and reconcile stale `running` rows first, so
-/// every response reflects real process liveness. Never touches the daemon's
-/// shared store mutex, since a poll must answer while an apply holds it.
+/// every response reflects real process liveness.
 fn open_reconciled_deps_store(state: &AppState) -> crate::error::Result<StateStore> {
     let store = StateStore::open(&state.runtime_paths.state_path)?;
     let is_live = deps_run_liveness();

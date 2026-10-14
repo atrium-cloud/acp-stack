@@ -190,29 +190,31 @@ pub struct McpServerHealth {
 }
 
 impl HealthReport {
-    /// Collect a fresh report. Every persistent signal is read under one state
-    /// lock; the supervisor snapshot is taken after release so a slow query
-    /// never blocks the bridge mutex.
+    /// Collect a fresh report. Every persistent signal is read in one state read
+    /// job; the supervisor snapshot is taken after it so a slow query never
+    /// blocks the bridge mutex.
     pub async fn collect(state: &AppState) -> Self {
-        let sqlite;
-        let sink;
-        let deps;
-        let prompts;
-        let agent_process_probe;
+        let supabase_enabled = state
+            .config
+            .logging
+            .supabase
+            .as_ref()
+            .is_some_and(|sb| sb.enabled);
+        let thresholds = prompt_stale_thresholds(&state.config.prompts);
+        let StoreProbes {
+            sqlite,
+            sink,
+            deps,
+            prompts,
+            agent_process_probe,
+        } = match state
+            .state
+            .read(move |store| Ok(StoreProbes::collect(store, supabase_enabled, thresholds)))
+            .await
         {
-            let store = state.state.lock().await;
-            sqlite = collect_sqlite(&store);
-            let supabase_enabled = state
-                .config
-                .logging
-                .supabase
-                .as_ref()
-                .is_some_and(|sb| sb.enabled);
-            sink = collect_sink(&store, supabase_enabled);
-            deps = collect_deps(&store);
-            prompts = collect_prompts(&store, prompt_stale_thresholds(&state.config.prompts));
-            agent_process_probe = collect_agent_process_probe(&store);
-        }
+            Ok(probes) => probes,
+            Err(err) => StoreProbes::unreachable(err.to_string(), supabase_enabled, thresholds),
+        };
         let workspace = collect_workspace(&state.config.workspace.root);
         let agent = collect_agent(state, agent_process_probe).await;
         let mcp = collect_mcp(
@@ -264,6 +266,66 @@ impl HealthReport {
             mcp,
             prompts,
             node,
+        }
+    }
+}
+
+/// The store-backed signals of a report.
+struct StoreProbes {
+    sqlite: SqliteHealth,
+    sink: SinkHealth,
+    deps: DepsHealth,
+    prompts: PromptsHealth,
+    agent_process_probe: AgentProcessProbe,
+}
+
+impl StoreProbes {
+    fn collect(store: &StateStore, sink_enabled: bool, thresholds: PromptStaleThresholds) -> Self {
+        Self {
+            sqlite: collect_sqlite(store),
+            sink: collect_sink(store, sink_enabled),
+            deps: collect_deps(store),
+            prompts: collect_prompts(store, thresholds),
+            agent_process_probe: collect_agent_process_probe(store),
+        }
+    }
+
+    /// The read job itself failed, so every store-backed subsystem carries its error.
+    fn unreachable(error: String, sink_enabled: bool, thresholds: PromptStaleThresholds) -> Self {
+        let (threshold_secs, tool_call_threshold_secs) = prompt_threshold_secs(thresholds);
+        Self {
+            sqlite: SqliteHealth {
+                reachable: false,
+                schema_version: None,
+                latest_event_at: None,
+                error: Some(error.clone()),
+            },
+            sink: SinkHealth {
+                enabled: sink_enabled,
+                open_failure_count: 0,
+                latest_failure_at: None,
+                latest_error: None,
+                probe_error: sink_enabled.then(|| error.clone()),
+            },
+            deps: DepsHealth {
+                last_apply_run_id: None,
+                last_apply_at: None,
+                last_apply_status: None,
+                last_apply_exit: None,
+                cluster_has_failure: false,
+                probe_error: Some(error.clone()),
+            },
+            prompts: PromptsHealth {
+                stuck_count: 0,
+                oldest_stuck_age_secs: None,
+                threshold_secs,
+                tool_call_threshold_secs,
+                probe_error: Some(error.clone()),
+            },
+            agent_process_probe: AgentProcessProbe {
+                started_processes: Vec::new(),
+                probe_error: Some(error),
+            },
         }
     }
 }
@@ -456,10 +518,15 @@ fn collect_sink(store: &StateStore, enabled: bool) -> SinkHealth {
     }
 }
 
+fn prompt_threshold_secs(thresholds: PromptStaleThresholds) -> (i64, i64) {
+    (
+        i64::try_from(thresholds.quiet.as_secs()).unwrap_or(i64::MAX),
+        i64::try_from(thresholds.open_tool_call.as_secs()).unwrap_or(i64::MAX),
+    )
+}
+
 fn collect_prompts(store: &StateStore, thresholds: PromptStaleThresholds) -> PromptsHealth {
-    let threshold_secs = i64::try_from(thresholds.quiet.as_secs()).unwrap_or(i64::MAX);
-    let tool_call_threshold_secs =
-        i64::try_from(thresholds.open_tool_call.as_secs()).unwrap_or(i64::MAX);
+    let (threshold_secs, tool_call_threshold_secs) = prompt_threshold_secs(thresholds);
     let (count, oldest_at) = match store.count_stuck_prompts(thresholds) {
         Ok(pair) => pair,
         Err(err) => {

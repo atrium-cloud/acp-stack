@@ -2,7 +2,6 @@
 //! `StateStore`-backed implementation used by the daemon.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use agent_client_protocol::schema::{
@@ -13,7 +12,9 @@ use tokio::sync::{Mutex as TokioMutex, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::runtime::agent::session_changes::SessionChangesHandle;
-use crate::state::{MAX_SESSION_AVAILABLE_COMMANDS, SessionAvailableCommand, StateStore};
+use crate::state::{
+    MAX_SESSION_AVAILABLE_COMMANDS, SessionAvailableCommand, StateHandle, StateStore,
+};
 
 /// Sink for ACP `session/update` notifications. `append` must persist the
 /// event before its future resolves, `drain` must resolve once every earlier
@@ -84,7 +85,7 @@ pub trait SessionEventSink: Send + Sync + 'static {
 /// what stops a runaway agent from exhausting daemon memory.
 pub struct StateStoreSessionSink {
     target_id: String,
-    state: Arc<TokioMutex<StateStore>>,
+    state: StateHandle,
     session_changes: SessionChangesHandle,
     tx: TokioMutex<Option<tokio::sync::mpsc::Sender<SessionWrite>>>,
     writer: TokioMutex<Option<JoinHandle<()>>>,
@@ -409,14 +410,84 @@ fn read_token_field(usage: &serde_json::Value, key: &str) -> Option<i64> {
 /// Backpressure buffer for unwritten ACP session updates.
 pub(crate) const SESSION_EVENT_BUFFER: usize = 1024;
 
+/// Record one session update and everything derived from it in one write job. Only the
+/// update row propagates its error; a failed projection or derived row is logged so the
+/// recorded update survives it. The caller parses `payload` so the writer thread, which
+/// commits the whole batch, never parses a full update.
+fn persist_session_row(
+    store: &StateStore,
+    row: &SessionEventRow,
+    payload: &serde_json::Value,
+) -> crate::error::Result<()> {
+    // The event row and the running-prompt touch share one commit; the projections
+    // and derived rows below follow only for the update kinds that carry them.
+    store.append_session_update(&row.session_id, &row.kind, &row.payload_json)?;
+    if let Err(err) = project_session_info_update(store, &row.session_id, payload) {
+        tracing::warn!(
+            error = %err,
+            session_id = %row.session_id,
+            "failed to apply ACP session info update"
+        );
+    }
+    if let Err(err) = project_available_commands_update(store, &row.session_id, payload) {
+        tracing::warn!(
+            error = %err,
+            session_id = %row.session_id,
+            "failed to apply ACP available commands update"
+        );
+    }
+    if let Err(err) = project_config_options_update(store, &row.session_id, payload) {
+        tracing::warn!(
+            error = %err,
+            session_id = %row.session_id,
+            "failed to apply ACP config option update"
+        );
+    }
+    if let Some(usage) = extract_usage_payload(&row.session_id, payload)
+        && let Ok(usage_text) = serde_json::to_string(&usage)
+        && let Err(err) = store.append_session_event_with_source(
+            &row.session_id,
+            "info",
+            "usage.reported",
+            crate::state::EVENT_SOURCE_ACP,
+            "agent usage reported",
+            &usage_text,
+        )
+    {
+        tracing::warn!(
+            error = %err,
+            session_id = %row.session_id,
+            "failed to persist usage.reported event"
+        );
+    }
+    if let Some(execute) = extract_execute_tool_call(&row.session_id, payload)
+        && let Ok(execute_text) = serde_json::to_string(&execute)
+        && let Err(err) = store.append_session_event_with_source(
+            &row.session_id,
+            "info",
+            "tool.execute",
+            crate::state::EVENT_SOURCE_ACP,
+            "agent execute tool call",
+            &execute_text,
+        )
+    {
+        tracing::warn!(
+            error = %err,
+            session_id = %row.session_id,
+            "failed to persist tool.execute event"
+        );
+    }
+    Ok(())
+}
+
 impl StateStoreSessionSink {
-    pub fn new(target_id: String, state: Arc<TokioMutex<StateStore>>) -> Self {
+    pub fn new(target_id: String, state: StateHandle) -> Self {
         Self::with_session_changes(target_id, state, SessionChangesHandle::new())
     }
 
     pub(crate) fn with_session_changes(
         target_id: String,
-        state: Arc<TokioMutex<StateStore>>,
+        state: StateHandle,
         session_changes: SessionChangesHandle,
     ) -> Self {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<SessionWrite>(SESSION_EVENT_BUFFER);
@@ -434,93 +505,28 @@ impl StateStoreSessionSink {
                         continue;
                     }
                 };
-                let guard = writer_state.lock().await;
-                // The event row and the running-prompt touch share one commit; the projections
-                // and derived rows below follow only for the update kinds that carry them.
-                match guard.append_session_update(&row.session_id, &row.kind, &row.payload_json) {
-                    Ok(_event) => {
-                        let payload = match serde_json::from_str::<serde_json::Value>(
-                            &row.payload_json,
-                        ) {
-                            Ok(payload) => payload,
-                            Err(err) => {
-                                tracing::warn!(
-                                    error = %err,
-                                    session_id = %row.session_id,
-                                    "recorded ACP session update is not JSON; skipping its projections"
-                                );
-                                continue;
-                            }
-                        };
-                        if let Err(err) =
-                            project_session_info_update(&guard, &row.session_id, &payload)
-                        {
-                            tracing::warn!(
-                                error = %err,
-                                session_id = %row.session_id,
-                                "failed to apply ACP session info update"
-                            );
-                        }
-                        if let Err(err) =
-                            project_available_commands_update(&guard, &row.session_id, &payload)
-                        {
-                            tracing::warn!(
-                                error = %err,
-                                session_id = %row.session_id,
-                                "failed to apply ACP available commands update"
-                            );
-                        }
-                        if let Err(err) =
-                            project_config_options_update(&guard, &row.session_id, &payload)
-                        {
-                            tracing::warn!(
-                                error = %err,
-                                session_id = %row.session_id,
-                                "failed to apply ACP config option update"
-                            );
-                        }
-                        if let Some(usage) = extract_usage_payload(&row.session_id, &payload)
-                            && let Ok(usage_text) = serde_json::to_string(&usage)
-                            && let Err(err) = guard.append_session_event_with_source(
-                                &row.session_id,
-                                "info",
-                                "usage.reported",
-                                crate::state::EVENT_SOURCE_ACP,
-                                "agent usage reported",
-                                &usage_text,
-                            )
-                        {
-                            tracing::warn!(
-                                error = %err,
-                                session_id = %row.session_id,
-                                "failed to persist usage.reported event"
-                            );
-                        }
-                        if let Some(execute) = extract_execute_tool_call(&row.session_id, &payload)
-                            && let Ok(execute_text) = serde_json::to_string(&execute)
-                            && let Err(err) = guard.append_session_event_with_source(
-                                &row.session_id,
-                                "info",
-                                "tool.execute",
-                                crate::state::EVENT_SOURCE_ACP,
-                                "agent execute tool call",
-                                &execute_text,
-                            )
-                        {
-                            tracing::warn!(
-                                error = %err,
-                                session_id = %row.session_id,
-                                "failed to persist tool.execute event"
-                            );
-                        }
-                    }
+                let session_id = row.session_id.clone();
+                // The store rejects a payload that is not JSON, so it is dropped here.
+                let payload = match serde_json::from_str::<serde_json::Value>(&row.payload_json) {
+                    Ok(payload) => payload,
                     Err(err) => {
                         tracing::warn!(
                             error = %err,
-                            session_id = %row.session_id,
-                            "failed to persist ACP session update"
+                            session_id = %session_id,
+                            "ACP session update is not JSON; dropping it"
                         );
+                        continue;
                     }
+                };
+                if let Err(err) = writer_state
+                    .write(move |store| persist_session_row(store, &row, &payload))
+                    .await
+                {
+                    tracing::warn!(
+                        error = %err,
+                        session_id = %session_id,
+                        "failed to persist ACP session update"
+                    );
                 }
             }
         });
@@ -553,7 +559,7 @@ impl SessionEventSink for StateStoreSessionSink {
                     .insert(agent_session_id.to_owned(), message_id.0.to_string());
             }
             // Only tool-call updates carry diff content; skipping the session
-            // lookup otherwise keeps chunk-heavy streams off the store lock.
+            // lookup otherwise keeps chunk-heavy streams off the state database.
             if !matches!(
                 update,
                 SessionUpdate::ToolCall(_) | SessionUpdate::ToolCallUpdate(_)
@@ -573,8 +579,18 @@ impl SessionEventSink for StateStoreSessionSink {
         agent_session_id: &'a str,
     ) -> futures::future::BoxFuture<'a, Option<String>> {
         Box::pin(async move {
-            let guard = self.state.lock().await;
-            match guard.get_session_by_target_agent_session_id(&self.target_id, agent_session_id) {
+            let target_id = self.target_id.clone();
+            let lookup_agent_session_id = agent_session_id.to_owned();
+            let record = self
+                .state
+                .read(move |store| {
+                    store.get_session_by_target_agent_session_id(
+                        &target_id,
+                        &lookup_agent_session_id,
+                    )
+                })
+                .await;
+            match record {
                 Ok(Some(record)) => Some(record.id),
                 Ok(None) => {
                     tracing::warn!(
@@ -614,8 +630,18 @@ impl SessionEventSink for StateStoreSessionSink {
         agent_session_id: &'a str,
     ) -> futures::future::BoxFuture<'a, Option<String>> {
         Box::pin(async move {
-            let guard = self.state.lock().await;
-            match guard.get_session_by_target_agent_session_id(&self.target_id, agent_session_id) {
+            let target_id = self.target_id.clone();
+            let lookup_agent_session_id = agent_session_id.to_owned();
+            let record = self
+                .state
+                .read(move |store| {
+                    store.get_session_by_target_agent_session_id(
+                        &target_id,
+                        &lookup_agent_session_id,
+                    )
+                })
+                .await;
+            match record {
                 Ok(Some(record)) => Some(record.cwd),
                 Ok(None) => None,
                 Err(err) => {

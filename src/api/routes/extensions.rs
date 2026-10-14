@@ -78,14 +78,20 @@ pub(crate) async fn extension_managed_state_apply_handler(
     // here would make the orchestrator retry a revision that was in fact applied.
     match serde_json::to_string(&payload) {
         Ok(payload_text) => {
-            let store = state.state.lock().await;
-            if let Err(err) = store.append_event_with_source(
-                "info",
-                "server.extension_managed_state_applied",
-                crate::state::EVENT_SOURCE_API,
-                "managed-state extension registry applied",
-                &payload_text,
-            ) {
+            let recorded = state
+                .state
+                .write(move |store| {
+                    store.append_event_with_source(
+                        "info",
+                        "server.extension_managed_state_applied",
+                        crate::state::EVENT_SOURCE_API,
+                        "managed-state extension registry applied",
+                        &payload_text,
+                    )?;
+                    Ok(())
+                })
+                .await;
+            if let Err(err) = recorded {
                 tracing::warn!(
                     error = %err,
                     "failed to record server.extension_managed_state_applied audit event"

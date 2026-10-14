@@ -207,10 +207,11 @@ async fn resolved_stored_target_id(
     session_id: &str,
     asserted_target_id: Option<&str>,
 ) -> Result<String> {
-    let stored_target_id = {
-        let store = state.state.lock().await;
-        store.require_live_session(session_id)?.target_id
-    };
+    let lookup_session_id = session_id.to_owned();
+    let stored_target_id = state
+        .state
+        .read(move |store| Ok(store.require_live_session(&lookup_session_id)?.target_id))
+        .await?;
     if let Some(asserted) = asserted_target_id
         && asserted != stored_target_id
     {

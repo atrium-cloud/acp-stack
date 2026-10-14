@@ -973,13 +973,12 @@ async fn commit_switch_and_apply_runtime(
     if commit.rename_sessions {
         // The session rename MUST precede the config write: it can fail on a UNIQUE collision, and
         // if it does the on-disk config must stay untouched so config and DB never diverge.
-        let rename_result = {
-            let store = state.state.lock().await;
-            store.rename_session_target_id(
-                commit.old_target_id,
-                &commit.candidate_config.array.primary_target,
-            )
-        };
+        let old_target_id = commit.old_target_id.to_owned();
+        let new_target_id = commit.candidate_config.array.primary_target.clone();
+        let rename_result = state
+            .state
+            .write(move |store| store.rename_session_target_id(&old_target_id, &new_target_id))
+            .await;
         if let Err(rename_error) = rename_result {
             // Nothing durable changed, so drop the Planned journal rather than strand a record that
             // would 409 every later switch.

@@ -330,16 +330,17 @@ async fn a_stalled_turn_does_not_block_cancelling_the_live_one() {
     let session_id = create_session(&harness).await;
     let stalled_prompt_id = submit_prompt(&harness, &session_id, "first turn").await;
     await_agent_entered_the_turn(&harness, &session_id).await;
-    {
-        let store = harness.state.lock().await;
-        let stalled = store
-            .mark_stalled_prompts(
+    let stalled = harness
+        .state
+        .write(|store| {
+            store.mark_stalled_prompts(
                 common::state::uniform_stale_thresholds(Duration::ZERO),
                 "test forced stall",
             )
-            .expect("mark stalled");
-        assert_eq!(stalled.len(), 1, "only the first turn should be swept");
-    }
+        })
+        .await
+        .expect("mark stalled");
+    assert_eq!(stalled.len(), 1, "only the first turn should be swept");
 
     // A stalled prompt is terminal, so the documented recovery (submit a new
     // prompt) works even though the swept turn's task is still parked.

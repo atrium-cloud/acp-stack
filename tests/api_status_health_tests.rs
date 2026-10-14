@@ -3,12 +3,12 @@
 use acp_stack::config::{HttpHeaderRef, McpConfig, McpHttpServer, McpServerConfig, McpStdioServer};
 use acp_stack::state::EventFilter;
 use reqwest::StatusCode;
-use rusqlite::Connection;
 use serde_json::Value;
 
 mod common;
 use common::api::{
-    ADMIN_KEY, SESSION_KEY, ServerHarness, codex_adapter, seed_command, seed_session, test_config,
+    ADMIN_KEY, SESSION_KEY, ServerHarness, codex_adapter, open_state_connection, seed_command,
+    seed_session, test_config,
 };
 
 #[tokio::test]
@@ -359,21 +359,19 @@ async fn health_ready_reports_orphaned_agent_process_groups() {
         child,
     };
     let harness = ServerHarness::spawn().await;
-    {
-        let guard = harness.state.lock().await;
-        guard
-            .append_agent_lifecycle(
-                "agent.started",
-                "agent initialized",
-                &serde_json::json!({
-                    "agent_id": "placebo",
-                    "pid": orphan.pid,
-                    "adapter": null,
-                })
-                .to_string(),
-            )
-            .expect("append agent.started");
-    }
+    let payload = serde_json::json!({
+        "agent_id": "placebo",
+        "pid": orphan.pid,
+        "adapter": null,
+    })
+    .to_string();
+    harness
+        .state
+        .write(move |store| {
+            store.append_agent_lifecycle("agent.started", "agent initialized", &payload)
+        })
+        .await
+        .expect("append agent.started");
 
     let response = reqwest::Client::new()
         .get(format!("{}/v1/health/ready", harness.base_url))
@@ -396,26 +394,22 @@ async fn health_ready_reports_orphaned_agent_process_groups() {
 async fn health_ready_surfaces_stuck_prompts_in_failing() {
     // An aged running prompt must surface without any sweeper run.
     let harness = ServerHarness::spawn().await;
-    {
-        let guard = harness.state.lock().await;
-        guard
-            .insert_session(acp_stack::state::NewSessionRecord {
+    harness
+        .state
+        .write(|store| {
+            store.insert_session(acp_stack::state::NewSessionRecord {
                 id: "sess_stuck".to_owned(),
                 agent_id: "fake".to_owned(),
                 cwd: "/tmp".to_owned(),
                 title: None,
                 metadata_json: "{}".to_owned(),
-            })
-            .expect("session inserted");
-        guard
-            .insert_prompt(acp_stack::state::NewPromptRecord {
+            })?;
+            store.insert_prompt(acp_stack::state::NewPromptRecord {
                 id: "prm_stuck".to_owned(),
                 session_id: "sess_stuck".to_owned(),
                 prompt_json: "[]".to_owned(),
-            })
-            .expect("prompt inserted");
-        guard
-            .update_prompt_status(
+            })?;
+            store.update_prompt_status(
                 "prm_stuck",
                 acp_stack::state::PromptStatus::Running,
                 None,
@@ -423,11 +417,13 @@ async fn health_ready_surfaces_stuck_prompts_in_failing() {
                 None,
                 None,
                 None,
-            )
-            .expect("prompt flipped to running");
-    }
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("running prompt seeded");
     // Force `updated_at` past the default 5m threshold.
-    let connection = Connection::open(&harness.state_path).expect("open sqlite for age override");
+    let connection = open_state_connection(&harness.state_path);
     connection
         .execute(
             "UPDATE prompts SET updated_at = ?1 WHERE id = ?2",
@@ -468,49 +464,43 @@ async fn health_ready_surfaces_stuck_prompts_in_failing() {
 #[tokio::test]
 async fn metrics_summary_exposes_prompt_failure_breakdowns() {
     let harness = ServerHarness::spawn().await;
-    {
-        let guard = harness.state.lock().await;
-        guard
-            .insert_session(acp_stack::state::NewSessionRecord {
+    let failure_applied = harness
+        .state
+        .write(|store| {
+            store.insert_session(acp_stack::state::NewSessionRecord {
                 id: "sess_metrics_prompt_failures".to_owned(),
                 agent_id: "fake".to_owned(),
                 cwd: "/tmp".to_owned(),
                 title: None,
                 metadata_json: "{}".to_owned(),
-            })
-            .expect("session inserted");
-        guard
-            .insert_prompt(acp_stack::state::NewPromptRecord {
+            })?;
+            store.insert_prompt(acp_stack::state::NewPromptRecord {
                 id: "prm_metrics_inference".to_owned(),
                 session_id: "sess_metrics_prompt_failures".to_owned(),
                 prompt_json: "[]".to_owned(),
-            })
-            .expect("prompt inserted");
-        assert!(
-            guard
-                .update_prompt_status(
-                    "prm_metrics_inference",
-                    acp_stack::state::PromptStatus::Errored,
-                    None,
-                    Some("agent.inference_5xx"),
-                    Some("inference endpoint returned 503 (service_unavailable)"),
-                    Some(acp_stack::state::FailureClass::Inference5xx.as_str()),
-                    Some(r#"{"status_code":503,"reason_category":"service_unavailable"}"#),
-                )
-                .expect("prompt failure update"),
-            "prompt failure update should apply"
-        );
-        guard
-            .append_session_event_with_source(
+            })?;
+            let failure_applied = store.update_prompt_status(
+                "prm_metrics_inference",
+                acp_stack::state::PromptStatus::Errored,
+                None,
+                Some("agent.inference_5xx"),
+                Some("inference endpoint returned 503 (service_unavailable)"),
+                Some(acp_stack::state::FailureClass::Inference5xx.as_str()),
+                Some(r#"{"status_code":503,"reason_category":"service_unavailable"}"#),
+            )?;
+            store.append_session_event_with_source(
                 "sess_metrics_prompt_failures",
                 "warn",
                 acp_stack::state::EVENT_KIND_PROMPT_INFERENCE_FAILED,
                 acp_stack::state::EVENT_SOURCE_SYSTEM,
                 "inference endpoint failure",
                 r#"{"prompt_id":"prm_metrics_inference","status_code":503,"reason_category":"service_unavailable"}"#,
-            )
-            .expect("inference event inserted");
-    }
+            )?;
+            Ok(failure_applied)
+        })
+        .await
+        .expect("prompt failure seeded");
+    assert!(failure_applied, "prompt failure update should apply");
 
     let response = reqwest::Client::new()
         .get(format!("{}/v1/metrics/summary?since=1h", harness.base_url))
@@ -534,11 +524,11 @@ async fn metrics_summary_exposes_prompt_failure_breakdowns() {
 #[tokio::test]
 async fn metrics_summary_exposes_maximum_context_window_usage() {
     let harness = ServerHarness::spawn().await;
-    {
-        let guard = harness.state.lock().await;
-        for used in [1024, 4096, 2048] {
-            guard
-                .append_event_with_source(
+    harness
+        .state
+        .write(|store| {
+            for used in [1024, 4096, 2048] {
+                store.append_event_with_source(
                     "info",
                     "usage.reported",
                     acp_stack::state::EVENT_SOURCE_ACP,
@@ -548,10 +538,12 @@ async fn metrics_summary_exposes_maximum_context_window_usage() {
                         "context_window_max": 32768
                     })
                     .to_string(),
-                )
-                .expect("append usage event");
-        }
-    }
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .expect("append usage event");
 
     let response = reqwest::Client::new()
         .get(format!("{}/v1/metrics/summary?since=1h", harness.base_url))
@@ -568,27 +560,27 @@ async fn metrics_summary_exposes_maximum_context_window_usage() {
 #[tokio::test]
 async fn metrics_summary_exposes_api_request_breakdowns() {
     let harness = ServerHarness::spawn().await;
-    {
-        let guard = harness.state.lock().await;
-        guard
-            .append_event_with_source(
+    harness
+        .state
+        .write(|store| {
+            store.append_event_with_source(
                 "info",
                 "api.request",
                 acp_stack::state::EVENT_SOURCE_API,
                 "",
                 r#"{"method":"GET","path":"/v1/sessions","status":200,"duration_ms":10,"key_kind":"session","origin":{"origin_kind":"cloudflare","country_code":"US","region_code":"CA"}}"#,
-            )
-            .expect("append api request");
-        guard
-            .append_event_with_source(
+            )?;
+            store.append_event_with_source(
                 "info",
                 "api.request",
                 acp_stack::state::EVENT_SOURCE_LOCAL,
                 "",
                 r#"{"method":"POST","path":"/v1/commands","status":503,"duration_ms":20,"key_kind":null,"origin":{"origin_kind":"direct"}}"#,
-            )
-            .expect("append local api request");
-    }
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("append api requests");
 
     let response = reqwest::Client::new()
         .get(format!("{}/v1/metrics/summary?since=1h", harness.base_url))
@@ -623,26 +615,22 @@ async fn metrics_summary_exposes_api_request_breakdowns() {
 async fn mark_stalled_prompts_appends_stalled_event_when_invoked_directly() {
     // Exercises the sweeper's persistence path without spawning its task.
     let harness = ServerHarness::spawn().await;
-    {
-        let guard = harness.state.lock().await;
-        guard
-            .insert_session(acp_stack::state::NewSessionRecord {
+    harness
+        .state
+        .write(|store| {
+            store.insert_session(acp_stack::state::NewSessionRecord {
                 id: "sess_stall_evt".to_owned(),
                 agent_id: "fake".to_owned(),
                 cwd: "/tmp".to_owned(),
                 title: None,
                 metadata_json: "{}".to_owned(),
-            })
-            .expect("session inserted");
-        guard
-            .insert_prompt(acp_stack::state::NewPromptRecord {
+            })?;
+            store.insert_prompt(acp_stack::state::NewPromptRecord {
                 id: "prm_stall_evt".to_owned(),
                 session_id: "sess_stall_evt".to_owned(),
                 prompt_json: "[]".to_owned(),
-            })
-            .expect("prompt inserted");
-        guard
-            .update_prompt_status(
+            })?;
+            store.update_prompt_status(
                 "prm_stall_evt",
                 acp_stack::state::PromptStatus::Running,
                 None,
@@ -650,10 +638,12 @@ async fn mark_stalled_prompts_appends_stalled_event_when_invoked_directly() {
                 None,
                 None,
                 None,
-            )
-            .expect("prompt flipped to running");
-    }
-    let connection = Connection::open(&harness.state_path).expect("open sqlite for age override");
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("running prompt seeded");
+    let connection = open_state_connection(&harness.state_path);
     connection
         .execute(
             "UPDATE prompts SET updated_at = ?1 WHERE id = ?2",
@@ -662,33 +652,35 @@ async fn mark_stalled_prompts_appends_stalled_event_when_invoked_directly() {
         .expect("force-set updated_at");
     drop(connection);
 
-    {
-        let guard = harness.state.lock().await;
-        let stalled = guard
-            .mark_stalled_prompts(
+    let stalled_count = harness
+        .state
+        .write(|store| {
+            let stalled = store.mark_stalled_prompts(
                 common::state::uniform_stale_thresholds(std::time::Duration::from_secs(60)),
                 "test stall",
-            )
-            .expect("mark_stalled_prompts should run");
-        assert_eq!(stalled.len(), 1);
-        // Mirror the sweeper's emit so the events surface for the API check.
-        let payload = serde_json::json!({
-            "prompt_id": stalled[0].prompt_id,
-            "threshold_secs": stalled[0].threshold.as_secs(),
-            "cause": "test stall",
+            )?;
+            // Mirror the sweeper's emit so the events surface for the API check.
+            for prompt in &stalled {
+                let payload = serde_json::json!({
+                    "prompt_id": prompt.prompt_id,
+                    "threshold_secs": prompt.threshold.as_secs(),
+                    "cause": "test stall",
+                })
+                .to_string();
+                store.append_session_event_with_source(
+                    &prompt.session_id,
+                    "warn",
+                    acp_stack::state::EVENT_KIND_PROMPT_STALLED,
+                    acp_stack::state::EVENT_SOURCE_SYSTEM,
+                    "prompt stalled",
+                    &payload,
+                )?;
+            }
+            Ok(stalled.len())
         })
-        .to_string();
-        guard
-            .append_session_event_with_source(
-                &stalled[0].session_id,
-                "warn",
-                acp_stack::state::EVENT_KIND_PROMPT_STALLED,
-                acp_stack::state::EVENT_SOURCE_SYSTEM,
-                "prompt stalled",
-                &payload,
-            )
-            .expect("append prompt.stalled event");
-    }
+        .await
+        .expect("mark_stalled_prompts and append prompt.stalled event");
+    assert_eq!(stalled_count, 1);
 
     let response = reqwest::Client::new()
         .get(format!(
@@ -725,13 +717,16 @@ async fn health_live_does_not_persist_api_request_row() {
         .expect("send");
     assert_eq!(response.status(), StatusCode::OK);
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    let guard = harness.state.lock().await;
-    let events = guard
-        .query_events(EventFilter {
-            limit: 100,
-            kind: Some("api.request"),
-            ..EventFilter::default()
+    let events = harness
+        .state
+        .read(|store| {
+            store.query_events(EventFilter {
+                limit: 100,
+                kind: Some("api.request"),
+                ..EventFilter::default()
+            })
         })
+        .await
         .expect("query api.request events");
     assert!(
         !events
@@ -754,13 +749,16 @@ async fn health_ready_does_not_persist_api_request_row() {
         .expect("send");
     assert_eq!(response.status(), StatusCode::OK);
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    let guard = harness.state.lock().await;
-    let events = guard
-        .query_events(EventFilter {
-            limit: 100,
-            kind: Some("api.request"),
-            ..EventFilter::default()
+    let events = harness
+        .state
+        .read(|store| {
+            store.query_events(EventFilter {
+                limit: 100,
+                kind: Some("api.request"),
+                ..EventFilter::default()
+            })
         })
+        .await
         .expect("query api.request events");
     assert!(
         !events
@@ -777,10 +775,10 @@ async fn health_ready_marks_deps_failing_when_last_apply_failed() {
     };
 
     let harness = ServerHarness::spawn().await;
-    {
-        let guard = harness.state.lock().await;
-        guard
-            .append_installer_run(InstallerRunInput {
+    harness
+        .state
+        .write(|store| {
+            store.append_installer_run(InstallerRunInput {
                 agent_id: "deps_apply",
                 started_at: "2026-05-25T00:00:00.000000000Z",
                 finished_at: Some("2026-05-25T00:00:01.000000000Z"),
@@ -797,8 +795,9 @@ async fn health_ready_marks_deps_failing_when_last_apply_failed() {
                 path: None,
                 sha256: None,
             })
-            .expect("seed failed deps_apply row");
-    }
+        })
+        .await
+        .expect("seed failed deps_apply row");
     let response = reqwest::Client::new()
         .get(format!("{}/v1/health/ready", harness.base_url))
         .header("Authorization", format!("Bearer {SESSION_KEY}"))
@@ -825,28 +824,29 @@ async fn health_ready_marks_sink_failing_when_open_failures_exist() {
         supabase.enabled = true;
     }
     let harness = ServerHarness::spawn_with_config(config).await;
-    {
-        let guard = harness.state.lock().await;
-        guard.set_external_logging_enabled(true);
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
-        guard
-            .append_event_with_source(
+    let failed_ids = harness
+        .state
+        .write(|store| {
+            store.set_external_logging_enabled(true);
+            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+            store.append_event_with_source(
                 "info",
                 "test.seed",
                 acp_stack::state::EVENT_SOURCE_CLI,
                 "seed sink_outbox row",
                 "{}",
-            )
-            .expect("append seed event");
-        let batch = guard
-            .next_sink_outbox_batch(10, &now)
-            .expect("read outbox batch");
-        let ids: Vec<String> = batch.iter().map(|row| row.id.clone()).collect();
-        assert!(!ids.is_empty(), "seed event should enqueue an outbox row");
-        guard
-            .mark_sink_outbox_failure(&ids, "boom", &now, &now)
-            .expect("mark outbox failure");
-    }
+            )?;
+            let batch = store.next_sink_outbox_batch(10, &now)?;
+            let ids: Vec<String> = batch.iter().map(|row| row.id.clone()).collect();
+            store.mark_sink_outbox_failure(&ids, "boom", &now, &now)?;
+            Ok(ids)
+        })
+        .await
+        .expect("seed and fail outbox row");
+    assert!(
+        !failed_ids.is_empty(),
+        "seed event should enqueue an outbox row"
+    );
     let response = reqwest::Client::new()
         .get(format!("{}/v1/health/ready", harness.base_url))
         .header("Authorization", format!("Bearer {SESSION_KEY}"))
@@ -881,18 +881,16 @@ async fn metrics_summary_counts_existing_state_rows() {
         "2026-05-14T00:00:02.000000000Z",
         "2026-05-14T00:00:03.000000000Z",
     );
-    {
-        let guard = harness.state.lock().await;
-        guard
-            .append_event("info", "permission.requested", "permission requested", "{}")
-            .expect("append permission event");
-        guard
-            .append_auth_failure("unknown", "invalid", None, Some("/v1/status"), "{}")
-            .expect("append auth failure");
-        guard
-            .append_agent_lifecycle("server.started", "started", "{}")
-            .expect("append lifecycle");
-    }
+    harness
+        .state
+        .write(|store| {
+            store.append_event("info", "permission.requested", "permission requested", "{}")?;
+            store.append_auth_failure("unknown", "invalid", None, Some("/v1/status"), "{}")?;
+            store.append_agent_lifecycle("server.started", "started", "{}")?;
+            Ok(())
+        })
+        .await
+        .expect("seed permission event, auth failure and lifecycle row");
 
     // Seeded fixtures use fixed historical dates, outside the default 24h window.
     let response = reqwest::Client::new()

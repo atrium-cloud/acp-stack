@@ -314,14 +314,16 @@ async fn security_check_reports_public_bind_proxy_and_auth_failure_findings() {
     config.security.http.trust_proxy_headers = true;
     config.security.http.auth_failures_per_minute = 2;
     let harness = ServerHarness::spawn_with_config(config).await;
-    {
-        let guard = harness.state.lock().await;
-        for _ in 0..2 {
-            guard
-                .append_auth_failure("unknown", "invalid", None, Some("/v1/status"), "{}")
-                .expect("append auth failure");
-        }
-    }
+    harness
+        .state
+        .write(|store| {
+            for _ in 0..2 {
+                store.append_auth_failure("unknown", "invalid", None, Some("/v1/status"), "{}")?;
+            }
+            Ok(())
+        })
+        .await
+        .expect("append auth failure");
 
     let response = reqwest::Client::new()
         .get(format!("{}/v1/security/check", harness.base_url))
@@ -492,7 +494,8 @@ async fn security_check_uses_effective_bind_and_recent_auth_failures_only() {
         ADMIN_KEY.to_owned(),
         "0.0.0.0:7700".to_owned(),
         RuntimePaths::new(config_path.clone(), path.clone(), home.clone()),
-    );
+    )
+    .expect("app state");
     let state = app_state.state.clone();
     let local_session_auth = app_state.local_session_auth.clone();
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");

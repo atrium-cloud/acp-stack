@@ -118,8 +118,7 @@ pub enum AgentUpdateStepStatus {
 /// Resolve the registry entry, open state, and run the update for the agent
 /// configured in `config`. Shared by the auto-update timer and the manual
 /// `POST /v1/agent/update` route; opens its own `StateStore` connection so
-/// callers never hold the daemon's shared state lock for the length of an
-/// install.
+/// the install never occupies the daemon's state writer.
 pub fn run_managed_agent_update(
     home: PathBuf,
     state_path: PathBuf,

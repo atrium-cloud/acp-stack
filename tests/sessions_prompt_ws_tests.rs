@@ -475,19 +475,21 @@ async fn append_session_event_fans_out_to_session_and_logs_topics() {
     }
 
     // Direct state write so the assertion targets the publish site, not the bridge plumbing.
-    let appended = {
-        let store = harness.state.lock().await;
-        store
-            .append_session_event_with_source(
-                &session_id,
+    let appended_session_id = session_id.clone();
+    let appended = harness
+        .state
+        .write(move |store| {
+            store.append_session_event_with_source(
+                &appended_session_id,
                 "info",
                 "session.update",
                 acp_stack::state::EVENT_SOURCE_ACP,
                 "ACP session update",
                 r#"{"seq":42}"#,
             )
-            .expect("event inserted")
-    };
+        })
+        .await
+        .expect("event inserted");
     let appended_seq = appended.seq.expect("session event carries seq");
 
     let session_event = recv_matching_event(
@@ -546,9 +548,12 @@ async fn prompt_inference_5xx_persists_taxonomy_and_emits_event() {
         if std::time::Instant::now() > deadline {
             panic!("prompt never settled");
         }
-        let state = harness.state.lock().await;
-        let prompt = state.get_prompt(&prompt_id).expect("prompt lookup");
-        drop(state);
+        let lookup_prompt_id = prompt_id.clone();
+        let prompt = harness
+            .state
+            .read(move |store| store.get_prompt(&lookup_prompt_id))
+            .await
+            .expect("prompt lookup");
         if let Some(record) = prompt
             && matches!(record.status.as_str(), "errored" | "stalled" | "cancelled")
         {
@@ -610,11 +615,11 @@ async fn prompt_inference_5xx_persists_taxonomy_and_emits_event() {
         "raw upstream text leaked into error_code: {error_code}"
     );
 
-    let state = harness.state.lock().await;
-    let events = state
-        .query_session_events(&session_id, None, 100)
+    let events = harness
+        .state
+        .read(move |store| store.query_session_events(&session_id, None, 100))
+        .await
         .expect("session events");
-    drop(state);
     let inference_event = events
         .iter()
         .find(|event| event.kind == "prompt.inference_failed")
@@ -668,48 +673,52 @@ async fn late_agent_failure_replaces_stalled_prompt() {
         if std::time::Instant::now() > deadline {
             panic!("prompt never reached running");
         }
-        let state = harness.state.lock().await;
-        let status = state
-            .get_prompt(&prompt_id)
+        let lookup_prompt_id = prompt_id.clone();
+        let status = harness
+            .state
+            .read(move |store| store.get_prompt(&lookup_prompt_id))
+            .await
             .expect("prompt lookup")
             .map(|record| record.status);
-        drop(state);
         if status.as_deref() == Some("running") {
             break;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 
-    {
-        let state = harness.state.lock().await;
-        let stalled = state
-            .mark_stalled_prompts(
+    let stalled = harness
+        .state
+        .write(|store| {
+            store.mark_stalled_prompts(
                 common::state::uniform_stale_thresholds(Duration::ZERO),
                 "test forced stall",
             )
-            .expect("mark stalled");
-        assert!(
-            stalled.iter().any(|prompt| prompt.prompt_id == prompt_id),
-            "forced stall should include submitted prompt, got {stalled:?}"
-        );
-    }
+        })
+        .await
+        .expect("mark stalled");
+    assert!(
+        stalled.iter().any(|prompt| prompt.prompt_id == prompt_id),
+        "forced stall should include submitted prompt, got {stalled:?}"
+    );
 
     tokio::time::sleep(Duration::from_millis(DELAY_MS + 250)).await;
 
-    let state = harness.state.lock().await;
-    let prompt = state
-        .get_prompt(&prompt_id)
-        .expect("prompt lookup")
-        .expect("prompt exists");
+    let lookup_prompt_id = prompt_id.clone();
+    let (prompt, events) = harness
+        .state
+        .read(move |store| {
+            let prompt = store.get_prompt(&lookup_prompt_id)?;
+            let events = store.query_session_events(&session_id, None, 100)?;
+            Ok((prompt, events))
+        })
+        .await
+        .expect("prompt lookup and session events");
+    let prompt = prompt.expect("prompt exists");
     assert_eq!(prompt.status, "errored");
     assert_eq!(
         prompt.failure_class.as_deref(),
         Some(acp_stack::state::FailureClass::Inference5xx.as_str())
     );
-    let events = state
-        .query_session_events(&session_id, None, 100)
-        .expect("session events");
-    drop(state);
     // The direct sweep call writes no `prompt.stalled` row; the sweeper task does.
     let kinds: Vec<&str> = events.iter().map(|event| event.kind.as_str()).collect();
     let resolved_at = kinds
@@ -753,12 +762,13 @@ async fn submit_and_settle(harness: &Harness, session_id: &str, text: &str) -> (
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         assert!(std::time::Instant::now() < deadline, "prompt never settled");
-        let state = harness.state.lock().await;
-        let status = state
-            .get_prompt(&prompt_id)
+        let lookup_prompt_id = prompt_id.clone();
+        let status = harness
+            .state
+            .read(move |store| store.get_prompt(&lookup_prompt_id))
+            .await
             .expect("prompt lookup")
             .map(|record| record.status);
-        drop(state);
         if let Some(status) = status
             && !matches!(status.as_str(), "pending" | "running")
         {
@@ -782,11 +792,11 @@ async fn prompt_usage_is_recorded_after_the_turn() {
     let (prompt_id, status) = submit_and_settle(&harness, &session_id, "count my tokens").await;
     assert_eq!(status, "completed");
 
-    let state = harness.state.lock().await;
-    let events = state
-        .query_session_events(&session_id, None, 100)
+    let events = harness
+        .state
+        .read(move |store| store.query_session_events(&session_id, None, 100))
+        .await
         .expect("session events");
-    drop(state);
     let usage_positions: Vec<usize> = events
         .iter()
         .enumerate()
@@ -860,11 +870,11 @@ async fn prompt_without_usage_records_no_usage_event() {
     let (_, status) = submit_and_settle(&harness, &session_id, "no usage here").await;
     assert_eq!(status, "completed");
 
-    let state = harness.state.lock().await;
-    let events = state
-        .query_session_events(&session_id, None, 100)
+    let events = harness
+        .state
+        .read(move |store| store.query_session_events(&session_id, None, 100))
+        .await
         .expect("session events");
-    drop(state);
     assert!(
         events
             .iter()
@@ -988,24 +998,28 @@ async fn lagging_subscriber_is_closed_to_reconnect() {
     .expect("subscribe");
     let connection_id = await_ws_connection_id(&harness, std::slice::from_ref(&topic)).await;
 
-    // The test runtime is single-threaded, so the connection task cannot drain
-    // the channel while this burst holds the thread: every write lands unread,
-    // and one past capacity puts the subscriber behind.
-    {
-        let store = harness.state.lock().await;
-        for sequence in 0..=EVENT_CHANNEL_CAPACITY {
-            store
-                .append_session_event_with_source(
+    // The test runtime is single-threaded, so joining the writing thread holds it
+    // and the connection task cannot drain the channel while the burst publishes:
+    // every event lands unread, and one past capacity puts the subscriber behind.
+    let state = harness.state.clone();
+    std::thread::spawn(move || {
+        state.blocking_write(move |store| {
+            for sequence in 0..=EVENT_CHANNEL_CAPACITY {
+                store.append_session_event_with_source(
                     &session_id,
                     "info",
                     "session.update",
                     acp_stack::state::EVENT_SOURCE_ACP,
                     "ACP session update",
                     &format!(r#"{{"seq":{sequence}}}"#),
-                )
-                .expect("event inserted");
-        }
-    }
+                )?;
+            }
+            Ok(())
+        })
+    })
+    .join()
+    .expect("event burst thread")
+    .expect("event inserted");
 
     let close = await_close_frame(&mut ws).await;
     assert_eq!(
@@ -1084,23 +1098,23 @@ async fn await_close_frame(
 async fn await_disconnect_payload(harness: &Harness, connection_id: &str) -> Value {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        {
-            let state = harness.state.lock().await;
-            let events = state
-                .query_events(acp_stack::state::LogFilter {
+        let events = harness
+            .state
+            .read(|store| {
+                store.query_events(acp_stack::state::LogFilter {
                     limit: 50,
                     kind: Some("ws.client_disconnected"),
                     ..acp_stack::state::LogFilter::default()
                 })
-                .expect("query ws lifecycle events");
-            let matched = events.iter().find_map(|event| {
-                let payload: Value =
-                    serde_json::from_str(&event.payload_json).expect("payload json");
-                (payload["connection_id"] == connection_id).then_some(payload)
-            });
-            if let Some(payload) = matched {
-                return payload;
-            }
+            })
+            .await
+            .expect("query ws lifecycle events");
+        let matched = events.iter().find_map(|event| {
+            let payload: Value = serde_json::from_str(&event.payload_json).expect("payload json");
+            (payload["connection_id"] == connection_id).then_some(payload)
+        });
+        if let Some(payload) = matched {
+            return payload;
         }
         assert!(
             tokio::time::Instant::now() < deadline,

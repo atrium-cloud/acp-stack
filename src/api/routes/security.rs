@@ -88,17 +88,28 @@ pub(crate) async fn security_check_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<SecurityCheckResponse>, StackError> {
     let started_at = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
-    let store = state.state.lock().await;
-    let counts = store.counts()?;
-    let recent_cutoff =
-        (Utc::now() - Duration::minutes(1)).to_rfc3339_opts(SecondsFormat::Nanos, true);
-    let recent_auth_failures = store.count_auth_failures_since(&recent_cutoff)?;
-    let sink_open_failures = store.sink_open_failure_count()?;
-    let sink_last_error = store
-        .latest_sink_failure_summary()?
-        .and_then(|(_window, _count, last_error, _observed)| last_error);
-    let recent_origin_counts = recent_cloudflare_origin_counts(&store)?;
-    drop(store);
+    let (counts, recent_auth_failures, sink_open_failures, sink_last_error, recent_origin_counts) =
+        state
+            .state
+            .read(|store| {
+                let counts = store.counts()?;
+                let recent_cutoff =
+                    (Utc::now() - Duration::minutes(1)).to_rfc3339_opts(SecondsFormat::Nanos, true);
+                let recent_auth_failures = store.count_auth_failures_since(&recent_cutoff)?;
+                let sink_open_failures = store.sink_open_failure_count()?;
+                let sink_last_error = store
+                    .latest_sink_failure_summary()?
+                    .and_then(|(_window, _count, last_error, _observed)| last_error);
+                let recent_origin_counts = recent_cloudflare_origin_counts(store)?;
+                Ok((
+                    counts,
+                    recent_auth_failures,
+                    sink_open_failures,
+                    sink_last_error,
+                    recent_origin_counts,
+                ))
+            })
+            .await?;
     let dependency_report = crate::runtime::dependencies::deps::check_dependencies(
         &state.config,
         &state.runtime_paths.home,
@@ -186,26 +197,32 @@ pub(crate) async fn security_check_handler(
                 .map(|value| serde_json::to_string(value).expect("details payload is JSON-safe"))
         })
         .collect();
-    let new_findings: Vec<NewSecurityFinding<'_>> = findings
-        .iter()
-        .zip(details_strings.iter())
-        .map(|(finding, details_json)| NewSecurityFinding {
-            code: finding.code.as_str(),
-            severity: finding.severity.as_str(),
-            message: finding.message.as_str(),
-            details_json: details_json.as_deref(),
-            remediation: finding.remediation.as_deref(),
+    let auth_failure_count = counts.auth_failures;
+    let (record, findings) = state
+        .state
+        .write(move |store| {
+            let record = {
+                let new_findings: Vec<NewSecurityFinding<'_>> = findings
+                    .iter()
+                    .zip(details_strings.iter())
+                    .map(|(finding, details_json)| NewSecurityFinding {
+                        code: finding.code.as_str(),
+                        severity: finding.severity.as_str(),
+                        message: finding.message.as_str(),
+                        details_json: details_json.as_deref(),
+                        remediation: finding.remediation.as_deref(),
+                    })
+                    .collect();
+                store.record_security_run(NewSecurityRun {
+                    started_at: started_at.as_str(),
+                    auth_failure_count,
+                    inputs_json: inputs_snapshot.as_str(),
+                    findings: &new_findings,
+                })?
+            };
+            Ok((record, findings))
         })
-        .collect();
-
-    let store = state.state.lock().await;
-    let record = store.record_security_run(NewSecurityRun {
-        started_at: started_at.as_str(),
-        auth_failure_count: counts.auth_failures,
-        inputs_json: inputs_snapshot.as_str(),
-        findings: &new_findings,
-    })?;
-    drop(store);
+        .await?;
 
     Ok(ApiSuccess::new(SecurityCheckResponse {
         run_id: record.id,
@@ -224,14 +241,17 @@ pub(crate) async fn security_history_handler(
         .limit
         .unwrap_or(DEFAULT_HISTORY_LIMIT)
         .clamp(1, MAX_HISTORY_LIMIT);
-    let store = state.state.lock().await;
-    let runs = store.query_security_runs(SecurityRunFilter {
-        limit,
-        after_id: query.after.as_deref(),
-        since: query.since.as_deref(),
-        until: query.until.as_deref(),
-    })?;
-    drop(store);
+    let runs = state
+        .state
+        .read(move |store| {
+            store.query_security_runs(SecurityRunFilter {
+                limit,
+                after_id: query.after.as_deref(),
+                since: query.since.as_deref(),
+                until: query.until.as_deref(),
+            })
+        })
+        .await?;
 
     let next_cursor = if runs.len() as u32 == limit {
         runs.last().map(|run| run.id.clone())
@@ -248,12 +268,16 @@ pub(crate) async fn security_history_show_handler(
     State(state): State<AppState>,
     AxumPath(run_id): AxumPath<String>,
 ) -> std::result::Result<ApiSuccess<SecurityHistoryShowResponse>, StackError> {
-    let store = state.state.lock().await;
-    let record = store
-        .get_security_run(&run_id)?
-        .ok_or_else(|| StackError::SecurityRunNotFound { id: run_id.clone() })?;
-    let rows = store.get_findings_for_run(&record.id)?;
-    drop(store);
+    let (record, rows) = state
+        .state
+        .read(move |store| {
+            let record = store
+                .get_security_run(&run_id)?
+                .ok_or_else(|| StackError::SecurityRunNotFound { id: run_id.clone() })?;
+            let rows = store.get_findings_for_run(&record.id)?;
+            Ok((record, rows))
+        })
+        .await?;
 
     let findings = rows
         .into_iter()

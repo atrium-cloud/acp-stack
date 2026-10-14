@@ -13,7 +13,6 @@ use agent_client_protocol::schema::v1::{
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tokio::sync::Mutex as TokioMutex;
 
 // `create_session` softens exactly the `AgentConfigProvision` variant from
 // these lookups into an ignored-feature record; any other variant would become
@@ -524,7 +523,7 @@ async fn fresh_service_with_action(
     let path = dir.path().join("state.sqlite");
     let store = StateStore::open(&path).expect("open");
     store.migrate().expect("migrate");
-    let state = Arc::new(TokioMutex::new(store));
+    let state = StateHandle::start(store).expect("start state handle");
     let events = EventHub::new();
     (
         dir,
@@ -1029,7 +1028,7 @@ async fn queued_notification_survives_backpressured_producer_cancellation_in_fif
 
 const FS_SESSION_ID: &str = "sess_fs";
 
-fn fs_context(cwd: &Path, state: Option<Arc<TokioMutex<StateStore>>>) -> AcpFsContext {
+fn fs_context(cwd: &Path, state: Option<StateHandle>) -> AcpFsContext {
     AcpFsContext {
         anchor: Arc::new(
             crate::workload_fs::Anchor::open_with(
@@ -1070,8 +1069,8 @@ async fn fs_handlers_round_trip_a_file_through_both_cwd_spellings_and_audit_the_
     let state_dir = tempfile::tempdir().expect("state dir");
     let store = StateStore::open(state_dir.path().join("state.sqlite")).expect("open");
     store.migrate().expect("migrate");
-    let state = Arc::new(TokioMutex::new(store));
-    let context = fs_context(cwd.path(), Some(Arc::clone(&state)));
+    let state = StateHandle::start(store).expect("start state handle");
+    let context = fs_context(cwd.path(), Some(state.clone()));
     let canonical = context.anchor.path().join("notes/lines.txt");
 
     handle_write_text_file(
@@ -1094,13 +1093,14 @@ async fn fs_handlers_round_trip_a_file_through_both_cwd_spellings_and_audit_the_
         .mode();
     assert_eq!(mode & 0o777, crate::workload_fs::OWNER_ONLY_FILE_MODE);
     let events = state
-        .lock()
-        .await
-        .query_events(crate::state::LogFilter {
-            limit: 10,
-            kind: Some("fs.write"),
-            ..Default::default()
+        .read(|store| {
+            store.query_events(crate::state::LogFilter {
+                limit: 10,
+                kind: Some("fs.write"),
+                ..Default::default()
+            })
         })
+        .await
         .expect("events");
     assert_eq!(events.len(), 1);
     assert!(events[0].payload_json.contains("lines.txt"));

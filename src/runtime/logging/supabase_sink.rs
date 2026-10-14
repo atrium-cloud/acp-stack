@@ -10,14 +10,14 @@ use chrono::{SecondsFormat, Utc};
 use rand::RngExt;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::Value;
-use tokio::sync::{Mutex as TokioMutex, Notify};
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
 use crate::config::{SupabaseLoggingBackend, SupabaseLoggingConfig};
 use crate::error::{Result, StackError};
 use crate::events::EventHub;
-use crate::state::{StateStore, sink_outbox::OutboxRow};
+use crate::state::{StateHandle, sink_outbox::OutboxRow};
 
 use super::sink_redaction::redact_row;
 use super::supabase_mirror;
@@ -32,7 +32,7 @@ const SUPABASE_ROOT_2021_CA_DER_BASE64: &str = "MIIDxDCCAqygAwIBAgIUbLxMod62P2kt
 const FAILURE_WINDOW_LEN: Duration = Duration::from_secs(60);
 
 struct UploadGroupContext<'a> {
-    state: &'a Arc<TokioMutex<StateStore>>,
+    state: &'a StateHandle,
     client: &'a reqwest::Client,
     config: &'a SupabaseLoggingConfig,
     credential: &'a SupabaseSinkCredential,
@@ -56,7 +56,7 @@ pub struct SupabaseSink {
 
 impl SupabaseSink {
     pub fn spawn(
-        state: Arc<TokioMutex<StateStore>>,
+        state: StateHandle,
         config: SupabaseLoggingConfig,
         credential: SupabaseSinkCredential,
         event_hub: EventHub,
@@ -114,7 +114,7 @@ impl Drop for SupabaseSink {
 }
 
 async fn run_worker(
-    state: Arc<TokioMutex<StateStore>>,
+    state: StateHandle,
     config: SupabaseLoggingConfig,
     credential: SupabaseSinkCredential,
     client: reqwest::Client,
@@ -194,12 +194,18 @@ async fn run_worker(
     // Flush so failures from the last partial minute land in the summary.
     if failure_window_count > 0 {
         let now = current_timestamp();
-        if let Err(err) = state.lock().await.record_sink_failure_window(
-            &failure_window_start,
-            failure_window_count,
-            failure_window_last_error.as_deref().unwrap_or(""),
-            &now,
-        ) {
+        let last_error = failure_window_last_error.unwrap_or_default();
+        if let Err(err) = state
+            .write(move |store| {
+                store.record_sink_failure_window(
+                    &failure_window_start,
+                    failure_window_count,
+                    &last_error,
+                    &now,
+                )
+            })
+            .await
+        {
             tracing::warn!(error = %err, "failed to flush final sink failure summary");
         }
     }
@@ -208,7 +214,7 @@ async fn run_worker(
 /// Run one outbox poll cycle: `Some(true)` shipped rows, `Some(false)` empty
 /// outbox, `None` read failure (caller backs off).
 async fn process_one_batch(
-    state: &Arc<TokioMutex<StateStore>>,
+    state: &StateHandle,
     client: &reqwest::Client,
     config: &SupabaseLoggingConfig,
     credential: &SupabaseSinkCredential,
@@ -217,25 +223,26 @@ async fn process_one_batch(
     failure_window_last_error: &mut Option<String>,
 ) -> Option<bool> {
     let now = current_timestamp();
-    let batch_result = {
-        let guard = state.lock().await;
-        // The worker is strictly sequential, so anything still `sending`
-        // between polls was stranded by a crashed worker or a failed mark_*
-        // write, and must be released before claiming the next batch.
-        match guard.recover_sink_outbox_in_flight() {
-            Ok(0) => {}
-            Ok(recovered) => {
-                tracing::warn!(
-                    rows = recovered,
-                    "recovered sink outbox rows stranded by an interrupted upload"
-                );
+    let batch_result = state
+        .write(move |store| {
+            // The worker is strictly sequential, so anything still `sending`
+            // between polls was stranded by a crashed worker or a failed mark_*
+            // write, and must be released before claiming the next batch.
+            match store.recover_sink_outbox_in_flight() {
+                Ok(0) => {}
+                Ok(recovered) => {
+                    tracing::warn!(
+                        rows = recovered,
+                        "recovered sink outbox rows stranded by an interrupted upload"
+                    );
+                }
+                Err(err) => {
+                    tracing::error!(error = %err, "failed to recover in-flight sink outbox rows");
+                }
             }
-            Err(err) => {
-                tracing::error!(error = %err, "failed to recover in-flight sink outbox rows");
-            }
-        }
-        guard.next_sink_outbox_batch(BATCH_SIZE, &now)
-    };
+            store.next_sink_outbox_batch(BATCH_SIZE, &now)
+        })
+        .await;
     let batch = match batch_result {
         Ok(b) => b,
         Err(err) => {
@@ -293,27 +300,35 @@ async fn upload_group(
     table: &str,
     rows: &[OutboxRow],
 ) -> Result<()> {
-    // Hydrate and redact before any I/O so the state mutex is held briefly.
-    let mut payloads: Vec<Value> = Vec::with_capacity(rows.len());
-    let mut acked_ids: Vec<String> = Vec::new();
-    let mut payload_ids: Vec<String> = Vec::new();
-    let mut hydration_failed: Vec<(String, String)> = Vec::new();
-    {
-        let guard = context.state.lock().await;
-        for row in rows {
-            match guard.hydrate_sink_outbox_row(table, &row.source_id) {
-                Ok(Some(mut hydrated)) => match redact_row(table, &mut hydrated) {
-                    Ok(()) => {
-                        payloads.push(Value::Object(hydrated));
-                        payload_ids.push(row.id.clone());
-                    }
-                    Err(err) => hydration_failed.push((row.id.clone(), err.to_string())),
-                },
-                Ok(None) => acked_ids.push(row.id.clone()),
-                Err(err) => hydration_failed.push((row.id.clone(), err.to_string())),
+    // Hydrate and redact in one read job before any I/O.
+    let hydration_table = table.to_owned();
+    let row_ids: Vec<(String, String)> = rows
+        .iter()
+        .map(|row| (row.id.clone(), row.source_id.clone()))
+        .collect();
+    let (payloads, payload_ids, acked_ids, hydration_failed) = context
+        .state
+        .read(move |store| {
+            let mut payloads: Vec<Value> = Vec::with_capacity(row_ids.len());
+            let mut acked_ids: Vec<String> = Vec::new();
+            let mut payload_ids: Vec<String> = Vec::new();
+            let mut hydration_failed: Vec<(String, String)> = Vec::new();
+            for (id, source_id) in row_ids {
+                match store.hydrate_sink_outbox_row(&hydration_table, &source_id) {
+                    Ok(Some(mut hydrated)) => match redact_row(&hydration_table, &mut hydrated) {
+                        Ok(()) => {
+                            payloads.push(Value::Object(hydrated));
+                            payload_ids.push(id);
+                        }
+                        Err(err) => hydration_failed.push((id, err.to_string())),
+                    },
+                    Ok(None) => acked_ids.push(id),
+                    Err(err) => hydration_failed.push((id, err.to_string())),
+                }
             }
-        }
-    }
+            Ok((payloads, payload_ids, acked_ids, hydration_failed))
+        })
+        .await?;
 
     if !hydration_failed.is_empty() {
         let now = current_timestamp();
@@ -326,9 +341,20 @@ async fn upload_group(
             .map(|(_, err)| err.as_str())
             .collect::<Vec<_>>()
             .join("; ");
-        let guard = context.state.lock().await;
-        guard.mark_sink_outbox_failure(&ids, &aggregated_error, &next_attempt, &now)?;
-        drop(guard);
+        let failed_ids = ids.clone();
+        let failure_message = aggregated_error.clone();
+        let failed_at = now.clone();
+        context
+            .state
+            .write(move |store| {
+                store.mark_sink_outbox_failure(
+                    &failed_ids,
+                    &failure_message,
+                    &next_attempt,
+                    &failed_at,
+                )
+            })
+            .await?;
         record_failure_observation(
             ids.len(),
             aggregated_error.clone(),
@@ -356,11 +382,11 @@ async fn upload_group(
     // get stuck riding along with a failing batch.
     if !acked_ids.is_empty() {
         let now = current_timestamp();
+        let sent_ids = acked_ids.clone();
         context
             .state
-            .lock()
-            .await
-            .mark_sink_outbox_sent(&acked_ids, &now)?;
+            .write(move |store| store.mark_sink_outbox_sent(&sent_ids, &now))
+            .await?;
     }
 
     let send_result = if payloads.is_empty() {
@@ -381,11 +407,12 @@ async fn upload_group(
     match send_result {
         Ok(()) => {
             if !payload_ids.is_empty() {
+                let sent_ids = payload_ids.clone();
+                let sent_at = now.clone();
                 context
                     .state
-                    .lock()
-                    .await
-                    .mark_sink_outbox_sent(&payload_ids, &now)?;
+                    .write(move |store| store.mark_sink_outbox_sent(&sent_ids, &sent_at))
+                    .await?;
             }
             context.event_hub.publish(crate::events::LiveEvent {
                 event_type: "event",
@@ -413,12 +440,21 @@ async fn upload_group(
                 offset_iso(&now, delay)
             };
             if !payload_ids.is_empty() {
-                context.state.lock().await.mark_sink_outbox_failure(
-                    &payload_ids,
-                    &message,
-                    &next_attempt_at,
-                    &now,
-                )?;
+                let failed_ids = payload_ids.clone();
+                let failure_message = message.clone();
+                let retry_at = next_attempt_at.clone();
+                let failed_at = now.clone();
+                context
+                    .state
+                    .write(move |store| {
+                        store.mark_sink_outbox_failure(
+                            &failed_ids,
+                            &failure_message,
+                            &retry_at,
+                            &failed_at,
+                        )
+                    })
+                    .await?;
             }
             context.event_hub.publish(crate::events::LiveEvent {
                 event_type: "event",
@@ -669,7 +705,7 @@ fn offset_iso(now_rfc3339: &str, delta: Duration) -> String {
 }
 
 async fn roll_failure_window(
-    state: &Arc<TokioMutex<StateStore>>,
+    state: &StateHandle,
     window_started_at: &mut String,
     failure_count: &mut i64,
     last_error: &mut Option<String>,
@@ -681,12 +717,17 @@ async fn roll_failure_window(
         let snapshot_count = *failure_count;
         let snapshot_error = last_error.clone().unwrap_or_default();
         let snapshot_now = now.clone();
-        if let Err(err) = state.lock().await.record_sink_failure_window(
-            &snapshot_started,
-            snapshot_count,
-            &snapshot_error,
-            &snapshot_now,
-        ) {
+        if let Err(err) = state
+            .write(move |store| {
+                store.record_sink_failure_window(
+                    &snapshot_started,
+                    snapshot_count,
+                    &snapshot_error,
+                    &snapshot_now,
+                )
+            })
+            .await
+        {
             tracing::warn!(error = %err, "failed to record sink failure window");
         }
     }
@@ -793,7 +834,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let store = StateStore::open(dir.path().join("state.sqlite")).expect("open store");
         store.migrate().expect("migrate");
-        let state = Arc::new(TokioMutex::new(store));
+        let state = StateHandle::start(store).expect("start state handle");
         let mut window_started_at = "2026-01-01T00:00:00Z".to_owned();
         let mut failure_count = 1;
         let mut last_error = Some("redaction failed".to_owned());
@@ -809,9 +850,8 @@ mod tests {
         .await;
 
         let summary = state
-            .lock()
+            .read(|store| store.latest_sink_failure_summary())
             .await
-            .latest_sink_failure_summary()
             .expect("query summary")
             .expect("summary present");
         assert_eq!(summary.1, 1);

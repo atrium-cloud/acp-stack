@@ -51,10 +51,15 @@ pub(crate) async fn sessions_delete_handler(
 ) -> std::result::Result<ApiSuccess<SessionsDeleteResponse>, StackError> {
     // Unknown ids are a silent success per ACP session/delete, so this uses a single lookup rather
     // than the shared resolvers, which would turn a concurrent delete racing this handler into a 404.
-    let stored_target_id = {
-        let store = state.state.lock().await;
-        store.get_session(&id)?.map(|record| record.target_id)
-    };
+    let session_id = id.clone();
+    let stored_target_id = state
+        .state
+        .read(move |store| {
+            Ok(store
+                .get_session(&session_id)?
+                .map(|record| record.target_id))
+        })
+        .await?;
     let Some(stored_target_id) = stored_target_id else {
         return Ok(ApiSuccess::new(SessionsDeleteResponse {
             session_id: id,

@@ -154,13 +154,13 @@ fn find_terminal_report_text(value: &serde_json::Value) -> Option<String> {
     }
 }
 
-pub(crate) fn open_test_state() -> (
-    tempfile::TempDir,
-    Arc<tokio::sync::Mutex<acp_stack::state::StateStore>>,
-) {
+pub(crate) fn open_test_state() -> (tempfile::TempDir, acp_stack::state::StateHandle) {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let store =
         acp_stack::state::StateStore::open(tempdir.path().join("state.sqlite")).expect("open");
     store.migrate().expect("migrate");
-    (tempdir, Arc::new(tokio::sync::Mutex::new(store)))
+    (
+        tempdir,
+        acp_stack::state::StateHandle::start(store).expect("start state handle"),
+    )
 }

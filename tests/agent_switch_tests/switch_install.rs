@@ -188,15 +188,16 @@ async fn agent_switch_demotes_renamed_sessions_of_running_agent() {
     let body_text = response.text().await.unwrap_or_default();
     assert_eq!(status, StatusCode::OK, "body: {body_text}");
 
-    let store = harness.state.lock().await;
-    let record = store
-        .get_session(&session_id)
-        .expect("session lookup")
-        .expect("session exists");
-    let events = store
-        .latest_session_events(&session_id, 20)
-        .expect("session events");
-    drop(store);
+    let (record, events) = harness
+        .state
+        .read(move |store| {
+            let record = store.get_session(&session_id)?;
+            let events = store.latest_session_events(&session_id, 20)?;
+            Ok((record, events))
+        })
+        .await
+        .expect("session lookup and events");
+    let record = record.expect("session exists");
     // The rename moved the row to the new target before the old agent
     // stopped; the switch path must still demote it.
     assert_eq!(record.target_id, "kimi");

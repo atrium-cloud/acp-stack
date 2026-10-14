@@ -2,14 +2,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::Mutex as TokioMutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{Config, parse_duration_string};
 use crate::runtime::agent::supervisor::AgentSupervisor;
 use crate::runtime::install::agent_updater::{AgentUpdateOptions, run_managed_agent_update};
-use crate::state::StateStore;
+use crate::state::StateHandle;
 
 const DISABLED_POLL_INTERVAL: Duration = Duration::from_secs(60);
 /// Grace window for `shutdown` to wait on an in-flight update before detaching.
@@ -27,7 +26,7 @@ impl AgentAutoUpdater {
         home: PathBuf,
         config_path: PathBuf,
         state_path: PathBuf,
-        state: Arc<TokioMutex<StateStore>>,
+        state: StateHandle,
         agent_supervisor: Arc<AgentSupervisor>,
     ) -> Self {
         let cancel = CancellationToken::new();
@@ -228,21 +227,25 @@ fn next_delay(config_path: &PathBuf) -> Duration {
 }
 
 async fn append_update_lifecycle(
-    state: &Arc<TokioMutex<StateStore>>,
-    kind: &str,
-    message: &str,
+    state: &StateHandle,
+    kind: &'static str,
+    message: &'static str,
     payload: serde_json::Value,
 ) -> crate::error::Result<()> {
     let payload = payload.to_string();
-    let guard = state.lock().await;
-    guard.append_agent_lifecycle(kind, message, &payload)?;
-    Ok(())
+    state
+        .write(move |store| {
+            store.append_agent_lifecycle(kind, message, &payload)?;
+            Ok(())
+        })
+        .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::runtime::agent::supervisor::AgentSupervisor;
+    use crate::state::StateStore;
 
     // Loading goes through full validation, so every required section is here.
     const BASE_CONFIG: &str = r#"
@@ -335,7 +338,7 @@ restart = "on-crash"
         let state_path = tempdir.path().join("state.sqlite");
         let store = StateStore::open(&state_path).expect("state open");
         store.migrate().expect("migrate");
-        let state = Arc::new(TokioMutex::new(store));
+        let state = StateHandle::start(store).expect("start state handle");
         let supervisor = Arc::new(AgentSupervisor::new());
 
         let updater = AgentAutoUpdater::spawn(

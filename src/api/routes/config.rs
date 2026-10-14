@@ -100,14 +100,20 @@ pub(crate) async fn config_import_handler(
     });
     match serde_json::to_string(&payload) {
         Ok(payload_text) => {
-            let store = state.state.lock().await;
-            if let Err(err) = store.append_event_with_source(
-                "info",
-                "server.config_imported",
-                crate::state::EVENT_SOURCE_API,
-                "config imported via /v1/config/import",
-                &payload_text,
-            ) {
+            let recorded = state
+                .state
+                .write(move |store| {
+                    store.append_event_with_source(
+                        "info",
+                        "server.config_imported",
+                        crate::state::EVENT_SOURCE_API,
+                        "config imported via /v1/config/import",
+                        &payload_text,
+                    )?;
+                    Ok(())
+                })
+                .await;
+            if let Err(err) = recorded {
                 tracing::warn!(
                     error = %crate::error::report(&err),
                     "failed to record server.config_imported audit event"

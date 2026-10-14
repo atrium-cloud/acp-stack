@@ -16,7 +16,7 @@ use crate::events::EventHub;
 use crate::state::{
     EVENT_KIND_PERMISSION_APPROVED, EVENT_KIND_PERMISSION_CANCELLED, EVENT_KIND_PERMISSION_DENIED,
     EVENT_KIND_PERMISSION_EXPIRED, NewPermissionRequest, PermissionDecisionRecord,
-    PermissionRequestRecord, PermissionStatus, StateStore,
+    PermissionRequestRecord, PermissionStatus, StateHandle,
 };
 
 /// Source of a permission request. ACP-source requests originate from a
@@ -157,7 +157,7 @@ const POLICY_APPROVAL_REASON: &str = "auto-approved by policy";
 
 #[derive(Clone)]
 pub struct PermissionService {
-    state: Arc<TokioMutex<StateStore>>,
+    state: StateHandle,
     events: EventHub,
     pending: Arc<TokioMutex<HashMap<String, PendingOp>>>,
     timeout: Duration,
@@ -167,7 +167,7 @@ pub struct PermissionService {
 
 impl PermissionService {
     pub fn new(
-        state: Arc<TokioMutex<StateStore>>,
+        state: StateHandle,
         events: EventHub,
         timeout: Duration,
         timeout_action: PermissionTimeoutAction,
@@ -231,20 +231,22 @@ impl PermissionService {
         input: NewPermission,
     ) -> Result<(PermissionRequestRecord, PermissionDecisionView)> {
         let detail_json = serialize_detail(&input.detail)?;
-        let (record, decision) = {
-            let state = self.state.lock().await;
-            state.append_approved_permission_request(
-                NewPermissionRequest {
-                    source: input.source.as_str(),
-                    requester: input.requester.as_deref(),
-                    subject_id: input.subject_id.as_deref(),
-                    detail_json: &detail_json,
-                    expires_at: None,
-                },
-                Some(POLICY_DECIDING_PRINCIPAL),
-                Some(POLICY_APPROVAL_REASON),
-            )?
-        };
+        let (record, decision) = self
+            .state
+            .write(move |store| {
+                store.append_approved_permission_request(
+                    NewPermissionRequest {
+                        source: input.source.as_str(),
+                        requester: input.requester.as_deref(),
+                        subject_id: input.subject_id.as_deref(),
+                        detail_json: &detail_json,
+                        expires_at: None,
+                    },
+                    Some(POLICY_DECIDING_PRINCIPAL),
+                    Some(POLICY_APPROVAL_REASON),
+                )
+            })
+            .await?;
         self.publish_created_event(&record).await;
         self.publish_decision_event(&record.id, &decision, EVENT_KIND_PERMISSION_APPROVED)
             .await;
@@ -257,14 +259,21 @@ impl PermissionService {
         expires_at: Option<&str>,
     ) -> Result<PermissionRequestRecord> {
         let detail_json = serialize_detail(&input.detail)?;
-        let state = self.state.lock().await;
-        state.append_permission_request(NewPermissionRequest {
-            source: input.source.as_str(),
-            requester: input.requester.as_deref(),
-            subject_id: input.subject_id.as_deref(),
-            detail_json: &detail_json,
-            expires_at,
-        })
+        let source = input.source.as_str();
+        let requester = input.requester.clone();
+        let subject_id = input.subject_id.clone();
+        let expires_at = expires_at.map(str::to_owned);
+        self.state
+            .write(move |store| {
+                store.append_permission_request(NewPermissionRequest {
+                    source,
+                    requester: requester.as_deref(),
+                    subject_id: subject_id.as_deref(),
+                    detail_json: &detail_json,
+                    expires_at: expires_at.as_deref(),
+                })
+            })
+            .await
     }
 
     async fn publish_created_event(&self, record: &PermissionRequestRecord) {
@@ -341,14 +350,17 @@ impl PermissionService {
         session_id: &str,
         reason: &str,
     ) -> Result<usize> {
-        let pending = {
-            let state = self.state.lock().await;
-            state.query_pending_permissions_for_subject(
-                PermissionSource::Acp.as_str(),
-                session_id,
-                SESSION_PENDING_PERMISSION_SCAN_LIMIT,
-            )?
-        };
+        let subject_id = session_id.to_owned();
+        let pending = self
+            .state
+            .read(move |store| {
+                store.query_pending_permissions_for_subject(
+                    PermissionSource::Acp.as_str(),
+                    &subject_id,
+                    SESSION_PENDING_PERMISSION_SCAN_LIMIT,
+                )
+            })
+            .await?;
         let mut settled = 0;
         for row in pending {
             if self.cancel_if_pending(&row.id, reason).await? {
@@ -359,17 +371,21 @@ impl PermissionService {
     }
 
     pub async fn pending(&self, limit: u32) -> Result<Vec<PermissionRequestView>> {
-        let state = self.state.lock().await;
-        let rows = state.query_pending_permissions(limit)?;
+        let rows = self
+            .state
+            .read(move |store| store.query_pending_permissions(limit))
+            .await?;
         rows.into_iter()
             .map(PermissionRequestView::from_record)
             .collect()
     }
 
     pub async fn get(&self, id: &str) -> Result<PermissionRequestView> {
-        let state = self.state.lock().await;
-        let record = state
-            .get_permission_request(id)?
+        let request_id = id.to_owned();
+        let record = self
+            .state
+            .read(move |store| store.get_permission_request(&request_id))
+            .await?
             .ok_or_else(|| StackError::PermissionNotFound { id: id.to_owned() })?;
         PermissionRequestView::from_record(record)
     }
@@ -378,18 +394,20 @@ impl PermissionService {
     /// was registered. A no-op on the ordinary path, where the row is still
     /// pending and the decider that comes later fires the waiter itself.
     async fn settle_waiter_if_already_decided(&self, id: &str) {
-        let status = {
-            let state = self.state.lock().await;
-            match state.get_permission_request(id) {
-                Ok(Some(record)) => Some(PermissionStatus::from_wire(&record.status)),
-                Ok(None) => {
-                    tracing::warn!(permission_id = %id, "fresh permission request missing on re-read");
-                    None
-                }
-                Err(error) => {
-                    tracing::warn!(error = %error, permission_id = %id, "failed to re-read a fresh permission request");
-                    None
-                }
+        let request_id = id.to_owned();
+        let record = self
+            .state
+            .read(move |store| store.get_permission_request(&request_id))
+            .await;
+        let status = match record {
+            Ok(Some(record)) => Some(PermissionStatus::from_wire(&record.status)),
+            Ok(None) => {
+                tracing::warn!(permission_id = %id, "fresh permission request missing on re-read");
+                None
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, permission_id = %id, "failed to re-read a fresh permission request");
+                None
             }
         };
         let Some(status) = status else {
@@ -430,10 +448,19 @@ impl PermissionService {
         reason: Option<String>,
     ) -> Result<PermissionDecisionView> {
         let new_status = outcome.as_status();
-        let decision = {
-            let state = self.state.lock().await;
-            state.decide_permission(id, new_status, Some(deciding_principal), reason.as_deref())?
-        };
+        let request_id = id.to_owned();
+        let deciding_principal = deciding_principal.to_owned();
+        let decision = self
+            .state
+            .write(move |store| {
+                store.decide_permission(
+                    &request_id,
+                    new_status,
+                    Some(&deciding_principal),
+                    reason.as_deref(),
+                )
+            })
+            .await?;
 
         // A missing waiter means the timer already fired or the daemon
         // restarted; the durable decision row is still written for the audit
@@ -480,7 +507,7 @@ impl PermissionService {
     fn spawn_timer(&self, id: String) {
         let timeout = self.timeout;
         let action = self.timeout_action;
-        let state = Arc::clone(&self.state);
+        let state = self.state.clone();
         let pending = Arc::clone(&self.pending);
         let events = self.events.clone();
         tokio::spawn(async move {
@@ -505,13 +532,21 @@ impl PermissionService {
             // The atomic `decide_permission` keeps a concurrent approve/deny
             // from landing between the transition and the decision row.
             let outcome_for_waiter = outcome.clone();
-            let result = {
-                let store = state.lock().await;
-                match store.decide_permission(&id, new_status, Some("system"), Some("timeout")) {
-                    Ok(decision) => Ok(Some(decision.created_at)),
-                    Err(StackError::InvalidPermissionTransition { .. }) => Ok(None),
-                    Err(err) => Err(err),
-                }
+            let request_id = id.clone();
+            let decided = state
+                .write(move |store| {
+                    store.decide_permission(
+                        &request_id,
+                        new_status,
+                        Some("system"),
+                        Some("timeout"),
+                    )
+                })
+                .await;
+            let result = match decided {
+                Ok(decision) => Ok(Some(decision.created_at)),
+                Err(StackError::InvalidPermissionTransition { .. }) => Ok(None),
+                Err(err) => Err(err),
             };
 
             let now = match result {
@@ -612,14 +647,14 @@ fn decision_view(decision: PermissionDecisionRecord) -> PermissionDecisionView {
 /// stamps on the durable event so the decision replays from the per-session
 /// event log.
 async fn link_request_subject(
-    state: &Arc<TokioMutex<StateStore>>,
+    state: &StateHandle,
     id: &str,
     payload: &mut Value,
 ) -> Option<String> {
-    let record = {
-        let store = state.lock().await;
-        store.get_permission_request(id)
-    };
+    let request_id = id.to_owned();
+    let record = state
+        .read(move |store| store.get_permission_request(&request_id))
+        .await;
     match record {
         Ok(Some(record)) => {
             payload["source"] = json!(record.source);
@@ -657,7 +692,7 @@ async fn link_request_subject(
 /// which is what puts an ACP-source decision in the per-session event log a
 /// transcript replays from.
 async fn persist_and_publish_permission_event(
-    state: &Arc<TokioMutex<StateStore>>,
+    state: &StateHandle,
     events: &EventHub,
     id: &str,
     created_at: &str,
@@ -685,35 +720,48 @@ async fn persist_and_publish_permission_event(
         EVENT_KIND_PERMISSION_EXPIRED => "permission expired",
         _ => "permission event",
     };
-    {
-        let store = state.lock().await;
-        let appended = match session_id {
-            Some(session_id) => store.append_session_event_with_source(
-                session_id,
-                "info",
-                kind,
-                crate::state::EVENT_SOURCE_PERMISSION,
-                message,
-                &payload_text,
-            ),
-            None => store.append_event_with_source(
-                "info",
-                kind,
-                crate::state::EVENT_SOURCE_PERMISSION,
-                message,
-                &payload_text,
-            ),
-        };
+    let event_session_id = session_id.map(str::to_owned);
+    let state = state.clone();
+    let events = events.clone();
+    let id = id.to_owned();
+    let created_at = created_at.to_owned();
+    let kind = kind.to_owned();
+    // Spawned so a caller dropped mid-write still publishes the row it committed.
+    let persisted = tokio::spawn(async move {
+        let event_kind = kind.clone();
+        let appended = state
+            .write(move |store| match event_session_id {
+                Some(session_id) => store.append_session_event_with_source(
+                    &session_id,
+                    "info",
+                    &event_kind,
+                    crate::state::EVENT_SOURCE_PERMISSION,
+                    message,
+                    &payload_text,
+                ),
+                None => store.append_event_with_source(
+                    "info",
+                    &event_kind,
+                    crate::state::EVENT_SOURCE_PERMISSION,
+                    message,
+                    &payload_text,
+                ),
+            })
+            .await;
         if let Err(err) = appended {
             tracing::warn!(
                 error = %err,
-                perm_id = id,
-                kind,
+                perm_id = %id,
+                kind = %kind,
                 "failed to append permission event to events table",
             );
         }
+        events.publish_permission_event(&id, &created_at, &kind, data);
+    })
+    .await;
+    if let Err(error) = persisted {
+        tracing::warn!(%error, "permission event write task failed");
     }
-    events.publish_permission_event(id, created_at, kind, data);
 }
 
 fn compute_expiry(timeout: Duration) -> Option<String> {
@@ -731,6 +779,7 @@ fn compute_expiry(timeout: Duration) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::StateStore;
 
     fn fresh_service(action: PermissionTimeoutAction) -> (tempfile::TempDir, PermissionService) {
         fresh_service_with_timeout(action, Duration::from_millis(60))
@@ -752,10 +801,28 @@ mod tests {
         let path = tempdir.path().join("state.sqlite");
         let store = StateStore::open(&path).expect("open");
         store.migrate().expect("migrate");
-        let state = Arc::new(TokioMutex::new(store));
+        let state = StateHandle::start(store).expect("start state handle");
         let events = EventHub::new();
         let service = PermissionService::new(state, events, timeout, action, acp_prompt_action);
         (tempdir, service)
+    }
+
+    async fn query_permission_events_for(
+        service: &PermissionService,
+        permission_id: &str,
+    ) -> Vec<crate::state::Event> {
+        let permission_id = permission_id.to_owned();
+        service
+            .state
+            .read(move |store| {
+                store.query_permission_events(crate::state::EventFilter {
+                    limit: 10,
+                    permission_id: Some(&permission_id),
+                    ..crate::state::EventFilter::default()
+                })
+            })
+            .await
+            .expect("query permission events")
     }
 
     #[tokio::test]
@@ -818,12 +885,11 @@ mod tests {
             .await
             .expect("deny command");
 
-        let session_events = {
-            let state = service.state.lock().await;
-            state
-                .query_session_events("sess_scope", None, 50)
-                .expect("query session events")
-        };
+        let session_events = service
+            .state
+            .read(|store| store.query_session_events("sess_scope", None, 50))
+            .await
+            .expect("query session events");
         let decisions: Vec<&crate::state::Event> = session_events
             .iter()
             .filter(|event| event.kind.starts_with("permission."))
@@ -868,16 +934,17 @@ mod tests {
 
         let deadline = tokio::time::Instant::now() + RACED_WAITER_BUDGET;
         let id = loop {
-            let pending = {
-                let state = service.state.lock().await;
-                state
-                    .query_pending_permissions_for_subject(
+            let pending = service
+                .state
+                .read(|store| {
+                    store.query_pending_permissions_for_subject(
                         PermissionSource::Acp.as_str(),
                         "sess_race",
                         SESSION_PENDING_PERMISSION_SCAN_LIMIT,
                     )
-                    .expect("query pending")
-            };
+                })
+                .await
+                .expect("query pending");
             if let Some(row) = pending.first() {
                 break row.id.clone();
             }
@@ -889,17 +956,19 @@ mod tests {
         };
         // Decide it durably with no waiter to fire, which is all a sweep can do
         // in this window.
-        {
-            let state = service.state.lock().await;
-            state
-                .decide_permission(
-                    &id,
+        let decided_id = id.clone();
+        service
+            .state
+            .write(move |store| {
+                store.decide_permission(
+                    &decided_id,
                     PermissionStatus::Canceled,
                     Some("system"),
                     Some("session-cancelled"),
                 )
-                .expect("decide");
-        }
+            })
+            .await
+            .expect("decide");
         drop(registry_guard);
 
         let (_record, receiver) = requesting.await.expect("join").expect("request");
@@ -944,16 +1013,17 @@ mod tests {
 
         let deadline = tokio::time::Instant::now() + RACED_WAITER_BUDGET;
         let id = loop {
-            let pending = {
-                let state = service.state.lock().await;
-                state
-                    .query_pending_permissions_for_subject(
+            let pending = service
+                .state
+                .read(|store| {
+                    store.query_pending_permissions_for_subject(
                         PermissionSource::Acp.as_str(),
                         "sess_race_approve",
                         SESSION_PENDING_PERMISSION_SCAN_LIMIT,
                     )
-                    .expect("query pending")
-            };
+                })
+                .await
+                .expect("query pending");
             if let Some(row) = pending.first() {
                 break row.id.clone();
             }
@@ -963,12 +1033,19 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(5)).await;
         };
-        {
-            let state = service.state.lock().await;
-            state
-                .decide_permission(&id, PermissionStatus::Approved, Some("operator"), None)
-                .expect("decide");
-        }
+        let decided_id = id.clone();
+        service
+            .state
+            .write(move |store| {
+                store.decide_permission(
+                    &decided_id,
+                    PermissionStatus::Approved,
+                    Some("operator"),
+                    None,
+                )
+            })
+            .await
+            .expect("decide");
         drop(registry_guard);
 
         let (_record, receiver) = requesting.await.expect("join").expect("request");
@@ -1016,19 +1093,11 @@ mod tests {
         assert_eq!(view.source, "acp");
         assert!(service.pending(10).await.expect("pending").is_empty());
 
-        let kinds: Vec<String> = {
-            let state = service.state.lock().await;
-            state
-                .query_permission_events(crate::state::EventFilter {
-                    limit: 10,
-                    permission_id: Some(&record.id),
-                    ..crate::state::EventFilter::default()
-                })
-                .expect("query permission events")
-                .into_iter()
-                .map(|row| row.kind)
-                .collect()
-        };
+        let kinds: Vec<String> = query_permission_events_for(&service, &record.id)
+            .await
+            .into_iter()
+            .map(|row| row.kind)
+            .collect();
         assert!(kinds.iter().any(|kind| kind == "permission.created"));
         assert!(kinds.iter().any(|kind| kind == "permission.approved"));
     }
@@ -1144,16 +1213,7 @@ mod tests {
 
         let rows = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                let rows = {
-                    let state = service.state.lock().await;
-                    state
-                        .query_permission_events(crate::state::EventFilter {
-                            limit: 10,
-                            permission_id: Some(&record.id),
-                            ..crate::state::EventFilter::default()
-                        })
-                        .expect("query permission events")
-                };
+                let rows = query_permission_events_for(&service, &record.id).await;
                 if rows.iter().any(|row| row.kind == "permission.expired") {
                     return rows;
                 }
@@ -1189,16 +1249,7 @@ mod tests {
             .await
             .expect("cancel");
 
-        let rows = {
-            let state = service.state.lock().await;
-            state
-                .query_permission_events(crate::state::EventFilter {
-                    limit: 10,
-                    permission_id: Some(&record.id),
-                    ..crate::state::EventFilter::default()
-                })
-                .expect("query permission events")
-        };
+        let rows = query_permission_events_for(&service, &record.id).await;
         let canceled = rows
             .iter()
             .find(|row| row.kind == "permission.cancelled")
@@ -1210,16 +1261,17 @@ mod tests {
         assert_eq!(payload["subject_id"], "cmd_x");
         assert_eq!(payload["reason"], "command-permission-waiter-lost");
 
-        let by_command = {
-            let state = service.state.lock().await;
-            state
-                .query_permission_events(crate::state::EventFilter {
+        let by_command = service
+            .state
+            .read(|store| {
+                store.query_permission_events(crate::state::EventFilter {
                     limit: 10,
                     command_id: Some("cmd_x"),
                     ..crate::state::EventFilter::default()
                 })
-                .expect("query by command id")
-        };
+            })
+            .await
+            .expect("query by command id");
         assert!(
             by_command
                 .iter()
@@ -1245,16 +1297,7 @@ mod tests {
             .await
             .expect("cancel");
 
-        let rows = {
-            let state = service.state.lock().await;
-            state
-                .query_permission_events(crate::state::EventFilter {
-                    limit: 10,
-                    permission_id: Some(&record.id),
-                    ..crate::state::EventFilter::default()
-                })
-                .expect("query permission events")
-        };
+        let rows = query_permission_events_for(&service, &record.id).await;
         let canceled = rows
             .iter()
             .find(|row| row.kind == "permission.cancelled")

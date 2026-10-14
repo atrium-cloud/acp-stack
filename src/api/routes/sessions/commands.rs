@@ -43,9 +43,10 @@ pub(crate) async fn sessions_commands_handler(
     Path(id): Path<String>,
     Query(params): Query<SessionsTargetParams>,
 ) -> std::result::Result<ApiSuccess<SessionCommandsResponse>, StackError> {
-    let store = state.state.lock().await;
-    let session = store.require_live_session(&id)?;
-    drop(store);
+    let session = state
+        .state
+        .read(move |store| store.require_live_session(&id))
+        .await?;
     if let Some(asserted) = params.target_id.as_deref()
         && asserted != session.target_id
     {
@@ -90,10 +91,11 @@ pub(crate) async fn sessions_commands_run_handler(
             reason: "command name must not be empty".to_owned(),
         });
     }
-    let session = {
-        let store = state.state.lock().await;
-        store.require_live_session(&id)?
-    };
+    let session_id = id.clone();
+    let session = state
+        .state
+        .read(move |store| store.require_live_session(&session_id))
+        .await?;
     if let Some(asserted) = params.target_id.as_deref()
         && asserted != session.target_id
     {

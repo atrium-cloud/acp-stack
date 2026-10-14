@@ -18,7 +18,7 @@ use crate::config::{Config, parse_duration_string};
 use crate::error::{Result, StackError};
 use crate::events::EventHub;
 use crate::runtime::mediation::permissions::{NewPermission, PermissionService, PermissionSource};
-use crate::state::{CommandRecord, NewCommandRecord, StateStore};
+use crate::state::{CommandRecord, NewCommandRecord, StateHandle};
 
 use self::policy::{PolicyDecision, evaluate_policy, resolve_cwd_under_workspace};
 use self::supervisor::SupervisorTask;
@@ -52,7 +52,7 @@ pub(super) struct RunningCommand {
 
 #[derive(Clone)]
 pub struct CommandGateway {
-    state: Arc<TokioMutex<StateStore>>,
+    state: StateHandle,
     event_hub: EventHub,
     config: Arc<Config>,
     /// Boot-time home handed to every mediated child; resolved once so spawns
@@ -67,7 +67,7 @@ pub struct CommandGateway {
 
 impl CommandGateway {
     pub fn new(
-        state: Arc<TokioMutex<StateStore>>,
+        state: StateHandle,
         event_hub: EventHub,
         config: Arc<Config>,
         permissions: PermissionService,
@@ -160,17 +160,21 @@ impl CommandGateway {
         let sandbox =
             crate::runtime::sandbox::SandboxProfile::resolve(&self.config.workspace.sandbox)?;
         let cwd_owned = request.cwd.as_ref().map(|_| execution_cwd.display_path());
-        let record = {
-            let store = self.state.lock().await;
-            store.append_command(NewCommandRecord {
-                command: &request.command,
-                cwd: cwd_owned.as_deref(),
-                env_json: env_json.as_deref(),
-                origin: crate::state::CommandOrigin::Operator,
-                session_id: None,
-                terminal_id: None,
-            })?
-        };
+        let command_text = request.command.clone();
+        let record_cwd = cwd_owned.clone();
+        let record = self
+            .state
+            .write(move |store| {
+                store.append_command(NewCommandRecord {
+                    command: &command_text,
+                    cwd: record_cwd.as_deref(),
+                    env_json: env_json.as_deref(),
+                    origin: crate::state::CommandOrigin::Operator,
+                    session_id: None,
+                    terminal_id: None,
+                })
+            })
+            .await?;
 
         let (cancel_tx, cancel_rx) = watch::channel(false);
         {
@@ -258,19 +262,24 @@ impl CommandGateway {
     }
 
     pub async fn get(&self, id: &str) -> Result<CommandRecord> {
-        let store = self.state.lock().await;
-        store
-            .get_command(id)?
+        let command_id = id.to_owned();
+        self.state
+            .read(move |store| store.get_command(&command_id))
+            .await?
             .ok_or_else(|| StackError::CommandNotFound { id: id.to_owned() })
     }
 
     pub async fn list(&self, limit: u32, terminal_id: Option<&str>) -> Result<Vec<CommandRecord>> {
-        let store = self.state.lock().await;
-        store.query_commands(crate::state::CommandFilter {
-            limit,
-            terminal_id,
-            ..Default::default()
-        })
+        let terminal_id = terminal_id.map(str::to_owned);
+        self.state
+            .read(move |store| {
+                store.query_commands(crate::state::CommandFilter {
+                    limit,
+                    terminal_id: terminal_id.as_deref(),
+                    ..Default::default()
+                })
+            })
+            .await
     }
 
     /// Signal the running command to cancel and return the latest stored row.
@@ -297,26 +306,15 @@ impl CommandGateway {
             let running = self.running.lock().await;
             running.get(id).map(|entry| entry.cancel_tx.clone())
         };
-        match sender {
-            Some(tx) => {
-                if let Err(error) = tx.send(true) {
-                    tracing::warn!(
-                        error = %crate::error::report(&error),
-                        command_id = %id,
-                        "command cancel signal could not be delivered",
-                    );
-                }
-            }
-            None => {
-                let store = self.state.lock().await;
-                return store
-                    .get_command(id)?
-                    .ok_or_else(|| StackError::CommandNotFound { id: id.to_owned() });
-            }
+        if let Some(tx) = sender
+            && let Err(error) = tx.send(true)
+        {
+            tracing::warn!(
+                error = %crate::error::report(&error),
+                command_id = %id,
+                "command cancel signal could not be delivered",
+            );
         }
-        let store = self.state.lock().await;
-        store
-            .get_command(id)?
-            .ok_or_else(|| StackError::CommandNotFound { id: id.to_owned() })
+        self.get(id).await
     }
 }

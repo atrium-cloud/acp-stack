@@ -11,7 +11,7 @@ impl AgentSupervisor {
         target_id: &str,
         agent: &AgentConfig,
         workspace_root: &str,
-        state: &Arc<TokioMutex<StateStore>>,
+        state: &StateHandle,
     ) -> Result<SessionListSyncResult> {
         let bridge = {
             let guard = self.state.lock().await;
@@ -75,12 +75,13 @@ impl AgentSupervisor {
                 metadata_json,
             });
         }
-        let counts = state.lock().await.record_session_list_sync(
-            target_id,
-            &agent.id,
-            records,
-            skipped_invalid_cwd,
-        )?;
+        let target_id = target_id.to_owned();
+        let agent_id = agent.id.clone();
+        let counts = state
+            .write(move |store| {
+                store.record_session_list_sync(&target_id, &agent_id, records, skipped_invalid_cwd)
+            })
+            .await?;
         Ok(SessionListSyncResult {
             attempted: true,
             status: SessionListSyncStatus::Synced,
@@ -98,7 +99,7 @@ impl AgentSupervisor {
         workspace_root: &str,
         cwd: Option<String>,
         mcp_servers: Vec<McpServer>,
-        state: &Arc<TokioMutex<StateStore>>,
+        state: &StateHandle,
     ) -> Result<SessionAttachOutcome> {
         let bridge = self.bridge().await?;
         let resolved_cwd = resolve_session_cwd(cwd, workspace_root)?;
@@ -278,57 +279,72 @@ impl AgentSupervisor {
             title: None,
             metadata_json: "{}".to_owned(),
         };
-        let guard = state.lock().await;
-        let inserted =
-            guard.insert_session_for_target(target_id, agent_session_id.clone(), record)?;
-        guard.append_session_event(
-            &inserted.id,
-            "info",
-            "session.created",
-            "session created",
-            &json!({
-                "target_id": target_id,
-                "agent_id": agent.id,
-                "agent_session_id": &agent_session_id,
-                "cwd": &inserted.cwd,
-            })
-            .to_string(),
-        )?;
-        append_mcp_skipped_event(&guard, &inserted.id, &skipped)?;
-        append_capability_ignored_event(&guard, &inserted.id, &ignored)?;
-        // A snapshot failure must not undo an already-confirmed session.
+        let target_id = target_id.to_owned();
+        let agent_id = agent.id.clone();
         let advertised = latest_options
             .or(response.config_options)
             .unwrap_or_default();
-        let mut snapshot =
-            crate::runtime::agent::config_options::project_config_options(&advertised);
-        if snapshot.len() > crate::state::MAX_SESSION_CONFIG_OPTIONS {
-            tracing::warn!(
-                session = %inserted.id,
-                advertised = advertised.len(),
-                stored = crate::state::MAX_SESSION_CONFIG_OPTIONS,
-                "agent advertised more config options than the stored cap; list truncated"
-            );
-            snapshot.truncate(crate::state::MAX_SESSION_CONFIG_OPTIONS);
-        }
-        match serde_json::to_value(&snapshot) {
-            Ok(value) => {
-                if let Err(error) = guard.replace_session_config_options(&inserted.id, value) {
-                    tracing::warn!(%error, session = %inserted.id, "config-option snapshot write failed");
+        let job_ignored = ignored.clone();
+        // Only the row insert and its read-back propagate: once the agent confirmed
+        // `session/new`, a failed audit or snapshot write must not drop the session row.
+        let record = state
+            .write(move |store| {
+                let inserted =
+                    store.insert_session_for_target(&target_id, agent_session_id.clone(), record)?;
+                if let Err(error) = store.append_session_event(
+                    &inserted.id,
+                    "info",
+                    "session.created",
+                    "session created",
+                    &json!({
+                        "target_id": &target_id,
+                        "agent_id": &agent_id,
+                        "agent_session_id": &agent_session_id,
+                        "cwd": &inserted.cwd,
+                    })
+                    .to_string(),
+                ) {
+                    tracing::warn!(%error, session = %inserted.id, "session.created event write failed");
                 }
-            }
-            Err(error) => {
-                tracing::warn!(%error, session = %inserted.id, "config-option snapshot serialize failed");
-            }
-        }
-        // Re-read so the response carries the change and event positions the
-        // writes above advanced.
-        let record =
-            guard
-                .get_session(&inserted.id)?
-                .ok_or_else(|| StackError::SessionNotFound {
-                    id: inserted.id.clone(),
-                })?;
+                if let Err(error) = append_mcp_skipped_event(store, &inserted.id, &skipped) {
+                    tracing::warn!(%error, session = %inserted.id, "mcp skipped event write failed");
+                }
+                if let Err(error) =
+                    append_capability_ignored_event(store, &inserted.id, &job_ignored)
+                {
+                    tracing::warn!(%error, session = %inserted.id, "capability ignored event write failed");
+                }
+                let mut snapshot =
+                    crate::runtime::agent::config_options::project_config_options(&advertised);
+                if snapshot.len() > crate::state::MAX_SESSION_CONFIG_OPTIONS {
+                    tracing::warn!(
+                        session = %inserted.id,
+                        advertised = advertised.len(),
+                        stored = crate::state::MAX_SESSION_CONFIG_OPTIONS,
+                        "agent advertised more config options than the stored cap; list truncated"
+                    );
+                    snapshot.truncate(crate::state::MAX_SESSION_CONFIG_OPTIONS);
+                }
+                match serde_json::to_value(&snapshot) {
+                    Ok(value) => {
+                        if let Err(error) = store.replace_session_config_options(&inserted.id, value)
+                        {
+                            tracing::warn!(%error, session = %inserted.id, "config-option snapshot write failed");
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, session = %inserted.id, "config-option snapshot serialize failed");
+                    }
+                }
+                // Re-read so the response carries the change and event positions the
+                // writes above advanced.
+                store
+                    .get_session(&inserted.id)?
+                    .ok_or_else(|| StackError::SessionNotFound {
+                        id: inserted.id.clone(),
+                    })
+            })
+            .await?;
         Ok(SessionAttachOutcome {
             record,
             attached_mcp: accepted_names,
@@ -343,7 +359,7 @@ impl AgentSupervisor {
         cwd: Option<String>,
         mcp_servers: Vec<McpServer>,
         workspace_root: &str,
-        state: &Arc<TokioMutex<StateStore>>,
+        state: &StateHandle,
     ) -> Result<SessionAttachOutcome> {
         self.attach_session(
             session_id,
@@ -363,7 +379,7 @@ impl AgentSupervisor {
         cwd: Option<String>,
         mcp_servers: Vec<McpServer>,
         workspace_root: &str,
-        state: &Arc<TokioMutex<StateStore>>,
+        state: &StateHandle,
     ) -> Result<SessionAttachOutcome> {
         self.attach_session(
             session_id,
@@ -385,7 +401,7 @@ impl AgentSupervisor {
         cwd: Option<String>,
         mcp_servers: Vec<McpServer>,
         workspace_root: &str,
-        state: &Arc<TokioMutex<StateStore>>,
+        state: &StateHandle,
         kind: SessionAttachKind,
     ) -> Result<SessionAttachOutcome> {
         let bridge = self.bridge().await?;
@@ -411,34 +427,42 @@ impl AgentSupervisor {
                     .await?;
             }
         }
-        let guard = state.lock().await;
-        append_mcp_skipped_event(&guard, session_id, &skipped)?;
-        if explicit_cwd {
-            guard.update_session_status_and_cwd(
-                session_id,
-                SESSION_STATUS_ACTIVE,
-                &resolved_cwd,
-            )?;
-        } else {
-            guard.update_session_status(session_id, SESSION_STATUS_ACTIVE)?;
-        }
         let (event_kind, event_message) = match kind {
             SessionAttachKind::Load => ("session.loaded", "session loaded"),
             SessionAttachKind::Resume => ("session.resumed", "session resumed"),
         };
-        guard.append_session_event(
-            session_id,
-            "info",
-            event_kind,
-            event_message,
-            &json!({ "agent_session_id": record.agent_session_id, "cwd": resolved_cwd })
-                .to_string(),
-        )?;
-        let record = guard
-            .get_session(session_id)?
-            .ok_or_else(|| StackError::SessionNotFound {
-                id: session_id.to_owned(),
-            })?;
+        let session_id = session_id.to_owned();
+        // Only the status flip and its read-back propagate: once the agent attached the
+        // session, a failed audit write must not leave the row out of date.
+        let record = state
+            .write(move |store| {
+                if explicit_cwd {
+                    store.update_session_status_and_cwd(
+                        &session_id,
+                        SESSION_STATUS_ACTIVE,
+                        &resolved_cwd,
+                    )?;
+                } else {
+                    store.update_session_status(&session_id, SESSION_STATUS_ACTIVE)?;
+                }
+                if let Err(error) = append_mcp_skipped_event(store, &session_id, &skipped) {
+                    tracing::warn!(%error, session = %session_id, "mcp skipped event write failed");
+                }
+                if let Err(error) = store.append_session_event(
+                    &session_id,
+                    "info",
+                    event_kind,
+                    event_message,
+                    &json!({ "agent_session_id": record.agent_session_id, "cwd": resolved_cwd })
+                        .to_string(),
+                ) {
+                    tracing::warn!(%error, session = %session_id, event_kind, "session attach event write failed");
+                }
+                store
+                    .get_session(&session_id)?
+                    .ok_or_else(|| StackError::SessionNotFound { id: session_id })
+            })
+            .await?;
         Ok(SessionAttachOutcome {
             record,
             attached_mcp: accepted_names,
@@ -458,21 +482,26 @@ impl AgentSupervisor {
         &self,
         parent_session_id: &str,
         message_id: &str,
-        state: &Arc<TokioMutex<StateStore>>,
+        state: &StateHandle,
     ) -> Result<BreakpointFork> {
-        let (prompt, preceding) = {
-            let guard = state.lock().await;
-            let prompt = guard
-                .get_prompt_by_message_id(parent_session_id, message_id)?
-                .ok_or_else(|| StackError::InvalidParam {
-                    field: "message_id",
-                    reason: format!(
-                        "session `{parent_session_id}` has no prompt with message id `{message_id}`"
-                    ),
-                })?;
-            let preceding = guard.preceding_prompt(parent_session_id, &prompt.id)?;
-            (prompt, preceding)
-        };
+        let job_parent_session_id = parent_session_id.to_owned();
+        let job_message_id = message_id.to_owned();
+        let (prompt, preceding) = state
+            .read(move |store| {
+                let parent_session_id = job_parent_session_id;
+                let message_id = job_message_id;
+                let prompt = store
+                    .get_prompt_by_message_id(&parent_session_id, &message_id)?
+                    .ok_or_else(|| StackError::InvalidParam {
+                        field: "message_id",
+                        reason: format!(
+                            "session `{parent_session_id}` has no prompt with message id `{message_id}`"
+                        ),
+                    })?;
+                let preceding = store.preceding_prompt(&parent_session_id, &prompt.id)?;
+                Ok((prompt, preceding))
+            })
+            .await?;
         if !prompt.message_id_acknowledged {
             return Err(StackError::InvalidParam {
                 field: "message_id",
@@ -521,7 +550,7 @@ impl AgentSupervisor {
         mcp_servers: Vec<McpServer>,
         workspace_root: &str,
         message_id: Option<String>,
-        state: &Arc<TokioMutex<StateStore>>,
+        state: &StateHandle,
     ) -> Result<SessionAttachOutcome> {
         let bridge = self.bridge().await?;
         let parent = fetch_open_session(state, parent_session_id).await?;
@@ -540,8 +569,11 @@ impl AgentSupervisor {
                 )
             }
             None => {
-                let guard = state.lock().await;
-                (None, guard.newest_settled_prompt_id(parent_session_id)?)
+                let job_parent_session_id = parent_session_id.to_owned();
+                let held_through_prompt_id = state
+                    .read(move |store| store.newest_settled_prompt_id(&job_parent_session_id))
+                    .await?;
+                (None, held_through_prompt_id)
             }
         };
         let resolved_cwd = resolve_session_cwd(
@@ -583,46 +615,58 @@ impl AgentSupervisor {
             title: parent.title.clone(),
             metadata_json,
         };
-        let guard = state.lock().await;
-        let inserted = guard.insert_forked_session(
-            &parent.target_id,
-            child_agent_session_id.clone(),
-            record,
-            parent_session_id,
-            held_through_prompt_id.as_deref(),
-        )?;
-        let payload = json!({
-            "target_id": &parent.target_id,
-            "parent_session_id": parent_session_id,
-            "parent_agent_session_id": &parent_agent_session_id,
-            "child_session_id": &child_session_id,
-            "child_agent_session_id": &child_agent_session_id,
-            "strategy": "acp_native",
-            "message_id": &breakpoint_message_id,
-            "cwd": &inserted.cwd,
-        })
-        .to_string();
-        guard.append_session_event(
-            &inserted.id,
-            "info",
-            "session.forked",
-            "session forked",
-            &payload,
-        )?;
-        guard.append_session_event(
-            parent_session_id,
-            "info",
-            "session.fork.created_child",
-            "session fork child created",
-            &payload,
-        )?;
-        append_mcp_skipped_event(&guard, &inserted.id, &skipped)?;
-        let record =
-            guard
-                .get_session(&inserted.id)?
-                .ok_or_else(|| StackError::SessionNotFound {
-                    id: inserted.id.clone(),
-                })?;
+        let parent_target_id = parent.target_id.clone();
+        let parent_session_id = parent_session_id.to_owned();
+        // Only the child row insert and its read-back propagate: once the agent
+        // confirmed `session/fork`, a failed audit write must not drop the child row.
+        let record = state
+            .write(move |store| {
+                let inserted = store.insert_forked_session(
+                    &parent_target_id,
+                    child_agent_session_id.clone(),
+                    record,
+                    &parent_session_id,
+                    held_through_prompt_id.as_deref(),
+                )?;
+                let payload = json!({
+                    "target_id": &parent_target_id,
+                    "parent_session_id": &parent_session_id,
+                    "parent_agent_session_id": &parent_agent_session_id,
+                    "child_session_id": &child_session_id,
+                    "child_agent_session_id": &child_agent_session_id,
+                    "strategy": "acp_native",
+                    "message_id": &breakpoint_message_id,
+                    "cwd": &inserted.cwd,
+                })
+                .to_string();
+                if let Err(error) = store.append_session_event(
+                    &inserted.id,
+                    "info",
+                    "session.forked",
+                    "session forked",
+                    &payload,
+                ) {
+                    tracing::warn!(%error, session = %inserted.id, "session.forked event write failed");
+                }
+                if let Err(error) = store.append_session_event(
+                    &parent_session_id,
+                    "info",
+                    "session.fork.created_child",
+                    "session fork child created",
+                    &payload,
+                ) {
+                    tracing::warn!(%error, session = %parent_session_id, "session.fork.created_child event write failed");
+                }
+                if let Err(error) = append_mcp_skipped_event(store, &inserted.id, &skipped) {
+                    tracing::warn!(%error, session = %inserted.id, "mcp skipped event write failed");
+                }
+                store
+                    .get_session(&inserted.id)?
+                    .ok_or_else(|| StackError::SessionNotFound {
+                        id: inserted.id.clone(),
+                    })
+            })
+            .await?;
         Ok(SessionAttachOutcome {
             record,
             attached_mcp: accepted_names,
@@ -635,37 +679,39 @@ impl AgentSupervisor {
     pub async fn close_session(
         &self,
         session_id: &str,
-        state: &Arc<TokioMutex<StateStore>>,
+        state: &StateHandle,
     ) -> Result<SessionRecord> {
         let bridge = self.bridge().await?;
-        let agent_session_id = {
-            let guard = state.lock().await;
-            let record =
-                guard
-                    .get_session(session_id)?
-                    .ok_or_else(|| StackError::SessionNotFound {
-                        id: session_id.to_owned(),
-                    })?;
-            record.agent_session_id
-        };
+        let lookup_session_id = session_id.to_owned();
+        let record = state
+            .read(move |store| store.get_session(&lookup_session_id))
+            .await?
+            .ok_or_else(|| StackError::SessionNotFound {
+                id: session_id.to_owned(),
+            })?;
+        let agent_session_id = record.agent_session_id;
         bridge
             .close_session(AcpSessionId::new(agent_session_id.clone()))
             .await?;
         self.cancel_prompts_for_session(session_id).await;
-        let guard = state.lock().await;
-        guard.update_session_status(session_id, SESSION_STATUS_CLOSED)?;
-        guard.append_session_event(
-            session_id,
-            "info",
-            "session.closed",
-            "session closed",
-            &json!({ "agent_session_id": agent_session_id }).to_string(),
-        )?;
-        guard
-            .get_session(session_id)?
-            .ok_or_else(|| StackError::SessionNotFound {
-                id: session_id.to_owned(),
+        let session_id = session_id.to_owned();
+        state
+            .write(move |store| {
+                store.update_session_status(&session_id, SESSION_STATUS_CLOSED)?;
+                if let Err(error) = store.append_session_event(
+                    &session_id,
+                    "info",
+                    "session.closed",
+                    "session closed",
+                    &json!({ "agent_session_id": agent_session_id }).to_string(),
+                ) {
+                    tracing::warn!(%error, session = %session_id, "session.closed event write failed");
+                }
+                store
+                    .get_session(&session_id)?
+                    .ok_or_else(|| StackError::SessionNotFound { id: session_id })
             })
+            .await
     }
 
     /// `POST /v1/sessions/{id}/delete`. The agent confirms first, then the local row and its
@@ -673,16 +719,17 @@ impl AgentSupervisor {
     pub async fn delete_session(
         &self,
         session_id: &str,
-        state: &Arc<TokioMutex<StateStore>>,
+        state: &StateHandle,
         permissions: &PermissionService,
         permission_reason: &str,
     ) -> Result<Option<SessionRecord>> {
-        let agent_session_id = {
-            let guard = state.lock().await;
-            match guard.get_session(session_id)? {
-                Some(record) => record.agent_session_id,
-                None => return Ok(None),
-            }
+        let lookup_session_id = session_id.to_owned();
+        let agent_session_id = match state
+            .read(move |store| store.get_session(&lookup_session_id))
+            .await?
+        {
+            Some(record) => record.agent_session_id,
+            None => return Ok(None),
         };
         let bridge = self.bridge().await?;
         bridge
@@ -701,8 +748,10 @@ impl AgentSupervisor {
                 "failed to cancel pending ACP permissions before session delete"
             );
         }
-        let guard = state.lock().await;
-        guard.delete_session(session_id)
+        let session_id = session_id.to_owned();
+        state
+            .write(move |store| store.delete_session(&session_id))
+            .await
     }
 
     /// `POST /v1/sessions/{id}/config-options`. Forwards one `session/set_config_option` and
@@ -712,7 +761,7 @@ impl AgentSupervisor {
         session_id: &str,
         config_id: &str,
         value: SessionConfigOptionValue,
-        state: &Arc<TokioMutex<StateStore>>,
+        state: &StateHandle,
     ) -> Result<Vec<crate::runtime::agent::config_options::SessionConfigOptionSnapshot>> {
         let record = fetch_open_session(state, session_id).await?;
         let bridge = self.bridge().await?;
@@ -723,34 +772,44 @@ impl AgentSupervisor {
                 value,
             )
             .await?;
-        let guard = state.lock().await;
-        guard.append_session_event(
-            session_id,
-            "info",
-            "session.config_option_set",
-            "session config option set",
-            &json!({ "config_id": config_id }).to_string(),
-        )?;
         // Lax adapters return an empty list after a successful set and refresh via
         // `config_option_update` instead; that must not wipe the snapshot.
-        if response.config_options.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut snapshot =
-            crate::runtime::agent::config_options::project_config_options(&response.config_options);
-        snapshot.truncate(crate::state::MAX_SESSION_CONFIG_OPTIONS);
-        match serde_json::to_value(&snapshot) {
-            Ok(options_value) => {
-                if let Err(error) = guard.replace_session_config_options(session_id, options_value)
+        let snapshot = (!response.config_options.is_empty()).then(|| {
+            let mut snapshot = crate::runtime::agent::config_options::project_config_options(
+                &response.config_options,
+            );
+            snapshot.truncate(crate::state::MAX_SESSION_CONFIG_OPTIONS);
+            snapshot
+        });
+        let options_value = match snapshot.as_ref().map(serde_json::to_value) {
+            Some(Ok(options_value)) => Some(options_value),
+            Some(Err(error)) => {
+                tracing::warn!(%error, session = %session_id, "config-option snapshot serialize failed");
+                None
+            }
+            None => None,
+        };
+        let session_id = session_id.to_owned();
+        let event_payload = json!({ "config_id": config_id }).to_string();
+        state
+            .write(move |store| {
+                store.append_session_event(
+                    &session_id,
+                    "info",
+                    "session.config_option_set",
+                    "session config option set",
+                    &event_payload,
+                )?;
+                if let Some(options_value) = options_value
+                    && let Err(error) =
+                        store.replace_session_config_options(&session_id, options_value)
                 {
                     tracing::warn!(%error, session = %session_id, "config-option snapshot write failed");
                 }
-            }
-            Err(error) => {
-                tracing::warn!(%error, session = %session_id, "config-option snapshot serialize failed");
-            }
-        }
-        Ok(snapshot)
+                Ok(())
+            })
+            .await?;
+        Ok(snapshot.unwrap_or_default())
     }
 }
 
@@ -779,17 +838,14 @@ impl SessionAttachKind {
 }
 
 /// Fetch a session row and refuse closed ones, before any bridge call is made.
-async fn fetch_open_session(
-    state: &Arc<TokioMutex<StateStore>>,
-    session_id: &str,
-) -> Result<SessionRecord> {
-    let record = {
-        let guard = state.lock().await;
-        guard.get_session(session_id)?
-    }
-    .ok_or_else(|| StackError::SessionNotFound {
-        id: session_id.to_owned(),
-    })?;
+async fn fetch_open_session(state: &StateHandle, session_id: &str) -> Result<SessionRecord> {
+    let lookup_session_id = session_id.to_owned();
+    let record = state
+        .read(move |store| store.get_session(&lookup_session_id))
+        .await?
+        .ok_or_else(|| StackError::SessionNotFound {
+            id: session_id.to_owned(),
+        })?;
     reject_closed_session(&record)?;
     Ok(record)
 }

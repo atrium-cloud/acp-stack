@@ -76,8 +76,7 @@ async fn ws_connection(
         &state,
         "ws.client_connected",
         serde_json::json!({"connection_id": connection_id, "origin": origin}),
-    )
-    .await;
+    );
 
     let mut disconnect_reason = "client_disconnect";
     let mut operator_reason: Option<String> = None;
@@ -203,7 +202,7 @@ async fn ws_connection(
             serde_json::Value::String(operator_reason),
         );
     }
-    persist_ws_lifecycle_event(&state, "ws.client_disconnected", payload).await;
+    persist_ws_lifecycle_event(&state, "ws.client_disconnected", payload);
 }
 
 /// Monotonically-increasing connection identifier. Pairs the connect/disconnect
@@ -218,7 +217,7 @@ fn next_ws_connection_id() -> String {
     format!("ws_{nanos}_{seq}")
 }
 
-async fn persist_ws_lifecycle_event(state: &AppState, kind: &str, payload: serde_json::Value) {
+fn persist_ws_lifecycle_event(state: &AppState, kind: &'static str, payload: serde_json::Value) {
     let payload_text = match serde_json::to_string(&payload) {
         Ok(text) => text,
         Err(err) => {
@@ -226,16 +225,16 @@ async fn persist_ws_lifecycle_event(state: &AppState, kind: &str, payload: serde
             return;
         }
     };
-    let store = state.state.lock().await;
-    if let Err(err) = store.append_event_with_source(
-        "info",
-        kind,
-        crate::state::EVENT_SOURCE_API,
-        "",
-        &payload_text,
-    ) {
-        tracing::warn!(error = %crate::error::report(&err), kind, "failed to persist ws lifecycle event");
-    }
+    state.state.write_detached(kind, move |store| {
+        store.append_event_with_source(
+            "info",
+            kind,
+            crate::state::EVENT_SOURCE_API,
+            "",
+            &payload_text,
+        )?;
+        Ok(())
+    });
 }
 
 async fn handle_ws_client_message(subscribed_topics: &mut BTreeSet<String>, text: &str) {

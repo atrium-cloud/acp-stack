@@ -3,7 +3,6 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use acp_stack::api::{self, AppState, RuntimePaths};
 use acp_stack::auth::AuthVerifierSet;
@@ -11,12 +10,11 @@ use acp_stack::config::{Config, ExtensionConfig, ExtensionType, load_config_from
 use acp_stack::secrets::{
     CredentialSource, ProviderCredential, ProviderCredentialSet, SecretStore,
 };
-use acp_stack::state::{EventFilter, StateStore};
+use acp_stack::state::{EventFilter, StateHandle, StateStore};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
-use tokio::sync::Mutex as TokioMutex;
 use tokio::task::JoinHandle;
 
 const SESSION_KEY: &str = "acps_session_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -30,7 +28,7 @@ struct ServerHarness {
     client: reqwest::Client,
     join: JoinHandle<acp_stack::error::Result<()>>,
     _tempdir: TempDir,
-    state: Arc<TokioMutex<StateStore>>,
+    state: StateHandle,
 }
 
 impl ServerHarness {
@@ -63,7 +61,8 @@ impl ServerHarness {
             ADMIN_KEY.to_owned(),
             "127.0.0.1:7700".to_owned(),
             runtime_paths,
-        );
+        )
+        .expect("app state");
         let state = app_state.state.clone();
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let local = listener.local_addr().expect("local addr");
@@ -1003,13 +1002,16 @@ async fn audit_event_records_outcome_without_values() {
         .await;
     assert_eq!(response.status(), StatusCode::OK);
 
-    let store = harness.state.lock().await;
-    let events = store
-        .query_events(EventFilter {
-            kind: Some("server.extension_managed_state_applied"),
-            limit: 10,
-            ..Default::default()
+    let events = harness
+        .state
+        .read(|store| {
+            store.query_events(EventFilter {
+                kind: Some("server.extension_managed_state_applied"),
+                limit: 10,
+                ..Default::default()
+            })
         })
+        .await
         .expect("query events");
     assert_eq!(events.len(), 1);
     let payload = events[0].payload_json.as_str();

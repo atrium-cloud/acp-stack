@@ -44,9 +44,10 @@ pub(crate) async fn sessions_get_handler(
     Path(id): Path<String>,
     Query(params): Query<SessionsTargetParams>,
 ) -> std::result::Result<ApiSuccess<SessionResponse>, StackError> {
-    let store = state.state.lock().await;
-    let record = store.require_live_session(&id)?;
-    drop(store);
+    let record = state
+        .state
+        .read(move |store| store.require_live_session(&id))
+        .await?;
     if let Some(asserted) = params.target_id.as_deref()
         && asserted != record.target_id
     {
@@ -178,19 +179,30 @@ async fn persist_mcp_attached(
         "server_names": outcome.attached_mcp,
     });
     let payload_text = payload.to_string();
-    let store = state.state.lock().await;
-    if let Err(err) = store.append_session_event_with_source(
-        &session_id,
-        "info",
-        "mcp.session_attached",
-        crate::state::EVENT_SOURCE_API,
-        "mcp servers attached to session",
-        &payload_text,
-    ) {
-        tracing::warn!(error = %err, session_id, "failed to record mcp.session_attached event");
-        return;
-    }
-    match store.get_session(&session_id) {
+    let attached_session_id = session_id.clone();
+    // The inner result is the read-back, so a failed re-read keeps the appended event.
+    let appended = state
+        .state
+        .write(move |store| {
+            store.append_session_event_with_source(
+                &attached_session_id,
+                "info",
+                "mcp.session_attached",
+                crate::state::EVENT_SOURCE_API,
+                "mcp servers attached to session",
+                &payload_text,
+            )?;
+            Ok(store.get_session(&attached_session_id))
+        })
+        .await;
+    let reread = match appended {
+        Ok(reread) => reread,
+        Err(err) => {
+            tracing::warn!(error = %err, session_id, "failed to record mcp.session_attached event");
+            return;
+        }
+    };
+    match reread {
         Ok(Some(record)) => outcome.record = record,
         Ok(None) => {
             tracing::warn!(

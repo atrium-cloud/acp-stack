@@ -72,23 +72,23 @@ async fn get_runs(harness: &ServerHarness, query: &str, key: &str) -> (StatusCod
 #[tokio::test]
 async fn installer_runs_active_returns_only_running_rows_with_elapsed() {
     let harness = ServerHarness::spawn().await;
-    {
-        let guard = harness.state.lock().await;
-        guard
-            .append_installer_run(finished_input(
+    harness
+        .state
+        .write(|store| {
+            store.append_installer_run(finished_input(
                 "hermes-agent",
                 "2026-05-21T00:00:00.000000000Z",
                 "harness",
-            ))
-            .expect("finished row");
-        guard
-            .append_installer_run(running_input(
+            ))?;
+            store.append_installer_run(running_input(
                 "hermes-agent",
                 "2026-05-21T00:01:00.000000000Z",
                 "adapter",
-            ))
-            .expect("running row");
-    }
+            ))?;
+            Ok(())
+        })
+        .await
+        .expect("seed installer rows");
 
     let (status, body) = get_runs(&harness, "?active=true", SESSION_KEY).await;
     assert_eq!(status, StatusCode::OK);
@@ -113,23 +113,23 @@ async fn installer_runs_active_returns_only_running_rows_with_elapsed() {
 #[tokio::test]
 async fn installer_runs_lists_history_newest_first_without_elapsed() {
     let harness = ServerHarness::spawn().await;
-    {
-        let guard = harness.state.lock().await;
-        guard
-            .append_installer_run(finished_input(
+    harness
+        .state
+        .write(|store| {
+            store.append_installer_run(finished_input(
                 "hermes-agent",
                 "2026-05-21T00:00:00.000000000Z",
                 "harness",
-            ))
-            .expect("finished row");
-        guard
-            .append_installer_run(running_input(
+            ))?;
+            store.append_installer_run(running_input(
                 "hermes-agent",
                 "2026-05-21T00:01:00.000000000Z",
                 "adapter",
-            ))
-            .expect("running row");
-    }
+            ))?;
+            Ok(())
+        })
+        .await
+        .expect("seed installer rows");
 
     let (status, body) = get_runs(&harness, "", SESSION_KEY).await;
     assert_eq!(status, StatusCode::OK);
@@ -147,23 +147,23 @@ async fn installer_runs_lists_history_newest_first_without_elapsed() {
 #[tokio::test]
 async fn installer_runs_filters_by_agent() {
     let harness = ServerHarness::spawn().await;
-    {
-        let guard = harness.state.lock().await;
-        guard
-            .append_installer_run(running_input(
+    harness
+        .state
+        .write(|store| {
+            store.append_installer_run(running_input(
                 "hermes-agent",
                 "2026-05-21T00:01:00.000000000Z",
                 "harness",
-            ))
-            .expect("hermes row");
-        guard
-            .append_installer_run(running_input(
+            ))?;
+            store.append_installer_run(running_input(
                 "opencode",
                 "2026-05-21T00:02:00.000000000Z",
                 "install",
-            ))
-            .expect("opencode row");
-    }
+            ))?;
+            Ok(())
+        })
+        .await
+        .expect("seed installer rows");
 
     let (status, body) = get_runs(&harness, "?active=true&agent=hermes-agent", SESSION_KEY).await;
     assert_eq!(status, StatusCode::OK);
@@ -189,8 +189,8 @@ async fn installer_runs_is_session_tier() {
 #[tokio::test]
 async fn installer_runs_active_reads_rows_written_via_another_connection() {
     let harness = ServerHarness::spawn().await;
-    // Deps apply publishes progress while holding the daemon's shared store mutex for its whole
-    // run, so the endpoint must see the autocommit `running` row without waiting on that mutex.
+    // Deps apply records progress through its own connection, so the endpoint must see that
+    // connection's committed `running` row.
     let writer = StateStore::open(&harness.state_path).expect("second connection");
     writer
         .append_installer_run(running_input(

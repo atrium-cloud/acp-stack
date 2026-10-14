@@ -168,9 +168,10 @@ pub(crate) async fn metrics_summary_handler(
         since: format_rfc3339_nanos(since),
         until: format_rfc3339_nanos(until),
     };
-    let store = state.state.lock().await;
-    let summary = store.metrics_summary(window)?;
-    drop(store);
+    let summary = state
+        .state
+        .read(move |store| store.metrics_summary(window))
+        .await?;
     Ok(ApiSuccess::new(MetricsSummaryResponse::from(summary)))
 }
 

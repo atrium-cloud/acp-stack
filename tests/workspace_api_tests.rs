@@ -1,14 +1,12 @@
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use acp_stack::api::{self, AppState};
 use acp_stack::config::{Config, load_config_from_str};
-use acp_stack::state::StateStore;
+use acp_stack::state::{StateHandle, StateStore};
 use reqwest::StatusCode;
 use serde_json::Value;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
-use tokio::sync::Mutex as TokioMutex;
 use tokio::task::JoinHandle;
 
 const SESSION_KEY: &str = "acps_session_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -18,7 +16,7 @@ struct Harness {
     base_url: String,
     workspace_root: PathBuf,
     uploads_root: PathBuf,
-    _state: Arc<TokioMutex<StateStore>>,
+    _state: StateHandle,
     join: JoinHandle<acp_stack::error::Result<()>>,
     _workspace_tempdir: TempDir,
     _state_tempdir: TempDir,
@@ -45,7 +43,8 @@ impl Harness {
         let store = StateStore::open(&state_path).expect("state open");
         store.migrate().expect("migrate");
 
-        let app_state = AppState::new(config, store, SESSION_KEY.to_owned(), ADMIN_KEY.to_owned());
+        let app_state = AppState::new(config, store, SESSION_KEY.to_owned(), ADMIN_KEY.to_owned())
+            .expect("app state");
         let state = app_state.state.clone();
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let local = listener.local_addr().expect("local addr");

@@ -625,24 +625,29 @@ async fn delete_session_reports_unsupported_capability_and_keeps_the_row() {
     assert_eq!(get.status(), StatusCode::OK);
     // A delete the agent refused leaves the session's turn, and its pending
     // permission, untouched.
-    let store = harness.state.lock().await;
-    let permission = store
-        .get_permission_request(&permission_id)
+    let permission = harness
+        .state
+        .read(move |store| store.get_permission_request(&permission_id))
+        .await
         .expect("permission lookup")
         .expect("permission exists");
     assert_eq!(permission.status, "pending");
 }
 
 async fn append_pending_acp_permission(harness: &Harness, session_id: &str) -> String {
-    let store = harness.state.lock().await;
-    store
-        .append_permission_request(NewPermissionRequest {
-            source: "acp",
-            requester: None,
-            subject_id: Some(session_id),
-            detail_json: "{}",
-            expires_at: None,
+    let session_id = session_id.to_owned();
+    harness
+        .state
+        .write(move |store| {
+            store.append_permission_request(NewPermissionRequest {
+                source: "acp",
+                requester: None,
+                subject_id: Some(&session_id),
+                detail_json: "{}",
+                expires_at: None,
+            })
         })
+        .await
         .expect("pending permission")
         .id
 }
@@ -664,20 +669,22 @@ async fn deleting_a_session_settles_its_pending_permission_without_leaving_event
         .expect("delete");
     assert_eq!(delete.status(), StatusCode::OK);
 
-    let store = harness.state.lock().await;
-    let permission = store
-        .get_permission_request(&permission_id)
-        .expect("permission lookup")
-        .expect("the permission row outlives the session");
+    let (permission, events) = harness
+        .state
+        .read(move |store| {
+            let permission = store.get_permission_request(&permission_id)?;
+            let events = store.query_events(acp_stack::state::EventFilter {
+                limit: 100,
+                session_id: Some(&session_id),
+                ..acp_stack::state::EventFilter::default()
+            })?;
+            Ok((permission, events))
+        })
+        .await
+        .expect("permission lookup and session events");
+    let permission = permission.expect("the permission row outlives the session");
     assert_eq!(permission.status, "cancelled");
     // The cancellation's decision event landed in the log the delete removed.
-    let events = store
-        .query_events(acp_stack::state::EventFilter {
-            limit: 100,
-            session_id: Some(&session_id),
-            ..acp_stack::state::EventFilter::default()
-        })
-        .expect("session events");
     assert!(events.is_empty(), "{events:?}");
 }
 
@@ -700,11 +707,12 @@ async fn fork_session_records_parent_lineage() {
         .json()
         .await
         .expect("fork json");
-    let child_id = forked["data"]["id"].as_str().expect("child id");
+    let child_id = forked["data"]["id"].as_str().expect("child id").to_owned();
 
-    let state = harness.state.lock().await;
-    let child = state
-        .get_session(child_id)
+    let child = harness
+        .state
+        .read(move |store| store.get_session(&child_id))
+        .await
         .expect("child lookup")
         .expect("child exists");
     let metadata: Value = serde_json::from_str(&child.metadata_json).expect("metadata json");
@@ -727,22 +735,22 @@ async fn fork_session_forwards_message_breakpoint_to_placebo() {
     let client = http();
     let session_id = create_session(&harness).await;
 
-    {
-        let state = harness.state.lock().await;
-        state
-            .insert_prompt_with_message_id(
+    let seeded_session_id = session_id.clone();
+    harness
+        .state
+        .write(move |store| {
+            store.insert_prompt_with_message_id(
                 NewPromptRecord {
                     id: "prm_fork_breakpoint".to_owned(),
-                    session_id: session_id.clone(),
+                    session_id: seeded_session_id,
                     prompt_json: r#"[{"type":"text","text":"fork breakpoint"}]"#.to_owned(),
                 },
                 Some(BREAKPOINT_MESSAGE_ID.to_owned()),
-            )
-            .expect("prompt inserted");
-        state
-            .acknowledge_prompt_message_id("prm_fork_breakpoint", BREAKPOINT_MESSAGE_ID)
-            .expect("prompt message id acknowledged");
-    }
+            )?;
+            store.acknowledge_prompt_message_id("prm_fork_breakpoint", BREAKPOINT_MESSAGE_ID)
+        })
+        .await
+        .expect("prompt inserted and message id acknowledged");
 
     let forked: Value = client
         .post(format!(
@@ -757,11 +765,12 @@ async fn fork_session_forwards_message_breakpoint_to_placebo() {
         .json()
         .await
         .expect("fork json");
-    let child_id = forked["data"]["id"].as_str().expect("child id");
+    let child_id = forked["data"]["id"].as_str().expect("child id").to_owned();
 
-    let state = harness.state.lock().await;
-    let child = state
-        .get_session(child_id)
+    let child = harness
+        .state
+        .read(move |store| store.get_session(&child_id))
+        .await
         .expect("child lookup")
         .expect("child exists");
     let metadata: Value = serde_json::from_str(&child.metadata_json).expect("metadata json");
@@ -876,12 +885,18 @@ async fn a_head_fork_carries_the_parent_conversation_before_its_fork_marker() {
         conversation(&parent_events),
         "child = {child_events:#?}"
     );
-    let state = harness.state.lock().await;
-    for message_id in [&first_message_id, &second_message_id] {
-        let inherited = state
-            .get_prompt_by_message_id(&child_id, message_id)
-            .expect("child prompt lookup")
-            .expect("the child holds the parent's prompt");
+    let inherited_prompts = harness
+        .state
+        .read(move |store| {
+            [first_message_id, second_message_id]
+                .iter()
+                .map(|message_id| store.get_prompt_by_message_id(&child_id, message_id))
+                .collect::<acp_stack::error::Result<Vec<_>>>()
+        })
+        .await
+        .expect("child prompt lookup");
+    for inherited in inherited_prompts {
+        let inherited = inherited.expect("the child holds the parent's prompt");
         assert!(inherited.message_id_acknowledged);
         assert_eq!(inherited.status, "completed");
     }
@@ -908,19 +923,22 @@ async fn a_breakpoint_fork_carries_the_parent_conversation_strictly_before_the_n
         expected,
         "child = {child_events:#?}"
     );
-    let state = harness.state.lock().await;
-    assert!(
-        state
-            .get_prompt_by_message_id(&child_id, &first_message_id)
-            .expect("child prompt lookup")
-            .is_some()
-    );
-    for message_id in [&second_message_id, &third_message_id] {
+    let (first_inherited, later_inherited) = harness
+        .state
+        .read(move |store| {
+            let first_inherited = store.get_prompt_by_message_id(&child_id, &first_message_id)?;
+            let later_inherited = [second_message_id, third_message_id]
+                .iter()
+                .map(|message_id| store.get_prompt_by_message_id(&child_id, message_id))
+                .collect::<acp_stack::error::Result<Vec<_>>>()?;
+            Ok((first_inherited, later_inherited))
+        })
+        .await
+        .expect("child prompt lookup");
+    assert!(first_inherited.is_some());
+    for inherited in later_inherited {
         assert!(
-            state
-                .get_prompt_by_message_id(&child_id, message_id)
-                .expect("child prompt lookup")
-                .is_none(),
+            inherited.is_none(),
             "the named prompt and everything after it stay with the parent"
         );
     }
@@ -940,15 +958,21 @@ async fn a_fork_of_a_fork_resolves_inherited_prompts_ahead_of_its_own() {
         submit_and_settle_ids(&harness, &child_id, "third turn").await;
     let child_events = log_after_turns(&harness, &child_id, 3).await;
     {
-        let state = harness.state.lock().await;
-        let second_inherited = state
-            .get_prompt_by_message_id(&child_id, &second_message_id)
-            .expect("child prompt lookup")
-            .expect("second prompt inherited");
-        let preceding = state
-            .preceding_prompt(&child_id, &third_prompt_id)
-            .expect("preceding lookup")
-            .expect("an inherited prompt precedes the child's own");
+        let child_id = child_id.clone();
+        let second_message_id = second_message_id.clone();
+        let third_prompt_id = third_prompt_id.clone();
+        let (second_inherited, preceding) = harness
+            .state
+            .read(move |store| {
+                let second_inherited =
+                    store.get_prompt_by_message_id(&child_id, &second_message_id)?;
+                let preceding = store.preceding_prompt(&child_id, &third_prompt_id)?;
+                Ok((second_inherited, preceding))
+            })
+            .await
+            .expect("child prompt and preceding lookup");
+        let second_inherited = second_inherited.expect("second prompt inherited");
+        let preceding = preceding.expect("an inherited prompt precedes the child's own");
         assert_eq!(preceding.id, second_inherited.id);
     }
 
@@ -960,21 +984,19 @@ async fn a_fork_of_a_fork_resolves_inherited_prompts_ahead_of_its_own() {
         inherited_rows(&session_events(&harness, &at_inherited).await),
         conversation(&parent_events[..cut])
     );
-    {
-        let state = harness.state.lock().await;
-        assert!(
-            state
-                .get_prompt_by_message_id(&at_inherited, &first_message_id)
-                .expect("prompt lookup")
-                .is_some()
-        );
-        assert!(
-            state
-                .get_prompt_by_message_id(&at_inherited, &second_message_id)
-                .expect("prompt lookup")
-                .is_none()
-        );
-    }
+    let (first_inherited, second_inherited) = harness
+        .state
+        .read(move |store| {
+            let first_inherited =
+                store.get_prompt_by_message_id(&at_inherited, &first_message_id)?;
+            let second_inherited =
+                store.get_prompt_by_message_id(&at_inherited, &second_message_id)?;
+            Ok((first_inherited, second_inherited))
+        })
+        .await
+        .expect("prompt lookup");
+    assert!(first_inherited.is_some());
+    assert!(second_inherited.is_none());
 
     // A breakpoint at the child's own prompt holds every inherited turn.
     let at_own = fork_at(&harness, &child_id, Some(&third_message_id)).await;
@@ -1097,18 +1119,21 @@ async fn fork_at_an_air_adapter_names_the_preceding_turns_anchor() {
     let (second_prompt_id, second_message_id) =
         submit_and_settle_ids(&harness, &session_id, "second turn").await;
     {
-        let state = harness.state.lock().await;
-        let first = state
-            .get_prompt_by_message_id(&session_id, &first_message_id)
-            .expect("first prompt lookup")
-            .expect("first prompt exists");
+        let session_id = session_id.clone();
+        let (first, preceding) = harness
+            .state
+            .read(move |store| {
+                let first = store.get_prompt_by_message_id(&session_id, &first_message_id)?;
+                let preceding = store.preceding_prompt(&session_id, &second_prompt_id)?;
+                Ok((first, preceding))
+            })
+            .await
+            .expect("first prompt and preceding lookup");
+        let first = first.expect("first prompt exists");
         // The adapter never echoes the acpStack key, so a settled turn is the
         // acknowledgement on this dialect.
         assert!(first.message_id_acknowledged);
-        let preceding = state
-            .preceding_prompt(&session_id, &second_prompt_id)
-            .expect("preceding lookup")
-            .expect("the first turn precedes the second");
+        let preceding = preceding.expect("the first turn precedes the second");
         assert_eq!(preceding.id, first.id);
         assert_eq!(preceding.agent_message_id.as_deref(), Some(TURN_ANCHOR));
     }
@@ -1128,11 +1153,12 @@ async fn fork_at_an_air_adapter_names_the_preceding_turns_anchor() {
         .expect("fork");
     assert_eq!(response.status(), StatusCode::OK);
     let forked: Value = response.json().await.expect("fork json");
-    let child_id = forked["data"]["id"].as_str().expect("child id");
+    let child_id = forked["data"]["id"].as_str().expect("child id").to_owned();
 
-    let state = harness.state.lock().await;
-    let child = state
-        .get_session(child_id)
+    let child = harness
+        .state
+        .read(move |store| store.get_session(&child_id))
+        .await
         .expect("child lookup")
         .expect("child exists");
     let metadata: Value = serde_json::from_str(&child.metadata_json).expect("metadata json");
@@ -1165,11 +1191,12 @@ async fn a_failed_turn_records_no_anchor() {
         .to_owned();
     await_prompt_status(&harness, &session_id, &prompt_id, "errored").await;
 
-    let state = harness.state.lock().await;
     // Any id that sorts after the failed prompt's id makes it the preceding row.
     let later_prompt_id = format!("{prompt_id}~");
-    let preceding = state
-        .preceding_prompt(&session_id, &later_prompt_id)
+    let preceding = harness
+        .state
+        .read(move |store| store.preceding_prompt(&session_id, &later_prompt_id))
+        .await
         .expect("preceding lookup")
         .expect("the failed prompt exists");
     assert_eq!(preceding.id, prompt_id);
@@ -1195,22 +1222,22 @@ async fn fork_at_the_first_prompt_is_refused_for_an_air_adapter() {
     let client = http();
     let session_id = create_session(&harness).await;
 
-    {
-        let state = harness.state.lock().await;
-        state
-            .insert_prompt_with_message_id(
+    let seeded_session_id = session_id.clone();
+    harness
+        .state
+        .write(move |store| {
+            store.insert_prompt_with_message_id(
                 NewPromptRecord {
                     id: "prm_air_only".to_owned(),
-                    session_id: session_id.clone(),
+                    session_id: seeded_session_id,
                     prompt_json: r#"[{"type":"text","text":"first turn"}]"#.to_owned(),
                 },
                 Some(FIRST_MESSAGE_ID.to_owned()),
-            )
-            .expect("prompt inserted");
-        state
-            .acknowledge_prompt_message_id("prm_air_only", FIRST_MESSAGE_ID)
-            .expect("prompt acknowledged");
-    }
+            )?;
+            store.acknowledge_prompt_message_id("prm_air_only", FIRST_MESSAGE_ID)
+        })
+        .await
+        .expect("prompt inserted and acknowledged");
 
     let response = client
         .post(format!(
@@ -1555,18 +1582,18 @@ async fn close_session_on_secondary_target_survives_array_off() {
 async fn stored_session_cwd_must_remain_under_workspace_for_reuse() {
     let harness = Harness::spawn().await;
     let outside = tempfile::tempdir().expect("outside");
-    {
-        let state = harness.state.lock().await;
-        state
-            .insert_session(NewSessionRecord {
-                id: "sess_bad_cwd".to_owned(),
-                agent_id: "placebo".to_owned(),
-                cwd: outside.path().to_string_lossy().into_owned(),
-                title: None,
-                metadata_json: "{}".to_owned(),
-            })
-            .expect("session inserted");
-    }
+    let record = NewSessionRecord {
+        id: "sess_bad_cwd".to_owned(),
+        agent_id: "placebo".to_owned(),
+        cwd: outside.path().to_string_lossy().into_owned(),
+        title: None,
+        metadata_json: "{}".to_owned(),
+    };
+    harness
+        .state
+        .write(move |store| store.insert_session(record))
+        .await
+        .expect("session inserted");
 
     let response = http()
         .post(format!(
@@ -1588,18 +1615,18 @@ async fn stored_inner_cwd_is_valid_for_load_resume_and_fork() {
     let harness = Harness::spawn().await;
     let inner = harness.workspace_root.join("stored-inner");
     std::fs::create_dir(&inner).expect("inner dir");
-    {
-        let state = harness.state.lock().await;
-        state
-            .insert_session(NewSessionRecord {
-                id: "sess_valid_cwd".to_owned(),
-                agent_id: "placebo".to_owned(),
-                cwd: inner.to_string_lossy().into_owned(),
-                title: None,
-                metadata_json: "{}".to_owned(),
-            })
-            .expect("session inserted");
-    }
+    let record = NewSessionRecord {
+        id: "sess_valid_cwd".to_owned(),
+        agent_id: "placebo".to_owned(),
+        cwd: inner.to_string_lossy().into_owned(),
+        title: None,
+        metadata_json: "{}".to_owned(),
+    };
+    harness
+        .state
+        .write(move |store| store.insert_session(record))
+        .await
+        .expect("session inserted");
 
     let client = http();
     for route in ["load", "resume", "fork"] {
@@ -1665,9 +1692,10 @@ async fn explicit_load_and_resume_cwd_is_persisted_after_agent_success() {
         canonical_resume.to_string_lossy().as_ref()
     );
 
-    let state = harness.state.lock().await;
-    let stored = state
-        .get_session(&session_id)
+    let stored = harness
+        .state
+        .read(move |store| store.get_session(&session_id))
+        .await
         .expect("session lookup")
         .expect("session exists");
     assert_eq!(stored.cwd, canonical_resume.to_string_lossy());
@@ -1679,18 +1707,18 @@ async fn stored_session_cwd_symlink_escape_is_rejected_before_reuse() {
     let harness = Harness::spawn().await;
     let inner = harness.workspace_root.join("stored-cwd");
     std::fs::create_dir(&inner).expect("inner dir");
-    {
-        let state = harness.state.lock().await;
-        state
-            .insert_session(NewSessionRecord {
-                id: "sess_changed_cwd".to_owned(),
-                agent_id: "placebo".to_owned(),
-                cwd: inner.to_string_lossy().into_owned(),
-                title: None,
-                metadata_json: "{}".to_owned(),
-            })
-            .expect("session inserted");
-    }
+    let record = NewSessionRecord {
+        id: "sess_changed_cwd".to_owned(),
+        agent_id: "placebo".to_owned(),
+        cwd: inner.to_string_lossy().into_owned(),
+        title: None,
+        metadata_json: "{}".to_owned(),
+    };
+    harness
+        .state
+        .write(move |store| store.insert_session(record))
+        .await
+        .expect("session inserted");
     std::fs::remove_dir(&inner).expect("remove inner");
     let outside = tempfile::tempdir().expect("outside");
     std::os::unix::fs::symlink(outside.path(), &inner).expect("replace with symlink");
@@ -1742,12 +1770,11 @@ async fn no_mcp_advertisement_skips_every_server_including_stdio() {
 
     let session_id = create_session(&harness).await;
 
-    let events = {
-        let store = harness.state.lock().await;
-        store
-            .query_session_events(&session_id, None, 50)
-            .expect("session events")
-    };
+    let events = harness
+        .state
+        .read(move |store| store.query_session_events(&session_id, None, 50))
+        .await
+        .expect("session events");
     assert!(
         events
             .iter()
@@ -1797,12 +1824,11 @@ async fn attached_mcp_event_lists_servers_for_an_mcp_capable_agent() {
         .expect("session id")
         .to_owned();
 
-    let events = {
-        let store = harness.state.lock().await;
-        store
-            .query_session_events(&session_id, None, 50)
-            .expect("session events")
-    };
+    let events = harness
+        .state
+        .read(move |store| store.query_session_events(&session_id, None, 50))
+        .await
+        .expect("session events");
     let attached: Vec<_> = events
         .iter()
         .filter(|event| event.kind == "mcp.session_attached")
@@ -1919,12 +1945,12 @@ async fn unadvertised_mode_model_and_effort_are_ignored_not_fatal() {
     assert_eq!(ignored[2]["value"], "high");
 
     let session_id = body["data"]["id"].as_str().expect("session id").to_owned();
-    let events = {
-        let store = harness.state.lock().await;
-        store
-            .query_session_events(&session_id, None, 50)
-            .expect("session events")
-    };
+    let events_session_id = session_id.clone();
+    let events = harness
+        .state
+        .read(move |store| store.query_session_events(&events_session_id, None, 50))
+        .await
+        .expect("session events");
     let capability_events: Vec<_> = events
         .iter()
         .filter(|event| event.kind == "session.capability_ignored")
@@ -2196,12 +2222,11 @@ async fn advertised_current_model_yields_no_ignore_records() {
     );
 
     let session_id = body["data"]["id"].as_str().expect("session id").to_owned();
-    let events = {
-        let store = harness.state.lock().await;
-        store
-            .query_session_events(&session_id, None, 50)
-            .expect("session events")
-    };
+    let events = harness
+        .state
+        .read(move |store| store.query_session_events(&session_id, None, 50))
+        .await
+        .expect("session events");
     assert!(
         events
             .iter()

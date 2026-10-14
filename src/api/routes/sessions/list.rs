@@ -62,18 +62,22 @@ pub(crate) async fn sessions_list_handler(
             &state.state,
         )
         .await?;
-    let store = state.state.lock().await;
-    let bounds = store.session_update_bounds()?;
-    let (since, until) = resolve_session_list_bounds(&params, bounds.as_ref(), now)?;
-    let sessions = store.query_sessions(crate::state::SessionFilter {
-        limit,
-        since: since.as_deref(),
-        until: until.as_deref(),
-        target_id: Some(&target.target_id),
-        ..Default::default()
-    })?;
-    let feed_epoch = store.feed_epoch().to_owned();
-    drop(store);
+    let list_target_id = target.target_id.clone();
+    let sessions = state
+        .state
+        .read(move |store| {
+            let bounds = store.session_update_bounds()?;
+            let (since, until) = resolve_session_list_bounds(&params, bounds.as_ref(), now)?;
+            store.query_sessions(crate::state::SessionFilter {
+                limit,
+                since: since.as_deref(),
+                until: until.as_deref(),
+                target_id: Some(&list_target_id),
+                ..Default::default()
+            })
+        })
+        .await?;
+    let feed_epoch = state.state.feed_epoch().to_owned();
     Ok(ApiSuccess::new(SessionsListResponse {
         sessions: sessions.into_iter().map(SessionResponse::from).collect(),
         agent_sync: agent_sync.into(),
@@ -123,9 +127,11 @@ pub(crate) async fn sessions_change_feed_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<SessionsChangeFeedResponse>, StackError> {
     let limit = params.limit.clamp(MIN_CHANGE_FEED_LIMIT, MAX_LOGS_LIMIT);
-    let store = state.state.lock().await;
-    let page = store.query_session_changes(params.after, limit)?;
-    drop(store);
+    let after = params.after;
+    let page = state
+        .state
+        .read(move |store| store.query_session_changes(after, limit))
+        .await?;
     Ok(ApiSuccess::new(SessionsChangeFeedResponse {
         changes: page
             .changes

@@ -21,25 +21,23 @@ impl AgentSupervisor {
         prompt_json: String,
         open_mcp_servers: impl FnOnce() -> Result<Vec<McpServer>>,
         workspace_root: &str,
-        state: &Arc<TokioMutex<StateStore>>,
+        state: &StateHandle,
     ) -> Result<PromptRecord> {
         let _dispatch_guard = self.dispatch_gate.lock().await;
         let bridge = self.bridge().await?;
-        let agent_session_id = {
-            let guard = state.lock().await;
-            let session =
-                guard
-                    .get_session(session_id)?
-                    .ok_or_else(|| StackError::SessionNotFound {
-                        id: session_id.to_owned(),
-                    })?;
-            if session.status == SESSION_STATUS_CLOSED {
-                return Err(StackError::SessionClosed {
-                    id: session_id.to_owned(),
-                });
-            }
-            session.agent_session_id
-        };
+        let lookup_session_id = session_id.to_owned();
+        let session = state
+            .read(move |store| store.get_session(&lookup_session_id))
+            .await?
+            .ok_or_else(|| StackError::SessionNotFound {
+                id: session_id.to_owned(),
+            })?;
+        if session.status == SESSION_STATUS_CLOSED {
+            return Err(StackError::SessionClosed {
+                id: session_id.to_owned(),
+            });
+        }
+        let agent_session_id = session.agent_session_id;
         // One ACP session drives one turn at a time: a second prompt would
         // race the live one on the same agent session, and its `session/cancel`
         // would be ambiguous. Reap first so a finished-but-unreaped task does
@@ -63,8 +61,12 @@ impl AgentSupervisor {
             // Written unconditionally so `updated_at` records this submission
             // and an aged-but-active session cannot be swept between this gate
             // and the prompt insert below.
-            let guard = state.lock().await;
-            guard.update_session_status(session_id, SESSION_STATUS_ACTIVE)?;
+            let active_session_id = session_id.to_owned();
+            state
+                .write(move |store| {
+                    store.update_session_status(&active_session_id, SESSION_STATUS_ACTIVE)
+                })
+                .await?;
         } else {
             self.reattach_for_prompt(session_id, &bridge, open_mcp_servers, workspace_root, state)
                 .await?;
@@ -78,27 +80,34 @@ impl AgentSupervisor {
         bridge.take_last_agent_message_id(&agent_session_id).await;
         let prompt_id = next_prompt_id();
         let message_id = next_prompt_message_id();
-        let record = {
-            let guard = state.lock().await;
-            let record = guard.insert_prompt_with_message_id(
-                NewPromptRecord {
-                    id: prompt_id.clone(),
-                    session_id: session_id.to_owned(),
-                    prompt_json,
-                },
-                Some(message_id.clone()),
-            )?;
-            // Written before the ACP request is dispatched, so the user's turn
-            // always precedes that turn's agent output in the event log.
-            append_user_prompt_events(
-                &guard,
-                session_id,
-                &agent_session_id,
-                &message_id,
-                &prompt_id,
-                &prompt_blocks,
-            );
-            record
+        let (record, prompt_blocks) = {
+            let session_id = session_id.to_owned();
+            let agent_session_id = agent_session_id.clone();
+            let prompt_id = prompt_id.clone();
+            let message_id = message_id.clone();
+            state
+                .write(move |store| {
+                    let record = store.insert_prompt_with_message_id(
+                        NewPromptRecord {
+                            id: prompt_id.clone(),
+                            session_id: session_id.clone(),
+                            prompt_json,
+                        },
+                        Some(message_id.clone()),
+                    )?;
+                    // Written before the ACP request is dispatched, so the user's turn
+                    // always precedes that turn's agent output in the event log.
+                    append_user_prompt_events(
+                        store,
+                        &session_id,
+                        &agent_session_id,
+                        &message_id,
+                        &prompt_id,
+                        &prompt_blocks,
+                    );
+                    Ok((record, prompt_blocks))
+                })
+                .await?
         };
 
         let cancel = CancellationToken::new();
@@ -115,19 +124,22 @@ impl AgentSupervisor {
         let join = tokio::spawn(async move {
             // A failed `pending -> running` flip is survivable: the row stays
             // `pending` and settle still writes the terminal status.
+            let running_prompt_id = prompt_id_owned.clone();
+            if let Err(err) = state_clone
+                .write(move |store| {
+                    store.update_prompt_status(
+                        &running_prompt_id,
+                        PromptStatus::Running,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                })
+                .await
             {
-                let guard = state_clone.lock().await;
-                if let Err(err) = guard.update_prompt_status(
-                    &prompt_id_owned,
-                    PromptStatus::Running,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                ) {
-                    tracing::warn!(error = %crate::error::report(&err), prompt_id = %prompt_id_owned, "failed to mark prompt running");
-                }
+                tracing::warn!(error = %crate::error::report(&err), prompt_id = %prompt_id_owned, "failed to mark prompt running");
             }
 
             let bridge_call = bridge.prompt_session(acp_request);
@@ -147,9 +159,16 @@ impl AgentSupervisor {
                     ForkPointDialect::JetbrainsAir => true,
                 };
                 if acknowledged {
-                    let guard = state_clone.lock().await;
-                    if let Err(err) =
-                        guard.acknowledge_prompt_message_id(&prompt_id_owned, &message_id_owned)
+                    let acknowledged_prompt_id = prompt_id_owned.clone();
+                    let acknowledged_message_id = message_id_owned.clone();
+                    if let Err(err) = state_clone
+                        .write(move |store| {
+                            store.acknowledge_prompt_message_id(
+                                &acknowledged_prompt_id,
+                                &acknowledged_message_id,
+                            )
+                        })
+                        .await
                     {
                         tracing::warn!(
                             error = %crate::error::report(&err),
@@ -166,9 +185,15 @@ impl AgentSupervisor {
                     .take_last_agent_message_id(&agent_session_id_owned)
                     .await
                 {
-                    let guard = state_clone.lock().await;
-                    if let Err(err) =
-                        guard.record_prompt_agent_message_id(&prompt_id_owned, &agent_message_id)
+                    let anchored_prompt_id = prompt_id_owned.clone();
+                    if let Err(err) = state_clone
+                        .write(move |store| {
+                            store.record_prompt_agent_message_id(
+                                &anchored_prompt_id,
+                                &agent_message_id,
+                            )
+                        })
+                        .await
                     {
                         tracing::warn!(
                             error = %crate::error::report(&err),
@@ -190,55 +215,58 @@ impl AgentSupervisor {
             let replaces_stall = outcome.replaces_stall();
             let terminal = build_terminal_outcome_with_prompt_id(outcome, Some(&prompt_id_owned));
 
-            {
-                let guard = state_clone.lock().await;
-                let settle = match guard.settle_prompt(
-                    &prompt_id_owned,
-                    &terminal.settlement(),
-                    replaces_stall,
-                ) {
-                    Ok(settle) => settle,
-                    Err(err) => {
-                        tracing::warn!(
-                            error = %crate::error::report(&err),
-                            prompt_id = %prompt_id_owned,
-                            "failed to record terminal prompt status"
-                        );
-                        return;
+            // The settle and its session events share one job; a failed event is logged
+            // and leaves the terminal row in place.
+            let settled_prompt_id = prompt_id_owned.clone();
+            let settled = state_clone
+                .write(move |store| {
+                    let prompt_id_owned = settled_prompt_id;
+                    let settle = store.settle_prompt(
+                        &prompt_id_owned,
+                        &terminal.settlement(),
+                        replaces_stall,
+                    )?;
+                    let stall_resolved = match settle {
+                        PromptSettle::Applied => None,
+                        PromptSettle::ReplacedStall => {
+                            Some(terminal.stall_resolved_event(&prompt_id_owned))
+                        }
+                        PromptSettle::AlreadyTerminal => {
+                            tracing::warn!(
+                                prompt_id = %prompt_id_owned,
+                                terminal_status = %terminal.status.as_str(),
+                                "skipping terminal prompt event because prompt row was already terminal"
+                            );
+                            return Ok(());
+                        }
+                    };
+                    for event in stall_resolved.iter().chain(terminal.session_event.as_ref()) {
+                        if let Err(err) = store.append_session_event_with_source(
+                            &session_id_owned,
+                            event.level,
+                            event.kind,
+                            event.source,
+                            event.message,
+                            &event.payload_json,
+                        ) {
+                            tracing::warn!(
+                                error = %crate::error::report(&err),
+                                prompt_id = %prompt_id_owned,
+                                session_id = %session_id_owned,
+                                event_kind = event.kind,
+                                "failed to record terminal prompt session event"
+                            );
+                        }
                     }
-                };
-                let stall_resolved = match settle {
-                    PromptSettle::Applied => None,
-                    PromptSettle::ReplacedStall => {
-                        Some(terminal.stall_resolved_event(&prompt_id_owned))
-                    }
-                    PromptSettle::AlreadyTerminal => {
-                        tracing::warn!(
-                            prompt_id = %prompt_id_owned,
-                            terminal_status = %terminal.status.as_str(),
-                            "skipping terminal prompt event because prompt row was already terminal"
-                        );
-                        return;
-                    }
-                };
-                for event in stall_resolved.iter().chain(terminal.session_event.as_ref()) {
-                    if let Err(err) = guard.append_session_event_with_source(
-                        &session_id_owned,
-                        event.level,
-                        event.kind,
-                        event.source,
-                        event.message,
-                        &event.payload_json,
-                    ) {
-                        tracing::warn!(
-                            error = %crate::error::report(&err),
-                            prompt_id = %prompt_id_owned,
-                            session_id = %session_id_owned,
-                            event_kind = event.kind,
-                            "failed to record terminal prompt session event"
-                        );
-                    }
-                }
+                    Ok(())
+                })
+                .await;
+            if let Err(err) = settled {
+                tracing::warn!(
+                    error = %crate::error::report(&err),
+                    prompt_id = %prompt_id_owned,
+                    "failed to record terminal prompt status"
+                );
             }
         });
 
@@ -265,7 +293,7 @@ impl AgentSupervisor {
         bridge: &AcpBridge,
         open_mcp_servers: impl FnOnce() -> Result<Vec<McpServer>>,
         workspace_root: &str,
-        state: &Arc<TokioMutex<StateStore>>,
+        state: &StateHandle,
     ) -> Result<()> {
         let kind = if bridge.capabilities().supports_resume_session() {
             SessionAttachKind::Resume
@@ -299,7 +327,7 @@ impl AgentSupervisor {
     pub async fn cancel_session(
         &self,
         session_id: &str,
-        state: &Arc<TokioMutex<StateStore>>,
+        state: &StateHandle,
         permissions: &PermissionService,
     ) -> Result<()> {
         // Held only across collect-and-send: a prompt submitted concurrently either
@@ -310,16 +338,14 @@ impl AgentSupervisor {
         // as non-terminal and is refused by the in-flight guard, not by this gate.
         let dispatch_guard = self.dispatch_gate.lock().await;
         let bridge = self.bridge().await?;
-        let agent_session_id = {
-            let guard = state.lock().await;
-            let record =
-                guard
-                    .get_session(session_id)?
-                    .ok_or_else(|| StackError::SessionNotFound {
-                        id: session_id.to_owned(),
-                    })?;
-            record.agent_session_id
-        };
+        let lookup_session_id = session_id.to_owned();
+        let agent_session_id = state
+            .read(move |store| store.get_session(&lookup_session_id))
+            .await?
+            .ok_or_else(|| StackError::SessionNotFound {
+                id: session_id.to_owned(),
+            })?
+            .agent_session_id;
         let live_prompts = self.live_prompts_for_session(session_id, state).await?;
         bridge
             .cancel_session(AcpSessionId::new(agent_session_id.clone()))
@@ -348,15 +374,19 @@ impl AgentSupervisor {
         }
         self.forget_prompts(&live_prompts).await;
 
-        let guard = state.lock().await;
-        guard.append_session_event(
-            session_id,
-            "info",
-            EVENT_KIND_SESSION_CANCEL_REQUESTED,
-            "cancel requested",
-            &json!({ "agent_session_id": agent_session_id }).to_string(),
-        )?;
-        Ok(())
+        let session_id = session_id.to_owned();
+        state
+            .write(move |store| {
+                store.append_session_event(
+                    &session_id,
+                    "info",
+                    EVENT_KIND_SESSION_CANCEL_REQUESTED,
+                    "cancel requested",
+                    &json!({ "agent_session_id": agent_session_id }).to_string(),
+                )?;
+                Ok(())
+            })
+            .await
     }
 
     /// Prompts for `session_id` this process is still driving: their task has
@@ -368,25 +398,28 @@ impl AgentSupervisor {
     async fn live_prompts_for_session(
         &self,
         session_id: &str,
-        state: &Arc<TokioMutex<StateStore>>,
+        state: &StateHandle,
     ) -> Result<Vec<String>> {
         let registered = self.registered_prompts_for_session(session_id).await;
         if registered.is_empty() {
             return Ok(Vec::new());
         }
-        let guard = state.lock().await;
-        let mut live = Vec::with_capacity(registered.len());
-        for prompt_id in registered {
-            // A row deleted underneath us belongs to a session teardown, not to
-            // a turn anything still has to wait for.
-            let Some(record) = guard.get_prompt(&prompt_id)? else {
-                continue;
-            };
-            if !record.status.parse::<PromptStatus>()?.terminal() {
-                live.push(prompt_id);
-            }
-        }
-        Ok(live)
+        state
+            .read(move |store| {
+                let mut live = Vec::with_capacity(registered.len());
+                for prompt_id in registered {
+                    // A row deleted underneath us belongs to a session teardown, not to
+                    // a turn anything still has to wait for.
+                    let Some(record) = store.get_prompt(&prompt_id)? else {
+                        continue;
+                    };
+                    if !record.status.parse::<PromptStatus>()?.terminal() {
+                        live.push(prompt_id);
+                    }
+                }
+                Ok(live)
+            })
+            .await
     }
 
     /// Prompt ids for `session_id` whose background task has not finished.
@@ -400,9 +433,8 @@ impl AgentSupervisor {
     }
 
     /// Poll each prompt row until it is terminal or the budget expires. `None`
-    /// marks a prompt that never settled. The state mutex is taken per pass and
-    /// released across the sleep so the prompt task can write its own terminal
-    /// row while we wait for it.
+    /// marks a prompt that never settled. Each pass is one read job, so the
+    /// prompt task's own terminal write is visible on the next pass once committed.
     ///
     /// Every pass first answers the session's outstanding
     /// `session/request_permission` calls with the `cancelled` outcome, which
@@ -415,7 +447,7 @@ impl AgentSupervisor {
         &self,
         session_id: &str,
         prompt_ids: &[String],
-        state: &Arc<TokioMutex<StateStore>>,
+        state: &StateHandle,
         permissions: &PermissionService,
     ) -> Result<Vec<Option<PromptStatus>>> {
         let deadline = tokio::time::Instant::now() + PROMPT_CANCEL_SETTLE_BUDGET;
@@ -439,23 +471,30 @@ impl AgentSupervisor {
                 );
                 sweep_failure_logged = true;
             }
-            {
-                let guard = state.lock().await;
-                for (slot, prompt_id) in observed.iter_mut().zip(prompt_ids) {
-                    if slot.is_some() {
-                        continue;
+            let pending: Vec<(usize, String)> = observed
+                .iter()
+                .zip(prompt_ids)
+                .enumerate()
+                .filter(|(_, (slot, _))| slot.is_none())
+                .map(|(index, (_, prompt_id))| (index, prompt_id.clone()))
+                .collect();
+            let settled = state
+                .read(move |store| {
+                    let mut settled = Vec::new();
+                    for (index, prompt_id) in pending {
+                        let record = store
+                            .get_prompt(&prompt_id)?
+                            .ok_or(StackError::PromptNotFound { id: prompt_id })?;
+                        let status: PromptStatus = record.status.parse()?;
+                        if status.terminal() {
+                            settled.push((index, status));
+                        }
                     }
-                    let record =
-                        guard
-                            .get_prompt(prompt_id)?
-                            .ok_or_else(|| StackError::PromptNotFound {
-                                id: prompt_id.clone(),
-                            })?;
-                    let status: PromptStatus = record.status.parse()?;
-                    if status.terminal() {
-                        *slot = Some(status);
-                    }
-                }
+                    Ok(settled)
+                })
+                .await?;
+            for (index, status) in settled {
+                observed[index] = Some(status);
             }
             if observed.iter().all(Option::is_some) || tokio::time::Instant::now() >= deadline {
                 return Ok(observed);
@@ -465,9 +504,9 @@ impl AgentSupervisor {
     }
 
     /// Drop settled prompts from the registry. Their terminal row and its
-    /// companion session event are already durable (both are written under one
-    /// state guard, which we had to take to observe the status), so detaching
-    /// the task by dropping its `JoinHandle` loses nothing.
+    /// companion session event are already durable (both commit in one state
+    /// write job, which had to commit for the status to be observed), so
+    /// detaching the task by dropping its `JoinHandle` loses nothing.
     async fn forget_prompts(&self, prompt_ids: &[String]) {
         let mut prompts = self.prompts.lock().await;
         for prompt_id in prompt_ids {

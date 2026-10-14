@@ -32,12 +32,13 @@ async fn terminal_create_returns_output_and_records_acp_command() {
     bridge.shutdown().await.expect("shutdown ok");
 
     let commands = state
-        .lock()
-        .await
-        .query_commands(acp_stack::state::CommandFilter {
-            limit: 10,
-            ..Default::default()
+        .read(|store| {
+            store.query_commands(acp_stack::state::CommandFilter {
+                limit: 10,
+                ..Default::default()
+            })
         })
+        .await
         .expect("query commands");
     let row = commands
         .iter()

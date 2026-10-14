@@ -13,7 +13,7 @@ use tokio::time::{Instant, sleep};
 use crate::error::Result;
 use crate::events::EventHub;
 use crate::runtime::mediation::permissions::{PermissionOutcome, PermissionService};
-use crate::state::{CommandStatus, StateStore};
+use crate::state::{CommandStatus, StateHandle};
 
 use super::RunningCommand;
 use super::exec::{GRACE_ESCALATION_SIGNAL, GraceKillOutcome, kill_with_grace, sandboxed_program};
@@ -25,7 +25,7 @@ use super::policy::ResolvedCommandCwd;
 use super::process::{exit_signal, kill_process_group_pid};
 
 pub(super) struct SupervisorTask {
-    pub(super) state: Arc<TokioMutex<StateStore>>,
+    pub(super) state: StateHandle,
     pub(super) event_hub: EventHub,
     pub(super) running: Arc<TokioMutex<HashMap<String, RunningCommand>>>,
     pub(super) awaiting_permission: Arc<TokioMutex<HashMap<String, String>>>,
@@ -314,15 +314,15 @@ impl SupervisorTask {
             }
         };
 
-        if let Err(error) = {
-            let store = self.state.lock().await;
-            store.finish_command(
-                &self.command_id,
-                status,
-                exit_status.flatten_to_i32(),
-                duration_ms,
-            )
-        } {
+        let command_id = self.command_id.clone();
+        let finish_exit_status = exit_status.flatten_to_i32();
+        if let Err(error) = self
+            .state
+            .write(move |store| {
+                store.finish_command(&command_id, status, finish_exit_status, duration_ms)
+            })
+            .await
+        {
             tracing::warn!(error = %crate::error::report(&error), command_id = %self.command_id, "failed to finalize command row");
             self.deregister(super::PERMISSION_REASON_PERSISTENCE_FAILED)
                 .await;
@@ -379,8 +379,10 @@ impl SupervisorTask {
     }
 
     async fn mark_running(&self) -> Result<()> {
-        let store = self.state.lock().await;
-        store.start_command(&self.command_id)
+        let command_id = self.command_id.clone();
+        self.state
+            .write(move |store| store.start_command(&command_id))
+            .await
     }
 
     async fn handle_chunk(&self, chunk: OutputChunk, counter: &mut OutputCounter) -> Result<bool> {
@@ -402,10 +404,10 @@ impl SupervisorTask {
                 persisted_progress = true;
             }
             counter.exhausted = true;
-            {
-                let store = self.state.lock().await;
-                store.mark_command_truncated(&self.command_id)
-            }?;
+            let command_id = self.command_id.clone();
+            self.state
+                .write(move |store| store.mark_command_truncated(&command_id))
+                .await?;
             self.publish_status_event(
                 "command.output_truncated",
                 json!({"command_id": self.command_id}),
@@ -421,10 +423,15 @@ impl SupervisorTask {
     }
 
     async fn persist_chunk(&self, stream: &str, seq: u64, data: &str) -> Result<()> {
-        let event = {
-            let store = self.state.lock().await;
-            store.append_command_output(&self.command_id, stream, seq, data)
-        }?;
+        let command_id = self.command_id.clone();
+        let output_stream = stream.to_owned();
+        let output_data = data.to_owned();
+        let event = self
+            .state
+            .write(move |store| {
+                store.append_command_output(&command_id, &output_stream, seq, &output_data)
+            })
+            .await?;
         self.event_hub.publish_command_event(
             &self.command_id,
             &event,
@@ -441,10 +448,11 @@ impl SupervisorTask {
     }
 
     async fn publish_progress_event(&self) -> Result<()> {
-        let event = {
-            let store = self.state.lock().await;
-            store.append_command_progress(&self.command_id)
-        }?;
+        let command_id = self.command_id.clone();
+        let event = self
+            .state
+            .write(move |store| store.append_command_progress(&command_id))
+            .await?;
         self.event_hub.publish_command_event(
             &self.command_id,
             &event,
@@ -503,10 +511,14 @@ impl SupervisorTask {
 
     async fn finish_after_persistence_error(&self, started: Instant) {
         let duration_ms = i64::try_from(started.elapsed().as_millis()).ok();
-        if let Err(error) = {
-            let store = self.state.lock().await;
-            store.finish_command(&self.command_id, CommandStatus::Failed, None, duration_ms)
-        } {
+        let command_id = self.command_id.clone();
+        if let Err(error) = self
+            .state
+            .write(move |store| {
+                store.finish_command(&command_id, CommandStatus::Failed, None, duration_ms)
+            })
+            .await
+        {
             tracing::warn!(error = %crate::error::report(&error), command_id = %self.command_id, "failed to finalize command after persistence error");
         }
     }
@@ -523,22 +535,28 @@ impl SupervisorTask {
             "duration_ms": null,
         });
         let payload_text = payload.to_string();
-        if let Err(error) = {
-            let store = self.state.lock().await;
-            store.finish_command(&self.command_id, CommandStatus::Failed, None, None)
-        } {
+        let command_id = self.command_id.clone();
+        if let Err(error) = self
+            .state
+            .write(move |store| {
+                store.finish_command(&command_id, CommandStatus::Failed, None, None)
+            })
+            .await
+        {
             tracing::warn!(error = %crate::error::report(&error), command_id = %self.command_id, "failed to record command spawn failure");
         }
-        let event = {
-            let store = self.state.lock().await;
-            store.append_event_with_source(
-                "error",
-                "command.spawn_failed",
-                crate::state::EVENT_SOURCE_COMMAND,
-                &reason,
-                &payload_text,
-            )
-        };
+        let event = self
+            .state
+            .write(move |store| {
+                store.append_event_with_source(
+                    "error",
+                    "command.spawn_failed",
+                    crate::state::EVENT_SOURCE_COMMAND,
+                    &reason,
+                    &payload_text,
+                )
+            })
+            .await;
         match event {
             Ok(event) => {
                 self.event_hub
@@ -557,16 +575,18 @@ impl SupervisorTask {
 
     async fn publish_status_event(&self, kind: &'static str, data: Value) -> Result<()> {
         let payload_text = data.to_string();
-        let event = {
-            let store = self.state.lock().await;
-            store.append_event_with_source(
-                "info",
-                kind,
-                crate::state::EVENT_SOURCE_COMMAND,
-                "",
-                &payload_text,
-            )
-        }?;
+        let event = self
+            .state
+            .write(move |store| {
+                store.append_event_with_source(
+                    "info",
+                    kind,
+                    crate::state::EVENT_SOURCE_COMMAND,
+                    "",
+                    &payload_text,
+                )
+            })
+            .await?;
         self.event_hub
             .publish_command_event(&self.command_id, &event, data);
         Ok(())
@@ -621,23 +641,27 @@ impl SupervisorTask {
         kind: &'static str,
         payload: Value,
     ) {
-        if let Err(error) = {
-            let store = self.state.lock().await;
-            store.finish_command(&self.command_id, status, None, None)
-        } {
+        let command_id = self.command_id.clone();
+        if let Err(error) = self
+            .state
+            .write(move |store| store.finish_command(&command_id, status, None, None))
+            .await
+        {
             tracing::warn!(error = %crate::error::report(&error), command_id = %self.command_id, "failed to finalize command without spawn");
         }
         let payload_text = payload.to_string();
-        let event = {
-            let store = self.state.lock().await;
-            store.append_event_with_source(
-                "info",
-                kind,
-                crate::state::EVENT_SOURCE_COMMAND,
-                "",
-                &payload_text,
-            )
-        };
+        let event = self
+            .state
+            .write(move |store| {
+                store.append_event_with_source(
+                    "info",
+                    kind,
+                    crate::state::EVENT_SOURCE_COMMAND,
+                    "",
+                    &payload_text,
+                )
+            })
+            .await;
         match event {
             Ok(event) => {
                 self.event_hub
@@ -676,11 +700,11 @@ mod tests {
     use crate::config::{AcpPromptAction, PermissionTimeoutAction};
     use crate::runtime::mediation::commands::policy::resolve_cwd_under_workspace;
     use crate::runtime::mediation::permissions::{NewPermission, PermissionSource};
-    use crate::state::{CommandOrigin, NewCommandRecord};
+    use crate::state::{CommandOrigin, NewCommandRecord, StateStore};
 
     struct Fixture {
         tempdir: tempfile::TempDir,
-        state: Arc<TokioMutex<StateStore>>,
+        state: StateHandle,
         permissions: PermissionService,
         awaiting_permission: Arc<TokioMutex<HashMap<String, String>>>,
     }
@@ -690,7 +714,7 @@ mod tests {
         let state_path = tempdir.path().join("state.sqlite");
         let store = StateStore::open(&state_path).expect("state open");
         store.migrate().expect("migrate");
-        let state = Arc::new(TokioMutex::new(store));
+        let state = StateHandle::start(store).expect("start state handle");
         let permissions = PermissionService::new(
             state.clone(),
             EventHub::new(),
@@ -744,18 +768,32 @@ mod tests {
     }
 
     async fn insert_command(fixture: &Fixture, command: &str) -> String {
-        let store = fixture.state.lock().await;
-        store
-            .append_command(NewCommandRecord {
-                command,
-                cwd: None,
-                env_json: None,
-                origin: CommandOrigin::Operator,
-                session_id: None,
-                terminal_id: None,
+        let command = command.to_owned();
+        fixture
+            .state
+            .write(move |store| {
+                store.append_command(NewCommandRecord {
+                    command: &command,
+                    cwd: None,
+                    env_json: None,
+                    origin: CommandOrigin::Operator,
+                    session_id: None,
+                    terminal_id: None,
+                })
             })
+            .await
             .expect("append command")
             .id
+    }
+
+    async fn command_row(fixture: &Fixture, command_id: &str) -> crate::state::CommandRecord {
+        let command_id = command_id.to_owned();
+        fixture
+            .state
+            .read(move |store| store.get_command(&command_id))
+            .await
+            .expect("get command")
+            .expect("command row")
     }
 
     #[tokio::test]
@@ -775,13 +813,17 @@ mod tests {
 
     /// The payload of the single `kind` event on the command log.
     async fn command_event_payload(fixture: &Fixture, kind: &str) -> Value {
-        let store = fixture.state.lock().await;
-        let events = store
-            .query_events(crate::state::LogFilter {
-                limit: 10,
-                kind: Some(kind),
-                ..Default::default()
+        let event_kind = kind.to_owned();
+        let events = fixture
+            .state
+            .read(move |store| {
+                store.query_events(crate::state::LogFilter {
+                    limit: 10,
+                    kind: Some(&event_kind),
+                    ..Default::default()
+                })
             })
+            .await
             .expect("query events");
         assert_eq!(events.len(), 1, "expected one {kind} event: {events:?}");
         serde_json::from_str(&events[0].payload_json).expect("payload is json")
@@ -817,13 +859,7 @@ mod tests {
 
         task.run().await;
 
-        let command = {
-            let store = fixture.state.lock().await;
-            store
-                .get_command(&command_id)
-                .expect("get command")
-                .expect("command row")
-        };
+        let command = command_row(&fixture, &command_id).await;
         assert_eq!(command.status, "failed");
         let payload = command_event_payload(&fixture, "command.spawn_failed").await;
         assert_eq!(payload["command_id"], command_id);
@@ -862,28 +898,24 @@ mod tests {
         task.permission_rx = Some(rx);
         task.run().await;
 
-        let command = {
-            let store = fixture.state.lock().await;
-            store
-                .get_command(&command_id)
-                .expect("get command")
-                .expect("command row")
-        };
+        let command = command_row(&fixture, &command_id).await;
         assert_eq!(command.status, "failed");
 
         let permission = fixture.permissions.get(&record.id).await.expect("get");
         assert_eq!(permission.status, "cancelled");
 
-        let events = {
-            let store = fixture.state.lock().await;
-            store
-                .query_permission_events(crate::state::EventFilter {
+        let permission_id = record.id.clone();
+        let events = fixture
+            .state
+            .read(move |store| {
+                store.query_permission_events(crate::state::EventFilter {
                     limit: 10,
-                    permission_id: Some(&record.id),
+                    permission_id: Some(&permission_id),
                     ..crate::state::EventFilter::default()
                 })
-                .expect("query events")
-        };
+            })
+            .await
+            .expect("query events");
         let canceled = events
             .iter()
             .find(|event| event.kind == "permission.cancelled")

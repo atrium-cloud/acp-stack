@@ -363,14 +363,9 @@ pub(crate) async fn log_api_request(
     );
     let payload_text = payload.to_string();
     // The row is observability, so the response must not wait on its commit.
-    let store_handle = state.state.clone();
-    tokio::spawn(async move {
-        let store = store_handle.lock().await;
-        if let Err(err) =
-            store.append_event_with_source("info", "api.request", event_source, "", &payload_text)
-        {
-            tracing::warn!(error = %err, path, "failed to persist api.request event");
-        }
+    state.state.write_detached("api.request", move |store| {
+        store.append_event_with_source("info", "api.request", event_source, "", &payload_text)?;
+        Ok(())
     });
     response
 }
@@ -664,10 +659,23 @@ async fn log_failure(
     // Every rejected auth attempt MUST leave a durable `auth_failures` row, so
     // an unwritable state DB fails closed with 500 rather than returning a
     // silent 401 an attacker could brute-force against unrecorded.
-    let store = state.state.lock().await;
-    if let Err(err) =
-        record_auth_failure_with_origin(&store, kind, reason, client_ip, Some(route), Some(origin))
-    {
+    let failure_client_ip = client_ip.map(str::to_owned);
+    let failure_route = route.to_owned();
+    let failure_origin = origin.clone();
+    let recorded = state
+        .state
+        .write(move |store| {
+            record_auth_failure_with_origin(
+                store,
+                kind,
+                reason,
+                failure_client_ip.as_deref(),
+                Some(&failure_route),
+                Some(&failure_origin),
+            )
+        })
+        .await;
+    if let Err(err) = recorded {
         return Err(Box::new(reject_with_report(
             StatusCode::INTERNAL_SERVER_ERROR,
             "state.error",
@@ -678,7 +686,6 @@ async fn log_failure(
             ),
         )));
     }
-    drop(store);
     // Tick the in-memory blocker; tripping the threshold emits a durable event.
     if let Some(ip_str) = client_ip
         && let Ok(ip) = ip_str.parse::<std::net::IpAddr>()
@@ -722,8 +729,23 @@ pub(super) async fn persist_security_event(
             return;
         }
     };
-    let store = state.state.lock().await;
-    if let Err(err) = store.append_event_with_source(level, kind, source, message, &payload) {
+    let event_level = level.to_owned();
+    let event_kind = kind.to_owned();
+    let event_message = message.to_owned();
+    let persisted = state
+        .state
+        .write(move |store| {
+            store.append_event_with_source(
+                &event_level,
+                &event_kind,
+                source,
+                &event_message,
+                &payload,
+            )?;
+            Ok(())
+        })
+        .await;
+    if let Err(err) = persisted {
         tracing::warn!(error = %err, kind, "failed to persist security event");
     }
 }
@@ -762,7 +784,7 @@ mod tests {
     const AUDIT_ROW_DEADLINE: Duration = Duration::from_secs(10);
     const AUDIT_ROW_POLL_INTERVAL: Duration = Duration::from_millis(20);
     const AUDIT_ROW_QUERY_LIMIT: u32 = 100;
-    /// The test holds the store mutex throughout, so a response that waited on the
+    /// The test holds the state writer throughout, so a response that waited on the
     /// audit write would never arrive.
     const RESPONSE_DEADLINE: Duration = Duration::from_secs(5);
 
@@ -774,6 +796,7 @@ mod tests {
         // Leaked because the returned AppState keeps the sqlite handle open.
         std::mem::forget(tempdir);
         AppState::new(test_config(), store, session.to_owned(), admin.to_owned())
+            .expect("app state")
     }
 
     fn test_config() -> Config {
@@ -996,18 +1019,20 @@ mod tests {
     }
 
     async fn api_request_rows(state: &AppState) -> Vec<Event> {
-        let store = state.state.lock().await;
-        store
-            .query_events(LogFilter {
-                limit: AUDIT_ROW_QUERY_LIMIT,
-                kind: Some("api.request"),
-                ..LogFilter::default()
+        state
+            .state
+            .read(|store| {
+                store.query_events(LogFilter {
+                    limit: AUDIT_ROW_QUERY_LIMIT,
+                    kind: Some("api.request"),
+                    ..LogFilter::default()
+                })
             })
+            .await
             .expect("query api.request rows")
     }
 
-    /// Poll until the `api.request` row for `path` lands. The sleep also yields so the
-    /// detached writer can take the store mutex.
+    /// Poll until the `api.request` row for `path` lands.
     async fn wait_for_api_request_row(state: &AppState, path: &str) -> Event {
         let needle = format!("\"{path}\"");
         let deadline = Instant::now() + AUDIT_ROW_DEADLINE;
@@ -1029,13 +1054,32 @@ mod tests {
         let state = new_state("acps_session_abc", "acps_admin_xyz");
         let app = local_audit_router(&state);
 
-        let held_store = state.state.lock().await;
+        let (writer_held, writer_held_signal) = tokio::sync::oneshot::channel();
+        let (release_writer, writer_release_signal) = std::sync::mpsc::channel::<()>();
+        let held_writer = tokio::spawn({
+            let handle = state.state.clone();
+            async move {
+                handle
+                    .write(move |_store| {
+                        writer_held.send(()).expect("signal writer held");
+                        writer_release_signal.recv().expect("writer release signal");
+                        Ok(())
+                    })
+                    .await
+            }
+        });
+        writer_held_signal.await.expect("writer held");
+
         let response = tokio::time::timeout(RESPONSE_DEADLINE, app.oneshot(empty_get("/v1/ping")))
             .await
             .expect("response must not wait on the api.request write")
             .expect("response");
         assert_eq!(response.status(), StatusCode::OK);
-        drop(held_store);
+        release_writer.send(()).expect("release writer");
+        held_writer
+            .await
+            .expect("held writer task")
+            .expect("held writer job");
 
         wait_for_api_request_row(&state, "/v1/ping").await;
     }

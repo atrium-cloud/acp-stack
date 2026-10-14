@@ -198,14 +198,19 @@ pub(crate) async fn sessions_status_handler(
     let target = state
         .session_agent_target(params.target_id.as_deref())
         .await?;
-    let store = state.state.lock().await;
-    let mut rows = store.query_session_status_window(
-        &window_start_text,
-        Some(&target.target_id),
-        query_limit,
-    )?;
-    let feed_epoch = store.feed_epoch().to_owned();
-    drop(store);
+    let status_window_start = window_start_text.clone();
+    let status_target_id = target.target_id.clone();
+    let mut rows = state
+        .state
+        .read(move |store| {
+            store.query_session_status_window(
+                &status_window_start,
+                Some(&status_target_id),
+                query_limit,
+            )
+        })
+        .await?;
+    let feed_epoch = state.state.feed_epoch().to_owned();
     let truncated = rows.len() > limit as usize;
     if truncated {
         rows.truncate(limit as usize);

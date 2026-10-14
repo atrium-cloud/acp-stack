@@ -31,14 +31,15 @@ async fn fs_write_persists_to_disk_and_records_audit_event() {
     bridge.shutdown().await.expect("shutdown ok");
 
     let events = state
-        .lock()
-        .await
-        .query_events(acp_stack::state::LogFilter {
-            limit: 50,
-            kind: Some("fs.write"),
-            source: Some("acp"),
-            ..Default::default()
+        .read(|store| {
+            store.query_events(acp_stack::state::LogFilter {
+                limit: 50,
+                kind: Some("fs.write"),
+                source: Some("acp"),
+                ..Default::default()
+            })
         })
+        .await
         .expect("query events");
     assert_eq!(events.len(), 1, "expected one acp fs.write audit event");
     assert!(events[0].payload_json.contains("fs-probe.txt"));

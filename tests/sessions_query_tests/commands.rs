@@ -10,14 +10,14 @@ use serde_json::{Value, json};
 async fn await_prompt_settled(harness: &Harness, prompt_id: &str) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let status = {
-            let store = harness.state.lock().await;
-            store
-                .get_prompt(prompt_id)
-                .expect("prompt lookup")
-                .expect("prompt exists")
-                .status
-        };
+        let lookup_prompt_id = prompt_id.to_owned();
+        let status = harness
+            .state
+            .read(move |store| store.get_prompt(&lookup_prompt_id))
+            .await
+            .expect("prompt lookup")
+            .expect("prompt exists")
+            .status;
         if matches!(
             status.as_str(),
             "completed" | "errored" | "cancelled" | "stalled"
@@ -69,12 +69,14 @@ async fn sessions_commands_lists_stored_advertisement() {
     assert_eq!(body["data"]["available_commands"], json!([]));
     assert!(body["data"]["updated_at"].is_null());
 
-    {
-        let store = harness.state.lock().await;
-        store
-            .replace_session_available_commands(&session_id, &advertised_fixture())
-            .expect("commands stored");
-    }
+    let stored_session_id = session_id.clone();
+    harness
+        .state
+        .write(move |store| {
+            store.replace_session_available_commands(&stored_session_id, &advertised_fixture())
+        })
+        .await
+        .expect("commands stored");
 
     let body: Value = client
         .get(format!(
@@ -125,12 +127,14 @@ async fn sessions_commands_run_submits_prompt_with_advisory_flag() {
     assert!(body["data"].get("advertised").is_none());
     await_prompt_settled(&harness, &first_prompt_id).await;
 
-    {
-        let store = harness.state.lock().await;
-        store
-            .replace_session_available_commands(&session_id, &advertised_fixture())
-            .expect("commands stored");
-    }
+    let stored_session_id = session_id.clone();
+    harness
+        .state
+        .write(move |store| {
+            store.replace_session_available_commands(&stored_session_id, &advertised_fixture())
+        })
+        .await
+        .expect("commands stored");
 
     // A leading slash is normalized even behind surrounding whitespace.
     let body: Value = client
@@ -152,9 +156,11 @@ async fn sessions_commands_run_submits_prompt_with_advisory_flag() {
         .expect("prompt id")
         .to_owned();
     {
-        let store = harness.state.lock().await;
-        let prompt = store
-            .get_prompt(&prompt_id)
+        let lookup_prompt_id = prompt_id.clone();
+        let prompt = harness
+            .state
+            .read(move |store| store.get_prompt(&lookup_prompt_id))
+            .await
             .expect("prompt lookup")
             .expect("prompt exists");
         let blocks: Value = serde_json::from_str(&prompt.prompt_json).expect("prompt json");

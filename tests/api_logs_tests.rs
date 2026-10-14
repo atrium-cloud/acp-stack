@@ -14,18 +14,21 @@ const AUDIT_ROW_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const AUDIT_ROW_QUERY_LIMIT: u32 = 100;
 
 async fn api_request_rows(harness: &ServerHarness) -> Vec<Event> {
-    let guard = harness.state.lock().await;
-    guard
-        .query_events(acp_stack::state::LogFilter {
-            limit: AUDIT_ROW_QUERY_LIMIT,
-            kind: Some("api.request"),
-            ..acp_stack::state::LogFilter::default()
+    harness
+        .state
+        .read(|store| {
+            store.query_events(acp_stack::state::LogFilter {
+                limit: AUDIT_ROW_QUERY_LIMIT,
+                kind: Some("api.request"),
+                ..acp_stack::state::LogFilter::default()
+            })
         })
+        .await
         .expect("query")
 }
 
-/// Poll until an `api.request` row matching `predicate` lands. The guard drops before
-/// each sleep so the detached writer can take the store mutex.
+/// Poll until an `api.request` row matching `predicate` lands; the audit row is a
+/// detached write that commits after the response is sent.
 async fn wait_for_api_request_row(
     harness: &ServerHarness,
     predicate: impl Fn(&Event) -> bool,
@@ -46,12 +49,14 @@ async fn wait_for_api_request_row(
 #[tokio::test]
 async fn logs_events_returns_array_envelope() {
     let harness = ServerHarness::spawn().await;
-    {
-        let guard = harness.state.lock().await;
-        guard
-            .append_event("info", "test.kind", "hello", "{}")
-            .expect("append event");
-    }
+    harness
+        .state
+        .write(|store| {
+            store.append_event("info", "test.kind", "hello", "{}")?;
+            Ok(())
+        })
+        .await
+        .expect("append event");
     let response = reqwest::Client::new()
         .get(format!("{}/v1/logs/events?limit=10", harness.base_url))
         .header("Authorization", format!("Bearer {SESSION_KEY}"))
@@ -70,18 +75,16 @@ async fn logs_events_returns_array_envelope() {
 #[tokio::test]
 async fn logs_events_supports_kind_filter() {
     let harness = ServerHarness::spawn().await;
-    {
-        let guard = harness.state.lock().await;
-        guard
-            .append_event_with_source("info", "command.started", "command", "", "{}")
-            .expect("append");
-        guard
-            .append_event_with_source("info", "command.exited", "command", "", "{}")
-            .expect("append");
-        guard
-            .append_event("info", "session.update", "", "{}")
-            .expect("append");
-    }
+    harness
+        .state
+        .write(|store| {
+            store.append_event_with_source("info", "command.started", "command", "", "{}")?;
+            store.append_event_with_source("info", "command.exited", "command", "", "{}")?;
+            store.append_event("info", "session.update", "", "{}")?;
+            Ok(())
+        })
+        .await
+        .expect("append");
     let response = reqwest::Client::new()
         .get(format!(
             "{}/v1/logs/events?kind=command.&limit=10",
@@ -103,15 +106,15 @@ async fn logs_events_supports_kind_filter() {
 #[tokio::test]
 async fn logs_events_supports_source_filter() {
     let harness = ServerHarness::spawn().await;
-    {
-        let guard = harness.state.lock().await;
-        guard
-            .append_event_with_source("info", "command.exited", "command", "", "{}")
-            .expect("append");
-        guard
-            .append_event_with_source("info", "permission.created", "permission", "", "{}")
-            .expect("append");
-    }
+    harness
+        .state
+        .write(|store| {
+            store.append_event_with_source("info", "command.exited", "command", "", "{}")?;
+            store.append_event_with_source("info", "permission.created", "permission", "", "{}")?;
+            Ok(())
+        })
+        .await
+        .expect("append");
     let response = reqwest::Client::new()
         .get(format!(
             "{}/v1/logs/events?source=command&limit=10",
@@ -130,14 +133,16 @@ async fn logs_events_supports_source_filter() {
 #[tokio::test]
 async fn logs_events_pagination_cursor_advances_page() {
     let harness = ServerHarness::spawn().await;
-    {
-        let guard = harness.state.lock().await;
-        for i in 0..5 {
-            guard
-                .append_event("info", "test.page", &format!("row-{i}"), "{}")
-                .expect("append");
-        }
-    }
+    harness
+        .state
+        .write(|store| {
+            for i in 0..5 {
+                store.append_event("info", "test.page", &format!("row-{i}"), "{}")?;
+            }
+            Ok(())
+        })
+        .await
+        .expect("append");
     let first = reqwest::Client::new()
         .get(format!(
             "{}/v1/logs/events?kind=test.page&limit=2",
@@ -178,18 +183,16 @@ async fn logs_events_pagination_cursor_advances_page() {
 #[tokio::test]
 async fn logs_events_category_filters_security_kinds_via_route() {
     let harness = ServerHarness::spawn().await;
-    {
-        let guard = harness.state.lock().await;
-        guard
-            .append_event("warn", "security.cors_origin_denied", "denied", "{}")
-            .expect("seed cors");
-        guard
-            .append_event("warn", "security.ws_origin_denied", "denied", "{}")
-            .expect("seed ws cors");
-        guard
-            .append_event("warn", "security.rate_limited", "rate", "{}")
-            .expect("seed rate");
-    }
+    harness
+        .state
+        .write(|store| {
+            store.append_event("warn", "security.cors_origin_denied", "denied", "{}")?;
+            store.append_event("warn", "security.ws_origin_denied", "denied", "{}")?;
+            store.append_event("warn", "security.rate_limited", "rate", "{}")?;
+            Ok(())
+        })
+        .await
+        .expect("seed security events");
     let response = reqwest::Client::new()
         .get(format!(
             "{}/v1/logs/events?category=origin_cors&limit=10",
@@ -215,14 +218,16 @@ async fn logs_events_category_filters_security_kinds_via_route() {
 #[tokio::test]
 async fn logs_events_order_asc_returns_oldest_first_via_route() {
     let harness = ServerHarness::spawn().await;
-    {
-        let guard = harness.state.lock().await;
-        for index in 0..3 {
-            guard
-                .append_event("info", "test.ordered", &format!("row-{index}"), "{}")
-                .expect("seed");
-        }
-    }
+    harness
+        .state
+        .write(|store| {
+            for index in 0..3 {
+                store.append_event("info", "test.ordered", &format!("row-{index}"), "{}")?;
+            }
+            Ok(())
+        })
+        .await
+        .expect("seed");
     let first = reqwest::Client::new()
         .get(format!(
             "{}/v1/logs/events?kind=test.ordered&order=asc&limit=2",
@@ -379,18 +384,16 @@ async fn log_query_routes_return_seeded_records_newest_first() {
         "2026-05-14T00:00:06.000000000Z",
         "2026-05-14T00:00:07.000000000Z",
     );
-    {
-        let guard = harness.state.lock().await;
-        guard
-            .append_event("info", "permission.requested", "old permission", "{}")
-            .expect("append permission event");
-        guard
-            .append_event("info", "permissions.decided", "new permission", "{}")
-            .expect("append permission event");
-        guard
-            .append_auth_failure("unknown", "missing", None, Some("/v1/status"), "{}")
-            .expect("append auth failure");
-    }
+    harness
+        .state
+        .write(|store| {
+            store.append_event("info", "permission.requested", "old permission", "{}")?;
+            store.append_event("info", "permissions.decided", "new permission", "{}")?;
+            store.append_auth_failure("unknown", "missing", None, Some("/v1/status"), "{}")?;
+            Ok(())
+        })
+        .await
+        .expect("seed permission events and auth failure");
 
     let client = reqwest::Client::new();
     let commands: Value = client
@@ -447,21 +450,17 @@ async fn log_query_routes_return_seeded_records_newest_first() {
 #[tokio::test]
 async fn logs_security_pages_auth_failures_and_events_independently() {
     let harness = ServerHarness::spawn().await;
-    {
-        let guard = harness.state.lock().await;
-        guard
-            .append_auth_failure("unknown", "missing", None, Some("/v1/a"), "{}")
-            .expect("append auth failure");
-        guard
-            .append_auth_failure("unknown", "invalid", None, Some("/v1/b"), "{}")
-            .expect("append auth failure");
-        guard
-            .append_event_with_source("warn", "security.first", "api", "", "{}")
-            .expect("append security event");
-        guard
-            .append_event_with_source("warn", "security.second", "api", "", "{}")
-            .expect("append security event");
-    }
+    harness
+        .state
+        .write(|store| {
+            store.append_auth_failure("unknown", "missing", None, Some("/v1/a"), "{}")?;
+            store.append_auth_failure("unknown", "invalid", None, Some("/v1/b"), "{}")?;
+            store.append_event_with_source("warn", "security.first", "api", "", "{}")?;
+            store.append_event_with_source("warn", "security.second", "api", "", "{}")?;
+            Ok(())
+        })
+        .await
+        .expect("seed auth failures and security events");
 
     let client = reqwest::Client::new();
     let first: Value = client
@@ -548,21 +547,17 @@ async fn logs_security_pages_auth_failures_and_events_independently() {
 #[tokio::test]
 async fn logs_security_order_asc_applies_to_auth_failures_and_events() {
     let harness = ServerHarness::spawn().await;
-    {
-        let guard = harness.state.lock().await;
-        guard
-            .append_auth_failure("unknown", "missing", None, Some("/v1/a"), "{}")
-            .expect("append auth failure");
-        guard
-            .append_auth_failure("unknown", "invalid", None, Some("/v1/b"), "{}")
-            .expect("append auth failure");
-        guard
-            .append_event_with_source("warn", "security.first", "api", "", "{}")
-            .expect("append security event");
-        guard
-            .append_event_with_source("warn", "security.second", "api", "", "{}")
-            .expect("append security event");
-    }
+    harness
+        .state
+        .write(|store| {
+            store.append_auth_failure("unknown", "missing", None, Some("/v1/a"), "{}")?;
+            store.append_auth_failure("unknown", "invalid", None, Some("/v1/b"), "{}")?;
+            store.append_event_with_source("warn", "security.first", "api", "", "{}")?;
+            store.append_event_with_source("warn", "security.second", "api", "", "{}")?;
+            Ok(())
+        })
+        .await
+        .expect("seed auth failures and security events");
 
     let body: Value = reqwest::Client::new()
         .get(format!(
@@ -596,15 +591,15 @@ async fn logs_security_order_asc_applies_to_auth_failures_and_events() {
 #[tokio::test]
 async fn logs_security_legacy_after_still_pages_when_specific_cursor_absent() {
     let harness = ServerHarness::spawn().await;
-    {
-        let guard = harness.state.lock().await;
-        guard
-            .append_auth_failure("unknown", "missing", None, Some("/v1/a"), "{}")
-            .expect("append auth failure");
-        guard
-            .append_auth_failure("unknown", "invalid", None, Some("/v1/b"), "{}")
-            .expect("append auth failure");
-    }
+    harness
+        .state
+        .write(|store| {
+            store.append_auth_failure("unknown", "missing", None, Some("/v1/a"), "{}")?;
+            store.append_auth_failure("unknown", "invalid", None, Some("/v1/b"), "{}")?;
+            Ok(())
+        })
+        .await
+        .expect("append auth failure");
 
     let client = reqwest::Client::new();
     let first: Value = client
@@ -650,14 +645,16 @@ async fn logs_events_limit_is_capped() {
     // Even with `limit=10000` the handler must cap at MAX_LOGS_LIMIT (1000) so
     // an authenticated session cannot ask sqlite for unbounded rows.
     let harness = ServerHarness::spawn().await;
-    {
-        let guard = harness.state.lock().await;
-        for i in 0..1500 {
-            guard
-                .append_event("info", "burst", &format!("e{i}"), "{}")
-                .expect("append");
-        }
-    }
+    harness
+        .state
+        .write(|store| {
+            for i in 0..1500 {
+                store.append_event("info", "burst", &format!("e{i}"), "{}")?;
+            }
+            Ok(())
+        })
+        .await
+        .expect("append");
     let response = reqwest::Client::new()
         .get(format!("{}/v1/logs/events?limit=10000", harness.base_url))
         .header("Authorization", format!("Bearer {SESSION_KEY}"))

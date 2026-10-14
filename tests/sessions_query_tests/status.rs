@@ -12,19 +12,17 @@ async fn sessions_status_returns_compact_active_summary() {
         config.agent.args.push("--no-cap-list-session".into());
     })
     .await;
-    {
-        let store = harness.state.lock().await;
-        store
-            .insert_session(NewSessionRecord {
+    harness
+        .state
+        .write(|store| {
+            store.insert_session(NewSessionRecord {
                 id: "sess_active".to_owned(),
                 agent_id: "placebo".to_owned(),
                 cwd: "/tmp/active".to_owned(),
                 title: Some("active title".to_owned()),
                 metadata_json: r#"{"secretish":"not returned"}"#.to_owned(),
-            })
-            .expect("session inserted");
-        store
-            .append_session_event_with_source(
+            })?;
+            store.append_session_event_with_source(
                 "sess_active",
                 "info",
                 "session.update",
@@ -32,8 +30,9 @@ async fn sessions_status_returns_compact_active_summary() {
                 "ACP session update",
                 "{}",
             )
-            .expect("event inserted");
-    }
+        })
+        .await
+        .expect("session and event inserted");
 
     let body: Value = http()
         .get(format!("{}/v1/sessions/-/status", harness.base_url))
@@ -64,19 +63,17 @@ async fn sessions_status_defaults_to_primary_target() {
         config.agent.args.push("--no-cap-list-session".into());
     })
     .await;
-    {
-        let store = harness.state.lock().await;
-        store
-            .insert_session(NewSessionRecord {
+    harness
+        .state
+        .write(|store| {
+            store.insert_session(NewSessionRecord {
                 id: "sess_primary".to_owned(),
                 agent_id: "placebo".to_owned(),
                 cwd: "/tmp/primary".to_owned(),
                 title: None,
                 metadata_json: "{}".to_owned(),
-            })
-            .expect("primary session inserted");
-        store
-            .insert_session_for_target(
+            })?;
+            store.insert_session_for_target(
                 "placebo-secondary",
                 "acp_secondary".to_owned(),
                 NewSessionRecord {
@@ -87,8 +84,9 @@ async fn sessions_status_defaults_to_primary_target() {
                     metadata_json: "{}".to_owned(),
                 },
             )
-            .expect("secondary session inserted");
-    }
+        })
+        .await
+        .expect("primary and secondary sessions inserted");
 
     let body: Value = http()
         .get(format!("{}/v1/sessions/-/status", harness.base_url))
@@ -152,18 +150,19 @@ async fn sessions_status_marks_old_activity_idle() {
         config.agent.args.push("--no-cap-list-session".into());
     })
     .await;
-    {
-        let store = harness.state.lock().await;
-        store
-            .insert_session(NewSessionRecord {
+    harness
+        .state
+        .write(|store| {
+            store.insert_session(NewSessionRecord {
                 id: "sess_active".to_owned(),
                 agent_id: "placebo".to_owned(),
                 cwd: "/tmp/active".to_owned(),
                 title: None,
                 metadata_json: "{}".to_owned(),
             })
-            .expect("session inserted");
-    }
+        })
+        .await
+        .expect("session inserted");
 
     let body: Value = http()
         .get(format!(
@@ -223,34 +222,30 @@ async fn sessions_status_reports_turn_states() {
         config.agent.args.push("--no-cap-list-session".into());
     })
     .await;
-    {
-        let store = harness.state.lock().await;
-        for session_id in [
-            "sess_prompt_sent",
-            "sess_working",
-            "sess_done",
-            "sess_error",
-            "sess_permission",
-        ] {
-            store
-                .insert_session(NewSessionRecord {
+    harness
+        .state
+        .write(|store| {
+            for session_id in [
+                "sess_prompt_sent",
+                "sess_working",
+                "sess_done",
+                "sess_error",
+                "sess_permission",
+            ] {
+                store.insert_session(NewSessionRecord {
                     id: session_id.to_owned(),
                     agent_id: "placebo".to_owned(),
                     cwd: format!("/tmp/{session_id}"),
                     title: None,
                     metadata_json: "{}".to_owned(),
-                })
-                .expect("session inserted");
-            let prompt_id = format!("prm_{session_id}");
-            store
-                .insert_prompt(NewPromptRecord {
+                })?;
+                let prompt_id = format!("prm_{session_id}");
+                store.insert_prompt(NewPromptRecord {
                     id: prompt_id.clone(),
                     session_id: session_id.to_owned(),
                     prompt_json: "[]".to_owned(),
-                })
-                .expect("prompt inserted");
-            store
-                .update_prompt_status(
+                })?;
+                store.update_prompt_status(
                     &prompt_id,
                     PromptStatus::Running,
                     None,
@@ -258,25 +253,28 @@ async fn sessions_status_reports_turn_states() {
                     None,
                     None,
                     None,
-                )
-                .expect("prompt running");
-        }
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .expect("running turn fixtures seeded");
 
-        std::thread::sleep(Duration::from_millis(2));
-        for session_id in ["sess_working", "sess_permission"] {
-            store
-                .append_session_event_with_source(
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    harness
+        .state
+        .write(|store| {
+            for session_id in ["sess_working", "sess_permission"] {
+                store.append_session_event_with_source(
                     session_id,
                     "info",
                     "session.update",
                     acp_stack::state::EVENT_SOURCE_ACP,
                     "ACP session update",
                     "{}",
-                )
-                .expect("session update");
-        }
-        store
-            .update_prompt_status(
+                )?;
+            }
+            store.update_prompt_status(
                 "prm_sess_done",
                 PromptStatus::Completed,
                 Some("end_turn"),
@@ -284,10 +282,8 @@ async fn sessions_status_reports_turn_states() {
                 None,
                 None,
                 None,
-            )
-            .expect("prompt completed");
-        store
-            .update_prompt_status(
+            )?;
+            store.update_prompt_status(
                 "prm_sess_error",
                 PromptStatus::Errored,
                 None,
@@ -295,18 +291,18 @@ async fn sessions_status_reports_turn_states() {
                 Some("failed"),
                 None,
                 None,
-            )
-            .expect("prompt errored");
-        store
-            .append_permission_request(NewPermissionRequest {
+            )?;
+            store.append_permission_request(NewPermissionRequest {
                 source: "acp",
                 requester: Some("agent"),
                 subject_id: Some("sess_permission"),
                 detail_json: "{}",
                 expires_at: None,
-            })
-            .expect("permission inserted");
-    }
+            })?;
+            Ok(())
+        })
+        .await
+        .expect("turn-state fixtures seeded");
 
     let body: Value = http()
         .get(format!(

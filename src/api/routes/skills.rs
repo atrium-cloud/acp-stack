@@ -302,14 +302,21 @@ async fn record_skill_event(state: &AppState, kind: &str, payload: serde_json::V
             return;
         }
     };
-    let store = state.state.lock().await;
-    if let Err(error) = store.append_event_with_source(
-        "info",
-        kind,
-        crate::state::EVENT_SOURCE_API,
-        "",
-        &payload_json,
-    ) {
+    let event_kind = kind.to_owned();
+    let recorded = state
+        .state
+        .write(move |store| {
+            store.append_event_with_source(
+                "info",
+                &event_kind,
+                crate::state::EVENT_SOURCE_API,
+                "",
+                &payload_json,
+            )?;
+            Ok(())
+        })
+        .await;
+    if let Err(error) = recorded {
         tracing::warn!(%error, kind, "failed to record skill event");
     }
 }

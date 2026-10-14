@@ -10,11 +10,10 @@ use std::time::Duration;
 use acp_stack::api::{self, AppState, RuntimePaths};
 use acp_stack::config::load_config_from_str;
 use acp_stack::events::EVENT_CHANNEL_CAPACITY;
-use acp_stack::state::{StateStore, default_state_path};
+use acp_stack::state::{StateHandle, StateStore, default_state_path};
 use serde_json::Value;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
-use tokio::sync::Mutex as TokioMutex;
 use tokio::task::JoinHandle;
 
 use crate::common::cli::{ADMIN_KEY, SESSION_KEY, VALID_PLACEBO_CONFIG, write_cli_home};
@@ -30,7 +29,7 @@ const DAEMON_RATE_LIMIT_BURST: u64 = 10_000;
 struct LogsDaemon {
     base_url: String,
     home: TempDir,
-    state: Arc<TokioMutex<StateStore>>,
+    state: StateHandle,
     join: JoinHandle<acp_stack::error::Result<()>>,
 }
 
@@ -65,7 +64,8 @@ impl LogsDaemon {
             ADMIN_KEY.to_owned(),
             "127.0.0.1:7700".to_owned(),
             runtime_paths,
-        );
+        )
+        .expect("app state");
         let state = app_state.state.clone();
         let join = tokio::spawn(async move { api::serve(app_state, listener).await });
         Self {
@@ -76,14 +76,22 @@ impl LogsDaemon {
         }
     }
 
-    /// Append one `FOLLOW_KIND` row per label while holding the state lock, so the daemon's tasks cannot run until the whole batch is written.
+    /// Append one `FOLLOW_KIND` row per label in one write job while blocking the runtime thread, so the daemon's tasks cannot run until the whole batch is committed and published.
     async fn append_rows(&self, labels: impl IntoIterator<Item = String>) {
-        let store = self.state.lock().await;
-        for label in labels {
-            store
-                .append_event("info", FOLLOW_KIND, &label, "{}")
-                .expect("event inserted");
-        }
+        let labels: Vec<String> = labels.into_iter().collect();
+        let state = self.state.clone();
+        // Joining synchronously keeps the single-threaded runtime from draining the event channel between publishes.
+        std::thread::spawn(move || {
+            state.blocking_write(move |store| {
+                for label in &labels {
+                    store.append_event("info", FOLLOW_KIND, label, "{}")?;
+                }
+                Ok(())
+            })
+        })
+        .join()
+        .expect("append thread")
+        .expect("event inserted");
     }
 
     /// Poll `/v1/ws/connections` until a connection subscribed to `logs` is listed.

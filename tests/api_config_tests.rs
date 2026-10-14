@@ -146,13 +146,16 @@ async fn config_import_dry_run_returns_metadata() {
 
     let current_config = std::fs::read_to_string(&harness.config_path).expect("read config");
     assert_eq!(current_config, original_config);
-    let guard = harness.state.lock().await;
-    let events = guard
-        .query_events(EventFilter {
-            limit: 10,
-            kind: Some("server.config_imported"),
-            ..EventFilter::default()
+    let events = harness
+        .state
+        .read(|store| {
+            store.query_events(EventFilter {
+                limit: 10,
+                kind: Some("server.config_imported"),
+                ..EventFilter::default()
+            })
         })
+        .await
         .expect("query events");
     assert!(events.is_empty(), "dry-run must not audit config import");
 }
@@ -186,13 +189,16 @@ admin_key_ref = "ACP_STACK_ADMIN_KEY"
 
     let current_config = std::fs::read_to_string(&harness.config_path).expect("read config");
     assert_eq!(current_config, original_config);
-    let guard = harness.state.lock().await;
-    let events = guard
-        .query_events(EventFilter {
-            limit: 10,
-            kind: Some("server.config_imported"),
-            ..EventFilter::default()
+    let events = harness
+        .state
+        .read(|store| {
+            store.query_events(EventFilter {
+                limit: 10,
+                kind: Some("server.config_imported"),
+                ..EventFilter::default()
+            })
         })
+        .await
         .expect("query events");
     assert!(events.is_empty(), "dry-run must not audit config import");
 }
@@ -255,8 +261,11 @@ async fn auth_regenerate_session_key_replaces_old_session_verifier() {
     assert!(new_session_key.starts_with("acps_"));
     assert_ne!(new_session_key, SESSION_KEY);
 
-    let guard = harness.state.lock().await;
-    let verifiers = guard.load_auth_verifier_pair().expect("auth verifiers");
+    let verifiers = harness
+        .state
+        .read(|store| store.load_auth_verifier_pair())
+        .await
+        .expect("auth verifiers");
     assert_eq!(verifiers.verify(SESSION_KEY), None);
     assert_eq!(verifiers.verify(new_session_key), Some(KeyKind::Session));
     assert_eq!(verifiers.verify(ADMIN_KEY), Some(KeyKind::Admin));

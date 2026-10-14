@@ -1,18 +1,16 @@
 //! Shared fixtures for the `sessions_*_tests` binaries: an in-process server harness wired to the placebo ACP agent.
 //! `tests/common/api.rs` defines same-named items with different key values and signatures; the two sets MUST stay separate, never merged or cross-imported.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use acp_stack::api::{self, AppState, RuntimePaths};
 use acp_stack::config::{Config, load_config_from_str};
-use acp_stack::state::StateStore;
+use acp_stack::state::{StateHandle, StateStore};
 use futures::StreamExt;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
-use tokio::sync::Mutex as TokioMutex;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
@@ -25,7 +23,7 @@ pub struct Harness {
     pub workspace_root: std::path::PathBuf,
     pub home: std::path::PathBuf,
     pub _tempdir: TempDir,
-    pub state: Arc<TokioMutex<StateStore>>,
+    pub state: StateHandle,
     pub join: JoinHandle<acp_stack::error::Result<()>>,
 }
 
@@ -99,7 +97,8 @@ impl Harness {
             ADMIN_KEY.to_owned(),
             effective_bind,
             runtime_paths,
-        );
+        )
+        .expect("app state");
         let state = app_state.state.clone();
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let base_url = format!("http://{}", listener.local_addr().expect("local"));
@@ -245,11 +244,7 @@ pub async fn create_session(harness: &Harness) -> String {
 }
 
 pub async fn prompt_count_for_session(harness: &Harness, session_id: &str) -> i64 {
-    let state_path = {
-        let state = harness.state.lock().await;
-        state.path().to_path_buf()
-    };
-    let connection = rusqlite::Connection::open(state_path).expect("open state db");
+    let connection = rusqlite::Connection::open(harness.state.path()).expect("open state db");
     connection
         .query_row(
             "SELECT COUNT(*) FROM prompts WHERE session_id = ?1",

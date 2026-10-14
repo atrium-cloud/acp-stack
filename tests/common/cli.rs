@@ -108,7 +108,8 @@ impl AgentCliHarness {
                 ADMIN_KEY.to_owned(),
                 bind,
                 runtime_paths,
-            ),
+            )
+            .expect("app state"),
             None => AppState::with_effective_bind_and_runtime_paths(
                 config,
                 store,
@@ -116,7 +117,8 @@ impl AgentCliHarness {
                 ADMIN_KEY.to_owned(),
                 "127.0.0.1:7700".to_owned(),
                 runtime_paths,
-            ),
+            )
+            .expect("app state"),
         };
         let bound_local = acp_stack::local_listener::bind_local(
             &socket_path,

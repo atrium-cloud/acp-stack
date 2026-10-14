@@ -22,7 +22,7 @@ use crate::runtime::install::install_ownership::install_components;
 use crate::runtime::process_runner::HostExec;
 use crate::state::{
     INSTALLER_OPERATION_INSTALL, INSTALLER_OUTPUT_CAP_BYTES, INSTALLER_STATUS_KEPT,
-    INSTALLER_STATUS_RUNNING, InstallerRunFinish, InstallerRunInput, StateStore,
+    INSTALLER_STATUS_RUNNING, InstallerRunFinish, InstallerRunInput, StateHandle, StateStore,
 };
 
 pub(crate) use self::execute::install_one_with_fallback;
@@ -88,7 +88,7 @@ impl InstallerOutcome {
 }
 
 /// One persisted row's worth of installer state, owned so the caller can write
-/// it without holding the state-store lock across the install work.
+/// it after the install work instead of during it.
 #[derive(Debug, Clone)]
 pub struct InstallerRowDraft {
     pub started_at: String,
@@ -190,31 +190,104 @@ impl InstallerRowDraft {
 // Step-boundary progress (in-flight visibility in `installer_runs`)
 // =================================================================
 
+/// The `running` row a sink inserts when a step starts.
+#[derive(Debug, Clone)]
+pub struct InstallerStepStart {
+    pub agent_id: String,
+    pub started_at: String,
+    pub step: &'static str,
+    pub operation: &'static str,
+    pub method: Option<String>,
+}
+
+impl InstallerStepStart {
+    fn append(&self, store: &StateStore) -> Result<String> {
+        let run = store.append_installer_run(InstallerRunInput {
+            agent_id: &self.agent_id,
+            started_at: &self.started_at,
+            finished_at: None,
+            status: INSTALLER_STATUS_RUNNING,
+            stdout: "",
+            stderr: "",
+            exit_status: None,
+            step: self.step,
+            version: None,
+            operation: self.operation,
+            method: self.method.as_deref(),
+            log_dir: None,
+            apply_run_id: None,
+            path: None,
+            sha256: None,
+        })?;
+        Ok(run.id)
+    }
+}
+
+/// The final state a sink writes over a step's `running` row.
+#[derive(Debug, Clone)]
+pub struct InstallerStepFinish {
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub status: String,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_status: Option<i32>,
+    pub version: Option<String>,
+    pub log_dir: Option<String>,
+    pub path: Option<String>,
+    pub sha256: Option<String>,
+}
+
+impl InstallerStepFinish {
+    fn write(&self, store: &StateStore, run_id: &str) -> Result<()> {
+        store.finish_installer_run(
+            run_id,
+            InstallerRunFinish {
+                started_at: &self.started_at,
+                finished_at: self.finished_at.as_deref(),
+                status: &self.status,
+                stdout: &self.stdout,
+                stderr: &self.stderr,
+                exit_status: self.exit_status,
+                version: self.version.as_deref(),
+                log_dir: self.log_dir.as_deref(),
+                path: self.path.as_deref(),
+                sha256: self.sha256.as_deref(),
+            },
+        )
+    }
+}
+
 /// Store access for step-boundary writes. `Sync` because adapter-backed
 /// installs share one sink across parallel scoped threads.
 pub trait InstallerRunSink: Sync {
-    /// Run `f` against a state store; `f` must do one brief write and never
-    /// outlive the call.
-    fn with_store(&self, f: &mut dyn FnMut(&StateStore) -> Result<()>) -> Result<()>;
+    /// Insert the step's `running` row and return its id.
+    fn begin_step(&self, start: InstallerStepStart) -> Result<String>;
+    /// Write the step's final state over its `running` row.
+    fn finish_step(&self, run_id: String, finish: InstallerStepFinish) -> Result<()>;
 }
 
-/// Sink over the daemon's shared store handle. Uses `blocking_lock`, so it is
+/// Sink over the daemon's shared store handle. Uses `blocking_write`, so it is
 /// only legal off the async executor. Callers must run steps in
 /// `spawn_blocking`.
 pub struct SharedInstallerSink {
-    state: std::sync::Arc<tokio::sync::Mutex<StateStore>>,
+    state: StateHandle,
 }
 
 impl SharedInstallerSink {
-    pub fn new(state: std::sync::Arc<tokio::sync::Mutex<StateStore>>) -> Self {
+    pub fn new(state: StateHandle) -> Self {
         Self { state }
     }
 }
 
 impl InstallerRunSink for SharedInstallerSink {
-    fn with_store(&self, f: &mut dyn FnMut(&StateStore) -> Result<()>) -> Result<()> {
-        let guard = self.state.blocking_lock();
-        f(&guard)
+    fn begin_step(&self, start: InstallerStepStart) -> Result<String> {
+        self.state.blocking_write(move |store| start.append(store))
+    }
+
+    fn finish_step(&self, run_id: String, finish: InstallerStepFinish) -> Result<()> {
+        self.state
+            .blocking_write(move |store| finish.write(store, &run_id))
     }
 }
 
@@ -232,9 +305,14 @@ impl ReconnectingInstallerSink {
 }
 
 impl InstallerRunSink for ReconnectingInstallerSink {
-    fn with_store(&self, f: &mut dyn FnMut(&StateStore) -> Result<()>) -> Result<()> {
+    fn begin_step(&self, start: InstallerStepStart) -> Result<String> {
         let store = StateStore::open(&self.state_path)?;
-        f(&store)
+        start.append(&store)
+    }
+
+    fn finish_step(&self, run_id: String, finish: InstallerStepFinish) -> Result<()> {
+        let store = StateStore::open(&self.state_path)?;
+        finish.write(&store, &run_id)
     }
 }
 
@@ -253,31 +331,15 @@ pub(crate) fn begin_tracked_step(
     step_label: &'static str,
     method: Option<&str>,
 ) -> Option<String> {
-    let started_at = current_timestamp();
-    let mut inserted_id = None;
-    let result = progress.sink.with_store(&mut |store| {
-        let run = store.append_installer_run(InstallerRunInput {
-            agent_id: progress.agent_id,
-            started_at: &started_at,
-            finished_at: None,
-            status: INSTALLER_STATUS_RUNNING,
-            stdout: "",
-            stderr: "",
-            exit_status: None,
-            step: step_label,
-            version: None,
-            operation: progress.operation,
-            method,
-            log_dir: None,
-            apply_run_id: None,
-            path: None,
-            sha256: None,
-        })?;
-        inserted_id = Some(run.id);
-        Ok(())
+    let result = progress.sink.begin_step(InstallerStepStart {
+        agent_id: progress.agent_id.to_owned(),
+        started_at: current_timestamp(),
+        step: step_label,
+        operation: progress.operation,
+        method: method.map(str::to_owned),
     });
     match result {
-        Ok(()) => inserted_id,
+        Ok(run_id) => Some(run_id),
         Err(error) => {
             tracing::warn!(error = %crate::error::report(&error), agent_id = progress.agent_id, step = step_label, "installer progress: running-row insert failed; step continues untracked");
             None
@@ -299,54 +361,48 @@ pub(crate) fn finalize_tracked_step(
     };
     let result = (|| -> Result<()> {
         persist_step_logs_to_disk(row, progress.agent_id, progress.log_base)?;
-        let artifact_path = InstalledArtifact::path_str(row.artifact.as_ref());
-        progress.sink.with_store(&mut |store| {
-            store.finish_installer_run(
-                &run_id,
-                InstallerRunFinish {
-                    started_at: &row.started_at,
-                    finished_at: row.finished_at.as_deref(),
-                    status: &row.status,
-                    stdout: &row.stdout,
-                    stderr: &row.stderr,
-                    exit_status: row.exit_status,
-                    version: row.version.as_deref(),
-                    log_dir: row.log_dir.as_deref(),
-                    path: artifact_path.as_deref(),
-                    sha256: row
-                        .artifact
-                        .as_ref()
-                        .map(|artifact| artifact.sha256.as_str()),
-                },
-            )
-        })
+        progress.sink.finish_step(
+            run_id.clone(),
+            InstallerStepFinish {
+                started_at: row.started_at.clone(),
+                finished_at: row.finished_at.clone(),
+                status: row.status.clone(),
+                stdout: row.stdout.clone(),
+                stderr: row.stderr.clone(),
+                exit_status: row.exit_status,
+                version: row.version.clone(),
+                log_dir: row.log_dir.clone(),
+                path: InstalledArtifact::path_str(row.artifact.as_ref()),
+                sha256: row
+                    .artifact
+                    .as_ref()
+                    .map(|artifact| artifact.sha256.clone()),
+            },
+        )
     })();
     match result {
         Ok(()) => row.persisted_run_id = Some(run_id),
         Err(error) => {
             tracing::warn!(error = %crate::error::report(&error), agent_id = progress.agent_id, run_id, "installer progress: running-row finalize failed; row falls back to end-of-run append");
-            let finished_now = current_timestamp();
             let reason = format!(
                 "installer progress finalize failed: {}",
                 crate::error::persisted_report(&error)
             );
-            let mark = progress.sink.with_store(&mut |store| {
-                store.finish_installer_run(
-                    &run_id,
-                    InstallerRunFinish {
-                        started_at: &row.started_at,
-                        finished_at: Some(&finished_now),
-                        status: "error",
-                        stdout: &row.stdout,
-                        stderr: &reason,
-                        exit_status: row.exit_status,
-                        version: row.version.as_deref(),
-                        log_dir: row.log_dir.as_deref(),
-                        path: None,
-                        sha256: None,
-                    },
-                )
-            });
+            let mark = progress.sink.finish_step(
+                run_id.clone(),
+                InstallerStepFinish {
+                    started_at: row.started_at.clone(),
+                    finished_at: Some(current_timestamp()),
+                    status: "error".to_owned(),
+                    stdout: row.stdout.clone(),
+                    stderr: reason,
+                    exit_status: row.exit_status,
+                    version: row.version.clone(),
+                    log_dir: row.log_dir.clone(),
+                    path: None,
+                    sha256: None,
+                },
+            );
             if let Err(mark_error) = mark {
                 tracing::warn!(error = %crate::error::report(&mark_error), agent_id = progress.agent_id, run_id,"installer progress: failed to mark unfinalizable row as error");
             }

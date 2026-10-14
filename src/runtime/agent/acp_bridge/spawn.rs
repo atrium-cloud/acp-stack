@@ -96,7 +96,7 @@ impl AcpBridge {
             anchor: Arc::new(fs_anchor),
             cwd: cwd.clone(),
             sandbox: sandbox.clone(),
-            state: command_log.as_ref().map(|log| Arc::clone(&log.state)),
+            state: command_log.as_ref().map(|log| log.state.clone()),
             sink: sink.clone(),
         });
         let mut env = build_agent_process_env(agent, home, env)?;

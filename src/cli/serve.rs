@@ -320,28 +320,38 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
             auth_verifiers,
             local.clone(),
             runtime_paths,
-        );
+        )?;
+        let state_handle = app_state.state.clone();
+        // Every exit after this point, early errors included, drains the state writer.
+        let served: Result<()> = async {
         spawn_node_runtime_ensure(app_state.node_runtime.clone(), home.clone(), node_startup_lock);
         crate::api::routes::native_config::recover_native_config_imports(&app_state).await?;
-        let state_handle = app_state.state.clone();
         let event_hub = app_state.event_hub.clone();
         lifecycle.started(&state_handle, &event_hub, &local).await?;
 
         // Emitted after the hub is attached to the store so the sweep trace also fans out live.
         if !reconciled_session_ids.is_empty() {
             let payload = serde_json::json!({ "reason": "daemon_restart" }).to_string();
-            let store = state_handle.lock().await;
-            for session_id in &reconciled_session_ids {
-                if let Err(error) = store.append_session_event_with_source(
-                    session_id,
-                    "info",
-                    crate::state::EVENT_KIND_SESSION_AVAILABLE,
-                    crate::state::EVENT_SOURCE_SYSTEM,
-                    "session available",
-                    &payload,
-                ) {
-                    tracing::warn!(error = %error, session_id = %session_id, "failed to record session.available event");
-                }
+            let session_ids = reconciled_session_ids.clone();
+            let recorded = state_handle
+                .write(move |store| {
+                    for session_id in &session_ids {
+                        if let Err(error) = store.append_session_event_with_source(
+                            session_id,
+                            "info",
+                            crate::state::EVENT_KIND_SESSION_AVAILABLE,
+                            crate::state::EVENT_SOURCE_SYSTEM,
+                            "session available",
+                            &payload,
+                        ) {
+                            tracing::warn!(error = %error, session_id = %session_id, "failed to record session.available event");
+                        }
+                    }
+                    Ok(())
+                })
+                .await;
+            if let Err(error) = recorded {
+                tracing::warn!(error = %error, "failed to record session.available events");
             }
         }
         if reconciled_prompts > 0
@@ -365,15 +375,17 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
                 "command_ids_truncated": command_ids_truncated,
                 "reason": "daemon-restart",
             });
-            let appended = {
-                let store = state_handle.lock().await;
-                store.append_event(
-                    "info",
-                    "server.reconciled",
-                    "settled orphaned rows on startup",
-                    &payload.to_string(),
-                )
-            };
+            let payload = payload.to_string();
+            let appended = state_handle
+                .write(move |store| {
+                    store.append_event(
+                        "info",
+                        "server.reconciled",
+                        "settled orphaned rows on startup",
+                        &payload,
+                    )
+                })
+                .await;
             if let Err(error) = appended {
                 tracing::warn!(error = %error, "failed to record server.reconciled event");
             }
@@ -453,6 +465,10 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
 
         eprintln!("acps serve: stopped ({reason})");
         serve_result
+        }
+        .await;
+        state_handle.shutdown().await;
+        served
     })
 }
 

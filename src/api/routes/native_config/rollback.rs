@@ -159,10 +159,11 @@ pub(super) async fn resume_pending_rollback_locked(
         .as_ref()
         .ok_or_else(|| native_error("agent.native_config_journal_invalid"))?;
     if marker.prior_was_running {
-        let blockers = {
-            let store = state.state.lock().await;
-            store.query_restart_blockers(Some(&prior_config.array.primary_target))?
-        };
+        let primary_target = prior_config.array.primary_target.clone();
+        let blockers = state
+            .state
+            .read(move |store| store.query_restart_blockers(Some(&primary_target)))
+            .await?;
         if !blockers.is_empty() {
             let blocked = mutate_operation_record(state, operation_id, |record| {
                 record.operation.status = NativeConfigOperationStatus::Queued;

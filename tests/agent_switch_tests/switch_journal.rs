@@ -247,10 +247,10 @@ async fn agent_switch_rename_collision_clears_journal_and_unblocks_retry() {
 
     // Seed the collision the rename check rejects: two sessions sharing an
     // agent_session_id across the current primary and the future target.
-    {
-        let store = harness.state.lock().await;
-        store
-            .insert_session_for_target(
+    harness
+        .state
+        .write(|store| {
+            store.insert_session_for_target(
                 "opencode",
                 "agent-session-dup".to_owned(),
                 NewSessionRecord {
@@ -260,10 +260,8 @@ async fn agent_switch_rename_collision_clears_journal_and_unblocks_retry() {
                     title: None,
                     metadata_json: "{}".to_owned(),
                 },
-            )
-            .expect("old-target session inserted");
-        store
-            .insert_session_for_target(
+            )?;
+            store.insert_session_for_target(
                 "kimi",
                 "agent-session-dup".to_owned(),
                 NewSessionRecord {
@@ -273,9 +271,11 @@ async fn agent_switch_rename_collision_clears_journal_and_unblocks_retry() {
                     title: None,
                     metadata_json: "{}".to_owned(),
                 },
-            )
-            .expect("new-target session inserted");
-    }
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("colliding sessions inserted");
 
     let (status, body) = switch_request(&harness, "kimi").await;
     assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
@@ -287,12 +287,11 @@ async fn agent_switch_rename_collision_clears_journal_and_unblocks_retry() {
         None
     );
 
-    {
-        let store = harness.state.lock().await;
-        store
-            .delete_session("sess_new")
-            .expect("colliding session deleted");
-    }
+    harness
+        .state
+        .write(|store| store.delete_session("sess_new"))
+        .await
+        .expect("colliding session deleted");
     let (status, body) = switch_request(&harness, "kimi").await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(body["data"]["agent_id"], "kimi");

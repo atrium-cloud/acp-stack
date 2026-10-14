@@ -12,7 +12,7 @@ pub(super) async fn spawn_agent_bridge(
     agent: &AgentConfig,
     workspace_root: &str,
     env: HashMap<String, String>,
-    state: &Arc<TokioMutex<StateStore>>,
+    state: &StateHandle,
     session_changes: &SessionChangesHandle,
     event_hub: EventHub,
     permissions: Option<crate::runtime::mediation::permissions::PermissionService>,
@@ -93,7 +93,7 @@ pub(super) async fn spawn_agent_bridge(
         }
     };
 
-    let mut capabilities = bridge.capabilities().clone();
+    let capabilities = bridge.capabilities().clone();
     let pid = bridge.pid();
 
     let started_data = json!({
@@ -116,28 +116,32 @@ pub(super) async fn spawn_agent_bridge(
                 )
             }
         };
-    let started_row_result: Result<crate::state::AgentLifecycleEvent> = {
-        let guard = state.lock().await;
-        (|| {
-            // Versions are read under the same lock as the capability write so the stored
+    let agent_id = agent.id.clone();
+    let started_payload = started_data.to_string();
+    let started_row_result = state
+        .write(move |store| {
+            let mut capabilities = capabilities;
+            // Versions are read in the same job as the capability write so the stored
             // snapshot pairs this process's advertisement with the install it launched from.
-            let installer_runs = guard.latest_successful_installer_runs_for_agent(&agent.id)?;
+            let installer_runs = store.latest_successful_installer_runs_for_agent(&agent_id)?;
             capabilities.attach_installed_versions(
-                &agent.id,
+                &agent_id,
                 &installed_components,
                 &installer_runs,
             );
-            guard.upsert_agent_capabilities(&agent.id, &capabilities.to_json()?)?;
-            guard.append_agent_lifecycle(
+            store.upsert_agent_capabilities(&agent_id, &capabilities.to_json()?)?;
+            let row = store.append_agent_lifecycle(
                 "agent.started",
                 "agent initialized",
-                &started_data.to_string(),
-            )
-        })()
-    };
-    match started_row_result {
-        Ok(row) => {
+                &started_payload,
+            )?;
+            Ok((capabilities, row))
+        })
+        .await;
+    let capabilities = match started_row_result {
+        Ok((capabilities, row)) => {
             event_hub.publish_agent_event(&row.id, &row.created_at, "agent.started", started_data);
+            capabilities
         }
         Err(err) => {
             if let Err(shutdown_err) = bridge.shutdown().await {
@@ -148,7 +152,7 @@ pub(super) async fn spawn_agent_bridge(
             }
             return Err(err);
         }
-    }
+    };
 
     Ok((capabilities, bridge))
 }
@@ -396,17 +400,28 @@ fn bridge_exit_payload(
 }
 
 pub(super) async fn append_and_publish_agent_lifecycle(
-    state: &Arc<TokioMutex<StateStore>>,
+    state: &StateHandle,
     event_hub: &EventHub,
     event_kind: &str,
     message: &str,
     data: Value,
 ) -> Result<()> {
     let payload = data.to_string();
-    let row = {
-        let guard = state.lock().await;
-        guard.append_agent_lifecycle(event_kind, message, &payload)?
-    };
-    event_hub.publish_agent_event(&row.id, &row.created_at, event_kind, data);
-    Ok(())
+    let state = state.clone();
+    let event_hub = event_hub.clone();
+    let event_kind = event_kind.to_owned();
+    let message = message.to_owned();
+    // Spawned so a caller dropped mid-write still publishes the row it committed.
+    tokio::spawn(async move {
+        let job_event_kind = event_kind.clone();
+        let row = state
+            .write(move |store| store.append_agent_lifecycle(&job_event_kind, &message, &payload))
+            .await?;
+        event_hub.publish_agent_event(&row.id, &row.created_at, &event_kind, data);
+        Ok(())
+    })
+    .await
+    .map_err(|error| StackError::StateAccessFailed {
+        reason: format!("agent lifecycle write task failed: {error}"),
+    })?
 }

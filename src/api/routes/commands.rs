@@ -165,12 +165,16 @@ pub(crate) async fn commands_output_handler(
 ) -> std::result::Result<ApiSuccess<CommandOutputResponse>, StackError> {
     let limit = params.limit.min(MAX_LOGS_LIMIT);
     let order = parse_order(params.order.as_deref())?;
-    let store = state.state.lock().await;
-    if store.get_command(&id)?.is_none() {
-        return Err(StackError::CommandNotFound { id });
-    }
-    let events = store.query_command_output_events(&id, limit, params.after.as_deref(), order)?;
-    drop(store);
+    let after = params.after;
+    let events = state
+        .state
+        .read(move |store| {
+            if store.get_command(&id)?.is_none() {
+                return Err(StackError::CommandNotFound { id });
+            }
+            store.query_command_output_events(&id, limit, after.as_deref(), order)
+        })
+        .await?;
     let next_cursor = if events.len() == limit as usize {
         events.last().map(|event| event.id.clone())
     } else {

@@ -21,9 +21,10 @@ pub(crate) async fn sessions_config_options_handler(
     Path(id): Path<String>,
     Query(params): Query<SessionsTargetParams>,
 ) -> std::result::Result<ApiSuccess<SessionConfigOptionsResponse>, StackError> {
-    let store = state.state.lock().await;
-    let session = store.require_live_session(&id)?;
-    drop(store);
+    let session = state
+        .state
+        .read(move |store| store.require_live_session(&id))
+        .await?;
     if let Some(asserted) = params.target_id.as_deref()
         && asserted != session.target_id
     {
@@ -79,10 +80,11 @@ pub(crate) async fn sessions_config_options_set_handler(
 
     // Pre-validate against the stored snapshot so an off-list request gets a retryable 400.
     // An empty snapshot skips the check: it is observational, not authoritative.
-    let session = {
-        let store = state.state.lock().await;
-        store.require_live_session(&id)?
-    };
+    let session_id = id.clone();
+    let session = state
+        .state
+        .read(move |store| store.require_live_session(&session_id))
+        .await?;
     if let Some(stored) = stored_config_options(&session.metadata_json)
         && !stored.options.is_empty()
     {
@@ -140,12 +142,11 @@ pub(crate) async fn sessions_config_options_set_handler(
         .await?;
     // Re-read so the response matches a follow-up GET: when a lax adapter answers with an
     // empty list and refreshes by notification, the stored snapshot is the truthful one.
-    let stored = {
-        let store = state.state.lock().await;
-        store
-            .get_session(&id)?
-            .and_then(|session| stored_config_options(&session.metadata_json))
-    };
+    let stored = state
+        .state
+        .read(move |store| store.get_session(&id))
+        .await?
+        .and_then(|session| stored_config_options(&session.metadata_json));
     let (config_options, updated_at) = match stored {
         Some(stored) if config_options.is_empty() => (stored.options, stored.updated_at),
         Some(stored) => (config_options, stored.updated_at),

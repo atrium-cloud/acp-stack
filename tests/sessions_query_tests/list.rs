@@ -20,25 +20,31 @@ async fn session_change_feed_pages_ascending_after_the_cursor_and_matches_the_li
         .await
         .expect("baseline feed json");
     let start = baseline["data"]["head"].as_u64().expect("head");
-    {
-        let store = harness.state.lock().await;
-        for id in ["sess_feed_route_a", "sess_feed_route_b"] {
-            store
-                .insert_session(NewSessionRecord {
+    harness
+        .state
+        .write(|store| {
+            for id in ["sess_feed_route_a", "sess_feed_route_b"] {
+                store.insert_session(NewSessionRecord {
                     id: id.to_owned(),
                     agent_id: "placebo".to_owned(),
                     cwd: "/tmp/feed".to_owned(),
                     title: None,
                     metadata_json: "{}".to_owned(),
-                })
-                .expect("session inserted");
-        }
-        for _ in 0..2 {
-            store
-                .append_session_event("sess_feed_route_a", "info", "session.update", "", "{}")
-                .expect("event appended");
-        }
-    }
+                })?;
+            }
+            for _ in 0..2 {
+                store.append_session_event(
+                    "sess_feed_route_a",
+                    "info",
+                    "session.update",
+                    "",
+                    "{}",
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .expect("sessions inserted and events appended");
     let feed = |query: String| {
         let url = format!("{}/v1/sessions/-/changes{query}", harness.base_url);
         async move {
@@ -267,40 +273,40 @@ async fn sessions_list_filters_by_since_and_until() {
         config.agent.args.push("--no-cap-list-session".into());
     })
     .await;
-    {
-        let store = harness.state.lock().await;
-        store
-            .upsert_listed_sessions(vec![
-                acp_stack::state::ListedSessionRecord {
-                    id: "sess_old".to_owned(),
-                    agent_session_id: "sess_old".to_owned(),
-                    agent_id: "placebo".to_owned(),
-                    cwd: "/tmp/old".to_owned(),
-                    title: None,
-                    updated_at: Some("2026-01-01T00:00:00Z".to_owned()),
-                    metadata_json: "{}".to_owned(),
-                },
-                acp_stack::state::ListedSessionRecord {
-                    id: "sess_mid".to_owned(),
-                    agent_session_id: "sess_mid".to_owned(),
-                    agent_id: "placebo".to_owned(),
-                    cwd: "/tmp/mid".to_owned(),
-                    title: None,
-                    updated_at: Some("2026-02-01T00:00:00Z".to_owned()),
-                    metadata_json: "{}".to_owned(),
-                },
-                acp_stack::state::ListedSessionRecord {
-                    id: "sess_new".to_owned(),
-                    agent_session_id: "sess_new".to_owned(),
-                    agent_id: "placebo".to_owned(),
-                    cwd: "/tmp/new".to_owned(),
-                    title: None,
-                    updated_at: Some("2026-03-01T00:00:00Z".to_owned()),
-                    metadata_json: "{}".to_owned(),
-                },
-            ])
-            .expect("sessions inserted");
-    }
+    let records = vec![
+        acp_stack::state::ListedSessionRecord {
+            id: "sess_old".to_owned(),
+            agent_session_id: "sess_old".to_owned(),
+            agent_id: "placebo".to_owned(),
+            cwd: "/tmp/old".to_owned(),
+            title: None,
+            updated_at: Some("2026-01-01T00:00:00Z".to_owned()),
+            metadata_json: "{}".to_owned(),
+        },
+        acp_stack::state::ListedSessionRecord {
+            id: "sess_mid".to_owned(),
+            agent_session_id: "sess_mid".to_owned(),
+            agent_id: "placebo".to_owned(),
+            cwd: "/tmp/mid".to_owned(),
+            title: None,
+            updated_at: Some("2026-02-01T00:00:00Z".to_owned()),
+            metadata_json: "{}".to_owned(),
+        },
+        acp_stack::state::ListedSessionRecord {
+            id: "sess_new".to_owned(),
+            agent_session_id: "sess_new".to_owned(),
+            agent_id: "placebo".to_owned(),
+            cwd: "/tmp/new".to_owned(),
+            title: None,
+            updated_at: Some("2026-03-01T00:00:00Z".to_owned()),
+            metadata_json: "{}".to_owned(),
+        },
+    ];
+    harness
+        .state
+        .write(move |store| store.upsert_listed_sessions(records))
+        .await
+        .expect("sessions inserted");
     let client = http();
     let body: Value = client
         .get(format!(
@@ -369,31 +375,31 @@ async fn sessions_list_resolves_missing_explicit_bound_to_session_span() {
         config.agent.args.push("--no-cap-list-session".into());
     })
     .await;
-    {
-        let store = harness.state.lock().await;
-        store
-            .upsert_listed_sessions(vec![
-                acp_stack::state::ListedSessionRecord {
-                    id: "sess_first".to_owned(),
-                    agent_session_id: "sess_first".to_owned(),
-                    agent_id: "placebo".to_owned(),
-                    cwd: "/tmp/first".to_owned(),
-                    title: None,
-                    updated_at: Some("2026-02-01T00:00:00Z".to_owned()),
-                    metadata_json: "{}".to_owned(),
-                },
-                acp_stack::state::ListedSessionRecord {
-                    id: "sess_latest".to_owned(),
-                    agent_session_id: "sess_latest".to_owned(),
-                    agent_id: "placebo".to_owned(),
-                    cwd: "/tmp/latest".to_owned(),
-                    title: None,
-                    updated_at: Some("2026-02-02T00:00:00Z".to_owned()),
-                    metadata_json: "{}".to_owned(),
-                },
-            ])
-            .expect("sessions inserted");
-    }
+    let records = vec![
+        acp_stack::state::ListedSessionRecord {
+            id: "sess_first".to_owned(),
+            agent_session_id: "sess_first".to_owned(),
+            agent_id: "placebo".to_owned(),
+            cwd: "/tmp/first".to_owned(),
+            title: None,
+            updated_at: Some("2026-02-01T00:00:00Z".to_owned()),
+            metadata_json: "{}".to_owned(),
+        },
+        acp_stack::state::ListedSessionRecord {
+            id: "sess_latest".to_owned(),
+            agent_session_id: "sess_latest".to_owned(),
+            agent_id: "placebo".to_owned(),
+            cwd: "/tmp/latest".to_owned(),
+            title: None,
+            updated_at: Some("2026-02-02T00:00:00Z".to_owned()),
+            metadata_json: "{}".to_owned(),
+        },
+    ];
+    harness
+        .state
+        .write(move |store| store.upsert_listed_sessions(records))
+        .await
+        .expect("sessions inserted");
 
     let body: Value = http()
         .get(format!(
@@ -442,18 +448,19 @@ async fn sessions_list_range_counts_from_request_time() {
         config.agent.args.push("--no-cap-list-session".into());
     })
     .await;
-    {
-        let store = harness.state.lock().await;
-        store
-            .insert_session(NewSessionRecord {
+    harness
+        .state
+        .write(|store| {
+            store.insert_session(NewSessionRecord {
                 id: "sess_active".to_owned(),
                 agent_id: "placebo".to_owned(),
                 cwd: "/tmp/active".to_owned(),
                 title: None,
                 metadata_json: "{}".to_owned(),
             })
-            .expect("session inserted");
-    }
+        })
+        .await
+        .expect("session inserted");
 
     let body: Value = http()
         .get(format!("{}/v1/sessions?range=30m", harness.base_url))

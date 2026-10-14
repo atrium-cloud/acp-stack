@@ -30,6 +30,7 @@ flowchart LR
 
 - Config: load, validate, import, export, and canonicalize TOML.
 - State: SQLite migrations and repositories for durable runtime records.
+- State handle: the daemon's single writer thread, which group-commits queued write jobs with one savepoint per job and publishes their live events after the commit, plus a pool of read-only connections and a WAL checkpointer thread (`src/state/handle.rs`). CLI commands open the store directly.
 - Secrets: age-compatible key management and encrypted values.
 
 ### Agent runtime

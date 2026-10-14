@@ -69,9 +69,11 @@ pub(crate) async fn sessions_prompt_status_handler(
 ) -> std::result::Result<ApiSuccess<PromptStatusResponse>, StackError> {
     let _target =
         target_for_existing_session(&state, &session_id, params.target_id.as_deref()).await?;
-    let store = state.state.lock().await;
-    let record = store.get_prompt(&prompt_id)?;
-    drop(store);
+    let lookup_prompt_id = prompt_id.clone();
+    let record = state
+        .state
+        .read(move |store| store.get_prompt(&lookup_prompt_id))
+        .await?;
     let record = record.ok_or_else(|| StackError::PromptNotFound {
         id: prompt_id.clone(),
     })?;

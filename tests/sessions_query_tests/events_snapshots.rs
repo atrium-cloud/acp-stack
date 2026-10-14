@@ -55,11 +55,11 @@ async fn session_update_notifications_land_in_events_table() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    let store = harness.state.lock().await;
-    let events = store
-        .query_session_events(&session_id, None, 100)
+    let events = harness
+        .state
+        .read(move |store| store.query_session_events(&session_id, None, 100))
+        .await
         .expect("session events");
-    drop(store);
     let updates = events.iter().filter(|e| e.kind == "session.update").count();
     assert!(
         updates >= 2,
@@ -76,37 +76,36 @@ async fn sessions_snapshot_returns_session_in_flight_prompts_and_recent_events()
     })
     .await;
     let session_id = "sess_snapshot".to_owned();
-    {
-        let store = harness.state.lock().await;
-        store
-            .insert_session(NewSessionRecord {
-                id: session_id.clone(),
+    let seeded_session_id = session_id.clone();
+    harness
+        .state
+        .write(move |store| {
+            store.insert_session(NewSessionRecord {
+                id: seeded_session_id.clone(),
                 agent_id: "placebo".to_owned(),
                 cwd: "/tmp/snap".to_owned(),
                 title: Some("snap".to_owned()),
                 metadata_json: "{}".to_owned(),
-            })
-            .expect("session inserted");
-        store
-            .insert_prompt(NewPromptRecord {
+            })?;
+            store.insert_prompt(NewPromptRecord {
                 id: "prm_inflight".to_owned(),
-                session_id: session_id.clone(),
+                session_id: seeded_session_id.clone(),
                 prompt_json: r#"[{"type":"text","text":"hi"}]"#.to_owned(),
-            })
-            .expect("prompt inserted");
-        for index in 0..3 {
-            store
-                .append_session_event_with_source(
-                    &session_id,
+            })?;
+            for index in 0..3 {
+                store.append_session_event_with_source(
+                    &seeded_session_id,
                     "info",
                     "session.update",
                     acp_stack::state::EVENT_SOURCE_ACP,
                     "ACP session update",
                     &format!(r#"{{"seq":{index}}}"#),
-                )
-                .expect("event inserted");
-        }
-    }
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .expect("session, prompt and events inserted");
 
     let body: Value = http()
         .get(format!(
@@ -157,38 +156,38 @@ async fn sessions_snapshot_surfaces_available_commands_and_tolerates_garbage_met
     .await;
     let advertised = "sess_snap_commands".to_owned();
     let garbage = "sess_snap_garbage".to_owned();
-    {
-        let store = harness.state.lock().await;
-        store
-            .insert_session(NewSessionRecord {
-                id: advertised.clone(),
+    let seeded_advertised = advertised.clone();
+    let seeded_garbage = garbage.clone();
+    harness
+        .state
+        .write(move |store| {
+            store.insert_session(NewSessionRecord {
+                id: seeded_advertised.clone(),
                 agent_id: "placebo".to_owned(),
                 cwd: "/tmp/snapcmd".to_owned(),
                 title: None,
                 metadata_json: "{}".to_owned(),
-            })
-            .expect("session inserted");
-        store
-            .replace_session_available_commands(
-                &advertised,
+            })?;
+            store.replace_session_available_commands(
+                &seeded_advertised,
                 &[acp_stack::state::SessionAvailableCommand {
                     name: "compact".to_owned(),
                     description: "Summarize the conversation".to_owned(),
                     input_hint: Some("optional instructions".to_owned()),
                 }],
-            )
-            .expect("commands stored");
-        // A wrong-shaped stored value must degrade to an empty list, not 500.
-        store
-            .insert_session(NewSessionRecord {
-                id: garbage.clone(),
+            )?;
+            // A wrong-shaped stored value must degrade to an empty list, not 500.
+            store.insert_session(NewSessionRecord {
+                id: seeded_garbage,
                 agent_id: "placebo".to_owned(),
                 cwd: "/tmp/snapgarbage".to_owned(),
                 title: None,
                 metadata_json: r#"{"available_commands":"not-a-list"}"#.to_owned(),
-            })
-            .expect("session inserted");
-    }
+            })?;
+            Ok(())
+        })
+        .await
+        .expect("sessions and commands stored");
 
     let body: Value = http()
         .get(format!(
@@ -246,18 +245,18 @@ async fn sessions_changes_returns_an_empty_ephemeral_snapshot_and_validates_targ
     })
     .await;
     let session_id = "sess_changes_empty".to_owned();
-    {
-        let store = harness.state.lock().await;
-        store
-            .insert_session(NewSessionRecord {
-                id: session_id.clone(),
-                agent_id: "placebo".to_owned(),
-                cwd: "/tmp/changes".to_owned(),
-                title: None,
-                metadata_json: "{}".to_owned(),
-            })
-            .expect("session inserted");
-    }
+    let record = NewSessionRecord {
+        id: session_id.clone(),
+        agent_id: "placebo".to_owned(),
+        cwd: "/tmp/changes".to_owned(),
+        title: None,
+        metadata_json: "{}".to_owned(),
+    };
+    harness
+        .state
+        .write(move |store| store.insert_session(record))
+        .await
+        .expect("session inserted");
 
     let response = http()
         .get(format!(
@@ -316,44 +315,43 @@ async fn sessions_events_separates_a_head_cursor_from_an_unknown_one() {
     })
     .await;
     let session_id = "sess_events_cursor".to_owned();
-    {
-        let store = harness.state.lock().await;
-        store
-            .insert_session(NewSessionRecord {
-                id: session_id.clone(),
+    let seeded_session_id = session_id.clone();
+    harness
+        .state
+        .write(move |store| {
+            store.insert_session(NewSessionRecord {
+                id: seeded_session_id.clone(),
                 agent_id: "placebo".to_owned(),
                 cwd: "/tmp/cursor".to_owned(),
                 title: None,
                 metadata_json: "{}".to_owned(),
-            })
-            .expect("session inserted");
-        for index in 0..3 {
-            store
-                .append_session_event_with_source(
-                    &session_id,
+            })?;
+            for index in 0..3 {
+                store.append_session_event_with_source(
+                    &seeded_session_id,
                     "info",
                     "session.update",
                     acp_stack::state::EVENT_SOURCE_ACP,
                     "ACP session update",
                     &format!(r#"{{"seq":{index}}}"#),
-                )
-                .expect("event inserted");
-        }
-    }
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .expect("session and events inserted");
     let other_session_id = "sess_events_cursor_other".to_owned();
-    let foreign_cursor = {
-        let store = harness.state.lock().await;
-        store
-            .insert_session(NewSessionRecord {
+    let foreign_cursor = harness
+        .state
+        .write(move |store| {
+            store.insert_session(NewSessionRecord {
                 id: other_session_id.clone(),
                 agent_id: "placebo".to_owned(),
                 cwd: "/tmp/cursor-other".to_owned(),
                 title: None,
                 metadata_json: "{}".to_owned(),
-            })
-            .expect("other session inserted");
-        store
-            .append_session_event_with_source(
+            })?;
+            store.append_session_event_with_source(
                 &other_session_id,
                 "info",
                 "session.update",
@@ -361,9 +359,10 @@ async fn sessions_events_separates_a_head_cursor_from_an_unknown_one() {
                 "ACP session update",
                 r#"{"seq":0}"#,
             )
-            .expect("foreign event inserted")
-            .id
-    };
+        })
+        .await
+        .expect("other session and foreign event inserted")
+        .id;
 
     let snapshot: Value = http()
         .get(format!(
@@ -435,30 +434,31 @@ async fn sessions_events_page_by_seq_and_every_event_surface_carries_it() {
     })
     .await;
     let session_id = "sess_events_seq".to_owned();
-    {
-        let store = harness.state.lock().await;
-        store
-            .insert_session(NewSessionRecord {
-                id: session_id.clone(),
+    let seeded_session_id = session_id.clone();
+    harness
+        .state
+        .write(move |store| {
+            store.insert_session(NewSessionRecord {
+                id: seeded_session_id.clone(),
                 agent_id: "placebo".to_owned(),
                 cwd: "/tmp/seq".to_owned(),
                 title: None,
                 metadata_json: "{}".to_owned(),
-            })
-            .expect("session inserted");
-        for index in 0..4 {
-            store
-                .append_session_event_with_source(
-                    &session_id,
+            })?;
+            for index in 0..4 {
+                store.append_session_event_with_source(
+                    &seeded_session_id,
                     "info",
                     "session.update",
                     acp_stack::state::EVENT_SOURCE_ACP,
                     "ACP session update",
                     &format!(r#"{{"index":{index}}}"#),
-                )
-                .expect("event inserted");
-        }
-    }
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .expect("session and events inserted");
     let get = |query: String| {
         let url = format!(
             "{}/v1/sessions/{}/events{query}",
@@ -562,30 +562,31 @@ async fn sessions_snapshot_caps_recent_events_at_50() {
     })
     .await;
     let session_id = "sess_snapshot_cap".to_owned();
-    {
-        let store = harness.state.lock().await;
-        store
-            .insert_session(NewSessionRecord {
-                id: session_id.clone(),
+    let seeded_session_id = session_id.clone();
+    harness
+        .state
+        .write(move |store| {
+            store.insert_session(NewSessionRecord {
+                id: seeded_session_id.clone(),
                 agent_id: "placebo".to_owned(),
                 cwd: "/tmp/cap".to_owned(),
                 title: None,
                 metadata_json: "{}".to_owned(),
-            })
-            .expect("session inserted");
-        for index in 0..75 {
-            store
-                .append_session_event_with_source(
-                    &session_id,
+            })?;
+            for index in 0..75 {
+                store.append_session_event_with_source(
+                    &seeded_session_id,
                     "info",
                     "session.update",
                     acp_stack::state::EVENT_SOURCE_ACP,
                     "ACP session update",
                     &format!(r#"{{"seq":{index}}}"#),
-                )
-                .expect("event inserted");
-        }
-    }
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .expect("session and events inserted");
 
     let body: Value = http()
         .get(format!(

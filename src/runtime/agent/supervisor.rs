@@ -96,8 +96,8 @@ use crate::state::{
     EVENT_KIND_SESSION_CAPABILITY_IGNORED, EVENT_KIND_SESSION_UPDATE, EVENT_SOURCE_ACP,
     EVENT_SOURCE_SYSTEM, FailureClass, ListedSessionRecord, NewPromptRecord, NewSessionRecord,
     PromptRecord, PromptSettle, PromptSettlement, PromptStatus, SESSION_STATUS_ACTIVE,
-    SESSION_STATUS_CLOSED, SessionRecord, StateStore, next_prompt_id, next_prompt_message_id,
-    next_session_id,
+    SESSION_STATUS_CLOSED, SessionRecord, StateHandle, StateStore, next_prompt_id,
+    next_prompt_message_id, next_session_id,
 };
 
 use self::bridge::*;
@@ -125,21 +125,22 @@ impl ServerLifecycle {
         })
     }
 
-    /// Record `server.started` after the listener is bound. Async-aware so the
-    /// caller can hold the same `Arc<Mutex<StateStore>>` it later hands to
-    /// axum handlers. Publishes the row to the `status` topic.
+    /// Record `server.started` after the listener is bound, through the same
+    /// `StateHandle` the caller later hands to axum handlers. Publishes the row
+    /// to the `status` topic.
     pub async fn started(
         &self,
-        state: &Arc<TokioMutex<StateStore>>,
+        state: &StateHandle,
         event_hub: &EventHub,
         bind: &str,
     ) -> Result<()> {
         let data = json!({ "bind": bind });
         let payload = data.to_string();
-        let guard = state.lock().await;
-        let row =
-            guard.append_agent_lifecycle("server.started", "acps serve listening", &payload)?;
-        drop(guard);
+        let row = state
+            .write(move |store| {
+                store.append_agent_lifecycle("server.started", "acps serve listening", &payload)
+            })
+            .await?;
         event_hub.publish_status_event(&row.id, &row.created_at, "server.started", data);
         Ok(())
     }
@@ -148,16 +149,18 @@ impl ServerLifecycle {
     /// arm after axum's graceful-shutdown future resolves.
     pub async fn stopped(
         &self,
-        state: &Arc<TokioMutex<StateStore>>,
+        state: &StateHandle,
         event_hub: &EventHub,
         reason: &str,
     ) -> Result<()> {
         let elapsed_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         let data = json!({ "reason": reason, "elapsed_ms": elapsed_ms });
         let payload = data.to_string();
-        let guard = state.lock().await;
-        let row = guard.append_agent_lifecycle("server.stopped", "acps serve stopped", &payload)?;
-        drop(guard);
+        let row = state
+            .write(move |store| {
+                store.append_agent_lifecycle("server.stopped", "acps serve stopped", &payload)
+            })
+            .await?;
         event_hub.publish_status_event(&row.id, &row.created_at, "server.stopped", data);
         Ok(())
     }
@@ -394,7 +397,7 @@ struct RestartContext {
     home: PathBuf,
     env: HashMap<String, String>,
     providers: Vec<ResolvedProviderSnapshot>,
-    state_store: Arc<TokioMutex<StateStore>>,
+    state_store: StateHandle,
     session_changes: SessionChangesHandle,
     event_hub: EventHub,
     permissions: Option<crate::runtime::mediation::permissions::PermissionService>,
@@ -412,7 +415,7 @@ pub struct AgentStartRequest<'a> {
     pub home: PathBuf,
     pub env: HashMap<String, String>,
     pub providers: Vec<ResolvedProviderSnapshot>,
-    pub state: &'a Arc<TokioMutex<StateStore>>,
+    pub state: &'a StateHandle,
     pub session_changes: &'a SessionChangesHandle,
     pub event_hub: EventHub,
     pub permissions: Option<crate::runtime::mediation::permissions::PermissionService>,
@@ -561,7 +564,7 @@ impl AgentSupervisor {
     pub async fn stop(
         &self,
         target_id: &str,
-        state: &Arc<TokioMutex<StateStore>>,
+        state: &StateHandle,
         event_hub: &EventHub,
     ) -> Result<Option<i32>> {
         let _dispatch_guard = self.dispatch_gate.lock().await;
@@ -571,14 +574,14 @@ impl AgentSupervisor {
     pub async fn stop_when_restart_safe(
         &self,
         target_id: &str,
-        state: &Arc<TokioMutex<StateStore>>,
+        state: &StateHandle,
         event_hub: &EventHub,
     ) -> Result<std::result::Result<Option<i32>, Vec<crate::state::RestartBlockerRecord>>> {
         let _dispatch_guard = self.dispatch_gate.lock().await;
-        let blockers = {
-            let guard = state.lock().await;
-            guard.query_restart_blockers(Some(target_id))?
-        };
+        let blockers_target_id = target_id.to_owned();
+        let blockers = state
+            .read(move |store| store.query_restart_blockers(Some(&blockers_target_id)))
+            .await?;
         if !blockers.is_empty() {
             return Ok(Err(blockers));
         }
@@ -593,7 +596,7 @@ impl AgentSupervisor {
     async fn stop_inner(
         &self,
         target_id: &str,
-        state: &Arc<TokioMutex<StateStore>>,
+        state: &StateHandle,
         event_hub: &EventHub,
     ) -> Result<Option<i32>> {
         // Extract the bridge under the lock and mark Stopping so a parallel
@@ -641,10 +644,11 @@ impl AgentSupervisor {
             "elapsed_ms": elapsed_ms,
         });
         let payload = data.to_string();
-        let row = {
-            let guard = state.lock().await;
-            guard.append_agent_lifecycle("agent.stopped", "agent stopped", &payload)
-        };
+        let row = state
+            .write(move |store| {
+                store.append_agent_lifecycle("agent.stopped", "agent stopped", &payload)
+            })
+            .await;
         match row {
             Ok(row) => {
                 event_hub.publish_agent_event(&row.id, &row.created_at, "agent.stopped", data);
@@ -669,7 +673,7 @@ impl AgentSupervisor {
     pub async fn shutdown_on_serve_exit(
         &self,
         target_id: &str,
-        state: &Arc<TokioMutex<StateStore>>,
+        state: &StateHandle,
         event_hub: &EventHub,
     ) {
         let needs_stop = matches!(*self.state.lock().await, AgentState::Running(_));
@@ -752,37 +756,36 @@ impl AgentSupervisor {
 /// gone: nothing can still be attached, so `active` would be a lie the DB's
 /// busy predicates act on. Best-effort, since teardown must not fail on it.
 pub(crate) async fn demote_sessions_on_agent_teardown(
-    state: &Arc<TokioMutex<StateStore>>,
+    state: &StateHandle,
     target_id: &str,
     reason: &str,
 ) {
-    let guard = state.lock().await;
-    let ids = match guard.reconcile_orphaned_sessions(Some(target_id)) {
-        Ok(ids) => ids,
-        Err(err) => {
-            tracing::warn!(error = %err, "failed to demote active sessions on agent teardown");
-            return;
-        }
-    };
-    if ids.is_empty() {
-        return;
-    }
+    let target_id = target_id.to_owned();
     let payload = json!({ "reason": reason }).to_string();
-    for session_id in &ids {
-        if let Err(err) = guard.append_session_event_with_source(
-            session_id,
-            "info",
-            EVENT_KIND_SESSION_AVAILABLE,
-            EVENT_SOURCE_SYSTEM,
-            "session available",
-            &payload,
-        ) {
-            tracing::warn!(
-                error = %err,
-                session_id = %session_id,
-                "failed to append session.available event on agent teardown"
-            );
-        }
+    let demoted = state
+        .write(move |store| {
+            let ids = store.reconcile_orphaned_sessions(Some(&target_id))?;
+            for session_id in &ids {
+                if let Err(err) = store.append_session_event_with_source(
+                    session_id,
+                    "info",
+                    EVENT_KIND_SESSION_AVAILABLE,
+                    EVENT_SOURCE_SYSTEM,
+                    "session available",
+                    &payload,
+                ) {
+                    tracing::warn!(
+                        error = %err,
+                        session_id = %session_id,
+                        "failed to append session.available event on agent teardown"
+                    );
+                }
+            }
+            Ok(())
+        })
+        .await;
+    if let Err(err) = demoted {
+        tracing::warn!(error = %err, "failed to demote active sessions on agent teardown");
     }
 }
 

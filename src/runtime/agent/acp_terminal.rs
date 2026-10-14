@@ -30,7 +30,7 @@ use crate::runtime::mediation::commands::process::{exit_signal, kill_process_gro
 use crate::runtime::sandbox::WorkloadCgroup;
 use crate::state::{
     CommandOrigin, CommandStatus, EVENT_KIND_TERMINAL_FINISHED, EVENT_SOURCE_ACP,
-    EVENT_SOURCE_COMMAND, NewCommandRecord, StateStore,
+    EVENT_SOURCE_COMMAND, NewCommandRecord, StateHandle,
 };
 
 use super::acp_bridge::workload_process_path;
@@ -148,7 +148,7 @@ struct RegistryEntries {
 /// land in, plus the hub the `commands.{id}` topic fans out through.
 #[derive(Clone)]
 pub struct TerminalCommandLog {
-    pub state: Arc<TokioMutex<StateStore>>,
+    pub state: StateHandle,
     pub event_hub: EventHub,
 }
 
@@ -431,15 +431,14 @@ async fn own_terminal(
         } else {
             status.exit_code.and_then(|code| i32::try_from(code).ok())
         };
-        let finish_result = {
-            let store = persistence.command_log.state.lock().await;
-            store.finish_command(
-                &persistence.command_id,
-                command_status,
-                exit_code,
-                duration_ms,
-            )
-        };
+        let command_id = persistence.command_id.clone();
+        let finish_result = persistence
+            .command_log
+            .state
+            .write(move |store| {
+                store.finish_command(&command_id, command_status, exit_code, duration_ms)
+            })
+            .await;
         match finish_result {
             Ok(()) => {
                 publish_lifecycle_event(
@@ -509,12 +508,24 @@ async fn append_chunk(
         .await
         .append_capped(&chunk.data, output_byte_limit);
     if let Some(persistence) = persistence {
-        let append_result = {
-            let store = persistence.command_log.state.lock().await;
-            store.append_command_output(&persistence.command_id, &chunk.stream, *seq, &chunk.data)
-        };
+        let command_id = persistence.command_id.clone();
+        let chunk_seq = *seq;
+        // The chunk moves through the job and back so its data is not copied.
+        let append_result = persistence
+            .command_log
+            .state
+            .write(move |store| {
+                let event = store.append_command_output(
+                    &command_id,
+                    &chunk.stream,
+                    chunk_seq,
+                    &chunk.data,
+                )?;
+                Ok((event, chunk))
+            })
+            .await;
         match append_result {
-            Ok(event) => {
+            Ok((event, chunk)) => {
                 persistence.command_log.event_hub.publish_command_event(
                     &persistence.command_id,
                     &event,
@@ -565,15 +576,21 @@ async fn publish_terminal_finished_event(
         CommandStatus::Exited => "info",
         _ => "warn",
     };
-    let store = command_log.state.lock().await;
-    if let Err(error) = store.append_session_event_with_source(
-        session_id,
-        level,
-        EVENT_KIND_TERMINAL_FINISHED,
-        EVENT_SOURCE_ACP,
-        TERMINAL_FINISHED_MESSAGE,
-        &payload,
-    ) {
+    let event_session_id = session_id.to_owned();
+    let appended = command_log
+        .state
+        .write(move |store| {
+            store.append_session_event_with_source(
+                &event_session_id,
+                level,
+                EVENT_KIND_TERMINAL_FINISHED,
+                EVENT_SOURCE_ACP,
+                TERMINAL_FINISHED_MESSAGE,
+                &payload,
+            )
+        })
+        .await;
+    if let Err(error) = appended {
         tracing::warn!(
             error = %crate::error::report(&error),
             command_id = %finished.command_id,
@@ -592,10 +609,12 @@ async fn publish_lifecycle_event(
     data: serde_json::Value,
 ) {
     let payload_text = data.to_string();
-    let event_result = {
-        let store = command_log.state.lock().await;
-        store.append_event_with_source("info", kind, EVENT_SOURCE_COMMAND, "", &payload_text)
-    };
+    let event_result = command_log
+        .state
+        .write(move |store| {
+            store.append_event_with_source("info", kind, EVENT_SOURCE_COMMAND, "", &payload_text)
+        })
+        .await;
     match event_result {
         Ok(event) => {
             command_log
@@ -691,16 +710,22 @@ pub(crate) async fn handle_create_terminal(
         Some(command_log) => {
             let rendered = render_command_line(&request.command, &request.args);
             let env_names_json = env_names_json(&request.env);
-            let store = command_log.state.lock().await;
-            let record = store
-                .append_command(NewCommandRecord {
-                    command: &rendered,
-                    cwd: Some(&cwd_display),
-                    env_json: env_names_json.as_deref(),
-                    origin: CommandOrigin::Acp,
-                    session_id: Some(&local_session_id),
-                    terminal_id: Some(&terminal_id),
+            let record_cwd = cwd_display.clone();
+            let record_session_id = local_session_id.clone();
+            let record_terminal_id = terminal_id.clone();
+            let record = command_log
+                .state
+                .write(move |store| {
+                    store.append_command(NewCommandRecord {
+                        command: &rendered,
+                        cwd: Some(&record_cwd),
+                        env_json: env_names_json.as_deref(),
+                        origin: CommandOrigin::Acp,
+                        session_id: Some(&record_session_id),
+                        terminal_id: Some(&record_terminal_id),
+                    })
                 })
+                .await
                 .map_err(AcpError::into_internal_error)?;
             Some(record.id)
         }
@@ -711,10 +736,13 @@ pub(crate) async fn handle_create_terminal(
     // event and on the session-scoped finalize event.
     let mark_failed = async |kind: &'static str, reason: &str| {
         if let (Some(command_log), Some(command_id)) = (&context.command_log, &command_id) {
-            let finish_result = {
-                let store = command_log.state.lock().await;
-                store.finish_command(command_id, CommandStatus::Failed, None, None)
-            };
+            let finish_command_id = command_id.clone();
+            let finish_result = command_log
+                .state
+                .write(move |store| {
+                    store.finish_command(&finish_command_id, CommandStatus::Failed, None, None)
+                })
+                .await;
             if let Err(finish_error) = finish_result {
                 tracing::warn!(
                     error = %crate::error::report(&finish_error),
@@ -802,10 +830,11 @@ pub(crate) async fn handle_create_terminal(
 
     let persistence = match (&context.command_log, command_id.clone()) {
         (Some(command_log), Some(command_id)) => {
-            let start_result = {
-                let store = command_log.state.lock().await;
-                store.start_command(&command_id)
-            };
+            let start_command_id = command_id.clone();
+            let start_result = command_log
+                .state
+                .write(move |store| store.start_command(&start_command_id))
+                .await;
             if let Err(error) = start_result {
                 // Finalize the pending row before surfacing the error, or it
                 // stays `pending` forever.

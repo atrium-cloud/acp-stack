@@ -2,17 +2,14 @@
 //! `tests/common/sessions.rs` define same-named items with different key values and signatures;
 //! the sets are deliberately separate, so do not merge or cross-import them.
 
-use std::sync::Arc;
-
 use acp_stack::api::{self, AppState, RuntimePaths};
 use acp_stack::config::{
     AgentAdapterConfig, ArrayTargetConfig, Config, HttpHeaderRef, McpConfig, McpHttpServer,
     McpServerConfig, McpStdioServer, load_config_from_str,
 };
-use acp_stack::state::StateStore;
+use acp_stack::state::{StateHandle, StateStore};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
-use tokio::sync::Mutex as TokioMutex;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
@@ -25,7 +22,7 @@ pub struct AgentHarness {
     pub home: std::path::PathBuf,
     // Option so `respawn` can move the dir out of this `Drop` type.
     tempdir: Option<TempDir>,
-    pub state: Arc<TokioMutex<StateStore>>,
+    pub state: StateHandle,
     pub join: JoinHandle<acp_stack::error::Result<()>>,
 }
 
@@ -62,6 +59,8 @@ impl AgentHarness {
     /// process would.
     pub async fn respawn(mut self) -> Self {
         self.join.abort();
+        // A restarted process never shares the state file with the old writer.
+        self.state.shutdown().await;
         let tempdir = self.tempdir.take().expect("harness tempdir");
         let config_path = tempdir.path().join("acps-config.toml");
         let content = std::fs::read_to_string(&config_path).expect("on-disk config read");
@@ -97,7 +96,8 @@ impl AgentHarness {
             ADMIN_KEY.to_owned(),
             effective_bind,
             runtime_paths,
-        );
+        )
+        .expect("app state");
         let state = app_state.state.clone();
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let base_url = format!("http://{}", listener.local_addr().expect("local"));

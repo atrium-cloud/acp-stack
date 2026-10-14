@@ -83,25 +83,32 @@ async fn seed_row(
     method: Option<&str>,
     version: &str,
 ) {
-    let store = harness.state.lock().await;
-    store
-        .append_installer_run(acp_stack::state::InstallerRunInput {
-            agent_id: "opencode",
-            started_at: "2026-01-01T00:00:00Z",
-            finished_at: Some("2026-01-01T00:00:01Z"),
-            status,
-            stdout: "",
-            stderr: "",
-            exit_status: Some(0),
-            step,
-            version: Some(version),
-            operation: acp_stack::state::INSTALLER_OPERATION_INSTALL,
-            method,
-            log_dir: None,
-            apply_run_id: None,
-            path: None,
-            sha256: None,
+    let status = status.to_owned();
+    let step = step.to_owned();
+    let method = method.map(str::to_owned);
+    let version = version.to_owned();
+    harness
+        .state
+        .write(move |store| {
+            store.append_installer_run(acp_stack::state::InstallerRunInput {
+                agent_id: "opencode",
+                started_at: "2026-01-01T00:00:00Z",
+                finished_at: Some("2026-01-01T00:00:01Z"),
+                status: &status,
+                stdout: "",
+                stderr: "",
+                exit_status: Some(0),
+                step: &step,
+                version: Some(version.as_str()),
+                operation: acp_stack::state::INSTALLER_OPERATION_INSTALL,
+                method: method.as_deref(),
+                log_dir: None,
+                apply_run_id: None,
+                path: None,
+                sha256: None,
+            })
         })
+        .await
         .expect("seed installer row");
 }
 
@@ -424,25 +431,25 @@ async fn update_skips_when_a_turn_blocks_the_stop() {
     // A session with a prompt in flight blocks the restart-safe stop, so the
     // agent stays up and the update skips as busy. `insert_session` keys the
     // row's target off `agent_id`, matching the harness's primary target.
-    {
-        let store = harness.state.lock().await;
-        store
-            .insert_session(NewSessionRecord {
+    harness
+        .state
+        .write(|store| {
+            store.insert_session(NewSessionRecord {
                 id: "sess_blocked".to_owned(),
                 agent_id: "opencode".to_owned(),
                 cwd: "/tmp/sess_blocked".to_owned(),
                 title: None,
                 metadata_json: "{}".to_owned(),
-            })
-            .expect("session inserted");
-        store
-            .insert_prompt(NewPromptRecord {
+            })?;
+            store.insert_prompt(NewPromptRecord {
                 id: "prm_blocked".to_owned(),
                 session_id: "sess_blocked".to_owned(),
                 prompt_json: "[]".to_owned(),
-            })
-            .expect("prompt inserted");
-    }
+            })?;
+            Ok(())
+        })
+        .await
+        .expect("session and prompt inserted");
 
     let response = client
         .post(format!("{}/v1/agent/update", harness.base_url))

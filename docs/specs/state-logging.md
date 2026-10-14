@@ -14,6 +14,8 @@ Default state path:
 
 The database runs in WAL mode with `synchronous = NORMAL`: a committed write survives a process crash, and a power loss or OS crash can drop only the newest commits, never corrupt the file.
 
+Inside `acps serve`, one writer thread runs every write made through the daemon's state handle; installer step rows and deps-apply runs write through their own connections. The writer commits the writes queued while the previous commit ran as one transaction, each under its own savepoint, so a failing write rolls back alone; live events reach WebSocket subscribers only after their commit. Reads run on separate read-only connections and never wait on a commit. A checkpointer folds the WAL back into the database file every 10 seconds. The `api.request`, `ws.client_connected`, and `ws.client_disconnected` rows are queued without waiting for their commit, and are dropped with a warning when the write queue is full.
+
 Durable records include:
 
 - sessions and prompts
@@ -66,7 +68,7 @@ Schema: `migrations/002_auth_failures_schema.sqlite.sql` (and the `.postgres.sql
 ### Running-Row Lifecycle
 
 - A step that actually executes first inserts a `running` row (`finished_at` NULL, empty stream previews). It updates that same row in place to its terminal status when it finishes.
-- In-flight installs are observable step-by-step via `GET /v1/installer/runs?active=true` (see [api/api.md](api/api.md)) without holding the daemon's state lock for the length of the step.
+- In-flight installs are observable step-by-step via `GET /v1/installer/runs?active=true` (see [api/api.md](api/api.md)).
 - Update operations are covered too: apt and native update steps publish the same `running` row while they execute.
 - If a step's worker thread panics, the installer finalizes the row as `error` before the unwind propagates. A surviving daemon never leaves a false-active row behind.
 - A row still `running` long after its step's timeout means the process died mid-step. Such rows are never finalized retroactively.
@@ -350,7 +352,8 @@ The `security_category` filter clusters the flat `security.*` kinds into operato
 The daemon writes diagnostic lines to stderr at `warn` and above, plus `info` lines under the `latency` target, and under the `acp_trace` target when `[logging].acp_trace` is on. Every line passes through the shared redactor, which replaces registered secret values and credential-shaped tokens with `[redacted]`.
 
 - Each ACP session request other than `session/prompt` logs one `agent request answered` line at `info` under the `latency` target with `method`, `elapsed_ms`, `ok`, `agent_id`, `target_id`, and `acp_session_id`. A `session/list` that pages also logs one `agent session list paged through` line with the total `elapsed_ms`, `pages`, and `sessions`.
-- A state write transaction that takes 200 ms or longer from `BEGIN IMMEDIATE` to `COMMIT` logs one `slow state transaction` line at `warn` under the `latency` target with `scope` (the table the write targets), `transaction_ms`, `lock_wait_ms` (the wait for SQLite's write lock), and `commit_ms`.
+- A state write scope that takes 200 ms or longer from opening to committing logs one `slow state transaction` line at `warn` under the `latency` target with `scope` (the table the write targets), `transaction_ms`, `lock_wait_ms` (the wait for SQLite's write lock), and `commit_ms`. Outside `acps serve` the scope is its own `BEGIN IMMEDIATE` transaction. In `acps serve` it is a savepoint inside the writer's batch, so `lock_wait_ms` and `commit_ms` stay near zero and the batch line below carries the commit.
+- In `acps serve`, a write batch whose oldest write waited 200 ms or longer in the queue, or that took 200 ms or longer to run and commit, logs one `slow state write batch` line at `warn` under the `latency` target with `batch_size`, `queue_wait_ms`, `batch_ms`, and `commit_ms`. A read that waited 200 ms or longer for a free read connection logs one `slow state reader permit` line with `permit_wait_ms`.
 
 - Each failed request logs one `request failed` line with `request_id`, `method`, `route`, `path`, `status`, `code`, and `error`. `error` is the internal error text with its source chain, which the public envelope omits. Server errors log at `error`, client errors at `warn`.
 - On `agent.request_failed`, `error` names the agent and, when known, its target and the agent session id. It then gives the agent's JSON-RPC error code, message, and `data` when the agent sent an error, and acp-stack's own description otherwise.

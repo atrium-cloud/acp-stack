@@ -444,18 +444,22 @@ async fn publish_workspace_mutation(
         requested: path.to_owned(),
         source: std::io::Error::other(source),
     })?;
-    let event = {
-        let store = state.state.lock().await;
-        // `message` stays empty so user paths never reach the text column;
-        // `logs/events` is session-tier-readable.
-        store.append_event_with_source(
-            "info",
-            event_kind,
-            AppState::event_source_for(Some(caller)),
-            "",
-            &payload_json,
-        )?
-    };
+    let stored_event_kind = event_kind.to_owned();
+    let event_source = AppState::event_source_for(Some(caller));
+    let event = state
+        .state
+        .write(move |store| {
+            // `message` stays empty so user paths never reach the text column;
+            // `logs/events` is session-tier-readable.
+            store.append_event_with_source(
+                "info",
+                &stored_event_kind,
+                event_source,
+                "",
+                &payload_json,
+            )
+        })
+        .await?;
     state.event_hub.publish_workspace_event(&event, data);
     Ok(())
 }
@@ -746,7 +750,7 @@ mod tests {
         store.migrate().expect("migrate");
         // Leaked because the returned AppState keeps the sqlite handle open.
         std::mem::forget(state_dir);
-        AppState::new(config, store, String::new(), String::new())
+        AppState::new(config, store, String::new(), String::new()).expect("app state")
     }
 
     #[tokio::test]

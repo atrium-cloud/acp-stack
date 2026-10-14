@@ -128,26 +128,29 @@ pub(crate) async fn logs_events_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<LogsEventsResponse>, StackError> {
     let limit = params.limit.min(MAX_LOGS_LIMIT);
-    let (kind_exact, kind_prefix) = split_kind_filter(params.kind.as_deref());
     let order = parse_order(params.order.as_deref())?;
     let security_category = parse_security_category(params.category.as_deref())?;
-    let store = state.state.lock().await;
-    let events = store.query_events(EventFilter {
-        limit,
-        level: params.level.as_deref(),
-        kind: kind_exact,
-        kind_prefix,
-        source: params.source.as_deref(),
-        session_id: params.session_id.as_deref(),
-        command_id: params.command_id.as_deref(),
-        permission_id: params.permission_id.as_deref(),
-        security_category,
-        since: params.since.as_deref(),
-        until: params.until.as_deref(),
-        after_id: params.after.as_deref(),
-        order,
-    })?;
-    drop(store);
+    let events = state
+        .state
+        .read(move |store| {
+            let (kind_exact, kind_prefix) = split_kind_filter(params.kind.as_deref());
+            store.query_events(EventFilter {
+                limit,
+                level: params.level.as_deref(),
+                kind: kind_exact,
+                kind_prefix,
+                source: params.source.as_deref(),
+                session_id: params.session_id.as_deref(),
+                command_id: params.command_id.as_deref(),
+                permission_id: params.permission_id.as_deref(),
+                security_category,
+                since: params.since.as_deref(),
+                until: params.until.as_deref(),
+                after_id: params.after.as_deref(),
+                order,
+            })
+        })
+        .await?;
     let next_cursor = paging_cursor(&events, limit);
     let events = events.into_iter().map(LogEventJson::from).collect();
     Ok(ApiSuccess::new(LogsEventsResponse {
@@ -231,17 +234,20 @@ pub(crate) async fn logs_sessions_handler(
 ) -> std::result::Result<ApiSuccess<LogsSessionsResponse>, StackError> {
     let limit = params.limit.min(MAX_LOGS_LIMIT);
     let order = parse_order(params.order.as_deref())?;
-    let store = state.state.lock().await;
-    let sessions = store.query_sessions(crate::state::SessionFilter {
-        limit,
-        since: params.since.as_deref(),
-        until: params.until.as_deref(),
-        status: params.status.as_deref(),
-        after_id: params.after.as_deref(),
-        target_id: None,
-        order,
-    })?;
-    drop(store);
+    let sessions = state
+        .state
+        .read(move |store| {
+            store.query_sessions(crate::state::SessionFilter {
+                limit,
+                since: params.since.as_deref(),
+                until: params.until.as_deref(),
+                status: params.status.as_deref(),
+                after_id: params.after.as_deref(),
+                target_id: None,
+                order,
+            })
+        })
+        .await?;
     let next_cursor = paging_cursor(&sessions, limit);
     Ok(ApiSuccess::new(LogsSessionsResponse {
         sessions: sessions
@@ -303,17 +309,20 @@ pub(crate) async fn logs_commands_handler(
 ) -> std::result::Result<ApiSuccess<LogsCommandsResponse>, StackError> {
     let limit = params.limit.min(MAX_LOGS_LIMIT);
     let order = parse_order(params.order.as_deref())?;
-    let store = state.state.lock().await;
-    let commands = store.query_commands(crate::state::CommandFilter {
-        limit,
-        since: params.since.as_deref(),
-        until: params.until.as_deref(),
-        status: params.status.as_deref(),
-        terminal_id: params.terminal_id.as_deref(),
-        after_id: params.after.as_deref(),
-        order,
-    })?;
-    drop(store);
+    let commands = state
+        .state
+        .read(move |store| {
+            store.query_commands(crate::state::CommandFilter {
+                limit,
+                since: params.since.as_deref(),
+                until: params.until.as_deref(),
+                status: params.status.as_deref(),
+                terminal_id: params.terminal_id.as_deref(),
+                after_id: params.after.as_deref(),
+                order,
+            })
+        })
+        .await?;
     let next_cursor = paging_cursor(&commands, limit);
     Ok(ApiSuccess::new(LogsCommandsResponse {
         commands: commands
@@ -352,25 +361,28 @@ pub(crate) async fn logs_permissions_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<LogsEventsResponse>, StackError> {
     let limit = params.limit.min(MAX_LOGS_LIMIT);
-    let (kind_exact, kind_prefix) = split_kind_filter(params.kind.as_deref());
     let order = parse_order(params.order.as_deref())?;
-    let store = state.state.lock().await;
-    let events = store.query_permission_events(EventFilter {
-        limit,
-        level: None,
-        kind: kind_exact,
-        kind_prefix,
-        source: params.source.as_deref(),
-        session_id: None,
-        command_id: None,
-        permission_id: params.permission_id.as_deref(),
-        security_category: None,
-        since: params.since.as_deref(),
-        until: params.until.as_deref(),
-        after_id: params.after.as_deref(),
-        order,
-    })?;
-    drop(store);
+    let events = state
+        .state
+        .read(move |store| {
+            let (kind_exact, kind_prefix) = split_kind_filter(params.kind.as_deref());
+            store.query_permission_events(EventFilter {
+                limit,
+                level: None,
+                kind: kind_exact,
+                kind_prefix,
+                source: params.source.as_deref(),
+                session_id: None,
+                command_id: None,
+                permission_id: params.permission_id.as_deref(),
+                security_category: None,
+                since: params.since.as_deref(),
+                until: params.until.as_deref(),
+                after_id: params.after.as_deref(),
+                order,
+            })
+        })
+        .await?;
     let next_cursor = paging_cursor(&events, limit);
     let events = events.into_iter().map(LogEventJson::from).collect();
     Ok(ApiSuccess::new(LogsEventsResponse {
@@ -433,29 +445,33 @@ pub(crate) async fn logs_security_handler(
     let limit = params.limit.min(MAX_LOGS_LIMIT);
     let order = parse_order(params.order.as_deref())?;
     let security_category = parse_security_category(params.category.as_deref())?;
-    let auth_failures_after = params
-        .auth_failures_after
-        .as_deref()
-        .or(params.after.as_deref());
-    let events_after = params.events_after.as_deref().or(params.after.as_deref());
-    let store = state.state.lock().await;
-    let auth_failures = store.query_auth_failures(AuthFailureFilter {
-        limit,
-        since: params.since.as_deref(),
-        until: params.until.as_deref(),
-        after_id: auth_failures_after,
-        order,
-    })?;
-    let security_events = store.query_security_events(EventFilter {
-        limit,
-        since: params.since.as_deref(),
-        until: params.until.as_deref(),
-        after_id: events_after,
-        security_category,
-        order,
-        ..EventFilter::default()
-    })?;
-    drop(store);
+    let (auth_failures, security_events) = state
+        .state
+        .read(move |store| {
+            let auth_failures_after = params
+                .auth_failures_after
+                .as_deref()
+                .or(params.after.as_deref());
+            let events_after = params.events_after.as_deref().or(params.after.as_deref());
+            let auth_failures = store.query_auth_failures(AuthFailureFilter {
+                limit,
+                since: params.since.as_deref(),
+                until: params.until.as_deref(),
+                after_id: auth_failures_after,
+                order,
+            })?;
+            let security_events = store.query_security_events(EventFilter {
+                limit,
+                since: params.since.as_deref(),
+                until: params.until.as_deref(),
+                after_id: events_after,
+                security_category,
+                order,
+                ..EventFilter::default()
+            })?;
+            Ok((auth_failures, security_events))
+        })
+        .await?;
     let auth_failures_next_cursor = paging_cursor(&auth_failures, limit);
     let events_next_cursor = paging_cursor(&security_events, limit);
     Ok(ApiSuccess::new(LogsSecurityResponse {

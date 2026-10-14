@@ -122,9 +122,11 @@ async fn on_crash_policy_restarts_agent_and_allows_session_resume() {
 
     // The crash demoted the session: the restarted adapter has nothing loaded.
     {
-        let store = harness.state.lock().await;
-        let record = store
-            .get_session(&session_id)
+        let lookup_id = session_id.clone();
+        let record = harness
+            .state
+            .read(move |store| store.get_session(&lookup_id))
+            .await
             .expect("session lookup")
             .expect("session exists");
         assert_eq!(record.status, "available");
@@ -145,9 +147,11 @@ async fn on_crash_policy_restarts_agent_and_allows_session_resume() {
     assert_eq!(resume_status, StatusCode::OK, "body: {resume_body}");
     assert_eq!(resume_body["data"]["status"], "active");
 
-    let store = harness.state.lock().await;
-    let lifecycle = store.query_agent_lifecycle(50).expect("lifecycle");
-    drop(store);
+    let lifecycle = harness
+        .state
+        .read(|store| store.query_agent_lifecycle(50))
+        .await
+        .expect("lifecycle");
     let kinds: Vec<&str> = lifecycle
         .iter()
         .map(|row| row.event_kind.as_str())
@@ -220,9 +224,8 @@ async fn never_policy_does_not_restart_after_agent_crash() {
     let lifecycle = loop {
         let lifecycle = harness
             .state
-            .lock()
+            .read(|store| store.query_agent_lifecycle(50))
             .await
-            .query_agent_lifecycle(50)
             .expect("lifecycle");
         if lifecycle
             .iter()

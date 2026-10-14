@@ -82,10 +82,11 @@ pub(super) async fn apply_stored_operation_locked(
             let operation = operation_record(state, operation_id).await?.operation;
             return Ok(ApplyStoredOutcome::Blocked(operation));
         }
-        let blockers = {
-            let store = state.state.lock().await;
-            store.query_restart_blockers(Some(&target_id))?
-        };
+        let blocker_target_id = target_id.clone();
+        let blockers = state
+            .state
+            .read(move |store| store.query_restart_blockers(Some(&blocker_target_id)))
+            .await?;
         if !blockers.is_empty() {
             let operation = state
                 .native_config_imports

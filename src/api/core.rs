@@ -99,7 +99,7 @@ use crate::runtime::agent::supervisor::AgentSupervisor;
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::runtime::mediation::commands::CommandGateway;
 use crate::runtime::mediation::permissions::PermissionService;
-use crate::state::StateStore;
+use crate::state::{StateHandle, StateStore};
 
 // === CONSTANTS ===
 
@@ -116,7 +116,7 @@ pub struct AppState {
     pub live_agent_config: Arc<TokioMutex<crate::config::AgentConfig>>,
     pub effective_bind: Arc<String>,
     pub runtime_paths: Arc<RuntimePaths>,
-    pub state: Arc<TokioMutex<StateStore>>,
+    pub state: StateHandle,
     pub auth_verifiers: Arc<TokioRwLock<AuthVerifierSet>>,
     pub local_session_auth: Arc<TokioRwLock<LocalSessionAuth>>,
     pub(crate) array_enabled: Arc<AtomicBool>,
@@ -362,7 +362,12 @@ impl AppState {
 
 impl AppState {
     /// Build app state from already-resolved config + state + auth secrets.
-    pub fn new(config: Config, state: StateStore, session_key: String, admin_key: String) -> Self {
+    pub fn new(
+        config: Config,
+        state: StateStore,
+        session_key: String,
+        admin_key: String,
+    ) -> Result<Self> {
         let effective_bind = config.api.bind.clone();
         Self::with_effective_bind(config, state, session_key, admin_key, effective_bind)
     }
@@ -375,7 +380,7 @@ impl AppState {
         session_key: String,
         admin_key: String,
         effective_bind: String,
-    ) -> Self {
+    ) -> Result<Self> {
         let runtime_paths = RuntimePaths::from_state_defaults(&state);
         Self::with_effective_bind_and_runtime_paths(
             config,
@@ -394,7 +399,7 @@ impl AppState {
         admin_key: String,
         effective_bind: String,
         runtime_paths: RuntimePaths,
-    ) -> Self {
+    ) -> Result<Self> {
         let auth_verifiers = AuthVerifierSet::create(&session_key, &admin_key);
         Self::with_auth_verifiers_and_runtime_paths(
             config,
@@ -411,7 +416,7 @@ impl AppState {
         auth_verifiers: AuthVerifierSet,
         effective_bind: String,
         runtime_paths: RuntimePaths,
-    ) -> Self {
+    ) -> Result<Self> {
         if let Some(primary) = config.array.primary_target_mut() {
             primary.agent = config.agent.clone();
         }
@@ -427,16 +432,16 @@ impl AppState {
         state.attach_event_hub(event_hub.clone());
         let max_request_bytes = usize::try_from(cap).unwrap_or(usize::MAX);
         let config_arc = Arc::new(config);
-        let state_arc = Arc::new(TokioMutex::new(state));
+        let state_handle = StateHandle::start(state)?;
         let permissions = PermissionService::new(
-            state_arc.clone(),
+            state_handle.clone(),
             event_hub.clone(),
             config_arc.permissions.effective_request_timeout(),
             config_arc.permissions.effective_timeout_action(),
             config_arc.permissions.effective_acp_prompt_action(),
         );
         let commands = CommandGateway::new(
-            state_arc.clone(),
+            state_handle.clone(),
             event_hub.clone(),
             config_arc.clone(),
             permissions.clone(),
@@ -457,12 +462,12 @@ impl AppState {
         ));
         let local_session_auth = Arc::new(TokioRwLock::new(config_arc.local.session_auth));
         let array_enabled = Arc::new(AtomicBool::new(config_arc.array.enabled));
-        Self {
+        Ok(Self {
             config: config_arc,
             live_agent_config,
             effective_bind: Arc::new(effective_bind),
             runtime_paths: Arc::new(runtime_paths),
-            state: state_arc,
+            state: state_handle,
             auth_verifiers: Arc::new(TokioRwLock::new(auth_verifiers)),
             local_session_auth,
             array_enabled,
@@ -486,7 +491,7 @@ impl AppState {
             ws_registry,
             node_runtime: crate::runtime::node_runtime::NodeRuntimeState::default(),
             shutdown: CancellationToken::new(),
-        }
+        })
     }
 }
 
