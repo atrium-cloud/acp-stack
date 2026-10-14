@@ -7,7 +7,7 @@ async fn prompting_available_session_promotes_it_to_active() {
     let harness = Harness::spawn().await;
     let client = http();
     let list: Value = client
-        .get(format!("{}/v1/sessions", harness.base_url))
+        .get(format!("{}/v1/sessions?sync=true", harness.base_url))
         .header("Authorization", session_bearer())
         .send()
         .await

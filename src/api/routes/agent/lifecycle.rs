@@ -105,6 +105,7 @@ pub(crate) async fn start_agent_target_locked(
             sandbox: config.workspace.sandbox.clone(),
             shell: config.workspace.default_shell.clone(),
             network_provider: crate::extensions::resolve_network_provider(&config),
+            list_sync_interval: config.prompts.effective_sweep_interval(),
         })
         .await?;
     {
@@ -416,6 +417,7 @@ async fn restart_agent_target(
             sandbox: fresh_config.workspace.sandbox.clone(),
             shell: fresh_config.workspace.default_shell.clone(),
             network_provider: crate::extensions::resolve_network_provider(&fresh_config),
+            list_sync_interval: fresh_config.prompts.effective_sweep_interval(),
         })
         .await?;
     let started_at = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);

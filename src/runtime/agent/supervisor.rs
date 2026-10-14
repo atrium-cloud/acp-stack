@@ -2,6 +2,7 @@
 //! start/stop rows, [`AgentSupervisor`] for the spawned ACP agent's state machine.
 
 mod bridge;
+mod list_sync;
 mod parse;
 mod prompts;
 mod sessions;
@@ -101,6 +102,7 @@ use crate::state::{
 };
 
 use self::bridge::*;
+use self::list_sync::*;
 use self::parse::*;
 
 pub(crate) use self::parse::resolve_session_cwd;
@@ -327,7 +329,12 @@ fn readiness_for_state(state: &AgentState) -> Option<AgentStartReadiness> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionListSyncStatus {
+    /// This request ran the sync.
     Synced,
+    /// The counts and time of the running agent's last successful sync.
+    Cached,
+    /// The running agent lists sessions but no sync of it has succeeded yet.
+    Pending,
     Unsupported,
     NotRunning,
 }
@@ -336,18 +343,33 @@ impl SessionListSyncStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Synced => "synced",
+            Self::Cached => "cached",
+            Self::Pending => "pending",
             Self::Unsupported => "unsupported",
             Self::NotRunning => "not_running",
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionListSyncResult {
     pub attempted: bool,
     pub status: SessionListSyncStatus,
     pub upserted: u32,
     pub updated: u32,
+    pub synced_at: Option<String>,
+}
+
+impl SessionListSyncResult {
+    fn without_sync(status: SessionListSyncStatus) -> Self {
+        Self {
+            attempted: false,
+            status,
+            upserted: 0,
+            updated: 0,
+            synced_at: None,
+        }
+    }
 }
 
 /// Per-prompt cancellation + join handle. We keep both so a `session/cancel`
@@ -379,6 +401,7 @@ pub struct AgentSupervisor {
     /// cannot pass an idle check while a new prompt has cloned the bridge but not
     /// yet inserted its durable prompt row.
     dispatch_gate: Arc<TokioMutex<()>>,
+    list_sync: Arc<ListSyncShared>,
 }
 
 #[derive(Clone)]
@@ -387,6 +410,7 @@ struct SupervisorShared {
     capabilities: Arc<RwLock<Option<AgentCapabilitiesDto>>>,
     last_pid: Arc<RwLock<Option<u32>>>,
     loaded_providers: Arc<RwLock<Option<Vec<ResolvedProviderSnapshot>>>>,
+    list_sync: Arc<ListSyncShared>,
 }
 
 #[derive(Clone)]
@@ -404,6 +428,7 @@ struct RestartContext {
     sandbox: crate::config::SandboxConfig,
     shell: String,
     network_provider: Option<crate::extensions::NetworkProviderExtension>,
+    list_sync_interval: Duration,
 }
 
 pub struct AgentStartRequest<'a> {
@@ -424,6 +449,9 @@ pub struct AgentStartRequest<'a> {
     /// argv-less agent command lines under.
     pub shell: String,
     pub network_provider: Option<crate::extensions::NetworkProviderExtension>,
+    /// `[prompts].sweep_interval`: how often the running agent's session list is
+    /// synced into local state.
+    pub list_sync_interval: Duration,
 }
 
 impl Default for AgentSupervisor {
@@ -441,6 +469,7 @@ impl AgentSupervisor {
             loaded_providers: Arc::new(RwLock::new(None)),
             prompts: Arc::new(TokioMutex::new(HashMap::new())),
             dispatch_gate: Arc::new(TokioMutex::new(())),
+            list_sync: Arc::new(ListSyncShared::default()),
         }
     }
 
@@ -450,6 +479,7 @@ impl AgentSupervisor {
             capabilities: Arc::clone(&self.capabilities),
             last_pid: Arc::clone(&self.last_pid),
             loaded_providers: Arc::clone(&self.loaded_providers),
+            list_sync: Arc::clone(&self.list_sync),
         }
     }
 
@@ -506,6 +536,7 @@ impl AgentSupervisor {
             sandbox: request.sandbox.clone(),
             shell: request.shell.clone(),
             network_provider: request.network_provider.clone(),
+            list_sync_interval: request.list_sync_interval,
         };
         match self.do_start(request).await {
             Ok((capabilities, bridge)) => {
@@ -518,6 +549,7 @@ impl AgentSupervisor {
                 *self.capabilities.write().await = Some(capabilities.clone());
                 *self.last_pid.write().await = pid;
                 *self.loaded_providers.write().await = Some(loaded_providers);
+                spawn_list_sync_loop(self.shared(), &bridge, &restart_context);
                 spawn_bridge_exit_monitor(self.shared(), bridge, restart_context);
                 Ok(capabilities)
             }

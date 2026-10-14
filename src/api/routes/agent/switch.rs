@@ -1245,6 +1245,7 @@ async fn start_agent_with_config(
             sandbox: config.workspace.sandbox.clone(),
             shell: config.workspace.default_shell.clone(),
             network_provider: crate::extensions::resolve_network_provider(config),
+            list_sync_interval: config.prompts.effective_sweep_interval(),
         })
         .await?;
     Ok(())

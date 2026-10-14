@@ -474,6 +474,8 @@ fn sessions_list_path(args: &SessionsListArgs, query_limit: u32) -> Result<Strin
         query.push_str("&target=");
         query.push_str(&encode_query_value(target));
     }
+    // An operator listing wants the agent's sessions now, not as of the last background sync.
+    query.push_str("&sync=true");
     Ok(format!("/v1/sessions?{query}"))
 }
 
@@ -851,7 +853,7 @@ mod tests {
         )
         .expect("list path");
 
-        assert_eq!(path, "/v1/sessions?limit=51&range=month");
+        assert_eq!(path, "/v1/sessions?limit=51&range=month&sync=true");
     }
 
     #[test]
@@ -868,7 +870,10 @@ mod tests {
         )
         .expect("list path");
 
-        assert_eq!(path, "/v1/sessions?limit=51&range=month&target=codex");
+        assert_eq!(
+            path,
+            "/v1/sessions?limit=51&range=month&target=codex&sync=true"
+        );
     }
 
     #[test]

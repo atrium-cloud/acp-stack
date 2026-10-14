@@ -11,11 +11,15 @@ pub(crate) struct SessionsListResponse {
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct SessionsAgentSyncResponse {
+    /// Whether this request ran the ACP session-list sync (`sync=true`).
     attempted: bool,
-    #[schemars(extend("enum" = ["synced", "unsupported", "not_running"]))]
+    #[schemars(extend("enum" = ["synced", "cached", "pending", "unsupported", "not_running"]))]
     status: String,
     upserted: u32,
     updated: u32,
+    /// When the reported sync finished; set for `synced` and `cached`.
+    /// `cached` reports the last successful sync, background or `sync=true`.
+    synced_at: Option<String>,
 }
 
 impl From<SessionListSyncResult> for SessionsAgentSyncResponse {
@@ -25,6 +29,7 @@ impl From<SessionListSyncResult> for SessionsAgentSyncResponse {
             status: result.status.as_str().to_owned(),
             upserted: result.upserted,
             updated: result.updated,
+            synced_at: result.synced_at,
         }
     }
 }
@@ -41,6 +46,10 @@ pub(crate) struct SessionsListParams {
     resolve_bounds: bool,
     #[serde(default, alias = "target")]
     target_id: Option<String>,
+    /// Run the ACP session-list sync before reading, instead of reporting the
+    /// running agent's last successful sync.
+    #[serde(default)]
+    sync: bool,
 }
 
 pub(crate) async fn sessions_list_handler(
@@ -52,16 +61,18 @@ pub(crate) async fn sessions_list_handler(
     let target = state
         .session_agent_target(params.target_id.as_deref())
         .await?;
-    let agent_for_session = target.live_agent_config.lock().await.clone();
-    let agent_sync = target
-        .supervisor
-        .sync_listed_sessions(
-            &target.target_id,
-            &agent_for_session,
-            &state.config.workspace.root,
-            &state.state,
-        )
-        .await?;
+    let agent_sync = if params.sync {
+        target
+            .supervisor
+            .sync_listed_sessions(
+                &target.target_id,
+                &state.config.workspace.root,
+                &state.state,
+            )
+            .await?
+    } else {
+        target.supervisor.last_listed_sessions_sync().await
+    };
     let list_target_id = target.target_id.clone();
     let sessions = state
         .state

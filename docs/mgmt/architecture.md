@@ -35,7 +35,7 @@ flowchart LR
 
 ### Agent runtime
 
-- Agent supervisor: process lifecycle for each configured ACP agent target.
+- Agent supervisor: process lifecycle for each configured ACP agent target, plus a per-agent background sync of its ACP session list into local state.
 - Array: multi-target fleet with per-target supervision and one primary target as the default and coordination point.
 - ACP bridge: ACP initialization, sessions, prompts, updates, and permissions. The adapter's stderr is read into the redacted daemon log and a bounded tail (`src/runtime/agent/acp_bridge/agent_stderr.rs`).
 - ACP terminals: client-side `terminal/*` handlers with per-terminal owning tasks, capped output buffers, and command-log recording (`src/runtime/agent/acp_terminal.rs`).

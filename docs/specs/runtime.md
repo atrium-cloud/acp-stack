@@ -303,6 +303,7 @@ sweep_interval            = "30s"
 - Defaults are `5m` / `1h` / `30s`. An unset `tool_call_stale_threshold` is the longer of `1h` and `stale_threshold`; a set one must not be shorter than `stale_threshold`.
 - While the turn has an open tool call, `tool_call_stale_threshold` applies instead of `stale_threshold`. An open tool call is a `tool_call` the agent announced since the prompt was submitted whose latest status is neither `completed` nor `failed`.
 - The sweeper runs every `sweep_interval` from `acps serve`. The first sweep happens after one interval has elapsed, not immediately at boot, so startup reconcile settles first.
+- The running agent's ACP session list is synced into local state when the agent starts and then every `sweep_interval` as read at that start (see `GET /v1/sessions`).
 - Each flipped row also emits a `prompt.stalled` session event (see [state-logging.md](state-logging.md)).
 - When the turn's ACP call later returns, its result (the agent's stop reason, or the error that ended the call, adapter exit included) replaces `stalled` and emits `prompt.stall_resolved`. A turn that acps cancels itself while stopping the agent stays `stalled`.
 

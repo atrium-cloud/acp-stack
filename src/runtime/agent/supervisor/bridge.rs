@@ -310,6 +310,7 @@ async fn monitor_bridge_exit(
             *shared.capabilities.write().await = Some(capabilities);
             *shared.last_pid.write().await = pid;
             *shared.loaded_providers.write().await = Some(restart_context.providers.clone());
+            spawn_list_sync_loop(shared.clone(), &new_bridge, &restart_context);
             spawn_bridge_exit_monitor(shared, new_bridge, restart_context);
         }
         Err(err) => {

@@ -1109,6 +1109,11 @@
               "null"
             ],
             "default": null
+          },
+          "sync": {
+            "type": "boolean",
+            "description": "Run the ACP session-list sync before reading, instead of reporting the\nrunning agent's last successful sync.",
+            "default": false
           }
         }
       },
@@ -6590,12 +6595,15 @@
         "type": "object",
         "properties": {
           "attempted": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Whether this request ran the ACP session-list sync (`sync=true`)."
           },
           "status": {
             "type": "string",
             "enum": [
               "synced",
+              "cached",
+              "pending",
               "unsupported",
               "not_running"
             ]
@@ -6609,13 +6617,21 @@
             "type": "integer",
             "format": "uint32",
             "minimum": 0
+          },
+          "synced_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When the reported sync finished; set for `synced` and `cached`.\n`cached` reports the last successful sync, background or `sync=true`."
           }
         },
         "required": [
           "attempted",
           "status",
           "upserted",
-          "updated"
+          "updated",
+          "synced_at"
         ]
       },
       "SessionsStatusResponse": {

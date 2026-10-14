@@ -142,24 +142,58 @@ async fn session_change_feed_pages_ascending_after_the_cursor_and_matches_the_li
     assert_eq!(status["data"]["feed_epoch"], epoch);
 }
 
-#[tokio::test]
-async fn sessions_list_syncs_agent_discovered_sessions() {
-    let harness = Harness::spawn().await;
-    let client = http();
+/// Longest a test waits for the background list sync to report.
+const BACKGROUND_SYNC_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
-    let list: Value = client
-        .get(format!("{}/v1/sessions", harness.base_url))
+async fn list_sessions(harness: &Harness, query: &str) -> Value {
+    http()
+        .get(format!("{}/v1/sessions{query}", harness.base_url))
         .header("Authorization", session_bearer())
         .send()
         .await
         .expect("list")
         .json()
         .await
-        .expect("list json");
+        .expect("list json")
+}
 
-    assert_eq!(list["data"]["agent_sync"]["attempted"], true);
-    assert_eq!(list["data"]["agent_sync"]["status"], "synced");
+/// Poll the plain list until `ready` accepts it.
+async fn wait_for_list(harness: &Harness, ready: impl Fn(&Value) -> bool) -> Value {
+    tokio::time::timeout(BACKGROUND_SYNC_WAIT, async {
+        loop {
+            let list = list_sessions(harness, "").await;
+            if ready(&list) {
+                return list;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("background list sync reported in time")
+}
+
+fn session_title(list: &Value, agent_session_id: &str) -> Value {
+    list["data"]["sessions"]
+        .as_array()
+        .expect("sessions array")
+        .iter()
+        .find(|session| session["agent_session_id"] == agent_session_id)
+        .map(|session| session["title"].clone())
+        .unwrap_or(Value::Null)
+}
+
+#[tokio::test]
+async fn sessions_list_syncs_agent_discovered_sessions_in_the_background() {
+    let harness = Harness::spawn().await;
+
+    let list = wait_for_list(&harness, |list| {
+        list["data"]["agent_sync"]["status"] == "cached"
+    })
+    .await;
+
+    assert_eq!(list["data"]["agent_sync"]["attempted"], false);
     assert_eq!(list["data"]["agent_sync"]["upserted"], 1);
+    assert!(list["data"]["agent_sync"]["synced_at"].is_string());
     let listed = list["data"]["sessions"]
         .as_array()
         .unwrap()
@@ -185,15 +219,7 @@ async fn sessions_list_skips_agent_discovered_cwd_outside_workspace() {
     })
     .await;
 
-    let list: Value = http()
-        .get(format!("{}/v1/sessions", harness.base_url))
-        .header("Authorization", session_bearer())
-        .send()
-        .await
-        .expect("list")
-        .json()
-        .await
-        .expect("list json");
+    let list = list_sessions(&harness, "?sync=true").await;
 
     assert_eq!(list["data"]["agent_sync"]["attempted"], true);
     assert_eq!(list["data"]["agent_sync"]["status"], "synced");
@@ -209,18 +235,9 @@ async fn sessions_list_skips_agent_discovered_cwd_outside_workspace() {
 #[tokio::test]
 async fn sessions_list_preserves_active_local_sessions() {
     let harness = Harness::spawn().await;
-    let client = http();
     let session_id = create_session(&harness).await;
 
-    let list: Value = client
-        .get(format!("{}/v1/sessions", harness.base_url))
-        .header("Authorization", session_bearer())
-        .send()
-        .await
-        .expect("list")
-        .json()
-        .await
-        .expect("list json");
+    let list = list_sessions(&harness, "?sync=true").await;
 
     let active = list["data"]["sessions"]
         .as_array()
@@ -229,18 +246,10 @@ async fn sessions_list_preserves_active_local_sessions() {
         .find(|session| session["id"].as_str() == Some(session_id.as_str()))
         .expect("created session present");
     assert_eq!(active["status"], "active");
-    assert_eq!(list["data"]["agent_sync"]["updated"], 1);
+    assert_eq!(list["data"]["agent_sync"]["status"], "synced");
 
     // The agent lists the same sessions again, so the second sync writes nothing.
-    let relisted: Value = client
-        .get(format!("{}/v1/sessions", harness.base_url))
-        .header("Authorization", session_bearer())
-        .send()
-        .await
-        .expect("relist")
-        .json()
-        .await
-        .expect("relist json");
+    let relisted = list_sessions(&harness, "?sync=true").await;
     assert_eq!(relisted["data"]["agent_sync"]["status"], "synced");
     assert_eq!(relisted["data"]["agent_sync"]["upserted"], 0);
     assert_eq!(relisted["data"]["agent_sync"]["updated"], 0);
@@ -265,6 +274,59 @@ async fn sessions_list_works_when_agent_list_is_unsupported() {
     assert_eq!(body["data"]["agent_sync"]["attempted"], false);
     assert_eq!(body["data"]["agent_sync"]["status"], "unsupported");
     assert!(body["data"]["sessions"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_plain_list_reads_rows_without_asking_the_agent() {
+    let harness = Harness::spawn().await;
+    wait_for_list(&harness, |list| {
+        list["data"]["agent_sync"]["status"] == "cached"
+    })
+    .await;
+    // The agent lists a created session with a title the local row lacks, so only a
+    // sync that asked the agent fills it in.
+    let session_id = create_session(&harness).await;
+    let agent_session_id = harness
+        .state
+        .read(move |store| store.get_session(&session_id))
+        .await
+        .expect("read session")
+        .expect("session row")
+        .agent_session_id;
+
+    let plain = list_sessions(&harness, "").await;
+    assert_eq!(plain["data"]["agent_sync"]["status"], "cached");
+    assert_eq!(session_title(&plain, &agent_session_id), Value::Null);
+
+    let forced = list_sessions(&harness, "?sync=true").await;
+    assert_eq!(forced["data"]["agent_sync"]["status"], "synced");
+    assert_eq!(
+        session_title(&forced, &agent_session_id),
+        json!(format!("created {agent_session_id}"))
+    );
+}
+
+#[tokio::test]
+async fn the_background_sync_repeats_on_the_sweep_interval() {
+    let harness = Harness::spawn_with(|config| {
+        config.prompts.sweep_interval = "1s".to_owned();
+    })
+    .await;
+    let session_id = create_session(&harness).await;
+    let agent_session_id = harness
+        .state
+        .read(move |store| store.get_session(&session_id))
+        .await
+        .expect("read session")
+        .expect("session row")
+        .agent_session_id;
+    let expected_title = json!(format!("created {agent_session_id}"));
+
+    let list = wait_for_list(&harness, |list| {
+        session_title(list, &agent_session_id) == expected_title
+    })
+    .await;
+    assert_eq!(list["data"]["agent_sync"]["status"], "cached");
 }
 
 #[tokio::test]

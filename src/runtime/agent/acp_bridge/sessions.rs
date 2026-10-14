@@ -19,6 +19,10 @@ use crate::tracing_init::{LATENCY_TARGET, latency_lines_enabled};
 /// into the API error details and the daemon log.
 const ACP_ERROR_DETAIL_MAX_BYTES: usize = 2048;
 
+/// Longest a whole paginated `session/list` may take. The list sync holds a single-flight
+/// gate across it, so one reply the agent never sends must not stall every later sync.
+const SESSION_LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// A resolved breakpoint for `session/fork`, already translated into the
 /// dialect the running adapter reads. The supervisor owns the translation
 /// because only it can map an acp-stack prompt message id onto the adapter's
@@ -193,6 +197,20 @@ impl AcpBridge {
                 name: "session/list",
             });
         }
+        match tokio::time::timeout(SESSION_LIST_TIMEOUT, self.list_all_session_pages()).await {
+            Ok(listed) => listed,
+            Err(_) => Err(self.local_request_failure(
+                "session/list",
+                None,
+                format!(
+                    "agent did not finish answering session/list within {}s",
+                    SESSION_LIST_TIMEOUT.as_secs()
+                ),
+            )),
+        }
+    }
+
+    async fn list_all_session_pages(&self) -> Result<Vec<SessionInfo>> {
         let connection = self.connection().await?;
         let started_at = Instant::now();
         let mut pages = 0_u32;

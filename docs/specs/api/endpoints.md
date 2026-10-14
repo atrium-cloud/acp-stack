@@ -722,14 +722,18 @@ Session creation proceeds when a configured `agent.mode`, model, `agent.effort`,
 ### `GET /v1/sessions`
 
 - Tier: `session`
-- Request: filters accept `limit`, time bounds, and range values. Duration suffixes such as `30m`, `12h`, `60d`, `8w`, `6mo`, and `1y` are interpreted relative to request time.
+- Request: filters accept `limit`, time bounds, and range values. Duration suffixes such as `30m`, `12h`, `60d`, `8w`, `6mo`, and `1y` are interpreted relative to request time. `sync=true` runs the ACP session-list sync before reading.
 - Response: `{ sessions, agent_sync, feed_epoch }`.
     - Each session carries `change_seq`, its position in the change feed, and `event_seq`, the `seq` of its newest event (`0` when it has none). The session object every `/v1/sessions` route returns carries both.
     - `feed_epoch` names the change-feed epoch the `change_seq` values belong to (see `GET /v1/sessions/-/changes`).
-    - `agent_sync` is `{ attempted, status, upserted, updated }`, reporting the optional ACP session-list sync. `upserted` counts rows the sync inserted and `updated` counts stored rows it changed.
-    - `status` is `synced`, `unsupported`, or `not_running`. The latter two mean the durable list may be stale.
+    - `agent_sync` is `{ attempted, status, upserted, updated, synced_at }`, reporting the ACP session-list sync. `attempted` is true when this request ran it. `upserted` counts rows the reported sync inserted, `updated` counts stored rows it changed, and `synced_at` is when it finished.
+    - `status` is one of:
+        - `synced`: this request ran the sync.
+        - `cached`: the counts and `synced_at` of the running agent's last successful sync, background or `sync=true`.
+        - `pending`: the running agent lists sessions and no sync of it has succeeded yet. A failing sync is retried every interval.
+        - `unsupported` or `not_running`: no sync runs, so the durable list may be stale.
 - Notes:
-    - Lists durable sessions, optionally after ACP session-list sync.
+    - Lists durable sessions. While the agent runs and supports `session/list`, acp-stack syncs its session list when the agent starts and then every `[prompts].sweep_interval` as read at that start, so a session the agent created elsewhere appears within one interval, or on `sync=true`.
     - A sync layers the listed metadata keys over the session's stored metadata, so stored config options, commands, and fork lineage stay. A listing without `updatedAt` leaves `updated_at` as stored.
     - A sync advances a row's `change_seq` when it changes a stored value.
 
