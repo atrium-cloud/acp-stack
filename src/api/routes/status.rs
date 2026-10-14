@@ -101,21 +101,34 @@ impl ServerInfo {
 /// In-flight probe: the daemon's own apply lock (non-blocking `try_lock`, so
 /// the status route answers while an apply runs) OR a live `deps_apply_runs`
 /// row, which also observes applies the daemon did not start (CLI, detached
-/// init child). Read through a fresh store connection, never the shared
-/// state handle; read failures degrade to the lock-only signal rather than erroring
-/// the status route.
-fn deps_apply_in_flight(state: &AppState) -> bool {
+/// init child). A poll is one read; the stale-row reconcile write runs only
+/// when a `running` row is abandoned. Store failures degrade to the lock-only
+/// signal rather than erroring the status route.
+async fn deps_apply_in_flight(state: &AppState) -> bool {
     if state.deps_apply_lock.try_lock().is_err() {
         return true;
     }
-    let live_run =
-        crate::state::StateStore::open(&state.runtime_paths.state_path).and_then(|store| {
-            let is_live = crate::runtime::dependencies::deps_apply::deps_run_liveness();
-            if let Err(error) = store.reconcile_stale_deps_apply_runs(&is_live) {
-                tracing::warn!(%error, "status: deps apply stale-row reconcile failed");
-            }
-            store.running_deps_apply_run()
-        });
+    let is_live = crate::runtime::dependencies::deps_apply::deps_run_liveness();
+    let live_run = match state
+        .state
+        .read(|store| store.running_deps_apply_run())
+        .await
+    {
+        Ok(Some(run)) if !run.is_abandoned(&is_live) => Ok(Some(run)),
+        Ok(Some(_)) => {
+            state
+                .state
+                .write(|store| {
+                    let is_live = crate::runtime::dependencies::deps_apply::deps_run_liveness();
+                    if let Err(error) = store.reconcile_stale_deps_apply_runs(&is_live) {
+                        tracing::warn!(%error, "status: deps apply stale-row reconcile failed");
+                    }
+                    store.running_deps_apply_run()
+                })
+                .await
+        }
+        other => other,
+    };
     match live_run {
         Ok(run) => run.is_some(),
         Err(error) => {
@@ -135,7 +148,7 @@ pub(crate) async fn status_handler(
     Ok(ApiSuccess::new(StatusResponse {
         schema_version,
         latest_event,
-        deps_apply_in_flight: deps_apply_in_flight(&state),
+        deps_apply_in_flight: deps_apply_in_flight(&state).await,
         server: ServerInfo::current(),
     }))
 }

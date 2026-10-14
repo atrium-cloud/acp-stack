@@ -16,7 +16,7 @@ use crate::events::EventHub;
 use crate::state::{
     EVENT_KIND_PERMISSION_APPROVED, EVENT_KIND_PERMISSION_CANCELLED, EVENT_KIND_PERMISSION_DENIED,
     EVENT_KIND_PERMISSION_EXPIRED, NewPermissionRequest, PermissionDecisionRecord,
-    PermissionRequestRecord, PermissionStatus, StateHandle,
+    PermissionRequestRecord, PermissionStatus, StateHandle, StateStore,
 };
 
 /// Source of a permission request. ACP-source requests originate from a
@@ -277,7 +277,9 @@ impl PermissionService {
     }
 
     async fn publish_created_event(&self, record: &PermissionRequestRecord) {
-        self.publish_event(
+        persist_and_publish_permission_event(
+            &self.state,
+            &self.events,
             &record.id,
             &record.created_at,
             "permission.created",
@@ -290,7 +292,6 @@ impl PermissionService {
                 "subject_id": record.subject_id,
                 "expires_at": record.expires_at,
             }),
-            None,
         )
         .await;
     }
@@ -447,61 +448,66 @@ impl PermissionService {
         deciding_principal: &str,
         reason: Option<String>,
     ) -> Result<PermissionDecisionView> {
-        let new_status = outcome.as_status();
-        let request_id = id.to_owned();
-        let deciding_principal = deciding_principal.to_owned();
-        let decision = self
-            .state
-            .write(move |store| {
-                store.decide_permission(
-                    &request_id,
-                    new_status,
-                    Some(&deciding_principal),
-                    reason.as_deref(),
-                )
-            })
-            .await?;
-
-        // A missing waiter means the timer already fired or the daemon
-        // restarted; the durable decision row is still written for the audit
-        // trail.
-        if let Some(op) = self.pending.lock().await.remove(id) {
-            let _ = op.waiter.send(outcome.clone());
-        }
-
         let kind = match outcome {
             PermissionOutcome::Approved { .. } => EVENT_KIND_PERMISSION_APPROVED,
             PermissionOutcome::Denied { .. } => EVENT_KIND_PERMISSION_DENIED,
             PermissionOutcome::Canceled { .. } => EVENT_KIND_PERMISSION_CANCELLED,
             PermissionOutcome::Expired => EVENT_KIND_PERMISSION_EXPIRED,
         };
-        self.publish_decision_event(id, &decision, kind).await;
-
+        let decision = decide_and_publish(
+            &self.state,
+            &self.events,
+            &self.pending,
+            Decide {
+                id: id.to_owned(),
+                outcome,
+                deciding_principal: deciding_principal.to_owned(),
+                reason,
+                kind,
+            },
+        )
+        .await?;
         Ok(decision_view(decision))
     }
 
+    /// Record the decision event of a request decided on arrival, then publish it live.
     async fn publish_decision_event(
         &self,
         id: &str,
         decision: &PermissionDecisionRecord,
-        kind: &str,
+        kind: &'static str,
     ) {
-        let mut payload = json!({
-            "id": id,
-            "permission_id": id,
-            "decision": decision.decision,
-            "deciding_principal": decision.deciding_principal,
-            "reason": decision.reason,
-        });
-        let session_id = link_request_subject(&self.state, id, &mut payload).await;
-        self.publish_event(
-            id,
-            &decision.created_at,
-            kind,
-            payload,
-            session_id.as_deref(),
-        )
+        let state = self.state.clone();
+        let events = self.events.clone();
+        let id = id.to_owned();
+        let decision = decision.clone();
+        // Spawned so a caller dropped mid-write still publishes the row it committed.
+        let persisted = tokio::spawn(async move {
+            let request_id = id.clone();
+            let recorded_decision = decision.clone();
+            let payload = state
+                .write(move |store| {
+                    Ok(record_decision_event(
+                        store,
+                        &request_id,
+                        &recorded_decision,
+                        kind,
+                    ))
+                })
+                .await;
+            match payload {
+                Ok(payload) => {
+                    events.publish_permission_event(&id, &decision.created_at, kind, payload)
+                }
+                Err(error) => {
+                    tracing::warn!(%error, perm_id = %id, kind, "failed to record permission decision event");
+                }
+            }
+        })
         .await;
+        if let Err(error) = persisted {
+            tracing::warn!(%error, "permission event write task failed");
+        }
     }
 
     fn spawn_timer(&self, id: String) {
@@ -513,14 +519,11 @@ impl PermissionService {
         tokio::spawn(async move {
             tokio::time::sleep(timeout).await;
 
-            let (new_status, outcome, kind) = match action {
-                PermissionTimeoutAction::Deny => (
-                    PermissionStatus::Expired,
-                    PermissionOutcome::Expired,
-                    EVENT_KIND_PERMISSION_EXPIRED,
-                ),
+            let (outcome, kind) = match action {
+                PermissionTimeoutAction::Deny => {
+                    (PermissionOutcome::Expired, EVENT_KIND_PERMISSION_EXPIRED)
+                }
                 PermissionTimeoutAction::Approve => (
-                    PermissionStatus::Approved,
                     PermissionOutcome::Approved {
                         option_id: None,
                         reason: Some("auto-approved on timeout".to_owned()),
@@ -531,30 +534,22 @@ impl PermissionService {
 
             // The atomic `decide_permission` keeps a concurrent approve/deny
             // from landing between the transition and the decision row.
-            let outcome_for_waiter = outcome.clone();
-            let request_id = id.clone();
-            let decided = state
-                .write(move |store| {
-                    store.decide_permission(
-                        &request_id,
-                        new_status,
-                        Some("system"),
-                        Some("timeout"),
-                    )
-                })
-                .await;
-            let result = match decided {
-                Ok(decision) => Ok(Some(decision.created_at)),
-                Err(StackError::InvalidPermissionTransition { .. }) => Ok(None),
-                Err(err) => Err(err),
-            };
-
-            let now = match result {
-                Ok(Some(created_at)) => created_at,
-                Ok(None) => {
-                    // A concurrent decider settled the row and fired the waiter.
-                    return;
-                }
+            let decided = decide_and_publish(
+                &state,
+                &events,
+                &pending,
+                Decide {
+                    id: id.clone(),
+                    outcome,
+                    deciding_principal: "system".to_owned(),
+                    reason: Some("timeout".to_owned()),
+                    kind,
+                },
+            )
+            .await;
+            match decided {
+                // A concurrent decider settled the row and fired the waiter.
+                Ok(_) | Err(StackError::InvalidPermissionTransition { .. }) => {}
                 Err(err) => {
                     // Fire the waiter with Expired so the caller cannot hang;
                     // the row stays pending for the restart sweep.
@@ -562,53 +557,9 @@ impl PermissionService {
                     if let Some(op) = pending.lock().await.remove(&id) {
                         let _ = op.waiter.send(PermissionOutcome::Expired);
                     }
-                    return;
                 }
-            };
-
-            if let Some(op) = pending.lock().await.remove(&id) {
-                let _ = op.waiter.send(outcome_for_waiter);
             }
-
-            let mut payload = json!({
-                "id": id,
-                "permission_id": id,
-                "decision": new_status.as_str(),
-                "deciding_principal": "system",
-                "reason": "timeout",
-            });
-            let session_id = link_request_subject(&state, &id, &mut payload).await;
-            persist_and_publish_permission_event(
-                &state,
-                &events,
-                &id,
-                &now,
-                kind,
-                payload,
-                session_id.as_deref(),
-            )
-            .await;
         });
-    }
-
-    async fn publish_event(
-        &self,
-        id: &str,
-        created_at: &str,
-        kind: &str,
-        data: Value,
-        session_id: Option<&str>,
-    ) {
-        persist_and_publish_permission_event(
-            &self.state,
-            &self.events,
-            id,
-            created_at,
-            kind,
-            data,
-            session_id,
-        )
-        .await;
     }
 }
 
@@ -646,16 +597,8 @@ fn decision_view(decision: PermissionDecisionRecord) -> PermissionDecisionView {
 /// Returns the local session id for ACP-source requests, which the caller
 /// stamps on the durable event so the decision replays from the per-session
 /// event log.
-async fn link_request_subject(
-    state: &StateHandle,
-    id: &str,
-    payload: &mut Value,
-) -> Option<String> {
-    let request_id = id.to_owned();
-    let record = state
-        .read(move |store| store.get_permission_request(&request_id))
-        .await;
-    match record {
+fn link_request_subject(store: &StateStore, id: &str, payload: &mut Value) -> Option<String> {
+    match store.get_permission_request(id) {
         Ok(Some(record)) => {
             payload["source"] = json!(record.source);
             payload["subject_id"] = json!(record.subject_id);
@@ -680,27 +623,135 @@ async fn link_request_subject(
     }
 }
 
-/// Append a durable `events` row AND publish the live `permissions` topic
-/// envelope for a permission lifecycle event. Two side effects so callers
-/// don't drift apart: every WS-visible event lands in `events` (so
-/// `GET /v1/logs/permissions` returns it), and every durable event is
-/// fanned out live (so subscribers see it immediately). The append_event
-/// helper already fans out to the `logs` topic, so each lifecycle event
-/// reaches `logs` AND `permissions` subscribers.
-///
-/// `session_id` scopes the durable row to the session that raised the request,
-/// which is what puts an ACP-source decision in the per-session event log a
-/// transcript replays from.
+/// Append a `permission.created` row AND publish its live `permissions` topic
+/// envelope. The append_event helper already fans out to the `logs` topic, so
+/// the event reaches `logs` AND `permissions` subscribers. Decision events go
+/// through `decide_and_publish` or `publish_decision_event` instead.
 async fn persist_and_publish_permission_event(
     state: &StateHandle,
     events: &EventHub,
     id: &str,
     created_at: &str,
-    kind: &str,
+    kind: &'static str,
     data: Value,
+) {
+    let state = state.clone();
+    let events = events.clone();
+    let id = id.to_owned();
+    let created_at = created_at.to_owned();
+    // Spawned so a caller dropped mid-write still publishes the row it committed.
+    let persisted = tokio::spawn(async move {
+        let request_id = id.clone();
+        let payload = data.clone();
+        let appended = state
+            .write(move |store| {
+                append_permission_event(store, &request_id, kind, &payload, None);
+                Ok(())
+            })
+            .await;
+        if let Err(err) = appended {
+            tracing::warn!(error = %err, perm_id = %id, kind, "failed to append permission event to events table");
+        }
+        events.publish_permission_event(&id, &created_at, kind, data);
+    })
+    .await;
+    if let Err(error) = persisted {
+        tracing::warn!(%error, "permission event write task failed");
+    }
+}
+
+/// Inputs of one permission decision.
+struct Decide {
+    id: String,
+    outcome: PermissionOutcome,
+    deciding_principal: String,
+    reason: Option<String>,
+    kind: &'static str,
+}
+
+/// Decide a request and record its decision event in one write job, then answer the
+/// waiter and publish the event live. Spawned so a caller dropped mid-write still answers
+/// the waiter and publishes the decision it committed.
+async fn decide_and_publish(
+    state: &StateHandle,
+    events: &EventHub,
+    pending: &Arc<TokioMutex<HashMap<String, PendingOp>>>,
+    decide: Decide,
+) -> Result<PermissionDecisionRecord> {
+    let state = state.clone();
+    let events = events.clone();
+    let pending = Arc::clone(pending);
+    tokio::spawn(async move {
+        let Decide {
+            id,
+            outcome,
+            deciding_principal,
+            reason,
+            kind,
+        } = decide;
+        let new_status = outcome.as_status();
+        let request_id = id.clone();
+        let (decision, payload) = state
+            .write(move |store| {
+                let decision = store.decide_permission(
+                    &request_id,
+                    new_status,
+                    Some(&deciding_principal),
+                    reason.as_deref(),
+                )?;
+                let payload = record_decision_event(store, &request_id, &decision, kind);
+                Ok((decision, payload))
+            })
+            .await?;
+        // A missing waiter means the timer already fired or the daemon
+        // restarted; the durable decision row is still written for the audit
+        // trail.
+        if let Some(op) = pending.lock().await.remove(&id) {
+            let _ = op.waiter.send(outcome);
+        }
+        events.publish_permission_event(&id, &decision.created_at, kind, payload);
+        Ok(decision)
+    })
+    .await
+    .map_err(|error| StackError::StateAccessFailed {
+        reason: format!("permission decision task failed: {error}"),
+    })?
+}
+
+/// Append a decision's event, linked to the request's subject, and return its payload
+/// for the live publish. A failed append is logged so the decision still commits.
+fn record_decision_event(
+    store: &StateStore,
+    id: &str,
+    decision: &PermissionDecisionRecord,
+    kind: &str,
+) -> Value {
+    let mut payload = json!({
+        "id": id,
+        "permission_id": id,
+        "decision": decision.decision,
+        "deciding_principal": decision.deciding_principal,
+        "reason": decision.reason,
+    });
+    let session_id = link_request_subject(store, id, &mut payload);
+    append_permission_event(store, id, kind, &payload, session_id.as_deref());
+    payload
+}
+
+/// Append a durable `events` row for a permission lifecycle event; the caller publishes
+/// the live `permissions` envelope after the commit, so every WS-visible event lands in
+/// `events` (and `GET /v1/logs/permissions`) and every durable event is fanned out.
+/// `session_id` scopes the row to the session that raised the request, which puts an
+/// ACP-source decision in the per-session event log a transcript replays from. A failure
+/// is logged.
+fn append_permission_event(
+    store: &StateStore,
+    id: &str,
+    kind: &str,
+    payload: &Value,
     session_id: Option<&str>,
 ) {
-    let payload_text = match serde_json::to_string(&data) {
+    let payload_text = match serde_json::to_string(payload) {
         Ok(text) => text,
         Err(err) => {
             tracing::warn!(
@@ -720,47 +771,30 @@ async fn persist_and_publish_permission_event(
         EVENT_KIND_PERMISSION_EXPIRED => "permission expired",
         _ => "permission event",
     };
-    let event_session_id = session_id.map(str::to_owned);
-    let state = state.clone();
-    let events = events.clone();
-    let id = id.to_owned();
-    let created_at = created_at.to_owned();
-    let kind = kind.to_owned();
-    // Spawned so a caller dropped mid-write still publishes the row it committed.
-    let persisted = tokio::spawn(async move {
-        let event_kind = kind.clone();
-        let appended = state
-            .write(move |store| match event_session_id {
-                Some(session_id) => store.append_session_event_with_source(
-                    &session_id,
-                    "info",
-                    &event_kind,
-                    crate::state::EVENT_SOURCE_PERMISSION,
-                    message,
-                    &payload_text,
-                ),
-                None => store.append_event_with_source(
-                    "info",
-                    &event_kind,
-                    crate::state::EVENT_SOURCE_PERMISSION,
-                    message,
-                    &payload_text,
-                ),
-            })
-            .await;
-        if let Err(err) = appended {
-            tracing::warn!(
-                error = %err,
-                perm_id = %id,
-                kind = %kind,
-                "failed to append permission event to events table",
-            );
-        }
-        events.publish_permission_event(&id, &created_at, &kind, data);
-    })
-    .await;
-    if let Err(error) = persisted {
-        tracing::warn!(%error, "permission event write task failed");
+    let appended = match session_id {
+        Some(session_id) => store.append_session_event_with_source(
+            session_id,
+            "info",
+            kind,
+            crate::state::EVENT_SOURCE_PERMISSION,
+            message,
+            &payload_text,
+        ),
+        None => store.append_event_with_source(
+            "info",
+            kind,
+            crate::state::EVENT_SOURCE_PERMISSION,
+            message,
+            &payload_text,
+        ),
+    };
+    if let Err(err) = appended {
+        tracing::warn!(
+            error = %err,
+            perm_id = id,
+            kind,
+            "failed to append permission event to events table",
+        );
     }
 }
 
@@ -823,6 +857,49 @@ mod tests {
             })
             .await
             .expect("query permission events")
+    }
+
+    #[tokio::test]
+    async fn failed_decision_event_keeps_the_decision_and_answers_the_waiter() {
+        let (dir, service) =
+            fresh_service_with_timeout(PermissionTimeoutAction::Deny, Duration::from_secs(60));
+        rusqlite::Connection::open(dir.path().join("state.sqlite"))
+            .expect("second connection")
+            .execute_batch(&format!(
+                "CREATE TRIGGER block_approved BEFORE INSERT ON events \
+                 WHEN NEW.kind = '{EVENT_KIND_PERMISSION_APPROVED}' \
+                 BEGIN SELECT RAISE(ABORT, 'forced event failure'); END;"
+            ))
+            .expect("trigger installed");
+        let (record, rx) = service
+            .request(NewPermission {
+                source: PermissionSource::Command,
+                requester: Some("cmd_a".to_owned()),
+                subject_id: Some("cmd_a".to_owned()),
+                detail: json!({ "command": "echo hi" }),
+            })
+            .await
+            .expect("request");
+
+        service
+            .approve(&record.id, Some("ok".to_owned()), None, "session-key")
+            .await
+            .expect("approve");
+
+        assert!(matches!(
+            rx.await.expect("waiter answered"),
+            PermissionOutcome::Approved { .. }
+        ));
+        assert_eq!(
+            service.get(&record.id).await.expect("get").status,
+            "approved"
+        );
+        let events = query_permission_events_for(&service, &record.id).await;
+        assert!(
+            events
+                .iter()
+                .all(|event| event.kind != EVENT_KIND_PERMISSION_APPROVED)
+        );
     }
 
     #[tokio::test]

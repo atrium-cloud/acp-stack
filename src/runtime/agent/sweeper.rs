@@ -121,31 +121,17 @@ fn stalled_event_payload(prompt_id: &str, threshold_secs: u64) -> String {
     .to_string()
 }
 
+/// Demote idle sessions and write their `session.available` events in one job; a failed
+/// event is logged and leaves the demotion in place.
 async fn sweep_idle_sessions(state: &StateHandle, idle_threshold: Duration) {
-    let ids = match state
-        .write(move |store| store.mark_idle_sessions(idle_threshold))
-        .await
-    {
-        Ok(ids) => ids,
-        Err(err) => {
-            tracing::warn!(
-                error = %err,
-                "state sweeper: mark_idle_sessions failed"
-            );
-            return;
-        }
-    };
-    if ids.is_empty() {
-        return;
-    }
     let payload = serde_json::json!({
         "reason": "idle",
         "threshold_secs": idle_threshold.as_secs(),
     })
     .to_string();
-    let appended = state
+    let swept = state
         .write(move |store| {
-            for session_id in ids {
+            for session_id in store.mark_idle_sessions(idle_threshold)? {
                 if let Err(err) = store.append_session_event_with_source(
                     &session_id,
                     "info",
@@ -164,10 +150,10 @@ async fn sweep_idle_sessions(state: &StateHandle, idle_threshold: Duration) {
             Ok(())
         })
         .await;
-    if let Err(err) = appended {
+    if let Err(err) = swept {
         tracing::warn!(
             error = %err,
-            "state sweeper: session.available events not written"
+            "state sweeper: mark_idle_sessions failed"
         );
     }
 }
@@ -200,6 +186,55 @@ impl Drop for StateSweeper {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::{
+        NewSessionRecord, SESSION_STATUS_ACTIVE, SESSION_STATUS_AVAILABLE, StateStore,
+    };
+
+    #[tokio::test]
+    async fn idle_demotion_stands_when_its_event_fails() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = StateStore::open(dir.path().join("state.sqlite")).expect("open");
+        store.migrate().expect("migrate");
+        store
+            .insert_session(NewSessionRecord {
+                id: "sess_idle".to_owned(),
+                agent_id: "fake".to_owned(),
+                cwd: "/tmp".to_owned(),
+                title: None,
+                metadata_json: "{}".to_owned(),
+            })
+            .expect("session inserted");
+        rusqlite::Connection::open(store.path())
+            .expect("second connection")
+            .execute_batch(&format!(
+                "UPDATE sessions SET status = '{SESSION_STATUS_ACTIVE}', \
+                 updated_at = '2020-01-01T00:00:00.000000000Z' WHERE id = 'sess_idle'; \
+                 CREATE TRIGGER block_available BEFORE INSERT ON events \
+                 WHEN NEW.kind = '{EVENT_KIND_SESSION_AVAILABLE}' \
+                 BEGIN SELECT RAISE(ABORT, 'forced event failure'); END;"
+            ))
+            .expect("session aged and trigger installed");
+        let state = StateHandle::start(store).expect("start state handle");
+
+        sweep_idle_sessions(&state, Duration::from_secs(30)).await;
+
+        let (status, events) = state
+            .read(|store| {
+                let status = store
+                    .get_session("sess_idle")?
+                    .map(|session| session.status);
+                let events = store.query_session_events("sess_idle", None, 10)?;
+                Ok((status, events))
+            })
+            .await
+            .expect("read session");
+        assert_eq!(status.as_deref(), Some(SESSION_STATUS_AVAILABLE));
+        assert!(
+            events
+                .iter()
+                .all(|event| event.kind != EVENT_KIND_SESSION_AVAILABLE)
+        );
+    }
 
     #[test]
     fn stalled_event_payload_names_the_stall_cause() {

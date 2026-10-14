@@ -135,6 +135,14 @@ fn row_is_abandoned(
     }
 }
 
+impl DepsApplyRunRecord {
+    /// Whether this `running` row no longer has a live owner, by the rule the
+    /// reconcile applies.
+    pub fn is_abandoned(&self, is_live: &dyn Fn(i64, Option<&str>) -> bool) -> bool {
+        row_is_abandoned(&self.started_at, self.pid, self.boot_id.as_deref(), is_live)
+    }
+}
+
 /// Mark every abandoned `running` row `failed`, shared by the claim transaction
 /// and the standalone reconcile so both apply one rule.
 fn reconcile_in_connection(

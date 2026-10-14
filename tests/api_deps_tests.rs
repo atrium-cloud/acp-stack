@@ -383,3 +383,49 @@ async fn status_reports_an_externally_owned_deps_apply() {
         .expect("json");
     assert_eq!(after["data"]["deps_apply_in_flight"], false);
 }
+
+/// A `running` row whose owner died reads as not in flight, and the probe
+/// settles it.
+#[tokio::test]
+async fn status_settles_a_deps_apply_row_whose_owner_died() {
+    let harness = ServerHarness::spawn_with_config(test_config()).await;
+    let mut child = std::process::Command::new("true")
+        .spawn()
+        .expect("spawn short-lived child");
+    let dead_pid = i64::from(child.id());
+    child.wait().expect("reap child");
+    StateStore::open(&harness.state_path)
+        .expect("external connection")
+        .claim_deps_apply_run(
+            NewDepsApplyRun {
+                id: "dap_orphaned",
+                origin: DEPS_APPLY_ORIGIN_CLI,
+                init_run_id: None,
+                feature: None,
+                pid: Some(dead_pid),
+                boot_id: acp_stack::runtime::process_runner::current_boot_id().as_deref(),
+                total: 1,
+            },
+            &|_, _| true,
+        )
+        .expect("orphaned claim");
+
+    let status: serde_json::Value = reqwest::Client::new()
+        .get(format!("{}/v1/status", harness.base_url))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("status")
+        .json()
+        .await
+        .expect("json");
+
+    assert_eq!(status["data"]["deps_apply_in_flight"], false);
+    let runs = harness
+        .state
+        .read(|store| store.query_deps_apply_runs(10))
+        .await
+        .expect("query runs");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, "failed");
+}

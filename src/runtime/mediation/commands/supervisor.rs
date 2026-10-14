@@ -13,7 +13,7 @@ use tokio::time::{Instant, sleep};
 use crate::error::Result;
 use crate::events::EventHub;
 use crate::runtime::mediation::permissions::{PermissionOutcome, PermissionService};
-use crate::state::{CommandStatus, StateHandle};
+use crate::state::{CommandStatus, Event, StateHandle, StateStore};
 
 use super::RunningCommand;
 use super::exec::{GRACE_ESCALATION_SIGNAL, GraceKillOutcome, kill_with_grace, sandboxed_program};
@@ -316,34 +316,37 @@ impl SupervisorTask {
 
         let command_id = self.command_id.clone();
         let finish_exit_status = exit_status.flatten_to_i32();
-        if let Err(error) = self
+        let payload = json!({
+            "command_id": self.command_id,
+            "status": status.as_str(),
+            "exit_status": exit_status,
+            "signal": signal,
+            "reason": reason,
+            "duration_ms": duration_ms,
+        });
+        let payload_text = payload.to_string();
+        let finished = self
             .state
             .write(move |store| {
-                store.finish_command(&command_id, status, finish_exit_status, duration_ms)
+                store.finish_command(&command_id, status, finish_exit_status, duration_ms)?;
+                Ok(append_command_event(
+                    store,
+                    &command_id,
+                    "info",
+                    kind,
+                    "",
+                    &payload_text,
+                ))
             })
-            .await
-        {
-            tracing::warn!(error = %crate::error::report(&error), command_id = %self.command_id, "failed to finalize command row");
-            self.deregister(super::PERMISSION_REASON_PERSISTENCE_FAILED)
-                .await;
-            return;
-        }
-
-        if let Err(error) = self
-            .publish_status_event(
-                kind,
-                json!({
-                    "command_id": self.command_id,
-                    "status": status.as_str(),
-                    "exit_status": exit_status,
-                    "signal": signal,
-                    "reason": reason,
-                    "duration_ms": duration_ms,
-                }),
-            )
-            .await
-        {
-            tracing::warn!(error = %crate::error::report(&error), command_id = %self.command_id, "failed to persist terminal command event");
+            .await;
+        match finished {
+            Ok(event) => self.publish_appended_event(event, payload),
+            Err(error) => {
+                tracing::warn!(error = %crate::error::report(&error), command_id = %self.command_id, "failed to finalize command row");
+                self.deregister(super::PERMISSION_REASON_PERSISTENCE_FAILED)
+                    .await;
+                return;
+            }
         }
 
         self.deregister(super::PERMISSION_REASON_COMMAND_FINISHED)
@@ -405,14 +408,23 @@ impl SupervisorTask {
             }
             counter.exhausted = true;
             let command_id = self.command_id.clone();
-            self.state
-                .write(move |store| store.mark_command_truncated(&command_id))
+            let payload = json!({"command_id": self.command_id});
+            let payload_text = payload.to_string();
+            let event = self
+                .state
+                .write(move |store| {
+                    store.mark_command_truncated(&command_id)?;
+                    Ok(append_command_event(
+                        store,
+                        &command_id,
+                        "info",
+                        "command.output_truncated",
+                        "",
+                        &payload_text,
+                    ))
+                })
                 .await?;
-            self.publish_status_event(
-                "command.output_truncated",
-                json!({"command_id": self.command_id}),
-            )
-            .await?;
+            self.publish_appended_event(event, payload);
             return Ok(persisted_progress);
         }
         self.persist_chunk(&chunk.stream, counter.seq, &chunk.data)
@@ -536,32 +548,28 @@ impl SupervisorTask {
         });
         let payload_text = payload.to_string();
         let command_id = self.command_id.clone();
-        if let Err(error) = self
-            .state
-            .write(move |store| {
-                store.finish_command(&command_id, CommandStatus::Failed, None, None)
-            })
-            .await
-        {
-            tracing::warn!(error = %crate::error::report(&error), command_id = %self.command_id, "failed to record command spawn failure");
-        }
+        // The row and its event are written independently, so a failed row still records
+        // why the command never ran.
         let event = self
             .state
             .write(move |store| {
-                store.append_event_with_source(
+                if let Err(error) =
+                    store.finish_command(&command_id, CommandStatus::Failed, None, None)
+                {
+                    tracing::warn!(error = %crate::error::report(&error), command_id = %command_id, "failed to record command spawn failure");
+                }
+                Ok(append_command_event(
+                    store,
+                    &command_id,
                     "error",
                     "command.spawn_failed",
-                    crate::state::EVENT_SOURCE_COMMAND,
                     &reason,
                     &payload_text,
-                )
+                ))
             })
             .await;
         match event {
-            Ok(event) => {
-                self.event_hub
-                    .publish_command_event(&self.command_id, &event, payload);
-            }
+            Ok(event) => self.publish_appended_event(event, payload),
             Err(append_error) => {
                 tracing::warn!(
                     error = %crate::error::report(&append_error),
@@ -590,6 +598,14 @@ impl SupervisorTask {
         self.event_hub
             .publish_command_event(&self.command_id, &event, data);
         Ok(())
+    }
+
+    /// Fan out an event appended inside a write job, once that job committed.
+    fn publish_appended_event(&self, event: Option<Event>, payload: Value) {
+        if let Some(event) = event {
+            self.event_hub
+                .publish_command_event(&self.command_id, &event, payload);
+        }
     }
 
     /// Remove this command from the live registries and settle any still-pending permission. Every
@@ -642,31 +658,25 @@ impl SupervisorTask {
         payload: Value,
     ) {
         let command_id = self.command_id.clone();
-        if let Err(error) = self
-            .state
-            .write(move |store| store.finish_command(&command_id, status, None, None))
-            .await
-        {
-            tracing::warn!(error = %crate::error::report(&error), command_id = %self.command_id, "failed to finalize command without spawn");
-        }
         let payload_text = payload.to_string();
         let event = self
             .state
             .write(move |store| {
-                store.append_event_with_source(
+                if let Err(error) = store.finish_command(&command_id, status, None, None) {
+                    tracing::warn!(error = %crate::error::report(&error), command_id = %command_id, "failed to finalize command without spawn");
+                }
+                Ok(append_command_event(
+                    store,
+                    &command_id,
                     "info",
                     kind,
-                    crate::state::EVENT_SOURCE_COMMAND,
                     "",
                     &payload_text,
-                )
+                ))
             })
             .await;
         match event {
-            Ok(event) => {
-                self.event_hub
-                    .publish_command_event(&self.command_id, &event, payload);
-            }
+            Ok(event) => self.publish_appended_event(event, payload),
             Err(error) => {
                 tracing::warn!(
                     error = %crate::error::report(&error),
@@ -675,6 +685,36 @@ impl SupervisorTask {
                     "failed to persist command event for a command that never spawned",
                 );
             }
+        }
+    }
+}
+
+/// Append a command lifecycle event inside the write job that settled its row. A failed
+/// append is logged so the row write it accompanies still commits.
+fn append_command_event(
+    store: &StateStore,
+    command_id: &str,
+    level: &str,
+    kind: &str,
+    message: &str,
+    payload_text: &str,
+) -> Option<Event> {
+    match store.append_event_with_source(
+        level,
+        kind,
+        crate::state::EVENT_SOURCE_COMMAND,
+        message,
+        payload_text,
+    ) {
+        Ok(event) => Some(event),
+        Err(error) => {
+            tracing::warn!(
+                error = %crate::error::report(&error),
+                command_id,
+                event_kind = kind,
+                "failed to persist command event",
+            );
+            None
         }
     }
 }
@@ -830,6 +870,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_truncation_event_keeps_the_truncation_and_the_command_running() {
+        let fixture = fixture();
+        rusqlite::Connection::open(fixture.state.path())
+            .expect("second connection")
+            .execute_batch(
+                "CREATE TRIGGER block_truncated BEFORE INSERT ON events \
+                 WHEN NEW.kind = 'command.output_truncated' \
+                 BEGIN SELECT RAISE(ABORT, 'forced event failure'); END;",
+            )
+            .expect("trigger installed");
+        // Twice the 1024-byte cap, so the output is truncated mid-stream.
+        let command = "head -c 2048 /dev/zero | tr '\\0' x";
+        let command_id = insert_command(&fixture, command).await;
+        let (_cancel_tx, task) = task(&fixture, &command_id, command);
+
+        task.run().await;
+
+        let row = command_row(&fixture, &command_id).await;
+        assert_eq!(row.status, "exited");
+        assert!(row.truncated);
+    }
+
+    #[tokio::test]
     async fn signal_death_records_the_signal_on_the_failed_event() {
         let fixture = fixture();
         let command_id = insert_command(&fixture, "kill -9 $$").await;
@@ -843,6 +906,44 @@ mod tests {
         assert_eq!(payload["exit_status"], Value::Null);
         assert_eq!(payload["signal"], "SIGKILL");
         assert_eq!(payload["reason"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn failed_terminal_event_still_finalizes_and_deregisters_the_command() {
+        let fixture = fixture();
+        rusqlite::Connection::open(fixture.state.path())
+            .expect("second connection")
+            .execute_batch(
+                "CREATE TRIGGER block_exited BEFORE INSERT ON events \
+                 WHEN NEW.kind = 'command.exited' \
+                 BEGIN SELECT RAISE(ABORT, 'forced event failure'); END;",
+            )
+            .expect("trigger installed");
+        let command_id = insert_command(&fixture, "true").await;
+        let (cancel_tx, task) = task(&fixture, &command_id, "true");
+        let running = task.running.clone();
+        running
+            .lock()
+            .await
+            .insert(command_id.clone(), RunningCommand { cancel_tx });
+
+        task.run().await;
+
+        assert_eq!(command_row(&fixture, &command_id).await.status, "exited");
+        assert!(running.lock().await.is_empty());
+        let event_kind = "command.exited".to_owned();
+        let events = fixture
+            .state
+            .read(move |store| {
+                store.query_events(crate::state::LogFilter {
+                    limit: 10,
+                    kind: Some(&event_kind),
+                    ..Default::default()
+                })
+            })
+            .await
+            .expect("query events");
+        assert!(events.is_empty());
     }
 
     #[tokio::test]
