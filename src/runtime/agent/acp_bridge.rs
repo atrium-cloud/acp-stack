@@ -470,6 +470,11 @@ impl AcpBridge {
     pub async fn take_last_agent_message_id(&self, agent_session_id: &str) -> Option<String> {
         self.sink.take_last_agent_message_id(agent_session_id).await
     }
+
+    /// Forget the sink's local session id for a session whose local row was deleted.
+    pub async fn forget_session(&self, agent_session_id: &str) {
+        self.sink.forget_session(agent_session_id).await;
+    }
 }
 
 #[cfg(test)]

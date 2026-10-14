@@ -733,7 +733,7 @@ impl AgentSupervisor {
         };
         let bridge = self.bridge().await?;
         bridge
-            .delete_session(AcpSessionId::new(agent_session_id))
+            .delete_session(AcpSessionId::new(agent_session_id.clone()))
             .await?;
         self.cancel_prompts_for_session(session_id).await;
         // Settled before the wipe, so the decision events land in the log the
@@ -748,10 +748,18 @@ impl AgentSupervisor {
                 "failed to cancel pending ACP permissions before session delete"
             );
         }
+        // Updates already queued land before the wipe and are deleted with the session.
+        bridge.drain_session_events().await;
+        // A cached id would route later updates for this agent session to the deleted
+        // row. Forgotten before the delete so updates in between re-read it, and again
+        // after so an entry they cached from the pre-delete row goes too.
+        bridge.forget_session(&agent_session_id).await;
         let session_id = session_id.to_owned();
-        state
+        let deleted = state
             .write(move |store| store.delete_session(&session_id))
-            .await
+            .await;
+        bridge.forget_session(&agent_session_id).await;
+        deleted
     }
 
     /// `POST /v1/sessions/{id}/config-options`. Forwards one `session/set_config_option` and

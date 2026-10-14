@@ -2,6 +2,7 @@
 //! `StateStore`-backed implementation used by the daemon.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use agent_client_protocol::schema::{
@@ -16,10 +17,10 @@ use crate::state::{
     MAX_SESSION_AVAILABLE_COMMANDS, SessionAvailableCommand, StateHandle, StateStore,
 };
 
-/// Sink for ACP `session/update` notifications. `append` must persist the
-/// event before its future resolves, `drain` must resolve once every earlier
-/// `append` is durable, and `flush` must drain any background writer, or a
-/// fast shutdown drops in-flight writes.
+/// Sink for ACP `session/update` notifications. `append` must accept events in
+/// order, `drain` must resolve once every earlier `append` is durable, and
+/// `flush` must drain any background writer, or a fast shutdown drops
+/// in-flight writes.
 pub trait SessionEventSink: Send + Sync + 'static {
     fn capture_session_update<'a>(
         &'a self,
@@ -38,6 +39,16 @@ pub trait SessionEventSink: Send + Sync + 'static {
         agent_session_id: &'a str,
     ) -> futures::future::BoxFuture<'a, Option<String>> {
         Box::pin(async move { Some(agent_session_id.to_owned()) })
+    }
+
+    /// Drop any remembered local session id for `agent_session_id`, after its local
+    /// row was deleted.
+    fn forget_session<'a>(
+        &'a self,
+        agent_session_id: &'a str,
+    ) -> futures::future::BoxFuture<'a, ()> {
+        let _ = agent_session_id;
+        Box::pin(async {})
     }
 
     /// Remove and return the adapter's own `messageId` from the most recent
@@ -93,6 +104,18 @@ pub struct StateStoreSessionSink {
     /// the adapter's own session id. One entry per open session, replaced on
     /// every chunk and taken when the turn settles.
     last_agent_message_ids: TokioMutex<HashMap<String, String>>,
+    local_session_ids: TokioMutex<LocalSessionIds>,
+}
+
+/// Local session id per agent session id on this target, so a streamed update
+/// reaches the writer without a state read. Only hits are cached; a session
+/// delete forgets its entry because a re-imported agent session gets a new id.
+#[derive(Default)]
+struct LocalSessionIds {
+    ids: HashMap<String, String>,
+    /// Bumped by every forget, so a lookup whose read raced one does not cache
+    /// a row the forget's delete removed.
+    generation: u64,
 }
 
 /// Maximum wall time `drain` waits for the writer to reach its barrier. A
@@ -410,6 +433,10 @@ fn read_token_field(usage: &serde_json::Value, key: &str) -> Option<i64> {
 /// Backpressure buffer for unwritten ACP session updates.
 pub(crate) const SESSION_EVENT_BUFFER: usize = 1024;
 
+/// Most queued updates the sink writes in one state job. Bounds how long one batch
+/// holds the state writer while other writes wait behind it.
+const SESSION_WRITE_BATCH_MAX: usize = 128;
+
 /// Record one session update and everything derived from it in one write job. Only the
 /// update row propagates its error; a failed projection or derived row is logged so the
 /// recorded update survives it. The caller parses `payload` so the writer thread, which
@@ -490,46 +517,8 @@ impl StateStoreSessionSink {
         state: StateHandle,
         session_changes: SessionChangesHandle,
     ) -> Self {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<SessionWrite>(SESSION_EVENT_BUFFER);
-        let writer_state = state.clone();
-        let writer = tokio::spawn(async move {
-            while let Some(write) = rx.recv().await {
-                let row = match write {
-                    SessionWrite::Row(row) => row,
-                    SessionWrite::Barrier(ack) => {
-                        if ack.send(()).is_err() {
-                            tracing::debug!(
-                                "session event drain waiter gave up before the barrier"
-                            );
-                        }
-                        continue;
-                    }
-                };
-                let session_id = row.session_id.clone();
-                // The store rejects a payload that is not JSON, so it is dropped here.
-                let payload = match serde_json::from_str::<serde_json::Value>(&row.payload_json) {
-                    Ok(payload) => payload,
-                    Err(err) => {
-                        tracing::warn!(
-                            error = %err,
-                            session_id = %session_id,
-                            "ACP session update is not JSON; dropping it"
-                        );
-                        continue;
-                    }
-                };
-                if let Err(err) = writer_state
-                    .write(move |store| persist_session_row(store, &row, &payload))
-                    .await
-                {
-                    tracing::warn!(
-                        error = %err,
-                        session_id = %session_id,
-                        "failed to persist ACP session update"
-                    );
-                }
-            }
-        });
+        let (tx, rx) = tokio::sync::mpsc::channel::<SessionWrite>(SESSION_EVENT_BUFFER);
+        let writer = tokio::spawn(run_session_writer(state.clone(), rx));
         Self {
             target_id,
             state,
@@ -537,8 +526,93 @@ impl StateStoreSessionSink {
             tx: TokioMutex::new(Some(tx)),
             writer: TokioMutex::new(Some(writer)),
             last_agent_message_ids: TokioMutex::new(HashMap::new()),
+            local_session_ids: TokioMutex::new(LocalSessionIds::default()),
         }
     }
+}
+
+/// Drain the sink's queue in batches and write each batch as one state job, so a
+/// stream advances a batch per commit rather than a row per commit. Barriers in a
+/// batch are acknowledged once the whole batch is written.
+async fn run_session_writer(
+    state: StateHandle,
+    mut receiver: tokio::sync::mpsc::Receiver<SessionWrite>,
+) {
+    let mut writes = Vec::with_capacity(SESSION_WRITE_BATCH_MAX);
+    while receiver
+        .recv_many(&mut writes, SESSION_WRITE_BATCH_MAX)
+        .await
+        > 0
+    {
+        let mut rows = Vec::new();
+        let mut barriers = Vec::new();
+        for write in writes.drain(..) {
+            match write {
+                SessionWrite::Row(row) => {
+                    // The store rejects a payload that is not JSON, so it is dropped here.
+                    match serde_json::from_str::<serde_json::Value>(&row.payload_json) {
+                        Ok(payload) => rows.push((row, payload)),
+                        Err(err) => tracing::warn!(
+                            error = %err,
+                            session_id = %row.session_id,
+                            "ACP session update is not JSON; dropping it"
+                        ),
+                    }
+                }
+                SessionWrite::Barrier(ack) => barriers.push(ack),
+            }
+        }
+        if !rows.is_empty() {
+            let rows = Arc::new(rows);
+            // Per-row failures are handled inside the job, so a failed job means its
+            // transaction failed and committed none of the rows; one retry in a fresh
+            // transaction cannot duplicate them.
+            let mut written = write_session_rows(&state, &rows).await;
+            if let Err(err) = &written {
+                tracing::warn!(
+                    error = %err,
+                    rows = rows.len(),
+                    "a batch of ACP session updates failed; retrying it once"
+                );
+                written = write_session_rows(&state, &rows).await;
+            }
+            if let Err(err) = written {
+                tracing::warn!(
+                    error = %err,
+                    rows = rows.len(),
+                    "failed to persist a batch of ACP session updates"
+                );
+            }
+        }
+        for ack in barriers {
+            if ack.send(()).is_err() {
+                tracing::debug!("session event drain waiter gave up before the barrier");
+            }
+        }
+    }
+}
+
+/// Write a batch of session updates as one state job. Each row is its own write
+/// scope, so a failing row rolls back alone.
+async fn write_session_rows(
+    state: &StateHandle,
+    rows: &Arc<Vec<(SessionEventRow, serde_json::Value)>>,
+) -> crate::error::Result<()> {
+    let rows = Arc::clone(rows);
+    state
+        .write(move |store| {
+            for (row, payload) in rows.iter() {
+                if let Err(err) = persist_session_row(store, row, payload) {
+                    tracing::warn!(
+                        error = %err,
+                        session_id = %row.session_id,
+                        "failed to persist ACP session update"
+                    );
+                }
+            }
+            Ok(())
+        })
+        .await
 }
 
 impl SessionEventSink for StateStoreSessionSink {
@@ -579,6 +653,13 @@ impl SessionEventSink for StateStoreSessionSink {
         agent_session_id: &'a str,
     ) -> futures::future::BoxFuture<'a, Option<String>> {
         Box::pin(async move {
+            let generation = {
+                let cache = self.local_session_ids.lock().await;
+                if let Some(session_id) = cache.ids.get(agent_session_id) {
+                    return Some(session_id.clone());
+                }
+                cache.generation
+            };
             let target_id = self.target_id.clone();
             let lookup_agent_session_id = agent_session_id.to_owned();
             let record = self
@@ -591,7 +672,17 @@ impl SessionEventSink for StateStoreSessionSink {
                 })
                 .await;
             match record {
-                Ok(Some(record)) => Some(record.id),
+                Ok(Some(record)) => {
+                    let mut cache = self.local_session_ids.lock().await;
+                    // A forget during the read may have deleted this row after the
+                    // read's snapshot, so the result is used once but not cached.
+                    if cache.generation == generation {
+                        cache
+                            .ids
+                            .insert(agent_session_id.to_owned(), record.id.clone());
+                    }
+                    Some(record.id)
+                }
                 Ok(None) => {
                     tracing::warn!(
                         target_id = %self.target_id,
@@ -610,6 +701,24 @@ impl SessionEventSink for StateStoreSessionSink {
                     None
                 }
             }
+        })
+    }
+
+    fn forget_session<'a>(
+        &'a self,
+        agent_session_id: &'a str,
+    ) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            {
+                let mut cache = self.local_session_ids.lock().await;
+                cache.ids.remove(agent_session_id);
+                cache.generation += 1;
+            }
+            // An unsettled turn's anchor must not carry over to a re-created session.
+            self.last_agent_message_ids
+                .lock()
+                .await
+                .remove(agent_session_id);
         })
     }
 

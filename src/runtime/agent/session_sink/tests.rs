@@ -829,6 +829,108 @@ async fn drain_makes_every_earlier_append_durable_and_keeps_the_sink_open() {
     assert_eq!(count_rows().await, 3, "drain on a flushed sink returns");
 }
 
+fn sink_store_with_session(tempdir: &tempfile::TempDir) -> StateStore {
+    let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state open");
+    store.migrate().expect("migrate");
+    store
+        .insert_session_for_target(
+            "target_a",
+            "agent_sess_1".to_owned(),
+            NewSessionRecord {
+                id: "sess_local".to_owned(),
+                agent_id: "target_a".to_owned(),
+                cwd: "/tmp".to_owned(),
+                title: None,
+                metadata_json: "{}".to_owned(),
+            },
+        )
+        .expect("session inserted");
+    store
+}
+
+fn chunk_payload(text: &str) -> String {
+    format!(
+        r#"{{"sessionId":"agent_sess_1","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"{text}"}}}}}}"#
+    )
+}
+
+async fn raw_update_payloads(state: &StateHandle) -> Vec<String> {
+    state
+        .read(|store| {
+            store.query_events(crate::state::LogFilter {
+                limit: 10,
+                kind: Some("session.update"),
+                source: Some("acp"),
+                ..Default::default()
+            })
+        })
+        .await
+        .expect("query raw events")
+        .into_iter()
+        .map(|event| event.payload_json)
+        .collect()
+}
+
+#[tokio::test]
+async fn a_failing_row_in_a_batch_rolls_back_alone() {
+    use crate::runtime::agent::session_sink::{SessionEventSink, StateStoreSessionSink};
+
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let store = sink_store_with_session(&tempdir);
+    rusqlite::Connection::open(store.path())
+        .expect("second connection")
+        .execute_batch(
+            "CREATE TRIGGER block_poison BEFORE INSERT ON events \
+             WHEN NEW.payload_json LIKE '%poison%' \
+             BEGIN SELECT RAISE(ABORT, 'forced row failure'); END;",
+        )
+        .expect("trigger installed");
+    let state = StateHandle::start(store).expect("start state handle");
+    let sink = StateStoreSessionSink::new("target_a".to_owned(), state.clone());
+
+    // With the session id cached, an append never yields on this single-threaded
+    // runtime, so all three rows are queued before the sink's writer task runs and
+    // it takes them in one batch.
+    assert_eq!(
+        sink.local_session_id("agent_sess_1").await.as_deref(),
+        Some("sess_local")
+    );
+    for text in ["first", "poison", "last"] {
+        sink.append("agent_sess_1", "session.update", &chunk_payload(text))
+            .await;
+    }
+    sink.drain().await;
+
+    let payloads = raw_update_payloads(&state).await;
+    assert_eq!(payloads.len(), 2, "{payloads:?}");
+    assert!(payloads.iter().any(|payload| payload.contains("first")));
+    assert!(payloads.iter().any(|payload| payload.contains("last")));
+}
+
+#[tokio::test]
+async fn a_forgotten_session_drops_later_updates() {
+    use crate::runtime::agent::session_sink::{SessionEventSink, StateStoreSessionSink};
+
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let state = StateHandle::start(sink_store_with_session(&tempdir)).expect("start state handle");
+    let sink = StateStoreSessionSink::new("target_a".to_owned(), state.clone());
+    sink.append("agent_sess_1", "session.update", &chunk_payload("cached"))
+        .await;
+    sink.drain().await;
+    assert_eq!(raw_update_payloads(&state).await.len(), 1);
+
+    state
+        .write(|store| store.delete_session("sess_local"))
+        .await
+        .expect("delete session");
+    sink.forget_session("agent_sess_1").await;
+    sink.append("agent_sess_1", "session.update", &chunk_payload("late"))
+        .await;
+    sink.drain().await;
+
+    assert!(raw_update_payloads(&state).await.is_empty());
+}
+
 #[tokio::test]
 async fn session_cwd_resolves_local_session_record() {
     use crate::runtime::agent::session_sink::{SessionEventSink, StateStoreSessionSink};
@@ -1011,5 +1113,15 @@ async fn the_last_stamped_chunk_id_is_taken_once_per_session() {
             .as_deref(),
         Some("msg_other"),
         "slots are per agent session"
+    );
+
+    sink.capture_session_update("agent_sess_1", &stamped("msg_deleted"))
+        .await;
+    sink.forget_session("agent_sess_1").await;
+    assert!(
+        sink.take_last_agent_message_id("agent_sess_1")
+            .await
+            .is_none(),
+        "forgetting a deleted session clears its slot"
     );
 }
