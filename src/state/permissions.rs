@@ -1,7 +1,7 @@
 //! `permission_requests` / `permission_decisions` persistence.
 
 use crate::error::{Result, StackError};
-use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, params};
 
 use super::core::StateStore;
 use super::ids::{current_timestamp, next_permission_decision_id, next_permission_request_id};
@@ -203,8 +203,7 @@ impl StateStore {
             deciding_principal: deciding_principal.map(str::to_owned),
             reason: reason.map(str::to_owned),
         };
-        let transaction =
-            Transaction::new_unchecked(self.connection(), TransactionBehavior::Immediate)?;
+        let transaction = self.begin_immediate("permission_requests")?;
         transaction.execute(
             r#"
             INSERT INTO permission_requests
@@ -305,8 +304,7 @@ impl StateStore {
         deciding_principal: Option<&str>,
         reason: Option<&str>,
     ) -> Result<PermissionDecisionRecord> {
-        let transaction =
-            Transaction::new_unchecked(self.connection(), TransactionBehavior::Immediate)?;
+        let transaction = self.begin_immediate("permission_requests")?;
         let row: Option<String> = transaction
             .query_row(
                 "SELECT status FROM permission_requests WHERE id = ?1",
@@ -477,8 +475,7 @@ impl StateStore {
     pub fn reconcile_orphaned_permissions(&self) -> Result<(usize, usize)> {
         // One transaction for the transitions and their decision inserts, so the audit-trail
         // invariant (every terminal request row has a decision row) holds across a mid-reconcile crash.
-        let transaction =
-            Transaction::new_unchecked(self.connection(), TransactionBehavior::Immediate)?;
+        let transaction = self.begin_immediate("permission_requests")?;
         let now = current_timestamp();
 
         let external = self.external_logging_enabled();

@@ -199,7 +199,7 @@ pub(crate) struct AcpArgs {
     #[arg(long)]
     pub(crate) session_mode_current: Option<String>,
     /// Fail `session/prompt` unless this mode id was applied via `session/set_mode`
-    /// first, proving the native mode lane fired (mirrors `--expect-model-config`).
+    /// first, proving the native mode lane fired.
     #[arg(long)]
     pub(crate) expect_mode: Option<String>,
     /// Write the testflight artifact only when the session's effective native mode
@@ -214,6 +214,9 @@ pub(crate) struct AcpArgs {
     /// Answer every `session/set_config_option` with a JSON-RPC error.
     #[arg(long)]
     pub(crate) fail_set_config_option: bool,
+    /// Answer every `session/set_mode` with a JSON-RPC error.
+    #[arg(long)]
+    pub(crate) fail_set_mode: bool,
     /// Answer `session/set_config_option` without the model-category option, the way adapters
     /// that return only the options affected by the change do.
     #[arg(long)]
@@ -273,11 +276,9 @@ pub(crate) struct AcpArgs {
     pub(crate) fs_read_line: Option<u32>,
     #[arg(long)]
     pub(crate) fs_read_limit: Option<u32>,
-    #[arg(long)]
-    pub(crate) expect_model_config: Option<String>,
     /// Fail `session/prompt` unless `<id>=<value>` was applied via
-    /// `session/set_config_option` on this session first, proving the generic
-    /// config lane fired (mirrors `--expect-model-config`). Repeatable.
+    /// `session/set_config_option` on this session first, proving the config lane
+    /// fired. Repeatable.
     #[arg(long)]
     pub(crate) expect_config_option: Vec<String>,
     #[arg(long)]

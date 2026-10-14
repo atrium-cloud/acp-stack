@@ -221,10 +221,10 @@ fn agent_test_applies_configured_model_before_prompt() {
     write_fake_agent_home(
         tempdir.path(),
         &[
-            "--model-config-option",
-            "openai/gpt-5.5",
-            "--expect-model-config",
-            "openai/gpt-5.5",
+            "--config-option-select",
+            "agent-model@model=boot/model:boot/model,openai/gpt-5.5",
+            "--expect-config-option",
+            "agent-model=openai/gpt-5.5",
         ],
     );
     let config_path = tempdir.path().join(".config/acp-stack/acps-config.toml");

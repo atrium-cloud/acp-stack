@@ -111,6 +111,12 @@ pub(crate) async fn handle_set_mode(
     _connection: ConnectionTo<Client>,
 ) -> agent_client_protocol::Result<()> {
     let mut state = state.lock().await;
+    if state.args.fail_set_mode {
+        return responder.respond_with_error(Error::new(
+            -32000,
+            "placebo agent refuses session/set_mode".to_owned(),
+        ));
+    }
     let mode_id = request.mode_id.0.to_string();
     // Reject a mode the agent never advertised, so a mis-wired native lane
     // (wrong id on the wire) surfaces as an error rather than a silent pass.
@@ -199,12 +205,6 @@ pub(crate) async fn handle_set_config_option(
             -32000,
             "placebo agent refuses session/set_config_option".to_owned(),
         ));
-    }
-    if let SessionConfigOptionValue::ValueId { value } = &request.value
-        && state.args.expect_model_config.as_deref() == Some(value.0.as_ref())
-        && request.config_id.0.as_ref() == state.args.model_config_option_id.as_str()
-    {
-        state.model_configured = true;
     }
     state.config_option_values.insert(
         (

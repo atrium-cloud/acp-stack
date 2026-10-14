@@ -61,10 +61,6 @@ pub(crate) async fn handle_prompt(
     }
     {
         let state = state.lock().await;
-        if state.args.expect_model_config.is_some() && !state.model_configured {
-            return responder
-                .respond_with_error(Error::new(-32000, "expected model config before prompt"));
-        }
         if state.args.expect_mode.is_some() && !state.mode_configured {
             return responder
                 .respond_with_error(Error::new(-32000, "expected session mode before prompt"));

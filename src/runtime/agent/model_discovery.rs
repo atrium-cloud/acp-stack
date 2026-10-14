@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_client_protocol::schema::v1::{NewSessionResponse, SessionConfigOption};
+use agent_client_protocol::schema::v1::{
+    NewSessionResponse, SessionConfigOption, SessionConfigOptionValue,
+};
 
 use crate::config::{AgentConfig, Config};
 use crate::dev_gates::{
@@ -20,6 +22,7 @@ use crate::runtime::agent::acp_bridge::{
     session_config_id_for_value, session_config_values, session_mode_selection_for_value,
     session_mode_values, session_model_selection_for_value, session_model_values,
 };
+use crate::runtime::agent::acp_codec::session_config_option_is_current;
 use crate::runtime::agent::agent_headless_config::{CODEX_OPENROUTER_PROVIDER_ID, HERMES_AGENT_ID};
 use crate::runtime::agent::provider_keys::{
     CLAUDE_CODE_AGENT_ID, CODEX_AGENT_ID, GOOSE_AGENT_ID, agent_provider_id_for_provider_id,
@@ -452,9 +455,11 @@ async fn apply_probe_model(
             return None;
         }
     };
-    if advertised_current_value(response.config_options.as_deref(), &config_id).as_deref()
-        == Some(resolved.as_str())
-    {
+    if session_config_option_is_current(
+        response.config_options.as_deref(),
+        &config_id,
+        &SessionConfigOptionValue::value_id(resolved.clone()),
+    ) {
         // The session already booted on this model, so its options describe it already.
         return None;
     }
@@ -476,22 +481,6 @@ async fn apply_probe_model(
     // Lax adapters answer with an empty list and carry the refresh only in a notification, which
     // a probe session never reads; their `session/new` options stay the best available snapshot.
     (!applied.config_options.is_empty()).then_some(applied.config_options)
-}
-
-/// The value a select config option currently reports, so an already-current model needs no set.
-fn advertised_current_value(
-    options: Option<&[SessionConfigOption]>,
-    config_id: &str,
-) -> Option<String> {
-    use agent_client_protocol::schema::v1::SessionConfigKind;
-
-    let option = options?
-        .iter()
-        .find(|option| option.id.0.as_ref() == config_id)?;
-    match &option.kind {
-        SessionConfigKind::Select(select) => Some(select.current_value.0.to_string()),
-        _ => None,
-    }
 }
 
 /// Spawn the agent for its `initialize` handshake only, capture the advertised

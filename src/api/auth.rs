@@ -345,12 +345,7 @@ pub(crate) async fn log_api_request(
 
     let response = next.run(req).await;
 
-    // The cardinality skip targets public-API polling; local UDS calls are
-    // one-shot and stay attributable.
-    let is_local_caller = matches!(resolved_kind, Some(KeyKind::Local));
-    if !is_local_caller
-        && (should_skip_api_request_log(&path) || should_skip_api_request_log(&raw_path))
-    {
+    if should_skip_api_request_log(&path) || should_skip_api_request_log(&raw_path) {
         return response;
     }
 
@@ -367,13 +362,16 @@ pub(crate) async fn log_api_request(
         &origin,
     );
     let payload_text = payload.to_string();
-    // Best-effort: a failed audit insert must not break the response.
-    let store = state.state.lock().await;
-    if let Err(err) =
-        store.append_event_with_source("info", "api.request", event_source, "", &payload_text)
-    {
-        tracing::warn!(error = %err, path, "failed to persist api.request event");
-    }
+    // The row is observability, so the response must not wait on its commit.
+    let store_handle = state.state.clone();
+    tokio::spawn(async move {
+        let store = store_handle.lock().await;
+        if let Err(err) =
+            store.append_event_with_source("info", "api.request", event_source, "", &payload_text)
+        {
+            tracing::warn!(error = %err, path, "failed to persist api.request event");
+        }
+    });
     response
 }
 
@@ -435,13 +433,15 @@ pub(crate) async fn log_error_response(req: Request<Body>, next: Next) -> Respon
     response
 }
 
-/// Returns true when the path should not produce an `api.request` row: WS keeps
-/// its own connect/disconnect pair, the poll surfaces would dwarf real traffic,
-/// and `/v1/health/live` is contracted to stay state-store-free.
+/// Returns true when the path should not produce an `api.request` row for any
+/// caller tier: WS keeps its own connect/disconnect pair, the poll surfaces
+/// would dwarf real traffic, and `/v1/health/live` is contracted to stay
+/// state-store-free.
 fn should_skip_api_request_log(path: &str) -> bool {
     path == "/v1/ws"
         || path == "/v1/health/live"
         || path == "/v1/health/ready"
+        || path == "/v1/sessions/-/status"
         || path == "/v1/sessions/-/changes"
         || path.starts_with("/v1/status")
 }
@@ -752,10 +752,19 @@ mod tests {
     use axum::middleware;
     use axum::routing::get;
     use http::Method;
+    use std::time::{Duration, Instant};
     use tower::ServiceExt;
 
     use crate::config::Config;
-    use crate::state::StateStore;
+    use crate::state::{Event, LogFilter, StateStore};
+
+    /// Upper bound on how long a detached `api.request` write may take to land.
+    const AUDIT_ROW_DEADLINE: Duration = Duration::from_secs(10);
+    const AUDIT_ROW_POLL_INTERVAL: Duration = Duration::from_millis(20);
+    const AUDIT_ROW_QUERY_LIMIT: u32 = 100;
+    /// The test holds the store mutex throughout, so a response that waited on the
+    /// audit write would never arrive.
+    const RESPONSE_DEADLINE: Duration = Duration::from_secs(5);
 
     fn new_state(session: &str, admin: &str) -> AppState {
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -955,6 +964,105 @@ mod tests {
                     .chars()
                     .all(|character| character == '-' || character.is_ascii_hexdigit());
             assert!(uuid_shaped, "{unfit} -> {replaced}");
+        }
+    }
+
+    async fn tag_local_caller(mut req: Request<Body>, next: Next) -> Response {
+        req.extensions_mut().insert(KeyKind::Local);
+        next.run(req).await
+    }
+
+    /// Mirrors the local listener's layer order: the tier tag runs ahead of
+    /// `log_api_request`.
+    fn local_audit_router(state: &AppState) -> Router {
+        Router::new()
+            .route("/v1/sessions/-/changes", get(|| async { "changes" }))
+            .route("/v1/sessions/-/status", get(|| async { "status" }))
+            .route("/v1/ping", get(|| async { "pong" }))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                log_api_request,
+            ))
+            .layer(middleware::from_fn(tag_local_caller))
+            .with_state(state.clone())
+    }
+
+    fn empty_get(uri: &str) -> Request<Body> {
+        Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .body(Body::empty())
+            .expect("request build")
+    }
+
+    async fn api_request_rows(state: &AppState) -> Vec<Event> {
+        let store = state.state.lock().await;
+        store
+            .query_events(LogFilter {
+                limit: AUDIT_ROW_QUERY_LIMIT,
+                kind: Some("api.request"),
+                ..LogFilter::default()
+            })
+            .expect("query api.request rows")
+    }
+
+    /// Poll until the `api.request` row for `path` lands. The sleep also yields so the
+    /// detached writer can take the store mutex.
+    async fn wait_for_api_request_row(state: &AppState, path: &str) -> Event {
+        let needle = format!("\"{path}\"");
+        let deadline = Instant::now() + AUDIT_ROW_DEADLINE;
+        loop {
+            if let Some(row) = api_request_rows(state)
+                .await
+                .into_iter()
+                .find(|row| row.payload_json.contains(&needle))
+            {
+                return row;
+            }
+            assert!(Instant::now() < deadline, "no api.request row for {path}");
+            tokio::time::sleep(AUDIT_ROW_POLL_INTERVAL).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn response_returns_while_the_audit_write_waits_on_the_store() {
+        let state = new_state("acps_session_abc", "acps_admin_xyz");
+        let app = local_audit_router(&state);
+
+        let held_store = state.state.lock().await;
+        let response = tokio::time::timeout(RESPONSE_DEADLINE, app.oneshot(empty_get("/v1/ping")))
+            .await
+            .expect("response must not wait on the api.request write")
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        drop(held_store);
+
+        wait_for_api_request_row(&state, "/v1/ping").await;
+    }
+
+    #[tokio::test]
+    async fn local_callers_skip_api_request_rows_for_polled_routes() {
+        let state = new_state("acps_session_abc", "acps_admin_xyz");
+        let app = local_audit_router(&state);
+        let skipped = ["/v1/sessions/-/changes", "/v1/sessions/-/status"];
+
+        for uri in skipped {
+            let response = app.clone().oneshot(empty_get(uri)).await.expect("response");
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        }
+        // A later recorded row proves the detached writer had its chance at the skipped ones.
+        let response = app.oneshot(empty_get("/v1/ping")).await.expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let recorded = wait_for_api_request_row(&state, "/v1/ping").await;
+        assert_eq!(recorded.source, crate::state::EVENT_SOURCE_LOCAL);
+
+        let rows = api_request_rows(&state).await;
+        for uri in skipped {
+            assert!(
+                rows.iter()
+                    .all(|row| !row.payload_json.contains(&format!("\"{uri}\""))),
+                "no api.request row should be recorded for {uri}: {rows:?}"
+            );
         }
     }
 

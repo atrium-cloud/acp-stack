@@ -1,7 +1,7 @@
 //! SQLite schema migration runner, manifest parser, and embedded DDL.
 
 use crate::error::{Result, StackError};
-use rusqlite::{Connection, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, params};
 use serde::Deserialize;
 
 use super::core::StateStore;
@@ -393,8 +393,7 @@ impl StateStore {
             // between them strands managed tables without a version row. BEGIN
             // IMMEDIATE takes the write lock before the applicability re-check,
             // so a second process cannot re-run committed migration SQL.
-            let transaction =
-                Transaction::new_unchecked(self.connection(), TransactionBehavior::Immediate)?;
+            let transaction = self.begin_immediate("schema_migrations")?;
             if migration_is_applied(&transaction, entry.id)? {
                 transaction.commit()?;
                 continue;

@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::error::{Result, StackError};
 
@@ -206,8 +206,7 @@ impl StateStore {
         input: NewDepsApplyRun<'_>,
         is_live: &dyn Fn(i64, Option<&str>) -> bool,
     ) -> Result<DepsApplyRunRecord> {
-        let transaction =
-            Transaction::new_unchecked(self.connection(), TransactionBehavior::Immediate)?;
+        let transaction = self.begin_immediate("deps_apply_runs")?;
         reconcile_in_connection(&transaction, is_live)?;
         let record = DepsApplyRunRecord {
             id: input.id.to_owned(),
@@ -303,8 +302,7 @@ impl StateStore {
         if running == 0 {
             return Ok(0);
         }
-        let transaction =
-            Transaction::new_unchecked(self.connection(), TransactionBehavior::Immediate)?;
+        let transaction = self.begin_immediate("deps_apply_runs")?;
         let reconciled = reconcile_in_connection(&transaction, is_live)?;
         transaction.commit()?;
         Ok(reconciled)

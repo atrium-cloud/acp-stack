@@ -12,6 +12,8 @@ Default state path:
 ~/.local/share/acp-stack/state.sqlite
 ```
 
+The database runs in WAL mode with `synchronous = NORMAL`: a committed write survives a process crash, and a power loss or OS crash can drop only the newest commits, never corrupt the file.
+
 Durable records include:
 
 - sessions and prompts
@@ -169,8 +171,11 @@ Session-scoped events written when a prompt reaches a terminal status:
 | Kind                | Level | Source   | Payload                                                       | Emit site                                                    |
 | ------------------- | ----- | -------- | -------------------------------------------------------------- | ------------------------------------------------------------ |
 | `session.available` | info  | `system` | `{ "reason": "<label>", "threshold_secs"?: <u64> }`            | Startup reconcile, agent teardown, and the idle session sweep |
+| `session.list_synced` | info | `system` | `{ "target_id", "agent_id", "upserted": <u32>, "updated": <u32>, "skipped_invalid_cwd": <u32> }` | ACP session-list sync, in the transaction that writes the rows |
 
 `reason` is one of `daemon_restart`, `agent_stopped`, `agent_exited`, or `idle`; `threshold_secs` appears only on idle-sweep demotions.
+
+`session.list_synced` is unscoped and written only when a sync inserts rows (`upserted`) or changes stored ones (`updated`); a listing that matches the stored rows writes nothing.
 
 ### Client Terminal Events
 
@@ -323,7 +328,7 @@ The `security_category` filter clusters the flat `security.*` kinds into operato
 - `commands.total`, `commands.by_status`, command duration p50/p95, `commands.truncated_count`
 - `permissions.total`, `permissions.by_outcome`, permission response_ms p50/p95
 - `security.auth_failures`, `security.by_reason`, `security.events_by_kind`
-- `api_connections.request_count` (always present, `0` on an empty window), average duration, and count maps by status bucket, method, route template, key kind, event source, origin kind, country code, and region code; any missing or empty grouping key buckets under `unknown`, and `/v1/ws`, `/v1/health/*`, and `/v1/status*` are excluded for public-tier callers
+- `api_connections.request_count` (always present, `0` on an empty window), average duration, and count maps by status bucket, method, route template, key kind, event source, origin kind, country code, and region code; any missing or empty grouping key buckets under `unknown`, each request's `api.request` row is written after its response is sent, and `/v1/ws`, `/v1/health/*`, `/v1/status*`, `/v1/sessions/-/status`, and `/v1/sessions/-/changes` are excluded for every caller tier
 - `ws_connections.connections_opened`, `connections_closed`, `average_duration_ms` (all three `null` together when the window has no `ws.client_connected` and no `ws.client_disconnected` rows; otherwise the two counts are numbers, possibly `0`, while `average_duration_ms` stays `null` until some disconnect in the window carried a `duration_ms`)
 - `usage.tokens_input`, `usage.tokens_output`, `usage.context_window_used_max`, `usage.context_window_max`
 - `prompt_failures.total`, explicit `failure_class` counters, `by_class`, `by_status_code`, and `by_reason_category`
@@ -342,7 +347,10 @@ The `security_category` filter clusters the flat `security.*` kinds into operato
 
 ## Daemon Log
 
-The daemon writes diagnostic lines to stderr at `warn` and above, plus `info` lines under the `acp_trace` target when `[logging].acp_trace` is on. Every line passes through the shared redactor, which replaces registered secret values and credential-shaped tokens with `[redacted]`.
+The daemon writes diagnostic lines to stderr at `warn` and above, plus `info` lines under the `latency` target, and under the `acp_trace` target when `[logging].acp_trace` is on. Every line passes through the shared redactor, which replaces registered secret values and credential-shaped tokens with `[redacted]`.
+
+- Each ACP session request other than `session/prompt` logs one `agent request answered` line at `info` under the `latency` target with `method`, `elapsed_ms`, `ok`, `agent_id`, `target_id`, and `acp_session_id`. A `session/list` that pages also logs one `agent session list paged through` line with the total `elapsed_ms`, `pages`, and `sessions`.
+- A state write transaction that takes 200 ms or longer from `BEGIN IMMEDIATE` to `COMMIT` logs one `slow state transaction` line at `warn` under the `latency` target with `scope` (the table the write targets), `transaction_ms`, `lock_wait_ms` (the wait for SQLite's write lock), and `commit_ms`.
 
 - Each failed request logs one `request failed` line with `request_id`, `method`, `route`, `path`, `status`, `code`, and `error`. `error` is the internal error text with its source chain, which the public envelope omits. Server errors log at `error`, client errors at `warn`.
 - On `agent.request_failed`, `error` names the agent and, when known, its target and the agent session id. It then gives the agent's JSON-RPC error code, message, and `data` when the agent sent an error, and acp-stack's own description otherwise.

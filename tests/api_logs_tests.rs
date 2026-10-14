@@ -1,8 +1,47 @@
+use std::time::{Duration, Instant};
+
 use reqwest::StatusCode;
 use serde_json::Value;
 
+use acp_stack::state::Event;
+
 mod common;
 use common::api::{SESSION_KEY, ServerHarness, seed_command, seed_session};
+
+/// Upper bound on how long a detached `api.request` write may take to land.
+const AUDIT_ROW_DEADLINE: Duration = Duration::from_secs(10);
+const AUDIT_ROW_POLL_INTERVAL: Duration = Duration::from_millis(20);
+const AUDIT_ROW_QUERY_LIMIT: u32 = 100;
+
+async fn api_request_rows(harness: &ServerHarness) -> Vec<Event> {
+    let guard = harness.state.lock().await;
+    guard
+        .query_events(acp_stack::state::LogFilter {
+            limit: AUDIT_ROW_QUERY_LIMIT,
+            kind: Some("api.request"),
+            ..acp_stack::state::LogFilter::default()
+        })
+        .expect("query")
+}
+
+/// Poll until an `api.request` row matching `predicate` lands. The guard drops before
+/// each sleep so the detached writer can take the store mutex.
+async fn wait_for_api_request_row(
+    harness: &ServerHarness,
+    predicate: impl Fn(&Event) -> bool,
+) -> Event {
+    let deadline = Instant::now() + AUDIT_ROW_DEADLINE;
+    loop {
+        if let Some(row) = api_request_rows(harness).await.into_iter().find(&predicate) {
+            return row;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no matching api.request row landed"
+        );
+        tokio::time::sleep(AUDIT_ROW_POLL_INTERVAL).await;
+    }
+}
 
 #[tokio::test]
 async fn logs_events_returns_array_envelope() {
@@ -254,24 +293,9 @@ async fn api_request_middleware_records_event_with_status_and_duration() {
         .expect("send");
     assert_eq!(response.status(), StatusCode::OK);
 
-    // Inspect SQLite directly: the writer runs inside the response future.
-    let guard = harness.state.lock().await;
-    let rows = guard
-        .query_events(acp_stack::state::LogFilter {
-            limit: 50,
-            kind: Some("api.request"),
-            ..acp_stack::state::LogFilter::default()
-        })
-        .expect("query");
-    assert!(
-        rows.iter()
-            .any(|r| r.payload_json.contains("\"status\":200")),
-        "expected an api.request row with status=200"
-    );
-    let recorded = rows
-        .iter()
-        .find(|r| r.payload_json.contains("\"status\":200"))
-        .expect("matching row");
+    // The writer runs detached after the response is sent, so poll SQLite for its row.
+    let recorded =
+        wait_for_api_request_row(&harness, |r| r.payload_json.contains("\"status\":200")).await;
     assert_eq!(recorded.source, "api");
     let payload: Value = serde_json::from_str(&recorded.payload_json).expect("payload json");
     assert_eq!(payload["method"].as_str(), Some("GET"));
@@ -283,7 +307,12 @@ async fn api_request_middleware_skips_status_routes() {
     let harness = ServerHarness::spawn().await;
     // The skip list must keep `api.request` rows out of SQLite for these paths
     // so polling clients cannot bloat the table.
-    for path in ["/v1/status", "/v1/sessions/-/changes"] {
+    let skipped = [
+        "/v1/status",
+        "/v1/sessions/-/status",
+        "/v1/sessions/-/changes",
+    ];
+    for path in skipped {
         for _ in 0..3 {
             let response = reqwest::Client::new()
                 .get(format!("{}{path}", harness.base_url))
@@ -291,20 +320,22 @@ async fn api_request_middleware_skips_status_routes() {
                 .send()
                 .await
                 .expect("send");
-            if path == "/v1/sessions/-/changes" {
+            if path.starts_with("/v1/sessions/-/") {
                 assert!(response.status().is_success(), "{path}");
             }
         }
     }
-    let guard = harness.state.lock().await;
-    let rows = guard
-        .query_events(acp_stack::state::LogFilter {
-            limit: 100,
-            kind: Some("api.request"),
-            ..acp_stack::state::LogFilter::default()
-        })
-        .expect("query");
-    for path in ["/v1/status", "/v1/sessions/-/changes"] {
+    // A later recorded row proves the detached writer had its chance at the skipped ones.
+    let response = reqwest::Client::new()
+        .get(format!("{}/v1/logs/events?limit=1", harness.base_url))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::OK);
+    wait_for_api_request_row(&harness, |r| r.payload_json.contains("\"/v1/logs/events\"")).await;
+    let rows = api_request_rows(&harness).await;
+    for path in skipped {
         assert!(
             rows.iter()
                 .all(|r| !r.payload_json.contains(&format!("\"{path}\""))),

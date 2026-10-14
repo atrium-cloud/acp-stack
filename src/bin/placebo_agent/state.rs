@@ -28,13 +28,12 @@ pub(crate) struct PlaceboState {
     /// observes one cancel and turns that start later do not inherit it.
     pub(crate) cancelled_sessions: HashSet<String>,
     pub(crate) session_cancels: HashMap<String, u64>,
-    pub(crate) model_configured: bool,
     pub(crate) client_capabilities: Option<ClientCapabilities>,
     /// Values applied via `session/set_config_option`, keyed by `(session_id, config_id)` so a set
     /// on one session never leaks into another's advertised currents.
     pub(crate) config_option_values: BTreeMap<(String, String), SessionConfigOptionValue>,
-    /// Set once a `session/set_mode` applies the `--expect-mode` value, mirroring
-    /// `model_configured` so a test can prove the native mode lane actually fired.
+    /// Set once a `session/set_mode` applies the `--expect-mode` value, so a test can
+    /// prove the native mode lane actually fired.
     pub(crate) mode_configured: bool,
     /// The native mode applied via `session/set_mode`, keyed by session id, so the
     /// testflight-write gate can read each session's effective mode.
@@ -52,7 +51,6 @@ impl PlaceboState {
             opened_sessions: HashSet::new(),
             cancelled_sessions: HashSet::new(),
             session_cancels: HashMap::new(),
-            model_configured: false,
             client_capabilities: None,
             config_option_values: BTreeMap::new(),
             mode_configured: false,

@@ -1,8 +1,6 @@
 //! Fork inheritance: the part of a parent session's durable record that a fork
 //! child carries, written together with the child row.
 
-use rusqlite::{Transaction, TransactionBehavior};
-
 use super::events::next_session_event_seq;
 use super::queries::{insert_session_row, new_active_session_row};
 use super::*;
@@ -83,8 +81,7 @@ impl StateStore {
     ) -> Result<SessionRecord> {
         validate_json_payload(self.connection(), &record.metadata_json)?;
         let mut row = new_active_session_row(target_id, agent_session_id, record);
-        let transaction =
-            Transaction::new_unchecked(self.connection(), TransactionBehavior::Immediate)?;
+        let transaction = self.begin_immediate("sessions")?;
         row.change_seq = next_change_seq(&transaction)?;
         insert_session_row(&transaction, &row, row.change_seq)?;
         let mut copied: Vec<(&'static str, String, String)> = Vec::new();

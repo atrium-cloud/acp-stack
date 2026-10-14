@@ -444,10 +444,7 @@ impl StateStore {
     pub fn reconcile_orphaned_commands(&self) -> Result<(Vec<String>, usize)> {
         let now = current_timestamp();
         let external = self.external_logging_enabled();
-        let tx = rusqlite::Transaction::new_unchecked(
-            self.connection(),
-            rusqlite::TransactionBehavior::Immediate,
-        )?;
+        let tx = self.begin_immediate("commands")?;
         let ids: Vec<String> = {
             let mut statement =
                 tx.prepare("SELECT id FROM commands WHERE status IN ('pending', 'running')")?;

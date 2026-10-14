@@ -155,10 +155,7 @@ impl StateStore {
             })?;
         // Formatted like `current_timestamp`, which the string comparison needs.
         let cutoff = cutoff.to_rfc3339_opts(SecondsFormat::Nanos, true);
-        let transaction = rusqlite::Transaction::new_unchecked(
-            self.connection(),
-            rusqlite::TransactionBehavior::Immediate,
-        )?;
+        let transaction = self.begin_immediate("session_tombstones")?;
         let pruned: Vec<u64> = {
             let mut statement = transaction.prepare(
                 "DELETE FROM session_tombstones WHERE deleted_at < ?1 RETURNING change_seq",

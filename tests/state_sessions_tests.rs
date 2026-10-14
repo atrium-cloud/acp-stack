@@ -2156,6 +2156,105 @@ fn a_session_list_sync_moves_the_feed_only_for_rows_it_changes() {
 }
 
 #[test]
+fn a_session_list_sync_records_its_event_only_when_it_changes_rows() {
+    let (_dir, store) = fresh_state("list_sync_event.sqlite");
+    let listed = |agent_session_id: &str, title: &str| ListedSessionRecord {
+        id: format!("sess_{agent_session_id}"),
+        agent_session_id: agent_session_id.to_owned(),
+        agent_id: "fake".to_owned(),
+        cwd: "/tmp/listed".to_owned(),
+        title: Some(title.to_owned()),
+        updated_at: Some("2026-09-01T00:00:00Z".to_owned()),
+        metadata_json: "{}".to_owned(),
+    };
+    let sync_events = |store: &StateStore| {
+        store
+            .query_events(acp_stack::state::LogFilter {
+                limit: 10,
+                kind: Some(acp_stack::state::EVENT_KIND_SESSION_LIST_SYNCED),
+                ..Default::default()
+            })
+            .expect("query sync events")
+    };
+
+    let counts = store
+        .record_session_list_sync(
+            "fake",
+            "fake",
+            vec![listed("agent_a", "a"), listed("agent_b", "b")],
+            1,
+        )
+        .expect("first sync");
+    assert_eq!((counts.upserted, counts.updated), (2, 0));
+    let events = sync_events(&store);
+    assert_eq!(events.len(), 1);
+    let payload: serde_json::Value =
+        serde_json::from_str(&events[0].payload_json).expect("payload json");
+    assert_eq!(payload["upserted"], 2);
+    assert_eq!(payload["skipped_invalid_cwd"], 1);
+
+    let counts = store
+        .record_session_list_sync(
+            "fake",
+            "fake",
+            vec![listed("agent_a", "a"), listed("agent_b", "b")],
+            0,
+        )
+        .expect("identical sync");
+    assert_eq!((counts.upserted, counts.updated), (0, 0));
+    assert_eq!(
+        sync_events(&store).len(),
+        1,
+        "an unchanged listing records nothing"
+    );
+
+    let counts = store
+        .record_session_list_sync(
+            "fake",
+            "fake",
+            vec![listed("agent_a", "a"), listed("agent_b", "renamed")],
+            0,
+        )
+        .expect("one row changed");
+    assert_eq!(
+        (counts.upserted, counts.updated),
+        (0, 1),
+        "only the changed row counts"
+    );
+    let events = sync_events(&store);
+    assert_eq!(events.len(), 2);
+    let payload: serde_json::Value =
+        serde_json::from_str(&events[0].payload_json).expect("payload json");
+    assert_eq!(payload["updated"], 1);
+}
+
+#[test]
+fn a_listing_that_names_one_session_twice_keeps_one_row() {
+    let (_dir, store) = fresh_state("list_sync_duplicate.sqlite");
+    let listed = |title: &str| ListedSessionRecord {
+        id: format!("sess_{title}"),
+        agent_session_id: "agent_twice".to_owned(),
+        agent_id: "fake".to_owned(),
+        cwd: "/tmp/listed".to_owned(),
+        title: Some(title.to_owned()),
+        updated_at: Some("2026-09-01T00:00:00Z".to_owned()),
+        metadata_json: "{}".to_owned(),
+    };
+
+    let counts = store
+        .upsert_listed_sessions_for_target("fake", vec![listed("first"), listed("second")])
+        .expect("duplicate listing");
+
+    assert_eq!((counts.upserted, counts.updated), (1, 1));
+    let row = store
+        .get_session_by_target_agent_session_id("fake", "agent_twice")
+        .expect("lookup")
+        .expect("row exists");
+    assert_eq!(row.id, "sess_first");
+    assert_eq!(row.title.as_deref(), Some("second"));
+}
+
+#[test]
 fn a_deleted_session_stays_in_the_feed_as_a_tombstone_until_retention_prunes_it() {
     let (dir, store) = fresh_state("change_feed_tombstone.sqlite");
     insert_fork_session(&store, "sess_gone");

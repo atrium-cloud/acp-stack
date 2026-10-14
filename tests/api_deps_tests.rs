@@ -19,8 +19,8 @@ use common::api::{ADMIN_KEY, SESSION_KEY, ServerHarness, test_config};
 /// Long enough that the probe below lands inside the apply window, short
 /// enough to keep the test fast.
 const SLOW_INSTALL_SECONDS: u64 = 3;
-/// The probe touches no state, so a wait near the install duration means it
-/// was queued behind the apply.
+/// The probe's state read is a single short query, so a wait near the install
+/// duration means it was queued behind the apply.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 /// Upper bound on how long the in-flight action may take to become visible.
 const RUNNING_ROW_DEADLINE: Duration = Duration::from_secs(10);
@@ -77,14 +77,13 @@ async fn deps_apply_does_not_block_unrelated_requests() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    // `/v1/workspace` reads in-memory config only, but the `api.request` audit
-    // middleware takes the shared state mutex after the handler returns, so an
-    // apply holding that mutex stalls even this request.
+    // `/v1/logs/events` reads through the shared state mutex, so an apply
+    // holding that mutex stalls this request.
     let probe = reqwest::Client::builder()
         .timeout(PROBE_TIMEOUT)
         .build()
         .expect("probe client")
-        .get(format!("{}/v1/workspace", harness.base_url))
+        .get(format!("{}/v1/logs/events?limit=1", harness.base_url))
         .header("Authorization", format!("Bearer {SESSION_KEY}"))
         .send()
         .await

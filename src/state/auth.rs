@@ -2,7 +2,7 @@
 
 use crate::auth::{AuthVerifier, KeyKind};
 use crate::error::{Result, StackError};
-use rusqlite::{Connection, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, Transaction, params};
 
 use super::core::StateStore;
 use super::ids::{current_timestamp, next_auth_failure_id};
@@ -156,8 +156,7 @@ impl StateStore {
     }
 
     pub fn insert_auth_key_pair(&self, verifiers: &crate::auth::AuthVerifierSet) -> Result<()> {
-        let transaction =
-            Transaction::new_unchecked(self.connection(), TransactionBehavior::Immediate)?;
+        let transaction = self.begin_immediate("auth_keys")?;
         let now = current_timestamp();
         insert_auth_key_in_transaction(&transaction, KeyKind::Session, &verifiers.session, &now)?;
         insert_auth_key_in_transaction(&transaction, KeyKind::Admin, &verifiers.admin, &now)?;
@@ -168,8 +167,7 @@ impl StateStore {
     /// Rotate both keys in ONE transaction: two sequential upserts would leave a mismatched
     /// session/admin pair on a mid-way crash, which `ensure_auth_verifier_pair` cannot recover.
     pub fn replace_auth_key_pair(&self, verifiers: &crate::auth::AuthVerifierSet) -> Result<()> {
-        let transaction =
-            Transaction::new_unchecked(self.connection(), TransactionBehavior::Immediate)?;
+        let transaction = self.begin_immediate("auth_keys")?;
         let now = current_timestamp();
         upsert_auth_key_in_transaction(&transaction, KeyKind::Session, &verifiers.session, &now)?;
         upsert_auth_key_in_transaction(&transaction, KeyKind::Admin, &verifiers.admin, &now)?;

@@ -418,10 +418,7 @@ impl StateStore {
             Ok(true)
         };
 
-        let tx = rusqlite::Transaction::new_unchecked(
-            self.connection(),
-            rusqlite::TransactionBehavior::Immediate,
-        )?;
+        let tx = self.begin_immediate("prompts")?;
         let updated = update(&tx)?;
         if updated {
             bump_prompt_session_change(&tx, id)?;
@@ -452,10 +449,7 @@ impl StateStore {
             });
         }
         let now = current_timestamp();
-        let tx = rusqlite::Transaction::new_unchecked(
-            self.connection(),
-            rusqlite::TransactionBehavior::Immediate,
-        )?;
+        let tx = self.begin_immediate("prompts")?;
         let current: Option<String> = tx
             .query_row(
                 "SELECT status FROM prompts WHERE id = ?1",
@@ -520,10 +514,7 @@ impl StateStore {
         let now = current_timestamp();
         // One transaction covers the UPDATE, the change-feed stamps, and the
         // outbox enqueue, so the settled rows reach every reader together.
-        let tx = rusqlite::Transaction::new_unchecked(
-            self.connection(),
-            rusqlite::TransactionBehavior::Immediate,
-        )?;
+        let tx = self.begin_immediate("prompts")?;
         let settled: Vec<(String, String)> = {
             let mut statement = tx.prepare(
                 r#"
@@ -564,10 +555,7 @@ impl StateStore {
         // outbox enqueue share one IMMEDIATE transaction, so no touch lands
         // between a row qualifying and its flip, and the terminal status
         // reaches every reader atomically.
-        let tx = rusqlite::Transaction::new_unchecked(
-            self.connection(),
-            rusqlite::TransactionBehavior::Immediate,
-        )?;
+        let tx = self.begin_immediate("prompts")?;
         let mut stalled = Vec::new();
         for stuck in stuck_prompts(&tx, thresholds)? {
             let affected = tx.execute(

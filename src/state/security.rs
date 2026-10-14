@@ -2,7 +2,7 @@
 //! `security_findings` rows, keyed by `(run_id, ordinal)` so a run replays in emission order.
 
 use crate::error::Result;
-use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, params};
 
 use super::core::StateStore;
 use super::ids::{current_timestamp, next_security_run_id};
@@ -131,10 +131,9 @@ impl StateStore {
             inputs_json: input.inputs_json.to_owned(),
         };
 
-        // `Transaction::new_unchecked` + `commit()` lets rusqlite's `Drop` roll back on an early
-        // bail, so the shared connection is never left holding an open transaction.
-        let connection = self.connection();
-        let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
+        // Dropping the transaction on an early bail rolls it back, so the shared connection is
+        // never left holding an open transaction.
+        let transaction = self.begin_immediate("security_runs")?;
         transaction.execute(
             r#"
             INSERT INTO security_runs

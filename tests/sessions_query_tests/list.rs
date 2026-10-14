@@ -224,6 +224,20 @@ async fn sessions_list_preserves_active_local_sessions() {
         .expect("created session present");
     assert_eq!(active["status"], "active");
     assert_eq!(list["data"]["agent_sync"]["updated"], 1);
+
+    // The agent lists the same sessions again, so the second sync writes nothing.
+    let relisted: Value = client
+        .get(format!("{}/v1/sessions", harness.base_url))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("relist")
+        .json()
+        .await
+        .expect("relist json");
+    assert_eq!(relisted["data"]["agent_sync"]["status"], "synced");
+    assert_eq!(relisted["data"]["agent_sync"]["upserted"], 0);
+    assert_eq!(relisted["data"]["agent_sync"]["updated"], 0);
 }
 
 #[tokio::test]

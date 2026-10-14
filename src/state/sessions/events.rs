@@ -23,6 +23,37 @@ pub(super) fn next_session_event_seq(conn: &rusqlite::Connection, session_id: &s
     )?)
 }
 
+/// `message` of every agent-streamed `session.update` row.
+const SESSION_UPDATE_EVENT_MESSAGE: &str = "ACP session update";
+
+/// Insert `event` as the next row of `session_id`'s log and return its `seq`. The caller owns
+/// the transaction, the change-feed bump, the outbox row, and the publish after commit.
+fn insert_session_event_row(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    event: &Event,
+) -> Result<u64> {
+    let seq = next_session_event_seq(conn, session_id)?;
+    conn.execute(
+        r#"
+        INSERT INTO events (id, created_at, level, kind, message, payload_json, source, session_id, seq)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        "#,
+        params![
+            event.id,
+            event.created_at,
+            event.level,
+            event.kind,
+            event.message,
+            event.payload_json,
+            event.source,
+            session_id,
+            sequence_param(seq)?,
+        ],
+    )?;
+    Ok(seq)
+}
+
 impl StateStore {
     /// Append a session-scoped event with the default `system` source.
     pub fn append_session_event(
@@ -66,38 +97,80 @@ impl StateStore {
         };
 
         let seq = self.persist_with_outbox("events", &event.id, &event.created_at, |conn| {
-            let seq = next_session_event_seq(conn, session_id)?;
-            conn.execute(
-                r#"
-                INSERT INTO events (id, created_at, level, kind, message, payload_json, source, session_id, seq)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-                "#,
-                params![
-                    event.id,
-                    event.created_at,
-                    event.level,
-                    event.kind,
-                    event.message,
-                    event.payload_json,
-                    event.source,
-                    session_id,
-                    sequence_param(seq)?,
-                ],
-            )?;
+            let seq = insert_session_event_row(conn, session_id, &event)?;
             bump_session_change(conn, session_id)?;
             Ok(seq)
         })?;
         event.seq = Some(seq);
+        self.publish_session_event(session_id, &event);
+        Ok(event)
+    }
 
+    /// Append one agent-streamed ACP `session/update` row and touch the session's in-flight
+    /// prompt in one transaction, so a streamed chunk costs one commit. The touch keeps the
+    /// stale-prompt sweeper off a turn that is still streaming; ACP updates carry no prompt id,
+    /// so it lands on the session's oldest in-flight prompt.
+    pub fn append_session_update(
+        &self,
+        session_id: &str,
+        kind: &str,
+        payload_json: &str,
+    ) -> Result<Event> {
+        serde_json::from_str::<serde::de::IgnoredAny>(payload_json)
+            .map_err(|_| StackError::InvalidEventPayload)?;
+        let mut event = Event {
+            id: next_event_id(),
+            created_at: current_timestamp(),
+            level: "info".to_owned(),
+            kind: kind.to_owned(),
+            message: SESSION_UPDATE_EVENT_MESSAGE.to_owned(),
+            payload_json: payload_json.to_owned(),
+            source: EVENT_SOURCE_ACP.to_owned(),
+            session_id: Some(session_id.to_owned()),
+            seq: None,
+        };
+
+        let tx = self.begin_immediate("events")?;
+        let seq = insert_session_event_row(&tx, session_id, &event)?;
+        bump_session_change(&tx, session_id)?;
+        // Only `updated_at` moves: an in-flight prompt has no stop reason or error to keep.
+        let touched_prompt_id: Option<String> = tx
+            .query_row(
+                r#"
+                UPDATE prompts
+                SET updated_at = ?1
+                WHERE id = (
+                    SELECT id FROM prompts
+                    WHERE session_id = ?2 AND status IN ('pending', 'running')
+                    ORDER BY created_at ASC, id ASC
+                    LIMIT 1
+                )
+                RETURNING id
+                "#,
+                params![event.created_at, session_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if self.external_logging_enabled() {
+            sink_outbox::enqueue(&tx, "events", &event.id, &event.created_at)?;
+            if let Some(prompt_id) = &touched_prompt_id {
+                sink_outbox::enqueue(&tx, "prompts", prompt_id, &event.created_at)?;
+            }
+        }
+        tx.commit()?;
+        event.seq = Some(seq);
+        self.publish_session_event(session_id, &event);
+        Ok(event)
+    }
+
+    fn publish_session_event(&self, session_id: &str, event: &Event) {
         if let Some(hub) = self.event_hub() {
             // Both publishes are required: dropping the second strands
             // session-scoped events on the logs topic only, which breaks
             // reconnect/live-tail flows.
-            hub.publish_log_event(&event);
-            hub.publish_session_update(session_id, &event, &event.payload_json);
+            hub.publish_log_event(event);
+            hub.publish_session_update(session_id, event, &event.payload_json);
         }
-
-        Ok(event)
     }
 
     /// Forward page of session events in log (`seq`) order.

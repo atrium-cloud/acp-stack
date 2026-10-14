@@ -43,6 +43,7 @@ Repository test scripts are maintainer tools, not deployment instructions:
 
 - `scripts/docker-test.sh` validates the Docker image startup path.
 - `scripts/install-systemd-test.sh` validates the systemd installer path in a containerized systemd environment. Its default image is built from `packaging/systemd/installer-test.Dockerfile` so `/sbin/init` exists before the container boots.
+- `scripts/latency-probe.sh` prints client-side per-request latency for a session create, one prompt with status polls, and two session listings against a running acps.
 
 ## Dev Builds
 

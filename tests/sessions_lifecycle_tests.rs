@@ -63,14 +63,14 @@ async fn create_session_rejects_symlink_cwd_escape() {
 
 #[tokio::test]
 async fn create_session_applies_model_with_custom_config_option_id() {
+    // The session boots on another model, so the configured one must be set through the
+    // custom-id option; the placebo refuses the prompt unless that set arrived.
     let harness = Harness::spawn_with(|config| {
         config.agent.args.extend([
-            "--model-config-option".to_owned(),
-            "deepseek/deepseek-v4-flash".to_owned(),
-            "--model-config-option-id".to_owned(),
-            "agent-model".to_owned(),
-            "--expect-model-config".to_owned(),
-            "deepseek/deepseek-v4-flash".to_owned(),
+            "--config-option-select".to_owned(),
+            "agent-model@model=boot/model:boot/model,deepseek/deepseek-v4-flash".to_owned(),
+            "--expect-config-option".to_owned(),
+            "agent-model=deepseek/deepseek-v4-flash".to_owned(),
         ]);
         config.agent.model = Some("deepseek/deepseek-v4-flash".to_owned());
     })
@@ -2168,7 +2168,7 @@ async fn config_option_notifications_refresh_the_stored_snapshot() {
 }
 
 #[tokio::test]
-async fn advertised_model_is_still_applied_without_ignore_records() {
+async fn advertised_current_model_yields_no_ignore_records() {
     // When the agent does advertise the configured model, nothing is ignored.
     let harness = Harness::spawn_with(|config| {
         config.agent.args.extend([
@@ -2176,8 +2176,6 @@ async fn advertised_model_is_still_applied_without_ignore_records() {
             "deepseek/deepseek-v4-flash".to_owned(),
             "--model-config-option-id".to_owned(),
             "agent-model".to_owned(),
-            "--expect-model-config".to_owned(),
-            "deepseek/deepseek-v4-flash".to_owned(),
         ]);
         config.agent.model = Some("deepseek/deepseek-v4-flash".to_owned());
     })
@@ -2210,6 +2208,59 @@ async fn advertised_model_is_still_applied_without_ignore_records() {
             .all(|event| event.kind != "session.capability_ignored"),
         "{events:?}"
     );
+}
+
+#[tokio::test]
+async fn create_session_skips_setting_values_session_new_already_reports() {
+    // The placebo refuses every `session/set_config_option` and `session/set_mode`, so
+    // the create succeeds only if acps sends no set for a model, effort, generic option,
+    // or native mode the session already sits on.
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.extend([
+            "--fail-set-config-option".to_owned(),
+            "--fail-set-mode".to_owned(),
+            "--model-config-option".to_owned(),
+            "deepseek/deepseek-v4-flash".to_owned(),
+            "--config-option-select".to_owned(),
+            "reasoning_effort@thought_level=high:low,high".to_owned(),
+            "--config-option-boolean".to_owned(),
+            "fast@model_config=true".to_owned(),
+            "--session-mode".to_owned(),
+            "default".to_owned(),
+            "--session-mode".to_owned(),
+            "plan".to_owned(),
+            "--session-mode-current".to_owned(),
+            "plan".to_owned(),
+        ]);
+        config.agent.model = Some("deepseek/deepseek-v4-flash".to_owned());
+        config.agent.effort = Some("high".to_owned());
+        config.agent.mode = Some("plan".to_owned());
+        config.agent.config_options.insert(
+            "fast".to_owned(),
+            acp_stack::config::AgentConfigOptionValue::Bool(true),
+        );
+    })
+    .await;
+
+    let response = create_session_response(&harness).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    assert!(
+        body["data"].get("ignored").is_none(),
+        "every configured value is current, so nothing is ignored: {body}"
+    );
+    let session_id = body["data"]["id"].as_str().expect("session id").to_owned();
+    let prompt = http()
+        .post(format!(
+            "{}/v1/sessions/{}/prompt",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .json(&json!({ "prompt": "the boot model is the configured one" }))
+        .send()
+        .await
+        .expect("prompt");
+    assert_eq!(prompt.status(), StatusCode::OK);
 }
 
 async fn create_session_response(harness: &Harness) -> reqwest::Response {

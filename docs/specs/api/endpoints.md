@@ -726,7 +726,7 @@ Session creation proceeds when a configured `agent.mode`, model, `agent.effort`,
 - Response: `{ sessions, agent_sync, feed_epoch }`.
     - Each session carries `change_seq`, its position in the change feed, and `event_seq`, the `seq` of its newest event (`0` when it has none). The session object every `/v1/sessions` route returns carries both.
     - `feed_epoch` names the change-feed epoch the `change_seq` values belong to (see `GET /v1/sessions/-/changes`).
-    - `agent_sync` is `{ attempted, status, upserted, updated }`, reporting the optional ACP session-list sync.
+    - `agent_sync` is `{ attempted, status, upserted, updated }`, reporting the optional ACP session-list sync. `upserted` counts rows the sync inserted and `updated` counts stored rows it changed.
     - `status` is `synced`, `unsupported`, or `not_running`. The latter two mean the durable list may be stale.
 - Notes:
     - Lists durable sessions, optionally after ACP session-list sync.
@@ -1330,7 +1330,7 @@ Log query filters are per-route, not one shared set. All log routes accept:
     - `prompt_failures`, so operators can separate upstream inference outages from local runtime failures. Contains `total`, explicit counters for each `failure_class` (`inference_5xx`, `inference_4xx`, `agent_request`, `vm`, `sqlite`, `daemon`, `agent_process`, `stalled`), `by_class`, and inference event breakdowns by HTTP status code and reason category.
     - The `api_connections` block: `request_count`, `average_duration_ms`, `by_status` response buckets, and count maps by method, route template, key kind, event source, origin kind, country code, and region code. Any missing or empty grouping key (including an unauthenticated request's key kind) is bucketed under `unknown`. `request_count` is always present (`0` on an empty window).
 - Errors: `400` is returned when `since > until`.
-- Notes: the counts exclude `/v1/ws`, `/v1/health/*`, and `/v1/status*` for public-tier callers; internal `local`-tier calls are still counted.
+- Notes: the counts come from `api.request` rows written after each response is sent, and exclude `/v1/ws`, `/v1/health/*`, `/v1/status*`, `/v1/sessions/-/status`, and `/v1/sessions/-/changes` for every caller tier.
 
 ### `GET /v1/installer/runs`
 

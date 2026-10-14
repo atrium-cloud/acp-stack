@@ -79,6 +79,48 @@ fn model_lookup_only_constructs_agent_config_provision() {
     ));
 }
 
+// A false negative only costs a redundant set; a false positive skips a needed one,
+// so every mismatch must read as "not current".
+#[test]
+fn config_option_is_current_only_for_a_matching_kind_and_value() {
+    use agent_client_protocol::schema::v1::{SessionConfigOption, SessionConfigSelectOption};
+    let options = vec![
+        SessionConfigOption::select(
+            "model",
+            "Model",
+            "boot/model",
+            vec![
+                SessionConfigSelectOption::new("boot/model", "Boot"),
+                SessionConfigSelectOption::new("other/model", "Other"),
+            ],
+        ),
+        SessionConfigOption::boolean("fast", "Fast", true),
+    ];
+    let value_id = SessionConfigOptionValue::value_id;
+    let boolean = |value| SessionConfigOptionValue::Boolean { value };
+    let cases = [
+        ("model", value_id("boot/model"), true),
+        ("model", value_id("other/model"), false),
+        ("model", boolean(true), false),
+        ("fast", boolean(true), true),
+        ("fast", boolean(false), false),
+        ("fast", value_id("true"), false),
+        ("missing", value_id("boot/model"), false),
+    ];
+    for (config_id, value, expected) in cases {
+        assert_eq!(
+            session_config_option_is_current(Some(&options), config_id, &value),
+            expected,
+            "{config_id} {value:?}"
+        );
+    }
+    assert!(!session_config_option_is_current(
+        None,
+        "model",
+        &value_id("boot/model")
+    ));
+}
+
 fn response_with_native_modes_only() -> agent_client_protocol::schema::v1::NewSessionResponse {
     use agent_client_protocol::schema::v1::{NewSessionResponse, SessionMode, SessionModeState};
     NewSessionResponse::new("session").modes(SessionModeState::new(

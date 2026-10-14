@@ -1,4 +1,5 @@
 use std::io::{self, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracing_subscriber::filter::{LevelFilter, Targets};
 use tracing_subscriber::fmt::MakeWriter;
@@ -9,8 +10,25 @@ use crate::runtime::agent::acp_trace::ACP_TRACE_TARGET;
 
 // CONSTANTS
 
-/// Level every target logs at except the ACP trace, which `[logging].acp_trace` gates itself.
+/// Level every target logs at except the ACP trace, which `[logging].acp_trace` gates itself,
+/// and the latency target.
 const DEFAULT_LOG_LEVEL: LevelFilter = LevelFilter::WARN;
+
+/// Log target for latency lines: per-call ACP request timing at INFO and slow state writes at
+/// WARN. The default filter admits it at INFO so operators get timings without opting in.
+pub const LATENCY_TARGET: &str = "latency";
+
+static LATENCY_LINES_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Turn on the INFO latency lines. Only `acps serve` does, so one-shot CLI commands that drive
+/// an agent keep stderr to warnings.
+pub fn enable_latency_lines() {
+    LATENCY_LINES_ENABLED.store(true, Ordering::Relaxed);
+}
+
+pub fn latency_lines_enabled() -> bool {
+    LATENCY_LINES_ENABLED.load(Ordering::Relaxed)
+}
 
 pub fn init() {
     let result = log_subscriber(io::stderr).try_init();
@@ -38,6 +56,7 @@ fn log_filter() -> Targets {
     Targets::new()
         .with_default(DEFAULT_LOG_LEVEL)
         .with_target(ACP_TRACE_TARGET, LevelFilter::INFO)
+        .with_target(LATENCY_TARGET, LevelFilter::INFO)
 }
 
 /// Redacts each formatted event before it reaches the inner writer, so no log line can carry a
@@ -129,14 +148,18 @@ mod tests {
     }
 
     #[test]
-    fn filter_keeps_warn_by_default_and_acp_trace_at_info() {
+    fn filter_keeps_warn_by_default_and_acp_trace_and_latency_at_info() {
         let output = capture_events(|| {
             tracing::info!("default target info line");
             tracing::info!(target: ACP_TRACE_TARGET, "trace target info line");
+            tracing::info!(target: LATENCY_TARGET, "latency target info line");
+            tracing::debug!(target: LATENCY_TARGET, "latency target debug line");
             tracing::warn!("default target warn line");
         });
         assert!(!output.contains("default target info line"), "{output}");
         assert!(output.contains("trace target info line"), "{output}");
+        assert!(output.contains("latency target info line"), "{output}");
+        assert!(!output.contains("latency target debug line"), "{output}");
         assert!(output.contains("default target warn line"), "{output}");
     }
 }

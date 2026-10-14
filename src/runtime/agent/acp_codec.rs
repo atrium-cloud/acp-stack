@@ -9,8 +9,9 @@ use agent_client_protocol::schema::v1::{
     ContentBlock, ContentChunk, MessageId, Meta, NewSessionResponse, PermissionOption,
     PermissionOptionId, PermissionOptionKind, ReadTextFileRequest, ReadTextFileResponse,
     RequestPermissionOutcome, RequestPermissionRequest, SelectedPermissionOutcome,
-    SessionConfigKind, SessionConfigOption, SessionConfigSelectOptions, SessionId as AcpSessionId,
-    SessionNotification, SessionUpdate, WriteTextFileRequest, WriteTextFileResponse,
+    SessionConfigKind, SessionConfigOption, SessionConfigOptionValue, SessionConfigSelectOptions,
+    SessionId as AcpSessionId, SessionNotification, SessionUpdate, WriteTextFileRequest,
+    WriteTextFileResponse,
 };
 use tokio::sync::{Mutex as TokioMutex, mpsc};
 
@@ -398,6 +399,31 @@ pub(crate) fn session_config_option_contains_value(
     session_config_option_values(option)
         .iter()
         .any(|candidate| candidate == value)
+}
+
+/// Whether the advertised option `config_id` already reports `value` as its current value, so
+/// a `session/set_config_option` for it would be a round trip that changes nothing.
+pub(crate) fn session_config_option_is_current(
+    config_options: Option<&[SessionConfigOption]>,
+    config_id: &str,
+    value: &SessionConfigOptionValue,
+) -> bool {
+    let Some(option) = config_options
+        .unwrap_or_default()
+        .iter()
+        .find(|option| option.id.0.as_ref() == config_id)
+    else {
+        return false;
+    };
+    match (&option.kind, value) {
+        (SessionConfigKind::Select(select), SessionConfigOptionValue::ValueId { value }) => {
+            select.current_value.0.as_ref() == value.0.as_ref()
+        }
+        (SessionConfigKind::Boolean(boolean), SessionConfigOptionValue::Boolean { value }) => {
+            boolean.current_value == *value
+        }
+        _ => false,
+    }
 }
 
 fn session_config_option_values(option: &SessionConfigOption) -> Vec<String> {

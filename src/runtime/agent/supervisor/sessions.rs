@@ -2,6 +2,7 @@
 //! persists only after the agent confirms; a local row must never exist for a rejected session.
 
 use super::*;
+use crate::runtime::agent::acp_codec::session_config_option_is_current;
 
 impl AgentSupervisor {
     /// Sync ACP `session/list` results into local state; discovery only, rows land `available`.
@@ -74,21 +75,11 @@ impl AgentSupervisor {
                 metadata_json,
             });
         }
-        let guard = state.lock().await;
-        let counts = guard.upsert_listed_sessions_for_target(target_id, records)?;
-        let payload = serde_json::json!({
-            "target_id": target_id,
-            "agent_id": agent.id,
-            "upserted": counts.upserted,
-            "updated": counts.updated,
-            "skipped_invalid_cwd": skipped_invalid_cwd,
-        })
-        .to_string();
-        guard.append_event(
-            "info",
-            "session.list_synced",
-            "ACP session list synced",
-            &payload,
+        let counts = state.lock().await.record_session_list_sync(
+            target_id,
+            &agent.id,
+            records,
+            skipped_invalid_cwd,
         )?;
         Ok(SessionListSyncResult {
             attempted: true,
@@ -127,6 +118,7 @@ impl AgentSupervisor {
                     if let Some(refreshed) = provision_session_option(
                         &bridge,
                         &response.session_id,
+                        response.config_options.as_deref(),
                         Ok(config_id),
                         mode,
                         IGNORED_FEATURE_AGENT_MODE,
@@ -139,11 +131,22 @@ impl AgentSupervisor {
                     }
                 }
                 Ok(AgentSessionModeSelection::NativeMode { mode_id }) => {
+                    let already_current = response
+                        .modes
+                        .as_ref()
+                        .is_some_and(|modes| modes.current_mode_id.0.as_ref() == mode_id);
                     // `session/set_mode` returns no config options, so the
                     // snapshot the model/effort lanes read stays untouched.
-                    bridge
-                        .set_session_mode(response.session_id.clone(), &mode_id)
-                        .await?;
+                    if already_current {
+                        tracing::debug!(
+                            mode_id,
+                            "session/new already reports the configured mode; skipping session/set_mode"
+                        );
+                    } else {
+                        bridge
+                            .set_session_mode(response.session_id.clone(), &mode_id)
+                            .await?;
+                    }
                 }
                 // Same softened-miss contract as the config-option lanes: an
                 // unadvertised mode lands in `ignored`, a real error propagates.
@@ -151,6 +154,7 @@ impl AgentSupervisor {
                     provision_session_option(
                         &bridge,
                         &response.session_id,
+                        response.config_options.as_deref(),
                         Err(error),
                         mode,
                         IGNORED_FEATURE_AGENT_MODE,
@@ -175,16 +179,18 @@ impl AgentSupervisor {
                     "model provisioned on disk; skipping session/set_config_option"
                 );
             } else {
+                let advertised = latest_options
+                    .as_deref()
+                    .or(response.config_options.as_deref());
                 let lookup = session_config_id_for_value(
-                    latest_options
-                        .as_deref()
-                        .or(response.config_options.as_deref()),
+                    advertised,
                     AgentSessionConfigCategory::Model,
                     model,
                 );
                 if let Some(refreshed) = provision_session_option(
                     &bridge,
                     &response.session_id,
+                    advertised,
                     lookup,
                     model,
                     IGNORED_FEATURE_AGENT_MODEL,
@@ -208,25 +214,24 @@ impl AgentSupervisor {
                 effort,
                 "effort provisioned on disk; skipping session/set_config_option"
             );
-        } else if let Some(effort) = agent.effort.as_deref()
-            && let Some(refreshed) = provision_session_option(
+        } else if let Some(effort) = agent.effort.as_deref() {
+            let advertised = latest_options
+                .as_deref()
+                .or(response.config_options.as_deref());
+            if let Some(refreshed) = provision_session_option(
                 &bridge,
                 &response.session_id,
-                session_config_id_for_value(
-                    latest_options
-                        .as_deref()
-                        .or(response.config_options.as_deref()),
-                    AgentSessionConfigCategory::Effort,
-                    effort,
-                ),
+                advertised,
+                session_config_id_for_value(advertised, AgentSessionConfigCategory::Effort, effort),
                 effort,
                 IGNORED_FEATURE_AGENT_EFFORT,
                 "sessionConfig.effort",
                 &mut ignored,
             )
             .await?
-        {
-            latest_options = Some(refreshed);
+            {
+                latest_options = Some(refreshed);
+            }
         }
         // The generic map applies last so the typed lanes stay authoritative for their
         // categories; any miss is an ignored record, never an error.
@@ -250,6 +255,7 @@ impl AgentSupervisor {
             if let Some(refreshed) = provision_session_option_value(
                 &bridge,
                 &response.session_id,
+                advertised,
                 lookup,
                 value,
                 display_value,
@@ -790,9 +796,11 @@ async fn fetch_open_session(
 
 /// Apply one resolved session config option to a freshly created session. Only an
 /// `AgentConfigProvision` lookup failure is softened into `ignored`; a failed RPC still errors.
+#[allow(clippy::too_many_arguments)]
 async fn provision_session_option(
     bridge: &AcpBridge,
     session_id: &AcpSessionId,
+    advertised: Option<&[SessionConfigOption]>,
     lookup: Result<String>,
     value: &str,
     feature: &'static str,
@@ -802,6 +810,7 @@ async fn provision_session_option(
     provision_session_option_value(
         bridge,
         session_id,
+        advertised,
         lookup,
         SessionConfigOptionValue::ValueId {
             value: SessionConfigValueId::new(value.to_owned()),
@@ -867,10 +876,12 @@ fn resolve_generic_config_option(
 }
 
 /// Kind-generic twin of `provision_session_option`, shared with the `[agent.config_options]` map.
+/// A value `advertised` already reports as current is not set again.
 #[allow(clippy::too_many_arguments)]
 async fn provision_session_option_value(
     bridge: &AcpBridge,
     session_id: &AcpSessionId,
+    advertised: Option<&[SessionConfigOption]>,
     lookup: Result<String>,
     value: SessionConfigOptionValue,
     display_value: String,
@@ -881,6 +892,14 @@ async fn provision_session_option_value(
 ) -> Result<Option<Vec<SessionConfigOption>>> {
     match lookup {
         Ok(config_id) => {
+            if session_config_option_is_current(advertised, &config_id, &value) {
+                tracing::debug!(
+                    config_id,
+                    value = %display_value,
+                    "session/new already reports the configured value; skipping session/set_config_option"
+                );
+                return Ok(None);
+            }
             let response = bridge
                 .set_session_config_option_value(session_id.clone(), &config_id, value)
                 .await?;

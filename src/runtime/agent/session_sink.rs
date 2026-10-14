@@ -2,7 +2,6 @@
 //! `StateStore`-backed implementation used by the daemon.
 
 use std::collections::HashMap;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,9 +13,7 @@ use tokio::sync::{Mutex as TokioMutex, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::runtime::agent::session_changes::SessionChangesHandle;
-use crate::state::{
-    MAX_SESSION_AVAILABLE_COMMANDS, PromptStatus, SessionAvailableCommand, StateStore,
-};
+use crate::state::{MAX_SESSION_AVAILABLE_COMMANDS, SessionAvailableCommand, StateStore};
 
 /// Sink for ACP `session/update` notifications. `append` must persist the
 /// event before its future resolves, `drain` must resolve once every earlier
@@ -102,6 +99,11 @@ pub struct StateStoreSessionSink {
 /// delay and an out-of-order log row rather than a hung request.
 const SESSION_EVENT_DRAIN_BUDGET: Duration = Duration::from_secs(5);
 
+/// `sessionUpdate` tags of the updates projected onto the session row.
+const SESSION_INFO_UPDATE_KIND: &str = "session_info_update";
+const AVAILABLE_COMMANDS_UPDATE_KIND: &str = "available_commands_update";
+const CONFIG_OPTION_UPDATE_KIND: &str = "config_option_update";
+
 enum SessionWrite {
     Row(SessionEventRow),
     /// Ordering barrier: acknowledged once every row queued before it is
@@ -115,10 +117,36 @@ struct SessionEventRow {
     payload_json: String,
 }
 
+/// The `sessionUpdate` tag of a recorded `session/update` payload.
+fn session_update_kind(payload: &serde_json::Value) -> Option<&str> {
+    payload
+        .get("update")?
+        .get("sessionUpdate")
+        .and_then(serde_json::Value::as_str)
+}
+
+/// The typed ACP update inside a recorded payload whose tag is `expected_kind`.
+fn typed_session_update(
+    payload: &serde_json::Value,
+    expected_kind: &str,
+) -> crate::error::Result<Option<SessionUpdate>> {
+    if session_update_kind(payload) != Some(expected_kind) {
+        return Ok(None);
+    }
+    let Some(update) = payload.get("update") else {
+        return Ok(None);
+    };
+    serde_json::from_value::<SessionUpdate>(update.clone())
+        .map(Some)
+        .map_err(|err| crate::error::StackError::StateInvalidJson {
+            field: "session.update.update",
+            reason: err.to_string(),
+        })
+}
+
 /// Normalize standard ACP `usage_update` notifications and the legacy usage
 /// objects emitted by older agents.
-fn extract_usage_payload(session_id: &str, payload_json: &str) -> Option<serde_json::Value> {
-    let value: serde_json::Value = serde_json::from_str(payload_json).ok()?;
+fn extract_usage_payload(session_id: &str, value: &serde_json::Value) -> Option<serde_json::Value> {
     if let Some(update) = value.get("update")
         && update
             .get("sessionUpdate")
@@ -156,7 +184,7 @@ fn extract_usage_payload(session_id: &str, payload_json: &str) -> Option<serde_j
         return Some(serde_json::Value::Object(out));
     }
 
-    let usage = locate_usage_object(&value)?;
+    let usage = locate_usage_object(value)?;
     let input_tokens = read_token_field(usage, "input_tokens");
     let output_tokens = read_token_field(usage, "output_tokens");
     let context_window_max = read_token_field(usage, "context_window_max")
@@ -195,31 +223,11 @@ fn extract_usage_payload(session_id: &str, payload_json: &str) -> Option<serde_j
 fn project_session_info_update(
     store: &StateStore,
     session_id: &str,
-    payload_json: &str,
+    payload: &serde_json::Value,
 ) -> crate::error::Result<()> {
-    let payload = serde_json::from_str::<serde_json::Value>(payload_json).map_err(|err| {
-        crate::error::StackError::StateInvalidJson {
-            field: "session.update",
-            reason: err.to_string(),
-        }
-    })?;
-    let Some(update) = payload.get("update") else {
-        return Ok(());
-    };
-    if update
-        .get("sessionUpdate")
-        .and_then(serde_json::Value::as_str)
-        != Some("session_info_update")
-    {
-        return Ok(());
-    }
-    let update = serde_json::from_value::<SessionUpdate>(update.clone()).map_err(|err| {
-        crate::error::StackError::StateInvalidJson {
-            field: "session.update.update",
-            reason: err.to_string(),
-        }
-    })?;
-    let SessionUpdate::SessionInfoUpdate(info) = update else {
+    let Some(SessionUpdate::SessionInfoUpdate(info)) =
+        typed_session_update(payload, SESSION_INFO_UPDATE_KIND)?
+    else {
         return Ok(());
     };
     let title = match &info.title {
@@ -240,31 +248,11 @@ fn project_session_info_update(
 fn project_available_commands_update(
     store: &StateStore,
     session_id: &str,
-    payload_json: &str,
+    payload: &serde_json::Value,
 ) -> crate::error::Result<()> {
-    let payload = serde_json::from_str::<serde_json::Value>(payload_json).map_err(|err| {
-        crate::error::StackError::StateInvalidJson {
-            field: "session.update",
-            reason: err.to_string(),
-        }
-    })?;
-    let Some(update) = payload.get("update") else {
-        return Ok(());
-    };
-    if update
-        .get("sessionUpdate")
-        .and_then(serde_json::Value::as_str)
-        != Some("available_commands_update")
-    {
-        return Ok(());
-    }
-    let update = serde_json::from_value::<SessionUpdate>(update.clone()).map_err(|err| {
-        crate::error::StackError::StateInvalidJson {
-            field: "session.update.update",
-            reason: err.to_string(),
-        }
-    })?;
-    let SessionUpdate::AvailableCommandsUpdate(update) = update else {
+    let Some(SessionUpdate::AvailableCommandsUpdate(update)) =
+        typed_session_update(payload, AVAILABLE_COMMANDS_UPDATE_KIND)?
+    else {
         return Ok(());
     };
     let advertised_len = update.available_commands.len();
@@ -306,31 +294,11 @@ fn project_available_commands_update(
 fn project_config_options_update(
     store: &StateStore,
     session_id: &str,
-    payload_json: &str,
+    payload: &serde_json::Value,
 ) -> crate::error::Result<()> {
-    let payload = serde_json::from_str::<serde_json::Value>(payload_json).map_err(|err| {
-        crate::error::StackError::StateInvalidJson {
-            field: "session.update",
-            reason: err.to_string(),
-        }
-    })?;
-    let Some(update) = payload.get("update") else {
-        return Ok(());
-    };
-    if update
-        .get("sessionUpdate")
-        .and_then(serde_json::Value::as_str)
-        != Some("config_option_update")
-    {
-        return Ok(());
-    }
-    let update = serde_json::from_value::<SessionUpdate>(update.clone()).map_err(|err| {
-        crate::error::StackError::StateInvalidJson {
-            field: "session.update.update",
-            reason: err.to_string(),
-        }
-    })?;
-    let SessionUpdate::ConfigOptionUpdate(update) = update else {
+    let Some(SessionUpdate::ConfigOptionUpdate(update)) =
+        typed_session_update(payload, CONFIG_OPTION_UPDATE_KIND)?
+    else {
         return Ok(());
     };
     let advertised_len = update.config_options.len();
@@ -361,8 +329,10 @@ fn project_config_options_update(
 /// Derive a `tool.execute` event from an `execute`-kind tool call. Updates
 /// omitting `kind` yield `None`, since ACP only requires it on the initial
 /// `tool_call`; the verbatim `session.update` rows keep the full lifecycle.
-fn extract_execute_tool_call(session_id: &str, payload_json: &str) -> Option<serde_json::Value> {
-    let value: serde_json::Value = serde_json::from_str(payload_json).ok()?;
+fn extract_execute_tool_call(
+    session_id: &str,
+    value: &serde_json::Value,
+) -> Option<serde_json::Value> {
     let update = value.get("update")?;
     let update_kind = update.get("sessionUpdate").and_then(|v| v.as_str())?;
     if !matches!(update_kind, "tool_call" | "tool_call_update") {
@@ -425,22 +395,6 @@ fn locate_usage_object(value: &serde_json::Value) -> Option<&serde_json::Value> 
     None
 }
 
-/// Bump `updated_at` on the oldest in-flight prompt so the stale-prompt
-/// sweeper does not flag an actively streaming one. ACP `session/update`
-/// carries no `prompt_id`, so session-scoped is the best precision available.
-fn touch_running_prompt(store: &StateStore, session_id: &str) -> crate::error::Result<()> {
-    let prompts = store.in_flight_prompts_for_session(session_id)?;
-    let Some(prompt) = prompts.into_iter().next() else {
-        return Ok(());
-    };
-    // Re-passing the existing status advances `updated_at` while leaving
-    // every other column intact.
-    let status = PromptStatus::from_str(&prompt.status)?;
-    store
-        .update_prompt_status(&prompt.id, status, None, None, None, None, None)
-        .map(|_| ())
-}
-
 fn read_token_field(usage: &serde_json::Value, key: &str) -> Option<i64> {
     let raw = usage.get(key)?;
     if let Some(n) = raw.as_i64() {
@@ -481,17 +435,25 @@ impl StateStoreSessionSink {
                     }
                 };
                 let guard = writer_state.lock().await;
-                match guard.append_session_event_with_source(
-                    &row.session_id,
-                    "info",
-                    &row.kind,
-                    crate::state::EVENT_SOURCE_ACP,
-                    "ACP session update",
-                    &row.payload_json,
-                ) {
+                // The event row and the running-prompt touch share one commit; the projections
+                // and derived rows below follow only for the update kinds that carry them.
+                match guard.append_session_update(&row.session_id, &row.kind, &row.payload_json) {
                     Ok(_event) => {
+                        let payload = match serde_json::from_str::<serde_json::Value>(
+                            &row.payload_json,
+                        ) {
+                            Ok(payload) => payload,
+                            Err(err) => {
+                                tracing::warn!(
+                                    error = %err,
+                                    session_id = %row.session_id,
+                                    "recorded ACP session update is not JSON; skipping its projections"
+                                );
+                                continue;
+                            }
+                        };
                         if let Err(err) =
-                            project_session_info_update(&guard, &row.session_id, &row.payload_json)
+                            project_session_info_update(&guard, &row.session_id, &payload)
                         {
                             tracing::warn!(
                                 error = %err,
@@ -499,37 +461,25 @@ impl StateStoreSessionSink {
                                 "failed to apply ACP session info update"
                             );
                         }
-                        if let Err(err) = project_available_commands_update(
-                            &guard,
-                            &row.session_id,
-                            &row.payload_json,
-                        ) {
+                        if let Err(err) =
+                            project_available_commands_update(&guard, &row.session_id, &payload)
+                        {
                             tracing::warn!(
                                 error = %err,
                                 session_id = %row.session_id,
                                 "failed to apply ACP available commands update"
                             );
                         }
-                        if let Err(err) = project_config_options_update(
-                            &guard,
-                            &row.session_id,
-                            &row.payload_json,
-                        ) {
+                        if let Err(err) =
+                            project_config_options_update(&guard, &row.session_id, &payload)
+                        {
                             tracing::warn!(
                                 error = %err,
                                 session_id = %row.session_id,
                                 "failed to apply ACP config option update"
                             );
                         }
-                        if let Err(err) = touch_running_prompt(&guard, &row.session_id) {
-                            tracing::warn!(
-                                error = %err,
-                                session_id = %row.session_id,
-                                "failed to re-touch running prompt on session update"
-                            );
-                        }
-                        if let Some(usage) =
-                            extract_usage_payload(&row.session_id, &row.payload_json)
+                        if let Some(usage) = extract_usage_payload(&row.session_id, &payload)
                             && let Ok(usage_text) = serde_json::to_string(&usage)
                             && let Err(err) = guard.append_session_event_with_source(
                                 &row.session_id,
@@ -546,8 +496,7 @@ impl StateStoreSessionSink {
                                 "failed to persist usage.reported event"
                             );
                         }
-                        if let Some(execute) =
-                            extract_execute_tool_call(&row.session_id, &row.payload_json)
+                        if let Some(execute) = extract_execute_tool_call(&row.session_id, &payload)
                             && let Ok(execute_text) = serde_json::to_string(&execute)
                             && let Err(err) = guard.append_session_event_with_source(
                                 &row.session_id,

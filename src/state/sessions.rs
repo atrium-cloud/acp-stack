@@ -5,7 +5,10 @@ use chrono::{SecondsFormat, Utc};
 use rusqlite::{OptionalExtension, params};
 
 use super::core::StateStore;
-use super::events::{EVENT_COLUMNS, EVENT_SOURCE_ACP, EVENT_SOURCE_SYSTEM, Event, row_to_event};
+use super::events::{
+    EVENT_COLUMNS, EVENT_SOURCE_ACP, EVENT_SOURCE_SYSTEM, Event, insert_unscoped_event_row,
+    row_to_event,
+};
 use super::ids::{current_timestamp, next_event_id, next_prompt_id};
 use super::records::{LogOrder, SessionFilter};
 use super::rows::{sequence_column, sequence_param, validate_json_payload};
@@ -60,6 +63,8 @@ pub const EVENT_KIND_SESSION_CAPABILITY_IGNORED: &str = "session.capability_igno
 pub const EVENT_KIND_SESSION_AVAILABLE: &str = "session.available";
 /// The agent honored a `session/cancel`; the turn it interrupted ends here.
 pub const EVENT_KIND_SESSION_CANCEL_REQUESTED: &str = "session.cancel_requested";
+/// An ACP `session/list` sync inserted or changed stored session rows.
+pub const EVENT_KIND_SESSION_LIST_SYNCED: &str = "session.list_synced";
 /// Permission decisions; an ACP-source decision is scoped to the session that
 /// raised the request.
 pub const EVENT_KIND_PERMISSION_APPROVED: &str = "permission.approved";

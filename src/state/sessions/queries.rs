@@ -1,6 +1,20 @@
 //! Session row queries and mutations.
 
+use std::collections::HashMap;
+
 use super::*;
+
+/// The sync event [`StateStore::record_session_list_sync`] writes with the rows it changes.
+struct ListSyncEvent<'a> {
+    agent_id: &'a str,
+    skipped_invalid_cwd: u32,
+}
+
+/// One row write a session-list sync planned.
+enum ListedSessionWrite {
+    Insert(SessionRecord),
+    Update(SessionRecord),
+}
 
 impl StateStore {
     /// Apply a partial ACP `session_info_update`. The outer `Option`
@@ -682,22 +696,61 @@ impl StateStore {
         Ok(counts)
     }
 
+    /// Apply one listing's rows for `target_id`; see [`Self::record_session_list_sync`], which
+    /// also records the sync event.
     pub fn upsert_listed_sessions_for_target(
         &self,
         target_id: &str,
         records: Vec<ListedSessionRecord>,
     ) -> Result<ListedSessionUpsertCounts> {
+        self.apply_listed_sessions(target_id, records, None)
+    }
+
+    /// Apply one ACP `session/list` result for `target_id`: new rows are inserted `available`,
+    /// rows whose stored values the listing moves are updated, and the rest are not written.
+    /// Every write, plus a `session.list_synced` event naming the counts, lands in one
+    /// transaction; a listing that changes nothing opens no transaction and records no event.
+    pub fn record_session_list_sync(
+        &self,
+        target_id: &str,
+        agent_id: &str,
+        records: Vec<ListedSessionRecord>,
+        skipped_invalid_cwd: u32,
+    ) -> Result<ListedSessionUpsertCounts> {
+        self.apply_listed_sessions(
+            target_id,
+            records,
+            Some(ListSyncEvent {
+                agent_id,
+                skipped_invalid_cwd,
+            }),
+        )
+    }
+
+    fn apply_listed_sessions(
+        &self,
+        target_id: &str,
+        records: Vec<ListedSessionRecord>,
+        sync_event: Option<ListSyncEvent<'_>>,
+    ) -> Result<ListedSessionUpsertCounts> {
+        // Dedupe on `(target_id, agent_session_id)`: the agent's session id is the stable
+        // external identity, not the row `id`. A planned row replaces its entry, so a listing
+        // naming one session twice updates the row its first mention planned.
+        let mut stored: HashMap<String, SessionRecord> = self
+            .query_sessions_for_target(target_id)?
+            .into_iter()
+            .map(|row| (row.agent_session_id.clone(), row))
+            .collect();
+        let mut writes: Vec<ListedSessionWrite> = Vec::new();
         let mut counts = ListedSessionUpsertCounts::default();
         for record in records {
-            let existing =
-                self.get_session_by_target_agent_session_id(target_id, &record.agent_session_id)?;
-            validate_json_payload(self.connection(), &record.metadata_json)?;
+            let listed_metadata = metadata_object(&record.metadata_json)?;
             let listed_updated_at = record
                 .updated_at
                 .as_deref()
                 .map(normalize_listed_session_timestamp)
                 .transpose()?;
-            match existing {
+            let planned = match stored.get(&record.agent_session_id) {
                 Some(existing) => {
                     // A listing without `updated_at` reports no activity, so
                     // the stored timestamp stands.
@@ -706,96 +759,147 @@ impl StateStore {
                     let status = if existing.status == SESSION_STATUS_ACTIVE
                         || existing.status == SESSION_STATUS_CLOSED
                     {
-                        existing.status.as_str()
+                        existing.status.clone()
                     } else {
-                        SESSION_STATUS_AVAILABLE
+                        SESSION_STATUS_AVAILABLE.to_owned()
                     };
                     // The listing's keys layer over what the runtime stored
                     // for the session (config options, commands, fork lineage).
                     let existing_metadata = metadata_object(&existing.metadata_json)?;
                     let mut metadata = existing_metadata.clone();
-                    metadata.extend(metadata_object(&record.metadata_json)?);
-                    // A list sync rewrites every listed row; only a row whose
-                    // stored values move is a change for the feed.
+                    metadata.extend(listed_metadata);
                     let changed = existing.updated_at != updated_at
                         || existing.status != status
                         || existing.agent_id != record.agent_id
                         || existing.cwd != record.cwd
                         || existing.title != record.title
-                        || metadata != existing_metadata
-                        || existing.target_id != target_id
-                        || existing.agent_session_id != record.agent_session_id;
-                    let metadata_json = serde_json::Value::Object(metadata).to_string();
-                    self.persist_with_outbox("sessions", &existing.id, &updated_at, |conn| {
-                        conn.execute(
-                            r#"
-                            UPDATE sessions
-                            SET updated_at = ?1,
-                                status = CASE
-                                    WHEN status IN (?2, ?3) THEN status
-                                    ELSE ?4
-                                END,
-                                agent_id = ?5,
-                                cwd = ?6,
-                                title = ?7,
-                                metadata_json = ?8,
-                                target_id = ?9,
-                                agent_session_id = ?10
-                            WHERE id = ?11
-                            "#,
-                            params![
-                                updated_at,
-                                SESSION_STATUS_ACTIVE,
-                                SESSION_STATUS_CLOSED,
-                                SESSION_STATUS_AVAILABLE,
-                                record.agent_id,
-                                record.cwd,
-                                record.title,
-                                metadata_json,
-                                target_id,
-                                record.agent_session_id,
-                                existing.id,
-                            ],
-                        )?;
-                        if changed {
-                            bump_session_change(conn, &existing.id)?;
-                        }
-                        Ok(())
-                    })?;
+                        || metadata != existing_metadata;
+                    if !changed {
+                        continue;
+                    }
                     counts.updated += 1;
+                    let row = SessionRecord {
+                        updated_at,
+                        status,
+                        agent_id: record.agent_id,
+                        cwd: record.cwd,
+                        title: record.title,
+                        metadata_json: serde_json::Value::Object(metadata).to_string(),
+                        ..existing.clone()
+                    };
+                    writes.push(ListedSessionWrite::Update(row.clone()));
+                    row
                 }
                 None => {
                     let created_at = current_timestamp();
                     let updated_at = listed_updated_at.unwrap_or_else(|| created_at.clone());
-                    let id = record.id;
-                    self.persist_with_outbox("sessions", &id, &updated_at, |conn| {
-                        conn.execute(
-                            r#"
-                            INSERT INTO sessions
-                                (id, target_id, agent_session_id, created_at, updated_at, status, agent_id, cwd, title, metadata_json, change_seq)
-                            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-                            "#,
-                            params![
-                                id,
-                                target_id,
-                                record.agent_session_id,
-                                created_at,
-                                updated_at,
-                                SESSION_STATUS_AVAILABLE,
-                                record.agent_id,
-                                record.cwd,
-                                record.title,
-                                record.metadata_json,
-                                sequence_param(next_change_seq(conn)?)?,
-                            ],
-                        )?;
-                        clear_session_tombstone(conn, &id)
-                    })?;
                     counts.upserted += 1;
+                    let row = SessionRecord {
+                        id: record.id,
+                        target_id: target_id.to_owned(),
+                        agent_session_id: record.agent_session_id,
+                        created_at,
+                        updated_at,
+                        status: SESSION_STATUS_AVAILABLE.to_owned(),
+                        agent_id: record.agent_id,
+                        cwd: record.cwd,
+                        title: record.title,
+                        metadata_json: record.metadata_json,
+                        change_seq: 0,
+                        event_seq: 0,
+                    };
+                    writes.push(ListedSessionWrite::Insert(row.clone()));
+                    row
                 }
+            };
+            stored.insert(planned.agent_session_id.clone(), planned);
+        }
+        if writes.is_empty() {
+            return Ok(counts);
+        }
+
+        let event = sync_event.map(|sync| Event {
+            id: next_event_id(),
+            created_at: current_timestamp(),
+            level: "info".to_owned(),
+            kind: EVENT_KIND_SESSION_LIST_SYNCED.to_owned(),
+            message: "ACP session list synced".to_owned(),
+            payload_json: serde_json::json!({
+                "target_id": target_id,
+                "agent_id": sync.agent_id,
+                "upserted": counts.upserted,
+                "updated": counts.updated,
+                "skipped_invalid_cwd": sync.skipped_invalid_cwd,
+            })
+            .to_string(),
+            source: EVENT_SOURCE_SYSTEM.to_owned(),
+            session_id: None,
+            seq: None,
+        });
+        let tx = self.begin_immediate("sessions")?;
+        for write in &writes {
+            let row = match write {
+                ListedSessionWrite::Insert(row) => {
+                    insert_session_row(&tx, row, next_change_seq(&tx)?)?;
+                    row
+                }
+                ListedSessionWrite::Update(row) => {
+                    // Status is re-guarded in SQL: a session attached or closed since the
+                    // planning read keeps that status.
+                    tx.execute(
+                        r#"
+                        UPDATE sessions
+                        SET updated_at = ?1,
+                            status = CASE
+                                WHEN status IN (?2, ?3) THEN status
+                                ELSE ?4
+                            END,
+                            agent_id = ?5,
+                            cwd = ?6,
+                            title = ?7,
+                            metadata_json = ?8
+                        WHERE id = ?9
+                        "#,
+                        params![
+                            row.updated_at,
+                            SESSION_STATUS_ACTIVE,
+                            SESSION_STATUS_CLOSED,
+                            SESSION_STATUS_AVAILABLE,
+                            row.agent_id,
+                            row.cwd,
+                            row.title,
+                            row.metadata_json,
+                            row.id,
+                        ],
+                    )?;
+                    bump_session_change(&tx, &row.id)?;
+                    row
+                }
+            };
+            if self.external_logging_enabled() {
+                sink_outbox::enqueue(&tx, "sessions", &row.id, &row.updated_at)?;
             }
         }
+        if let Some(event) = &event {
+            insert_unscoped_event_row(&tx, event)?;
+            if self.external_logging_enabled() {
+                sink_outbox::enqueue(&tx, "events", &event.id, &event.created_at)?;
+            }
+        }
+        tx.commit()?;
+        if let (Some(event), Some(hub)) = (&event, self.event_hub()) {
+            hub.publish_log_event(event);
+        }
         Ok(counts)
+    }
+
+    /// Every session row of one target.
+    fn query_sessions_for_target(&self, target_id: &str) -> Result<Vec<SessionRecord>> {
+        let mut statement = self.connection().prepare(&format!(
+            "SELECT {SESSION_COLUMNS} FROM sessions WHERE target_id = ?1"
+        ))?;
+        let rows = statement.query_map(params![target_id], row_to_session)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn rename_session_target_id(

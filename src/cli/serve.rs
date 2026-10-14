@@ -105,6 +105,7 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
     let loaded_config = config::load_for_serve(&config_path)?;
     let config = loaded_config.config;
     crate::runtime::agent::acp_trace::set_enabled(config.logging.acp_trace);
+    crate::tracing_init::enable_latency_lines();
 
     // Fail closed: a configured sandbox backend or workload identity that cannot run on this host
     // must refuse to serve rather than silently lose the security posture at the first agent spawn.

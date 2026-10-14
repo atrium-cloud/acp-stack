@@ -1,8 +1,14 @@
+fn json(text: &str) -> serde_json::Value {
+    serde_json::from_str(text).expect("test payload is JSON")
+}
+
 #[test]
 fn extract_usage_payload_picks_up_top_level_usage_object() {
-    let payload =
-        r#"{"usage": {"input_tokens": 12, "output_tokens": 34, "context_window_max": 200000}}"#;
-    let usage = super::extract_usage_payload("sess_x", payload).expect("usage should be extracted");
+    let payload = json(
+        r#"{"usage": {"input_tokens": 12, "output_tokens": 34, "context_window_max": 200000}}"#,
+    );
+    let usage =
+        super::extract_usage_payload("sess_x", &payload).expect("usage should be extracted");
     assert_eq!(usage["input_tokens"].as_i64(), Some(12));
     assert_eq!(usage["output_tokens"].as_i64(), Some(34));
     assert_eq!(usage["context_window_max"].as_i64(), Some(200000));
@@ -11,8 +17,9 @@ fn extract_usage_payload_picks_up_top_level_usage_object() {
 
 #[test]
 fn extract_usage_payload_walks_nested_paths() {
-    let payload = r#"{"update": {"usage": {"input_tokens": 5}}}"#;
-    let usage = super::extract_usage_payload("sess_y", payload).expect("usage should be extracted");
+    let payload = json(r#"{"update": {"usage": {"input_tokens": 5}}}"#);
+    let usage =
+        super::extract_usage_payload("sess_y", &payload).expect("usage should be extracted");
     assert_eq!(usage["input_tokens"].as_i64(), Some(5));
     // Output tokens absent: must NOT be serialized rather than written as 0.
     assert!(usage.get("output_tokens").is_none());
@@ -20,9 +27,11 @@ fn extract_usage_payload_walks_nested_paths() {
 
 #[test]
 fn extract_usage_payload_normalizes_standard_usage_update() {
-    let payload = r#"{"sessionId":"agent_sess","update":{"sessionUpdate":"usage_update","used":4096,"size":32768,"cost":{"amount":1.25,"currency":"USD"}}}"#;
+    let payload = json(
+        r#"{"sessionId":"agent_sess","update":{"sessionUpdate":"usage_update","used":4096,"size":32768,"cost":{"amount":1.25,"currency":"USD"}}}"#,
+    );
     let usage =
-        super::extract_usage_payload("sess_local", payload).expect("standard usage extracted");
+        super::extract_usage_payload("sess_local", &payload).expect("standard usage extracted");
     assert_eq!(usage["session_id"], "sess_local");
     assert_eq!(usage["context_window_used"], 4096);
     assert_eq!(usage["context_window_max"], 32768);
@@ -33,15 +42,14 @@ fn extract_usage_payload_normalizes_standard_usage_update() {
 
 #[test]
 fn extract_usage_payload_returns_none_when_shape_unknown() {
-    assert!(super::extract_usage_payload("sess_z", "{}").is_none());
-    assert!(super::extract_usage_payload("sess_z", r#"{"update":{"foo":"bar"}}"#).is_none());
-    assert!(super::extract_usage_payload("sess_z", "not-json").is_none());
+    assert!(super::extract_usage_payload("sess_z", &json("{}")).is_none());
+    assert!(super::extract_usage_payload("sess_z", &json(r#"{"update":{"foo":"bar"}}"#)).is_none());
 }
 
 #[test]
 fn extract_usage_payload_rejects_negative_numbers() {
-    let payload = r#"{"usage": {"input_tokens": -5, "output_tokens": 3}}"#;
-    let usage = super::extract_usage_payload("s", payload).expect("partial usage");
+    let payload = json(r#"{"usage": {"input_tokens": -5, "output_tokens": 3}}"#);
+    let usage = super::extract_usage_payload("s", &payload).expect("partial usage");
     assert!(usage.get("input_tokens").is_none());
     assert_eq!(usage["output_tokens"].as_i64(), Some(3));
 }
@@ -49,8 +57,10 @@ fn extract_usage_payload_rejects_negative_numbers() {
 #[test]
 fn extract_execute_tool_call_lifts_command_from_raw_input() {
     // Serialized shape of an ACP `tool_call` update from a built-in shell tool.
-    let payload = r#"{"sessionId":"sess_1","update":{"sessionUpdate":"tool_call","toolCallId":"call_1","title":"uname -a","kind":"execute","status":"in_progress","rawInput":{"command":"uname -a","description":"print kernel info"}}}"#;
-    let event = super::extract_execute_tool_call("sess_local", payload)
+    let payload = json(
+        r#"{"sessionId":"sess_1","update":{"sessionUpdate":"tool_call","toolCallId":"call_1","title":"uname -a","kind":"execute","status":"in_progress","rawInput":{"command":"uname -a","description":"print kernel info"}}}"#,
+    );
+    let event = super::extract_execute_tool_call("sess_local", &payload)
         .expect("execute tool call extracted");
     assert_eq!(event["session_id"].as_str(), Some("sess_local"));
     assert_eq!(event["tool_call_id"].as_str(), Some("call_1"));
@@ -61,8 +71,10 @@ fn extract_execute_tool_call_lifts_command_from_raw_input() {
 
 #[test]
 fn extract_execute_tool_call_accepts_updates_that_restate_kind() {
-    let payload = r#"{"sessionId":"sess_1","update":{"sessionUpdate":"tool_call_update","toolCallId":"call_1","kind":"execute","status":"completed"}}"#;
-    let event = super::extract_execute_tool_call("sess_local", payload)
+    let payload = json(
+        r#"{"sessionId":"sess_1","update":{"sessionUpdate":"tool_call_update","toolCallId":"call_1","kind":"execute","status":"completed"}}"#,
+    );
+    let event = super::extract_execute_tool_call("sess_local", &payload)
         .expect("execute tool call update extracted");
     assert_eq!(event["status"].as_str(), Some("completed"));
     assert!(event.get("command").is_none());
@@ -70,22 +82,29 @@ fn extract_execute_tool_call_accepts_updates_that_restate_kind() {
 
 #[test]
 fn extract_execute_tool_call_ignores_other_updates() {
-    let read_call = r#"{"update":{"sessionUpdate":"tool_call","toolCallId":"call_2","kind":"read","status":"pending"}}"#;
-    assert!(super::extract_execute_tool_call("s", read_call).is_none());
+    let read_call = json(
+        r#"{"update":{"sessionUpdate":"tool_call","toolCallId":"call_2","kind":"read","status":"pending"}}"#,
+    );
+    assert!(super::extract_execute_tool_call("s", &read_call).is_none());
     // ACP requires `kind` only on the initial tool_call, so an update without a
     // restated kind must not fire.
-    let bare_update = r#"{"update":{"sessionUpdate":"tool_call_update","toolCallId":"call_1","status":"completed"}}"#;
-    assert!(super::extract_execute_tool_call("s", bare_update).is_none());
-    let chunk = r#"{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}}"#;
-    assert!(super::extract_execute_tool_call("s", chunk).is_none());
-    assert!(super::extract_execute_tool_call("s", "not-json").is_none());
+    let bare_update = json(
+        r#"{"update":{"sessionUpdate":"tool_call_update","toolCallId":"call_1","status":"completed"}}"#,
+    );
+    assert!(super::extract_execute_tool_call("s", &bare_update).is_none());
+    let chunk = json(
+        r#"{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}}"#,
+    );
+    assert!(super::extract_execute_tool_call("s", &chunk).is_none());
 }
 
 use crate::state::{NewPromptRecord, NewSessionRecord, PromptStatus, StateStore};
 use rusqlite::params;
 
+const STREAMED_CHUNK: &str = r#"{"sessionId":"agent_sess","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}}"#;
+
 #[test]
-fn touch_running_prompt_advances_updated_at_on_in_flight_row() {
+fn a_streamed_update_appends_its_row_and_touches_the_running_prompt() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let path = tempdir.path().join("state.sqlite");
     let store = StateStore::open(&path).expect("state open");
@@ -130,21 +149,57 @@ fn touch_running_prompt_advances_updated_at_on_in_flight_row() {
         )
         .expect("force-set updated_at");
     drop(connection);
+    let head_before = store
+        .get_session("sess_touch")
+        .expect("session lookup")
+        .expect("session exists")
+        .event_seq;
 
-    super::touch_running_prompt(&store, "sess_touch").expect("re-touch should succeed");
+    let event = store
+        .append_session_update("sess_touch", "session.update", STREAMED_CHUNK)
+        .expect("update appended");
 
+    assert_eq!(event.seq, Some(head_before + 1));
+    assert_eq!(event.source, crate::state::EVENT_SOURCE_ACP);
     let prompt = store
         .get_prompt("prm_touch")
         .expect("prompt lookup")
         .expect("prompt exists");
-    assert_ne!(
-        prompt.updated_at, aged,
-        "touch_running_prompt must advance updated_at"
+    assert_eq!(
+        prompt.updated_at, event.created_at,
+        "the touch lands with the row"
     );
     assert_eq!(
         prompt.status, "running",
         "touch must preserve the running status"
     );
+}
+
+#[test]
+fn a_streamed_update_without_an_in_flight_prompt_still_appends() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state open");
+    store.migrate().expect("migrate");
+    store
+        .insert_session(NewSessionRecord {
+            id: "sess_empty".to_owned(),
+            agent_id: "fake".to_owned(),
+            cwd: "/tmp".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("session inserted");
+
+    let event = store
+        .append_session_update("sess_empty", "session.update", STREAMED_CHUNK)
+        .expect("update appended");
+
+    assert_eq!(event.seq, Some(1));
+    assert!(matches!(
+        store.append_session_update("sess_empty", "session.update", "not-json"),
+        Err(crate::error::StackError::InvalidEventPayload)
+    ));
 }
 
 #[tokio::test]
@@ -275,7 +330,7 @@ fn session_info_updates_patch_title_and_agent_metadata() {
             "_meta": {"origin": "agent"}
         }
     });
-    super::project_session_info_update(&store, "sess_local", &metadata_update.to_string())
+    super::project_session_info_update(&store, "sess_local", &metadata_update)
         .expect("metadata projection");
     {
         let session = store
@@ -299,7 +354,7 @@ fn session_info_updates_patch_title_and_agent_metadata() {
             "updatedAt": null
         }
     });
-    super::project_session_info_update(&store, "sess_local", &clear_update.to_string())
+    super::project_session_info_update(&store, "sess_local", &clear_update)
         .expect("clear projection");
     {
         let session = store
@@ -321,7 +376,7 @@ fn session_info_updates_patch_title_and_agent_metadata() {
             "title": "renamed"
         }
     });
-    super::project_session_info_update(&store, "sess_local", &title_update.to_string())
+    super::project_session_info_update(&store, "sess_local", &title_update)
         .expect("title projection");
     let session = store
         .get_session("sess_local")
@@ -369,7 +424,7 @@ fn available_commands_updates_replace_stored_list() {
             ]
         }
     });
-    super::project_available_commands_update(&store, "sess_local", &advertise.to_string())
+    super::project_available_commands_update(&store, "sess_local", &advertise)
         .expect("commands projection");
     {
         let session = store
@@ -402,7 +457,7 @@ fn available_commands_updates_replace_stored_list() {
             ]
         }
     });
-    super::project_available_commands_update(&store, "sess_local", &replace.to_string())
+    super::project_available_commands_update(&store, "sess_local", &replace)
         .expect("replace projection");
     {
         let session = store
@@ -426,7 +481,7 @@ fn available_commands_updates_replace_stored_list() {
             "availableCommands": []
         }
     });
-    super::project_available_commands_update(&store, "sess_local", &clear.to_string())
+    super::project_available_commands_update(&store, "sess_local", &clear)
         .expect("clear projection");
     let session = store
         .get_session("sess_local")
@@ -495,7 +550,7 @@ fn config_option_updates_replace_stored_snapshot() {
             ]
         }
     });
-    super::project_config_options_update(&store, "sess_local", &advertise.to_string())
+    super::project_config_options_update(&store, "sess_local", &advertise)
         .expect("config-option projection");
     {
         let session = store
@@ -537,7 +592,7 @@ fn config_option_updates_replace_stored_snapshot() {
             ]
         }
     });
-    super::project_config_options_update(&store, "sess_local", &replace.to_string())
+    super::project_config_options_update(&store, "sess_local", &replace)
         .expect("replace projection");
     let session = store
         .get_session("sess_local")
@@ -571,10 +626,12 @@ fn available_commands_projection_ignores_other_updates_and_truncates_over_cap() 
         )
         .expect("session inserted");
 
-    let chunk = r#"{"sessionId":"agent_sess_1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}}"#;
-    super::project_available_commands_update(&store, "sess_local", chunk).expect("chunk no-op");
-    let bare = r#"{"sessionId":"agent_sess_1"}"#;
-    super::project_available_commands_update(&store, "sess_local", bare).expect("bare no-op");
+    let chunk = json(
+        r#"{"sessionId":"agent_sess_1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}}"#,
+    );
+    super::project_available_commands_update(&store, "sess_local", &chunk).expect("chunk no-op");
+    let bare = json(r#"{"sessionId":"agent_sess_1"}"#);
+    super::project_available_commands_update(&store, "sess_local", &bare).expect("bare no-op");
     {
         let session = store
             .get_session("sess_local")
@@ -595,7 +652,7 @@ fn available_commands_projection_ignores_other_updates_and_truncates_over_cap() 
             "availableCommands": commands
         }
     });
-    super::project_available_commands_update(&store, "sess_local", &oversized.to_string())
+    super::project_available_commands_update(&store, "sess_local", &oversized)
         .expect("oversized projection");
     let session = store
         .get_session("sess_local")
@@ -956,25 +1013,4 @@ async fn the_last_stamped_chunk_id_is_taken_once_per_session() {
         Some("msg_other"),
         "slots are per agent session"
     );
-}
-
-#[test]
-fn touch_running_prompt_is_noop_when_no_in_flight_prompt() {
-    let tempdir = tempfile::tempdir().expect("tempdir");
-    let path = tempdir.path().join("state.sqlite");
-    let store = StateStore::open(&path).expect("state open");
-    store.migrate().expect("migrate");
-    store
-        .insert_session(NewSessionRecord {
-            id: "sess_empty".to_owned(),
-            agent_id: "fake".to_owned(),
-            cwd: "/tmp".to_owned(),
-            title: None,
-            metadata_json: "{}".to_owned(),
-        })
-        .expect("session inserted");
-
-    // With no prompt rows the re-touch must still succeed, so the sink never
-    // blocks on a benign no-op.
-    super::touch_running_prompt(&store, "sess_empty").expect("noop succeeds");
 }

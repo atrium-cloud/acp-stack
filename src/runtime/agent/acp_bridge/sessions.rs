@@ -3,11 +3,15 @@
 
 use super::*;
 
+use std::time::Instant;
+
 use agent_client_protocol::Error as AcpError;
+use agent_client_protocol::JsonRpcRequest;
 use serde_json::Value;
 
 use crate::error::{AcpErrorDetail, AgentRequestContext};
 use crate::redaction::{bounded, redact_json, redact_text};
+use crate::tracing_init::{LATENCY_TARGET, latency_lines_enabled};
 
 // CONSTANTS
 
@@ -34,6 +38,32 @@ impl AcpBridge {
     pub(super) async fn connection(&self) -> Result<ConnectionTo<Agent>> {
         let guard = self.connection.lock().await;
         guard.as_ref().cloned().ok_or(StackError::AgentNotRunning)
+    }
+
+    /// Send one non-prompt session request and log how long the agent took to answer on the
+    /// latency target, so slow session RPCs are visible without the opt-in frame trace.
+    async fn timed_request<Request: JsonRpcRequest>(
+        &self,
+        connection: &ConnectionTo<Agent>,
+        method: &'static str,
+        acp_session_id: Option<&str>,
+        request: Request,
+    ) -> std::result::Result<Request::Response, AcpError> {
+        let started_at = Instant::now();
+        let response = connection.send_request(request).block_task().await;
+        if latency_lines_enabled() {
+            tracing::info!(
+                target: LATENCY_TARGET,
+                method,
+                elapsed_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+                ok = response.is_ok(),
+                agent_id = %self.agent_id,
+                target_id = self.target_id.as_deref().unwrap_or_default(),
+                acp_session_id = acp_session_id.unwrap_or_default(),
+                "agent request answered"
+            );
+        }
+        response
     }
 
     fn request_context(&self, acp_session_id: Option<&str>) -> AgentRequestContext {
@@ -97,9 +127,8 @@ impl AcpBridge {
         let connection = self.connection().await?;
         let mut request = NewSessionRequest::new(cwd);
         request.mcp_servers = mcp_servers;
-        let response = connection
-            .send_request(request)
-            .block_task()
+        let response = self
+            .timed_request(&connection, "session/new", None, request)
             .await
             .map_err(|err| self.request_failed("session/new", None, err))?;
         self.mark_session_attached(response.session_id.0.as_ref())
@@ -143,9 +172,13 @@ impl AcpBridge {
             }
             None => {}
         }
-        let response: ForkSessionResponse = connection
-            .send_request(request)
-            .block_task()
+        let response: ForkSessionResponse = self
+            .timed_request(
+                &connection,
+                "session/fork",
+                Some(&source_session_id),
+                request,
+            )
             .await
             .map_err(|err| self.request_failed("session/fork", Some(&source_session_id), err))?;
         self.mark_session_attached(response.session_id.0.as_ref())
@@ -161,18 +194,33 @@ impl AcpBridge {
             });
         }
         let connection = self.connection().await?;
+        let started_at = Instant::now();
+        let mut pages = 0_u32;
         let mut sessions = Vec::new();
         let mut cursor = None;
         let mut seen_cursors = HashSet::new();
         loop {
             let request = ListSessionsRequest::new().cursor(cursor.clone());
-            let response: ListSessionsResponse = connection
-                .send_request(request)
-                .block_task()
+            let response: ListSessionsResponse = self
+                .timed_request(&connection, "session/list", None, request)
                 .await
                 .map_err(|err| self.request_failed("session/list", None, err))?;
+            pages += 1;
             sessions.extend(response.sessions);
             let Some(next_cursor) = response.next_cursor else {
+                if pages > 1 && latency_lines_enabled() {
+                    tracing::info!(
+                        target: LATENCY_TARGET,
+                        method = "session/list",
+                        elapsed_ms =
+                            u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+                        pages,
+                        sessions = sessions.len(),
+                        agent_id = %self.agent_id,
+                        target_id = self.target_id.as_deref().unwrap_or_default(),
+                        "agent session list paged through"
+                    );
+                }
                 return Ok(sessions);
             };
             if !seen_cursors.insert(next_cursor.clone()) {
@@ -212,13 +260,14 @@ impl AcpBridge {
         let connection = self.connection().await?;
         let acp_session_id = session_id.0.to_string();
         let request = SetSessionConfigOptionRequest::new(session_id, config_id.to_owned(), value);
-        connection
-            .send_request(request)
-            .block_task()
-            .await
-            .map_err(|err| {
-                self.request_failed("session/set_config_option", Some(&acp_session_id), err)
-            })
+        self.timed_request(
+            &connection,
+            "session/set_config_option",
+            Some(&acp_session_id),
+            request,
+        )
+        .await
+        .map_err(|err| self.request_failed("session/set_config_option", Some(&acp_session_id), err))
     }
 
     /// `session/set_mode`. The native modes lane, used when a mode is advertised
@@ -232,11 +281,14 @@ impl AcpBridge {
         let acp_session_id = session_id.0.to_string();
         let request =
             SetSessionModeRequest::new(session_id, SessionModeId::new(mode_id.to_owned()));
-        connection
-            .send_request(request)
-            .block_task()
-            .await
-            .map_err(|err| self.request_failed("session/set_mode", Some(&acp_session_id), err))
+        self.timed_request(
+            &connection,
+            "session/set_mode",
+            Some(&acp_session_id),
+            request,
+        )
+        .await
+        .map_err(|err| self.request_failed("session/set_mode", Some(&acp_session_id), err))
     }
 
     /// `session/load`. Requires the `loadSession` capability.
@@ -256,9 +308,7 @@ impl AcpBridge {
         let connection = self.connection().await?;
         let attached_id = session_id.0.to_string();
         let request = LoadSessionRequest::new(session_id, cwd).mcp_servers(mcp_servers);
-        connection
-            .send_request(request)
-            .block_task()
+        self.timed_request(&connection, "session/load", Some(&attached_id), request)
             .await
             .map_err(|err| self.request_failed("session/load", Some(&attached_id), err))?;
         self.mark_session_attached(&attached_id).await;
@@ -282,9 +332,7 @@ impl AcpBridge {
         let connection = self.connection().await?;
         let attached_id = session_id.0.to_string();
         let request = ResumeSessionRequest::new(session_id, cwd).mcp_servers(mcp_servers);
-        connection
-            .send_request(request)
-            .block_task()
+        self.timed_request(&connection, "session/resume", Some(&attached_id), request)
             .await
             .map_err(|err| self.request_failed("session/resume", Some(&attached_id), err))?;
         self.mark_session_attached(&attached_id).await;
@@ -301,9 +349,7 @@ impl AcpBridge {
         let connection = self.connection().await?;
         let attached_id = session_id.0.to_string();
         let request = CloseSessionRequest::new(session_id);
-        connection
-            .send_request(request)
-            .block_task()
+        self.timed_request(&connection, "session/close", Some(&attached_id), request)
             .await
             .map_err(|err| self.request_failed("session/close", Some(&attached_id), err))?;
         self.forget_attached_session(&attached_id).await;
@@ -321,9 +367,7 @@ impl AcpBridge {
         let connection = self.connection().await?;
         let attached_id = session_id.0.to_string();
         let request = DeleteSessionRequest::new(session_id);
-        connection
-            .send_request(request)
-            .block_task()
+        self.timed_request(&connection, "session/delete", Some(&attached_id), request)
             .await
             .map_err(|err| self.request_failed("session/delete", Some(&attached_id), err))?;
         self.forget_attached_session(&attached_id).await;

@@ -92,9 +92,9 @@ pub(crate) async fn deps_apply_handler(
     // instead of racing the claim. Never a queue.
     //
     // The daemon's shared StateStore mutex is taken only for `migrate()` and released
-    // before any install snippet runs; held across the apply it would park the whole
-    // HTTP surface, since the `api.request` audit middleware takes it after every
-    // response. Audit rows go through a second short-lived connection instead.
+    // before any install snippet runs; held across the apply it would park every route
+    // that reads or writes state. Audit rows go through a second short-lived connection
+    // instead.
     let Ok(apply_guard) = state.deps_apply_lock.clone().try_lock_owned() else {
         // Best-effort id lookup for the 409 body.
         let running = match StateStore::open(&state.runtime_paths.state_path)

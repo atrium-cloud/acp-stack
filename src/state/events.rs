@@ -40,6 +40,27 @@ pub struct Event {
 pub(super) const EVENT_COLUMNS: &str =
     "id, created_at, level, kind, message, payload_json, source, session_id, seq";
 
+/// Insert an unscoped event row. The caller owns the transaction, the outbox row, and the
+/// hub publish after commit.
+pub(super) fn insert_unscoped_event_row(conn: &rusqlite::Connection, event: &Event) -> Result<()> {
+    conn.execute(
+        r#"
+        INSERT INTO events (id, created_at, level, kind, message, payload_json, source)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "#,
+        params![
+            event.id,
+            event.created_at,
+            event.level,
+            event.kind,
+            event.message,
+            event.payload_json,
+            event.source,
+        ],
+    )?;
+    Ok(())
+}
+
 pub(super) fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
     Ok(Event {
         id: row.get(0)?,
@@ -91,22 +112,7 @@ impl StateStore {
         };
 
         self.persist_with_outbox("events", &event.id, &event.created_at, |conn| {
-            conn.execute(
-                r#"
-                INSERT INTO events (id, created_at, level, kind, message, payload_json, source)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                "#,
-                params![
-                    event.id,
-                    event.created_at,
-                    event.level,
-                    event.kind,
-                    event.message,
-                    event.payload_json,
-                    event.source,
-                ],
-            )?;
-            Ok(())
+            insert_unscoped_event_row(conn, &event)
         })?;
 
         if let Some(hub) = self.event_hub() {
