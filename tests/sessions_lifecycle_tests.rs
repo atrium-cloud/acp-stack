@@ -1488,6 +1488,86 @@ async fn a_prompt_fails_fast_when_the_agent_can_neither_resume_nor_load() {
     );
 }
 
+/// Longest the parked submission may take to reach the agent's `session/resume`.
+const PARKED_RESUME_WAIT: Duration = Duration::from_secs(10);
+const PARKED_RESUME_POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// Longest a warm submission may take while another session's submission is parked.
+const WARM_SUBMIT_BUDGET: Duration = Duration::from_secs(10);
+/// The session the placebo lists without this daemon having opened it.
+const LISTED_AGENT_SESSION_ID: &str = "sess_listed_0";
+
+#[tokio::test]
+async fn a_parked_reattach_does_not_hold_up_another_sessions_prompt() {
+    let marker_dir = tempfile::tempdir().expect("marker tempdir");
+    let marker = marker_dir.path().join("resume-parked");
+    let marker_arg = marker.to_string_lossy().into_owned();
+    let harness = Harness::spawn_with(|config| {
+        config
+            .agent
+            .args
+            .extend(["--session-resume-stall-marker".to_owned(), marker_arg]);
+    })
+    .await;
+    let warm_session_id = create_session(&harness).await;
+    let listed: Value = http()
+        .get(format!("{}/v1/sessions?sync=true", harness.base_url))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("list sessions")
+        .json()
+        .await
+        .expect("list sessions json");
+    let parked_session_id = listed["data"]["sessions"]
+        .as_array()
+        .expect("sessions array")
+        .iter()
+        .find(|session| session["agent_session_id"] == LISTED_AGENT_SESSION_ID)
+        .and_then(|session| session["id"].as_str())
+        .unwrap_or_else(|| panic!("listed session imported in {listed}"))
+        .to_owned();
+
+    // The running adapter never opened the imported session, so its submission
+    // parks on a `session/resume` the agent never answers.
+    let parked_submit = tokio::spawn({
+        let base_url = harness.base_url.clone();
+        let parked_session_id = parked_session_id.clone();
+        async move {
+            http()
+                .post(format!("{base_url}/v1/sessions/{parked_session_id}/prompt"))
+                .header("Authorization", session_bearer())
+                .json(&json!({ "prompt": "parked on resume" }))
+                .send()
+                .await
+        }
+    });
+    let deadline = tokio::time::Instant::now() + PARKED_RESUME_WAIT;
+    while !marker.exists() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the parked submission never reached session/resume"
+        );
+        tokio::time::sleep(PARKED_RESUME_POLL_INTERVAL).await;
+    }
+
+    let response = tokio::time::timeout(
+        WARM_SUBMIT_BUDGET,
+        submit_prompt_response(&harness, &warm_session_id, "not behind the parked one"),
+    )
+    .await
+    .expect("a warm submission must not wait for another session's re-attach");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("prompt json");
+    let prompt_id = body["data"]["prompt_id"].as_str().expect("prompt id");
+    await_prompt_settled(&harness, &warm_session_id, prompt_id).await;
+
+    assert!(
+        !parked_submit.is_finished(),
+        "the resume must still be parked"
+    );
+    parked_submit.abort();
+}
+
 #[tokio::test]
 async fn load_and_resume_reject_closed_sessions() {
     let harness = Harness::spawn().await;

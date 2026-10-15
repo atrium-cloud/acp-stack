@@ -5,6 +5,7 @@ mod bridge;
 mod list_sync;
 mod parse;
 mod prompts;
+mod session_locks;
 mod sessions;
 
 use std::collections::HashMap;
@@ -104,6 +105,7 @@ use crate::state::{
 use self::bridge::*;
 use self::list_sync::*;
 use self::parse::*;
+use self::session_locks::SessionLocks;
 
 pub(crate) use self::parse::resolve_session_cwd;
 pub use self::parse::{parse_mcp_servers, parse_prompt_blocks, resolve_agent_env};
@@ -397,10 +399,14 @@ pub struct AgentSupervisor {
     /// session-tier handlers, because the durable `prompts` row is the source of
     /// truth for clients polling status.
     prompts: Arc<TokioMutex<HashMap<String, PromptHandle>>>,
-    /// Serializes prompt submission with guarded restarts so `restart auto`
-    /// cannot pass an idle check while a new prompt has cloned the bridge but not
-    /// yet inserted its durable prompt row.
-    dispatch_gate: Arc<TokioMutex<()>>,
+    /// Submits and cancels hold the read side, stops hold the write side, so
+    /// `restart auto` cannot pass an idle check while a new prompt has cloned the
+    /// bridge but not yet inserted its durable prompt row.
+    dispatch_gate: Arc<RwLock<()>>,
+    /// Keeps a submit and a cancel on one session from interleaving between
+    /// their in-flight check and their insert or send. Taken after the gate's
+    /// read side; nothing holding one waits for the gate.
+    session_locks: SessionLocks,
     list_sync: Arc<ListSyncShared>,
 }
 
@@ -468,7 +474,8 @@ impl AgentSupervisor {
             last_pid: Arc::new(RwLock::new(None)),
             loaded_providers: Arc::new(RwLock::new(None)),
             prompts: Arc::new(TokioMutex::new(HashMap::new())),
-            dispatch_gate: Arc::new(TokioMutex::new(())),
+            dispatch_gate: Arc::new(RwLock::new(())),
+            session_locks: SessionLocks::default(),
             list_sync: Arc::new(ListSyncShared::default()),
         }
     }
@@ -599,7 +606,7 @@ impl AgentSupervisor {
         state: &StateHandle,
         event_hub: &EventHub,
     ) -> Result<Option<i32>> {
-        let _dispatch_guard = self.dispatch_gate.lock().await;
+        let _dispatch_guard = self.dispatch_gate.write().await;
         self.stop_inner(target_id, state, event_hub).await
     }
 
@@ -609,7 +616,7 @@ impl AgentSupervisor {
         state: &StateHandle,
         event_hub: &EventHub,
     ) -> Result<std::result::Result<Option<i32>, Vec<crate::state::RestartBlockerRecord>>> {
-        let _dispatch_guard = self.dispatch_gate.lock().await;
+        let _dispatch_guard = self.dispatch_gate.write().await;
         let blockers_target_id = target_id.to_owned();
         let blockers = state
             .read(move |store| store.query_restart_blockers(Some(&blockers_target_id)))

@@ -114,6 +114,11 @@ pub(crate) struct AcpArgs {
     pub(crate) session_new_error: bool,
     #[arg(long)]
     pub(crate) session_new_stall: bool,
+    /// Never answer `session/resume`, holding it off the dispatch loop so other
+    /// requests are still served, and create this file once one is parked so a
+    /// test can wait for the client to be mid-request.
+    #[arg(long)]
+    pub(crate) session_resume_stall_marker: Option<PathBuf>,
     /// Write this many numbered lines to stderr at startup.
     #[arg(long, default_value_t = 0)]
     pub(crate) stderr_lines: usize,

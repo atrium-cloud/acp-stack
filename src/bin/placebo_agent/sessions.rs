@@ -252,9 +252,21 @@ pub(crate) async fn handle_resume_session(
     state: SharedState,
     request: ResumeSessionRequest,
     responder: Responder<ResumeSessionResponse>,
-    _connection: ConnectionTo<Client>,
+    connection: ConnectionTo<Client>,
 ) -> agent_client_protocol::Result<()> {
     let mut state = state.lock().await;
+    if let Some(marker) = state.args.session_resume_stall_marker.clone() {
+        drop(state);
+        return connection.spawn(async move {
+            let _responder_held_open = responder;
+            tokio::fs::write(&marker, request.session_id.0.as_bytes())
+                .await
+                .map_err(Error::into_internal_error)?;
+            loop {
+                tokio::time::sleep(STALL_SLEEP).await;
+            }
+        });
+    }
     state
         .opened_sessions
         .insert(request.session_id.0.to_string());

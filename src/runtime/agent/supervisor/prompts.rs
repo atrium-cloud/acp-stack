@@ -23,7 +23,8 @@ impl AgentSupervisor {
         workspace_root: &str,
         state: &StateHandle,
     ) -> Result<PromptRecord> {
-        let _dispatch_guard = self.dispatch_gate.lock().await;
+        let _dispatch_guard = self.dispatch_gate.read().await;
+        let _session_guard = self.session_locks.lock(session_id).await;
         let bridge = self.bridge().await?;
         let lookup_session_id = session_id.to_owned();
         let session = state
@@ -330,13 +331,14 @@ impl AgentSupervisor {
         state: &StateHandle,
         permissions: &PermissionService,
     ) -> Result<()> {
-        // Held only across collect-and-send: a prompt submitted concurrently either
-        // lands before the ids are collected or is rejected as in-flight. It is
-        // dropped before the settle wait below so a turn that ignores cancellation
-        // cannot block prompts, stops, or restarts on the agent's other sessions for
+        // Both guards are held only across collect-and-send: the session lock makes a
+        // prompt submitted to this session concurrently either land before the ids are
+        // collected or be rejected as in-flight. They are dropped before the settle
+        // wait so a turn that ignores cancellation cannot block stops or restarts for
         // the whole settle budget. A submit racing the wait still sees this turn's row
-        // as non-terminal and is refused by the in-flight guard, not by this gate.
-        let dispatch_guard = self.dispatch_gate.lock().await;
+        // as non-terminal and is refused by the in-flight guard, not by these locks.
+        let dispatch_guard = self.dispatch_gate.read().await;
+        let session_guard = self.session_locks.lock(session_id).await;
         let bridge = self.bridge().await?;
         let lookup_session_id = session_id.to_owned();
         let agent_session_id = state
@@ -350,6 +352,7 @@ impl AgentSupervisor {
         bridge
             .cancel_session(AcpSessionId::new(agent_session_id.clone()))
             .await?;
+        drop(session_guard);
         drop(dispatch_guard);
 
         let observed = self
@@ -691,6 +694,118 @@ fn cancel_settle_verdict(observed: &[Option<PromptStatus>]) -> CancelSettleVerdi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use futures::FutureExt;
+
+    use crate::config::{AcpPromptAction, PermissionTimeoutAction};
+
+    const TARGET_ID: &str = "target_locking";
+    /// Bound on awaiting a call that must get past the locks, so a regression fails instead of hanging.
+    const UNBLOCKED_BUDGET: Duration = Duration::from_secs(5);
+    const PERMISSION_TIMEOUT: Duration = Duration::from_secs(60);
+
+    fn started_state() -> (tempfile::TempDir, StateHandle) {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state open");
+        store.migrate().expect("migrate");
+        let state = StateHandle::start(store).expect("start state handle");
+        (tempdir, state)
+    }
+
+    async fn submit(
+        supervisor: &AgentSupervisor,
+        session_id: &str,
+        state: &StateHandle,
+    ) -> Result<PromptRecord> {
+        supervisor
+            .submit_prompt(
+                session_id,
+                Vec::new(),
+                "[]".to_owned(),
+                || Ok(Vec::new()),
+                "/workspace",
+                state,
+            )
+            .await
+    }
+
+    #[tokio::test]
+    async fn a_guarded_restart_waits_for_an_in_progress_submission() {
+        let (_tempdir, state) = started_state();
+        let supervisor = AgentSupervisor::new();
+        let event_hub = EventHub::new();
+        let submission = supervisor.dispatch_gate.read().await;
+
+        let mut restart =
+            Box::pin(supervisor.stop_when_restart_safe(TARGET_ID, &state, &event_hub));
+        assert!(
+            (&mut restart).now_or_never().is_none(),
+            "the restart must not run its idle check while a submission is in progress"
+        );
+
+        drop(submission);
+        let outcome = tokio::time::timeout(UNBLOCKED_BUDGET, restart)
+            .await
+            .expect("the restart proceeds once the submission is done")
+            .expect("restart");
+        assert!(matches!(outcome, Ok(None)), "{outcome:?}");
+    }
+
+    #[tokio::test]
+    async fn submissions_and_cancels_wait_only_for_their_own_session() {
+        let (_tempdir, state) = started_state();
+        let supervisor = AgentSupervisor::new();
+        let permissions = PermissionService::new(
+            state.clone(),
+            EventHub::new(),
+            PERMISSION_TIMEOUT,
+            PermissionTimeoutAction::Deny,
+            AcpPromptAction::Ask,
+        );
+        let busy_dispatch = supervisor.dispatch_gate.read().await;
+        let busy_session = supervisor.session_locks.lock("sess_busy").await;
+
+        // With no agent running, a call that gets past both locks fails at the bridge.
+        let other =
+            tokio::time::timeout(UNBLOCKED_BUDGET, submit(&supervisor, "sess_other", &state))
+                .await
+                .expect("another session's submission is not held up");
+        assert!(
+            matches!(other, Err(StackError::AgentNotRunning)),
+            "{other:?}"
+        );
+        let other_cancel = tokio::time::timeout(
+            UNBLOCKED_BUDGET,
+            supervisor.cancel_session("sess_other", &state, &permissions),
+        )
+        .await
+        .expect("another session's cancel is not held up");
+        assert!(
+            matches!(other_cancel, Err(StackError::AgentNotRunning)),
+            "{other_cancel:?}"
+        );
+
+        let mut same = Box::pin(submit(&supervisor, "sess_busy", &state));
+        let mut same_cancel =
+            Box::pin(supervisor.cancel_session("sess_busy", &state, &permissions));
+        assert!((&mut same).now_or_never().is_none());
+        assert!((&mut same_cancel).now_or_never().is_none());
+
+        drop(busy_session);
+        drop(busy_dispatch);
+        let same = tokio::time::timeout(UNBLOCKED_BUDGET, same)
+            .await
+            .expect("the submission proceeds once its session is released");
+        assert!(matches!(same, Err(StackError::AgentNotRunning)), "{same:?}");
+        let same_cancel = tokio::time::timeout(UNBLOCKED_BUDGET, same_cancel)
+            .await
+            .expect("the cancel proceeds once its session is released");
+        assert!(
+            matches!(same_cancel, Err(StackError::AgentNotRunning)),
+            "{same_cancel:?}"
+        );
+        assert_eq!(supervisor.session_locks.len(), 0);
+    }
 
     #[test]
     fn a_cancel_with_no_live_prompt_succeeds() {
