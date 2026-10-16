@@ -51,6 +51,8 @@ const TESTFLIGHT_MARKER: &str = ".acp-stack-testflight.txt";
 const TESTFLIGHT_CONTENT: &[u8] = b"acp-stack testflight ok\n";
 const FIRST_CHUNK: &str = "chunk-1";
 const SECOND_CHUNK: &str = "chunk-2";
+/// Text of the `--emit-update-after-answer` chunk, followed by the answered method.
+const AFTER_ANSWER_CHUNK_PREFIX: &str = "after-answer:";
 const DEFAULT_CWD: &str = "/tmp";
 const LISTED_UPDATED_AT: &str = "2026-05-25T00:00:00Z";
 const LISTED_PAGE_2_UPDATED_AT: &str = "2026-05-25T00:00:01Z";

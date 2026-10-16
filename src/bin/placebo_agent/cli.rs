@@ -216,6 +216,12 @@ pub(crate) struct AcpArgs {
     /// `config_option_update` session notification carrying the full list.
     #[arg(long)]
     pub(crate) emit_config_option_update: bool,
+    /// Right after answering `session/new`, `session/fork`, or
+    /// `session/set_config_option`, send an `agent_message_chunk` on that session
+    /// reading `after-answer:<method>`, the way an adapter streams its first
+    /// updates as a session opens.
+    #[arg(long)]
+    pub(crate) emit_update_after_answer: bool,
     /// Answer every `session/set_config_option` with a JSON-RPC error.
     #[arg(long)]
     pub(crate) fail_set_config_option: bool,

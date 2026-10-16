@@ -68,7 +68,7 @@ pub(crate) async fn handle_new_session(
     state: SharedState,
     request: NewSessionRequest,
     responder: Responder<NewSessionResponse>,
-    _connection: ConnectionTo<Client>,
+    connection: ConnectionTo<Client>,
 ) -> agent_client_protocol::Result<()> {
     let mut state = state.lock().await;
     if state.args.session_new_error {
@@ -101,7 +101,24 @@ pub(crate) async fn handle_new_session(
     if let Some(modes) = state.session_modes() {
         response = response.modes(modes);
     }
-    responder.respond(response)
+    responder.respond(response)?;
+    if state.args.emit_update_after_answer {
+        send_after_answer_update(&connection, &session_id, "session/new")?;
+    }
+    Ok(())
+}
+
+fn send_after_answer_update(
+    connection: &ConnectionTo<Client>,
+    session_id: &str,
+    method: &str,
+) -> agent_client_protocol::Result<()> {
+    connection.send_notification(SessionNotification::new(
+        session_id.to_owned(),
+        SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(TextContent::new(
+            format!("{AFTER_ANSWER_CHUNK_PREFIX}{method}"),
+        )))),
+    ))
 }
 
 pub(crate) async fn handle_set_mode(
@@ -231,7 +248,15 @@ pub(crate) async fn handle_set_config_option(
     } else {
         refreshed
     };
-    responder.respond(SetSessionConfigOptionResponse::new(responded))
+    responder.respond(SetSessionConfigOptionResponse::new(responded))?;
+    if state.args.emit_update_after_answer {
+        send_after_answer_update(
+            &connection,
+            request.session_id.0.as_ref(),
+            "session/set_config_option",
+        )?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn handle_load_session(
@@ -304,7 +329,7 @@ pub(crate) async fn handle_fork_session(
     state: SharedState,
     request: ForkSessionRequest,
     responder: Responder<ForkSessionResponse>,
-    _connection: ConnectionTo<Client>,
+    connection: ConnectionTo<Client>,
 ) -> agent_client_protocol::Result<()> {
     let ForkSessionRequest {
         session_id: _parent_session_id,
@@ -351,7 +376,11 @@ pub(crate) async fn handle_fork_session(
         cwd,
     });
     state.opened_sessions.insert(session_id.clone());
-    responder.respond(ForkSessionResponse::new(session_id))
+    responder.respond(ForkSessionResponse::new(session_id.clone()))?;
+    if state.args.emit_update_after_answer {
+        send_after_answer_update(&connection, &session_id, "session/fork")?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn handle_cancel(

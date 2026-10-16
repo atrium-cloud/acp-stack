@@ -148,6 +148,92 @@ async fn create_session_applies_native_mode_via_set_mode() {
     assert_eq!(prompt.status(), StatusCode::OK);
 }
 
+/// Text the placebo's `--emit-update-after-answer` chunk carries for each method.
+const AFTER_SESSION_NEW: &str = "after-answer:session/new";
+const AFTER_SET_CONFIG_OPTION: &str = "after-answer:session/set_config_option";
+const AFTER_SESSION_FORK: &str = "after-answer:session/fork";
+
+fn emit_update_after_answer(config: &mut Config) {
+    config
+        .agent
+        .args
+        .push("--emit-update-after-answer".to_owned());
+}
+
+/// The text of an `agent_message_chunk` row, when the event is one.
+fn agent_chunk_text(event: &Value) -> Option<String> {
+    let payload: Value = serde_json::from_str(event["payload_json"].as_str()?).ok()?;
+    if payload["update"]["sessionUpdate"] != "agent_message_chunk" {
+        return None;
+    }
+    Some(payload["update"]["content"]["text"].as_str()?.to_owned())
+}
+
+fn position_of_chunk(events: &[Value], text: &str) -> usize {
+    events
+        .iter()
+        .position(|event| agent_chunk_text(event).as_deref() == Some(text))
+        .unwrap_or_else(|| panic!("`{text}` is missing from the log: {events:#?}"))
+}
+
+fn position_of_kind(events: &[Value], kind: &str) -> usize {
+    events
+        .iter()
+        .position(|event| event["kind"] == kind)
+        .unwrap_or_else(|| panic!("no `{kind}` row in the log: {events:#?}"))
+}
+
+#[tokio::test]
+async fn updates_sent_while_a_session_is_created_land_in_its_log_before_the_first_prompt() {
+    let harness = Harness::spawn_with(|config| {
+        emit_update_after_answer(config);
+        config.agent.args.extend([
+            "--config-option-select".to_owned(),
+            "agent-model@model=boot/model:boot/model,deepseek/deepseek-v4-flash".to_owned(),
+        ]);
+        config.agent.model = Some("deepseek/deepseek-v4-flash".to_owned());
+    })
+    .await;
+    let session_id = create_session(&harness).await;
+    // Submitted with no wait after create: the held updates must already be queued
+    // ahead of the prompt's own user chunk.
+    submit_and_settle(&harness, &session_id, "first turn").await;
+
+    let events = log_after_turns(&harness, &session_id, 1).await;
+    let created = position_of_kind(&events, "session.created");
+    let after_new = position_of_chunk(&events, AFTER_SESSION_NEW);
+    let after_set = position_of_chunk(&events, AFTER_SET_CONFIG_OPTION);
+    let user_chunk = events
+        .iter()
+        .position(|event| chunk_kind(event).as_deref() == Some("user_message_chunk"))
+        .expect("the prompt's user chunk is logged");
+    assert!(
+        created < after_new && after_new < after_set && after_set < user_chunk,
+        "expected session.created < new < set_config_option < user chunk: {events:#?}"
+    );
+}
+
+#[tokio::test]
+async fn updates_sent_while_a_session_is_forked_land_in_the_child_log_after_its_fork_marker() {
+    let harness = Harness::spawn_with(emit_update_after_answer).await;
+    let session_id = create_session(&harness).await;
+    let child_id = fork_at(&harness, &session_id, None).await;
+    submit_and_settle(&harness, &child_id, "child turn").await;
+
+    let events = log_after_turns(&harness, &child_id, 1).await;
+    let forked = position_of_kind(&events, "session.forked");
+    let after_fork = position_of_chunk(&events, AFTER_SESSION_FORK);
+    let user_chunk = forked
+        + events[forked..]
+            .iter()
+            .position(|event| chunk_kind(event).as_deref() == Some("user_message_chunk"))
+            .expect("the child prompt's user chunk is logged");
+    assert!(
+        forked < after_fork && after_fork < user_chunk,
+        "expected session.forked < fork update < child user chunk: {events:#?}"
+    );
+}
+
 #[tokio::test]
 async fn full_lifecycle_create_list_get_prompt_poll_close() {
     let harness = Harness::spawn().await;
