@@ -2,10 +2,10 @@
 //! handshake, and owns the newline-delimited JSON-RPC connection to it until
 //! shutdown.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
@@ -223,20 +223,39 @@ pub struct AcpBridgeExit {
 
 #[derive(Default)]
 pub(super) struct NotificationDrain {
-    active: AtomicUsize,
+    positions: Mutex<NotificationPositions>,
     changed: Notify,
+}
+
+#[derive(Default)]
+struct NotificationPositions {
+    next: u64,
+    /// A set rather than a completed count: a guard dropped on a failed send
+    /// leaves out of order.
+    in_flight: BTreeSet<u64>,
 }
 
 pub(super) struct NotificationGuard {
     drain: Arc<NotificationDrain>,
+    position: u64,
 }
 
 impl NotificationDrain {
     pub(super) fn enter(self: &Arc<Self>) -> NotificationGuard {
-        self.active.fetch_add(1, Ordering::SeqCst);
+        let mut positions = self.positions();
+        let position = positions.next;
+        positions.next += 1;
+        positions.in_flight.insert(position);
         NotificationGuard {
             drain: Arc::clone(self),
+            position,
         }
+    }
+
+    fn positions(&self) -> MutexGuard<'_, NotificationPositions> {
+        self.positions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     pub(super) async fn wait_idle(&self) {
@@ -244,15 +263,33 @@ impl NotificationDrain {
     }
 
     pub(super) async fn wait_at_most(&self, maximum: usize) {
+        self.wait_until(|positions| positions.in_flight.len() <= maximum)
+            .await;
+    }
+
+    /// Wait for every notification that entered before this call, ignoring any
+    /// that enter while it waits.
+    pub(super) async fn wait_received_before_now(&self) {
+        let before = self.positions().next;
+        self.wait_until(|positions| {
+            positions
+                .in_flight
+                .first()
+                .is_none_or(|oldest| *oldest >= before)
+        })
+        .await;
+    }
+
+    async fn wait_until(&self, done: impl Fn(&NotificationPositions) -> bool) {
         loop {
             let notified = self.changed.notified();
             tokio::pin!(notified);
-            // Register the waiter before re-checking the count: notify_waiters()
-            // stores no permit, so a wakeup fired between an unregistered check
-            // and the await would be lost and the final 1->0 transition never
-            // notifies again.
+            // Register the waiter before re-checking: notify_waiters() stores
+            // no permit, so a wakeup fired between an unregistered check and
+            // the await would be lost and the last guard drop never notifies
+            // again.
             notified.as_mut().enable();
-            if self.active.load(Ordering::SeqCst) <= maximum {
+            if done(&self.positions()) {
                 return;
             }
             notified.await;
@@ -262,7 +299,7 @@ impl NotificationDrain {
 
 impl Drop for NotificationGuard {
     fn drop(&mut self) {
-        self.drain.active.fetch_sub(1, Ordering::SeqCst);
+        self.drain.positions().in_flight.remove(&self.position);
         self.drain.changed.notify_waiters();
     }
 }
@@ -458,9 +495,12 @@ impl AcpBridge {
 
     /// Wait until every `session/update` the agent has sent so far is durable.
     /// The sink stays open; this is the ordering barrier a new prompt takes
-    /// before writing its own row.
+    /// before writing its own row. Updates arriving meanwhile, from any session,
+    /// are not waited for. The SDK runs each notification callback to
+    /// completion before dispatching the next message, so every update sent
+    /// ahead of a response has entered by the time that response resolves.
     pub async fn drain_session_events(&self) {
-        self.notification_drain.wait_idle().await;
+        self.notification_drain.wait_received_before_now().await;
         self.sink.drain().await;
     }
 

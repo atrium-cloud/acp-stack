@@ -414,6 +414,67 @@ impl SessionEventSink for BlockingNotificationSink {
     }
 }
 
+/// Holds every capture until the test releases one permit for it.
+struct GatedNotificationSink {
+    operations: Mutex<Vec<String>>,
+    capture_started: tokio::sync::Notify,
+    gate: tokio::sync::Semaphore,
+}
+
+impl Default for GatedNotificationSink {
+    fn default() -> Self {
+        Self {
+            operations: Mutex::default(),
+            capture_started: tokio::sync::Notify::new(),
+            gate: tokio::sync::Semaphore::new(0),
+        }
+    }
+}
+
+impl SessionEventSink for GatedNotificationSink {
+    fn capture_session_update<'a>(
+        &'a self,
+        _agent_session_id: &'a str,
+        update: &'a SessionUpdate,
+    ) -> futures::future::BoxFuture<'a, bool> {
+        Box::pin(async move {
+            let SessionUpdate::ToolCall(tool_call) = update else {
+                panic!("test notification must contain a tool call");
+            };
+            self.operations
+                .lock()
+                .expect("operations lock")
+                .push(format!("capture:{}", tool_call.tool_call_id.0));
+            self.capture_started.notify_one();
+            self.gate
+                .acquire()
+                .await
+                .expect("gate stays open for the test")
+                .forget();
+            true
+        })
+    }
+
+    fn append<'a>(
+        &'a self,
+        _session_id: &'a str,
+        _kind: &'a str,
+        payload_json: &'a str,
+    ) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            let payload: serde_json::Value =
+                serde_json::from_str(payload_json).expect("notification payload JSON");
+            let tool_call_id = payload["update"]["toolCallId"]
+                .as_str()
+                .expect("tool call id");
+            self.operations
+                .lock()
+                .expect("operations lock")
+                .push(format!("append:{tool_call_id}"));
+        })
+    }
+}
+
 fn tool_call_notification(tool_call_id: &str) -> SessionNotification {
     let params = serde_json::json!({
         "sessionId": "sess_queue",
@@ -1024,6 +1085,49 @@ async fn queued_notification_survives_backpressured_producer_cancellation_in_fif
             "append:second"
         ]
     );
+}
+
+#[tokio::test]
+async fn received_before_now_barrier_releases_once_earlier_rows_are_appended_while_later_ones_stream()
+ {
+    let sink = Arc::new(GatedNotificationSink::default());
+    let sink_dyn: Arc<dyn SessionEventSink> = sink.clone();
+    let drain = Arc::new(NotificationDrain::default());
+    let queue = spawn_session_notification_queue(sink_dyn);
+
+    enqueue_session_notification(&queue, Arc::clone(&drain), tool_call_notification("first")).await;
+    sink.capture_started.notified().await;
+
+    let mut barrier = Box::pin(drain.wait_received_before_now());
+    assert!(
+        futures::poll!(barrier.as_mut()).is_pending(),
+        "the barrier must wait for the notification already in the worker"
+    );
+
+    let second_queue = queue.clone();
+    let second_drain = Arc::clone(&drain);
+    let second_enqueue = tokio::spawn(async move {
+        enqueue_session_notification(
+            &second_queue,
+            second_drain,
+            tool_call_notification("second"),
+        )
+        .await;
+    });
+
+    sink.gate.add_permits(1);
+    sink.capture_started.notified().await;
+    tokio::time::timeout(Duration::from_secs(1), barrier)
+        .await
+        .expect("a notification entered after the barrier must not hold it");
+    assert_eq!(
+        *sink.operations.lock().expect("operations lock"),
+        ["capture:first", "append:first", "capture:second"]
+    );
+
+    sink.gate.add_permits(1);
+    second_enqueue.await.expect("second enqueue task");
+    drain.wait_idle().await;
 }
 
 const FS_SESSION_ID: &str = "sess_fs";

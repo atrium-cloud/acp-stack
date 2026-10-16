@@ -520,6 +520,9 @@ fn spawn_connection_task(
             .on_receive_notification(
                 async move |notification: AgentNotification, _cx| {
                     match notification {
+                        // Runs inline, unlike the request handlers above: the
+                        // drain barrier needs an update entered before the next
+                        // message, including a prompt response, is dispatched.
                         AgentNotification::SessionNotification(session_note) => {
                             enqueue_session_notification(
                                 &notification_queue,

@@ -88,7 +88,8 @@ rustls = "0.23.45"
 tokio-postgres = { version = "0.7.15", features = ["with-serde_json-1"] }
 tokio-postgres-rustls = "0.14.0"
 webpki-roots = "1.0.7"
-agent-client-protocol = { version = "3.3.0", features = ["unstable_session_fork", "unstable_end_turn_token_usage", "schemars"] }
+# AcpBridge::drain_session_events relies on the SDK awaiting each notification callback before dispatching the next message; recheck that on upgrade.
+agent-client-protocol ={ version = "3.3.0", features = ["unstable_session_fork", "unstable_end_turn_token_usage", "schemars"] }
 sha2 = "0.10"
 tokio-util = { version = "0.7", features = ["compat", "rt"] }
 futures = "0.3"
