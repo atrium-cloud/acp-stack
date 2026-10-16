@@ -1230,7 +1230,7 @@ async fn run_agent_test_inner(
         let stop_reason = &mut stop_reason;
         let advertised_modes = &mut advertised_modes;
         async {
-            let session = bridge.new_session(cwd, Vec::new()).await.map_err(|err| {
+            let (session, _) = bridge.new_session(cwd, Vec::new()).await.map_err(|err| {
                 agent_test_error("session creation", CODE_SESSION_CREATE_FAILED, err)
             })?;
             *created_session = Some(session.session_id.clone());

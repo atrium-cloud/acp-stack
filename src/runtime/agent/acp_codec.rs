@@ -1,6 +1,7 @@
 //! Free codec helpers translating between ACP protocol types and the daemon's
 //! own request shapes, without needing an `AcpBridge` instance.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -13,7 +14,7 @@ use agent_client_protocol::schema::v1::{
     SessionId as AcpSessionId, SessionNotification, SessionUpdate, WriteTextFileRequest,
     WriteTextFileResponse,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::config::AcpPromptAction;
 use crate::error::{Result, StackError};
@@ -57,6 +58,12 @@ const AIR_FORK_VERSION: u64 = 1;
 /// use for large file diffs.
 const SESSION_NOTIFICATION_BACKLOG: usize = 1;
 
+/// Most updates held for one session whose local row does not exist yet.
+const HELD_SESSION_UPDATES_PER_SESSION: usize = 256;
+
+/// Most updates held across every session whose local row does not exist yet.
+const HELD_SESSION_UPDATES_TOTAL: usize = 1024;
+
 pub(super) struct QueuedSessionNotification {
     agent_session_id: String,
     update: SessionUpdate,
@@ -64,25 +71,245 @@ pub(super) struct QueuedSessionNotification {
     _guard: NotificationGuard,
 }
 
-pub(super) type SessionNotificationSender = mpsc::UnboundedSender<QueuedSessionNotification>;
+/// One item on the session-notification worker's queue. Control items share
+/// the notifications' FIFO, so holding and releasing are ordered against the
+/// updates themselves without a lock.
+pub(super) enum SessionQueueItem {
+    Notification(Box<QueuedSessionNotification>),
+    /// The agent answered `session/new` or `session/fork` with this id and its
+    /// local row is not written yet. Sent before the dispatch loop releases
+    /// the next message, so every later update for the id is held.
+    Expect {
+        agent_session_id: String,
+    },
+    /// The local row exists: write the held updates under it, then ack.
+    Release {
+        agent_session_id: String,
+        local_session_id: String,
+        ack: oneshot::Sender<()>,
+    },
+    /// The session will get no local row: discard what is held.
+    Abandon {
+        agent_session_id: String,
+    },
+}
+
+pub(super) type SessionNotificationSender = mpsc::UnboundedSender<SessionQueueItem>;
+
+/// A held update keeps no `NotificationGuard`, so it never counts as in
+/// flight for the dispatch backlog, the drain barrier, or shutdown.
+struct HeldSessionUpdate {
+    update: SessionUpdate,
+    payload: String,
+}
+
+#[derive(Default)]
+struct HeldSession {
+    updates: Vec<HeldSessionUpdate>,
+    /// Updates discarded after this session overflowed; once nonzero,
+    /// everything until release or abandon is discarded too.
+    discarded: usize,
+}
+
+/// Updates for sessions whose local row does not exist yet, owned by the
+/// notification worker.
+#[derive(Default)]
+struct HeldSessionUpdates {
+    sessions: HashMap<String, HeldSession>,
+    total: usize,
+}
+
+impl HeldSessionUpdates {
+    fn expect(&mut self, agent_session_id: String) {
+        self.sessions.entry(agent_session_id).or_default();
+    }
+
+    /// Hold `notification` when its session is expected; otherwise hand it
+    /// back for the normal path.
+    fn hold(
+        &mut self,
+        notification: Box<QueuedSessionNotification>,
+    ) -> Option<Box<QueuedSessionNotification>> {
+        let Some(session) = self.sessions.get_mut(&notification.agent_session_id) else {
+            return Some(notification);
+        };
+        if session.discarded > 0 {
+            session.discarded += 1;
+            return None;
+        }
+        if session.updates.len() >= HELD_SESSION_UPDATES_PER_SESSION
+            || self.total >= HELD_SESSION_UPDATES_TOTAL
+        {
+            self.total -= session.updates.len();
+            session.discarded = session.updates.len() + 1;
+            session.updates.clear();
+            return None;
+        }
+        let QueuedSessionNotification {
+            update, payload, ..
+        } = *notification;
+        session.updates.push(HeldSessionUpdate { update, payload });
+        self.total += 1;
+        None
+    }
+
+    fn take(&mut self, agent_session_id: &str) -> Option<HeldSession> {
+        let session = self.sessions.remove(agent_session_id)?;
+        self.total -= session.updates.len();
+        Some(session)
+    }
+
+    fn discard(&mut self, agent_session_id: &str, reason: &'static str) {
+        if let Some(session) = self.take(agent_session_id) {
+            warn_discarded(
+                agent_session_id,
+                session.discarded + session.updates.len(),
+                reason,
+            );
+        }
+    }
+}
+
+fn warn_discarded(agent_session_id: &str, count: usize, reason: &'static str) {
+    if count > 0 {
+        tracing::warn!(
+            agent_session_id,
+            count,
+            reason,
+            "discarded ACP session updates held while the session was being opened"
+        );
+    }
+}
+
+async fn record_session_update(
+    sink: &Arc<dyn SessionEventSink>,
+    agent_session_id: &str,
+    update: &SessionUpdate,
+    payload: &str,
+) {
+    if sink.capture_session_update(agent_session_id, update).await {
+        sink.append(agent_session_id, EVENT_KIND_SESSION_UPDATE, payload)
+            .await;
+    }
+}
+
+/// Updates held for a session the agent opened through `session/new` or
+/// `session/fork`, until its local row exists. Dropping the claim without
+/// [`Self::release`] discards them, so every failed or abandoned open lets go.
+#[derive(Debug)]
+pub struct PendingSessionUpdates {
+    held: Option<(SessionNotificationSender, String)>,
+}
+
+impl PendingSessionUpdates {
+    pub(super) fn held(queue: SessionNotificationSender, agent_session_id: String) -> Self {
+        Self {
+            held: Some((queue, agent_session_id)),
+        }
+    }
+
+    /// A claim for a sink that resolves no local rows, so nothing is held.
+    pub(super) fn inert() -> Self {
+        Self { held: None }
+    }
+
+    /// Write the held updates under `local_session_id`. Returns once they are
+    /// queued in the sink, ahead of any update received after them.
+    pub async fn release(mut self, local_session_id: &str) {
+        let Some((queue, agent_session_id)) = self.held.take() else {
+            return;
+        };
+        let (ack, acked) = oneshot::channel();
+        let release = SessionQueueItem::Release {
+            agent_session_id: agent_session_id.clone(),
+            local_session_id: local_session_id.to_owned(),
+            ack,
+        };
+        if queue.send(release).is_err() {
+            tracing::warn!(
+                agent_session_id,
+                "session/update worker stopped; held updates were not released"
+            );
+            return;
+        }
+        if acked.await.is_err() {
+            tracing::warn!(
+                agent_session_id,
+                "session/update worker stopped before releasing held updates"
+            );
+        }
+    }
+}
+
+impl Drop for PendingSessionUpdates {
+    fn drop(&mut self) {
+        if let Some((queue, agent_session_id)) = self.held.take()
+            && queue
+                .send(SessionQueueItem::Abandon { agent_session_id })
+                .is_err()
+        {
+            tracing::debug!("session/update worker already stopped; nothing held to abandon");
+        }
+    }
+}
 
 pub(super) fn spawn_session_notification_queue(
     sink: Arc<dyn SessionEventSink>,
 ) -> SessionNotificationSender {
-    let (sender, mut receiver) = mpsc::unbounded_channel::<QueuedSessionNotification>();
+    let (sender, mut receiver) = mpsc::unbounded_channel::<SessionQueueItem>();
     let worker = tokio::spawn(async move {
-        while let Some(notification) = receiver.recv().await {
-            if sink
-                .capture_session_update(&notification.agent_session_id, &notification.update)
-                .await
-            {
-                sink.append(
-                    &notification.agent_session_id,
-                    EVENT_KIND_SESSION_UPDATE,
-                    &notification.payload,
-                )
-                .await;
+        let mut held = HeldSessionUpdates::default();
+        while let Some(item) = receiver.recv().await {
+            match item {
+                SessionQueueItem::Notification(notification) => {
+                    if let Some(notification) = held.hold(notification) {
+                        record_session_update(
+                            &sink,
+                            &notification.agent_session_id,
+                            &notification.update,
+                            &notification.payload,
+                        )
+                        .await;
+                    }
+                }
+                SessionQueueItem::Expect { agent_session_id } => held.expect(agent_session_id),
+                SessionQueueItem::Release {
+                    agent_session_id,
+                    local_session_id,
+                    ack,
+                } => {
+                    if let Some(session) = held.take(&agent_session_id) {
+                        sink.remember_local_session(&agent_session_id, &local_session_id)
+                            .await;
+                        warn_discarded(&agent_session_id, session.discarded, "overflow");
+                        for update in session.updates {
+                            record_session_update(
+                                &sink,
+                                &agent_session_id,
+                                &update.update,
+                                &update.payload,
+                            )
+                            .await;
+                        }
+                    }
+                    if ack.send(()).is_err() {
+                        tracing::debug!(
+                            agent_session_id,
+                            "held-update release waiter gave up before the ack"
+                        );
+                    }
+                }
+                SessionQueueItem::Abandon { agent_session_id } => {
+                    held.discard(&agent_session_id, "abandoned");
+                }
             }
+        }
+        for (agent_session_id, session) in held.sessions {
+            warn_discarded(
+                &agent_session_id,
+                session.discarded + session.updates.len(),
+                "worker stopped",
+            );
         }
     });
     tokio::spawn(async move {
@@ -784,7 +1011,10 @@ pub(super) async fn enqueue_session_notification(
         payload,
         _guard: drain.enter(),
     };
-    if sender.send(notification).is_err() {
+    if sender
+        .send(SessionQueueItem::Notification(Box::new(notification)))
+        .is_err()
+    {
         tracing::warn!("session/update worker stopped; dropping notification");
         return;
     }

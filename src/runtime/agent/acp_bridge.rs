@@ -32,8 +32,9 @@ use tokio::time::timeout;
 use crate::config::AgentConfig;
 use crate::error::{Result, StackError};
 use crate::runtime::agent::acp_codec::{
-    AcpFsContext, auto_approve_acp_permission, enqueue_session_notification, handle_read_text_file,
-    handle_write_text_file, resolve_acp_permission, spawn_session_notification_queue,
+    AcpFsContext, SessionNotificationSender, SessionQueueItem, auto_approve_acp_permission,
+    enqueue_session_notification, handle_read_text_file, handle_write_text_file,
+    resolve_acp_permission, spawn_session_notification_queue,
 };
 use crate::runtime::agent::acp_terminal::{
     TerminalHandlerContext, TerminalRegistry, handle_create_terminal, handle_kill_terminal,
@@ -63,10 +64,10 @@ pub(crate) use self::spawn::resolve_command_path;
 pub(super) use self::spawn::workload_process_path;
 
 pub use crate::runtime::agent::acp_codec::{
-    air_fork_point_message_id, air_fork_point_meta, meta_message_id, prompt_message_id_meta,
-    session_config_id_for_value, session_config_values, session_mode_selection_for_value,
-    session_mode_values, session_model_selection_for_value, session_model_values,
-    user_prompt_chunk_payload,
+    PendingSessionUpdates, air_fork_point_message_id, air_fork_point_meta, meta_message_id,
+    prompt_message_id_meta, session_config_id_for_value, session_config_values,
+    session_mode_selection_for_value, session_mode_values, session_model_selection_for_value,
+    session_model_values, user_prompt_chunk_payload,
 };
 pub use crate::runtime::agent::acp_terminal::TerminalCommandLog;
 pub use crate::runtime::agent::session_changes::SessionChangesHandle;
@@ -179,6 +180,9 @@ pub struct AcpBridge {
     /// Held so `shutdown()` can flush pending `session/update` writes.
     sink: Arc<dyn SessionEventSink>,
     notification_drain: Arc<NotificationDrain>,
+    /// The session-notification worker's queue, for holding and releasing the
+    /// updates of sessions whose local row is not written yet.
+    notification_queue: SessionNotificationSender,
     /// Live client terminals. Their children run in their own process groups,
     /// so shutdown MUST drain this registry explicitly; the agent-pgroup kill
     /// never reaches them.
@@ -518,6 +522,15 @@ impl AcpBridge {
 
     /// Forget the sink's local session id for a session whose local row was deleted.
     pub async fn forget_session(&self, agent_session_id: &str) {
+        let abandon = SessionQueueItem::Abandon {
+            agent_session_id: agent_session_id.to_owned(),
+        };
+        if self.notification_queue.send(abandon).is_err() {
+            tracing::debug!(
+                agent_session_id,
+                "session/update worker already stopped; nothing held to abandon"
+            );
+        }
         self.sink.forget_session(agent_session_id).await;
     }
 }

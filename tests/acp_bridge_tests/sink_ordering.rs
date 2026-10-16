@@ -64,7 +64,7 @@ async fn shutdown_waits_for_connection_task_before_flushing_sink() {
         .await
         .expect("spawn"),
     );
-    let response = bridge
+    let (response, _) = bridge
         .new_session(std::env::temp_dir(), vec![])
         .await
         .expect("new session");
@@ -171,7 +171,7 @@ async fn shutdown_drains_notification_queued_before_capture_blocks() {
         .await
         .expect("spawn"),
     );
-    let response = bridge
+    let (response, _) = bridge
         .new_session(std::env::temp_dir(), vec![])
         .await
         .expect("new session");
@@ -229,7 +229,7 @@ async fn cancel_session_settles_prompt_with_cancelled_stop_reason() {
     )
     .await
     .expect("spawn");
-    let response = bridge
+    let (response, _) = bridge
         .new_session(std::env::temp_dir(), vec![])
         .await
         .expect("new");

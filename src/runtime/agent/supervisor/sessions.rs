@@ -22,7 +22,8 @@ impl AgentSupervisor {
         let PartitionedMcpServers { accepted, skipped } =
             bridge.capabilities().partition_mcp_servers(mcp_servers)?;
         let accepted_names = crate::runtime::agent::mcp::server_names(&accepted);
-        let response = bridge.new_session(cwd_path, accepted).await?;
+        // Any early return below drops `pending_updates`, which discards what it held.
+        let (response, pending_updates) = bridge.new_session(cwd_path, accepted).await?;
         let agent_session_id = response.session_id.0.to_string();
         let mut ignored: Vec<IgnoredFeature> = Vec::new();
         // The snapshot must reflect what was applied, not the pre-provisioning
@@ -260,6 +261,7 @@ impl AgentSupervisor {
                     })
             })
             .await?;
+        pending_updates.release(&record.id).await;
         Ok(SessionAttachOutcome {
             record,
             attached_mcp: accepted_names,
@@ -503,7 +505,7 @@ impl AgentSupervisor {
         // already queued; they must be durable before the parent's log is
         // copied.
         bridge.drain_session_events().await;
-        let response = bridge
+        let (response, pending_updates) = bridge
             .fork_session(
                 AcpSessionId::new(parent_agent_session_id.clone()),
                 PathBuf::from(&resolved_cwd),
@@ -582,6 +584,7 @@ impl AgentSupervisor {
                     })
             })
             .await?;
+        pending_updates.release(&record.id).await;
         Ok(SessionAttachOutcome {
             record,
             attached_mcp: accepted_names,

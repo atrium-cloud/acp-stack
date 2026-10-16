@@ -41,6 +41,24 @@ pub trait SessionEventSink: Send + Sync + 'static {
         Box::pin(async move { Some(agent_session_id.to_owned()) })
     }
 
+    /// Whether updates must wait for the local row of a session the agent just
+    /// opened. True only for a sink that resolves agent session ids to rows,
+    /// since the row is written after the agent answers.
+    fn holds_new_session_updates(&self) -> bool {
+        false
+    }
+
+    /// Record the local session id of a row just written for `agent_session_id`,
+    /// so its held updates resolve without a state read.
+    fn remember_local_session<'a>(
+        &'a self,
+        agent_session_id: &'a str,
+        local_session_id: &'a str,
+    ) -> futures::future::BoxFuture<'a, ()> {
+        let _ = (agent_session_id, local_session_id);
+        Box::pin(async {})
+    }
+
     /// Drop any remembered local session id for `agent_session_id`, after its local
     /// row was deleted.
     fn forget_session<'a>(
@@ -701,6 +719,24 @@ impl SessionEventSink for StateStoreSessionSink {
                     None
                 }
             }
+        })
+    }
+
+    fn holds_new_session_updates(&self) -> bool {
+        true
+    }
+
+    fn remember_local_session<'a>(
+        &'a self,
+        agent_session_id: &'a str,
+        local_session_id: &'a str,
+    ) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            self.local_session_ids
+                .lock()
+                .await
+                .ids
+                .insert(agent_session_id.to_owned(), local_session_id.to_owned());
         })
     }
 

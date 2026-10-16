@@ -101,7 +101,7 @@ async fn assert_real_agent_advertises_model(
     .await
     .expect("real ACP agent should initialize");
 
-    let response = tokio::time::timeout(
+    let (response, _) = tokio::time::timeout(
         Duration::from_secs(120),
         bridge.new_session(cwd.clone(), Vec::new()),
     )
@@ -145,7 +145,7 @@ async fn print_real_agent_mode_values(agent: AgentConfig, env: HashMap<String, S
     .await
     .expect("real ACP agent should initialize");
 
-    let response = tokio::time::timeout(
+    let (response, _) = tokio::time::timeout(
         Duration::from_secs(120),
         bridge.new_session(cwd.clone(), Vec::new()),
     )
@@ -183,7 +183,7 @@ async fn send_real_agent_prompt(agent: AgentConfig, env: HashMap<String, String>
     .await
     .expect("real ACP agent should initialize");
 
-    let response = tokio::time::timeout(
+    let (response, _) = tokio::time::timeout(
         Duration::from_secs(120),
         bridge.new_session(cwd.clone(), Vec::new()),
     )
@@ -271,7 +271,7 @@ async fn real_terminal_uname_probe(agent: AgentConfig, env: HashMap<String, Stri
     )
     .await
     .expect("real ACP agent should initialize");
-    let response = tokio::time::timeout(
+    let (response, _) = tokio::time::timeout(
         Duration::from_secs(120),
         bridge.new_session(cwd.clone(), Vec::new()),
     )

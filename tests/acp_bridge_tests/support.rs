@@ -101,7 +101,7 @@ pub(crate) async fn run_terminal_probe(
     )
     .await
     .expect("spawn");
-    let session = bridge
+    let (session, _) = bridge
         .new_session(std::env::temp_dir(), vec![])
         .await
         .expect("session/new");

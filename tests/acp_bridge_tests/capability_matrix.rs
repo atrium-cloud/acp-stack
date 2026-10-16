@@ -327,7 +327,7 @@ async fn fork_session_returns_child_session() {
     .expect("spawn");
     assert!(bridge.capabilities().supports_fork_session());
 
-    let fork = bridge
+    let (fork, _) = bridge
         .fork_session(
             agent_client_protocol::schema::v1::SessionId::new("sess_parent"),
             std::env::temp_dir(),
@@ -402,7 +402,7 @@ async fn fork_session_sends_message_id_when_capability_is_present() {
     .expect("spawn");
     assert!(bridge.capabilities().supports_fork_message_id());
 
-    let fork = bridge
+    let (fork, _) = bridge
         .fork_session(
             agent_client_protocol::schema::v1::SessionId::new("sess_parent"),
             std::env::temp_dir(),
@@ -444,7 +444,7 @@ async fn fork_session_sends_an_air_fork_point_without_the_acp_stack_capability()
     .expect("spawn");
     assert!(!bridge.capabilities().supports_fork_message_id());
 
-    let fork = bridge
+    let (fork, _) = bridge
         .fork_session(
             agent_client_protocol::schema::v1::SessionId::new("sess_parent"),
             std::env::temp_dir(),

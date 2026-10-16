@@ -23,6 +23,7 @@ struct ConnectionTask {
     task: JoinHandle<()>,
     connection_rx: oneshot::Receiver<InitializeOutcome>,
     shutdown_tx: oneshot::Sender<()>,
+    notification_queue: SessionNotificationSender,
 }
 
 /// A launched agent process with its stdio taken.
@@ -147,6 +148,7 @@ impl AcpBridge {
             task,
             connection_rx,
             shutdown_tx,
+            notification_queue,
         } = spawn_connection_task(
             stdin,
             stdout,
@@ -183,6 +185,7 @@ impl AcpBridge {
             spawn_pid: exit.pid,
             sink,
             notification_drain,
+            notification_queue,
             terminals,
             attached_sessions: TokioMutex::new(HashSet::new()),
         })
@@ -343,6 +346,7 @@ fn spawn_connection_task(
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
     let notification_queue = spawn_session_notification_queue(sink.clone());
+    let bridge_notification_queue = notification_queue.clone();
     let permission_sink = sink;
     let create_context = Arc::clone(&terminal_context);
     let output_context = Arc::clone(&terminal_context);
@@ -615,6 +619,7 @@ fn spawn_connection_task(
         task,
         connection_rx,
         shutdown_tx,
+        notification_queue: bridge_notification_queue,
     }
 }
 

@@ -385,7 +385,7 @@ pub async fn fetch_session_config_with_timeout(
     // single discovery round trip, and a second timeout could leave the probe
     // running past the first one's expiry.
     let probe = async {
-        let response = bridge.new_session(cwd, Vec::new()).await?;
+        let (response, _) = bridge.new_session(cwd, Vec::new()).await?;
         let refreshed_options = apply_probe_model(&bridge, &config.agent, model, &response).await;
         Ok(DiscoveredSessionConfig {
             response,

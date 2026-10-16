@@ -6,7 +6,7 @@ use super::*;
 use std::time::Instant;
 
 use agent_client_protocol::Error as AcpError;
-use agent_client_protocol::JsonRpcRequest;
+use agent_client_protocol::{JsonRpcRequest, RequestCancellationHandle};
 use serde_json::Value;
 
 use crate::error::{AcpErrorDetail, AgentRequestContext};
@@ -36,6 +36,26 @@ pub enum ForkPoint {
     /// vendor adapters keep the named point, so the id named here is the one
     /// from the turn before the prompt the client asked to cut at.
     AirMessageId(String),
+}
+
+/// Asks the agent to cancel a session-opening request whose caller stopped waiting, as
+/// dropping an awaited request does; the ordered callback owns the request itself.
+struct CancelUnansweredRequest(Option<RequestCancellationHandle>);
+
+impl CancelUnansweredRequest {
+    fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for CancelUnansweredRequest {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take()
+            && let Err(error) = handle.cancel()
+        {
+            tracing::debug!(error = %error, "could not ask the agent to cancel an abandoned session open");
+        }
+    }
 }
 
 impl AcpBridge {
@@ -68,6 +88,83 @@ impl AcpBridge {
             );
         }
         response
+    }
+
+    /// Send a request that opens a session (`session/new`, `session/fork`). The agent may
+    /// stream updates for the new session right after answering, before the caller writes
+    /// its local row, so the session is registered with the notification worker inside the
+    /// SDK's ordered response callback: the dispatch loop releases no later message until
+    /// the callback returns, and every later update for the session is held.
+    async fn open_session_request<Request>(
+        &self,
+        connection: &ConnectionTo<Agent>,
+        method: &'static str,
+        acp_session_id: Option<&str>,
+        request: Request,
+        opened_session_id: fn(&Request::Response) -> &SessionId,
+    ) -> Result<(Request::Response, PendingSessionUpdates)>
+    where
+        Request: JsonRpcRequest,
+        Request::Response: Send + 'static,
+    {
+        let started_at = Instant::now();
+        let holds = self.sink.holds_new_session_updates();
+        let queue = self.notification_queue.clone();
+        let (answer_tx, answer_rx) = oneshot::channel();
+        // Prepared rather than sent: ordering must be selected before publication, or a
+        // fast answer routed in between releases the next update ahead of `Expect`.
+        let prepared = connection.prepare_request(request);
+        let cancel_on_drop = CancelUnansweredRequest(Some(prepared.cancellation_handle()));
+        prepared
+            .on_receiving_result(move |result| {
+                let pending = match &result {
+                    Ok(response) if holds => {
+                        let agent_session_id = opened_session_id(response).0.to_string();
+                        let expect = SessionQueueItem::Expect {
+                            agent_session_id: agent_session_id.clone(),
+                        };
+                        if queue.send(expect).is_err() {
+                            tracing::debug!(
+                                agent_session_id,
+                                "session/update worker already stopped; nothing to hold"
+                            );
+                        }
+                        PendingSessionUpdates::held(queue, agent_session_id)
+                    }
+                    _ => PendingSessionUpdates::inert(),
+                };
+                // A caller that stopped waiting drops the claim here, which abandons
+                // whatever the worker holds for the session.
+                if answer_tx.send((result, pending)).is_err() {
+                    tracing::debug!(method, "session open caller stopped waiting for the answer");
+                }
+                std::future::ready(Ok(()))
+            })
+            .map_err(|err| self.request_failed(method, acp_session_id, err))?;
+        let answer = answer_rx.await;
+        cancel_on_drop.disarm();
+        if latency_lines_enabled() {
+            tracing::info!(
+                target: LATENCY_TARGET,
+                method,
+                elapsed_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+                ok = matches!(answer, Ok((Ok(_), _))),
+                agent_id = %self.agent_id,
+                target_id = self.target_id.as_deref().unwrap_or_default(),
+                acp_session_id = acp_session_id.unwrap_or_default(),
+                "agent request answered"
+            );
+        }
+        // The SDK skips the callback only when no response arrives at all.
+        let Ok((result, pending)) = answer else {
+            return Err(self.local_request_failure(
+                method,
+                acp_session_id,
+                "agent connection closed before the agent answered".to_owned(),
+            ));
+        };
+        let response = result.map_err(|err| self.request_failed(method, acp_session_id, err))?;
+        Ok((response, pending))
     }
 
     fn request_context(&self, acp_session_id: Option<&str>) -> AgentRequestContext {
@@ -120,24 +217,26 @@ impl AcpBridge {
         }
     }
 
-    /// `session/new`. Always supported per ACP baseline.
+    /// `session/new`. Always supported per ACP baseline. The returned claim holds the
+    /// session's updates until the caller releases them under its local row.
     pub async fn new_session(
         &self,
         cwd: PathBuf,
         mcp_servers: Vec<McpServer>,
-    ) -> Result<NewSessionResponse> {
+    ) -> Result<(NewSessionResponse, PendingSessionUpdates)> {
         self.capabilities
             .reject_unmodeled_mcp_servers(&mcp_servers)?;
         let connection = self.connection().await?;
         let mut request = NewSessionRequest::new(cwd);
         request.mcp_servers = mcp_servers;
-        let response = self
-            .timed_request(&connection, "session/new", None, request)
-            .await
-            .map_err(|err| self.request_failed("session/new", None, err))?;
+        let (response, pending) = self
+            .open_session_request(&connection, "session/new", None, request, |response| {
+                &response.session_id
+            })
+            .await?;
         self.mark_session_attached(response.session_id.0.as_ref())
             .await;
-        Ok(response)
+        Ok((response, pending))
     }
 
     pub async fn fork_session(
@@ -146,7 +245,7 @@ impl AcpBridge {
         cwd: PathBuf,
         mcp_servers: Vec<McpServer>,
         fork_point: Option<ForkPoint>,
-    ) -> Result<ForkSessionResponse> {
+    ) -> Result<(ForkSessionResponse, PendingSessionUpdates)> {
         if !self.capabilities.supports_fork_session() {
             return Err(StackError::AgentUnsupportedCapability {
                 name: "session/fork",
@@ -176,18 +275,18 @@ impl AcpBridge {
             }
             None => {}
         }
-        let response: ForkSessionResponse = self
-            .timed_request(
+        let (response, pending) = self
+            .open_session_request(
                 &connection,
                 "session/fork",
                 Some(&source_session_id),
                 request,
+                |response: &ForkSessionResponse| &response.session_id,
             )
-            .await
-            .map_err(|err| self.request_failed("session/fork", Some(&source_session_id), err))?;
+            .await?;
         self.mark_session_attached(response.session_id.0.as_ref())
             .await;
-        Ok(response)
+        Ok((response, pending))
     }
 
     /// `session/list`. Requires the `sessionCapabilities.list` capability.

@@ -28,7 +28,7 @@ async fn new_session_round_trips_and_prompt_emits_notifications() {
     .expect("spawn");
     assert!(bridge.capabilities().supports_load_session());
 
-    let new_session = bridge
+    let (new_session, _) = bridge
         .new_session(std::env::temp_dir(), vec![])
         .await
         .expect("session/new");
@@ -208,7 +208,7 @@ async fn a_traced_connection_round_trips_a_session_and_prompt() {
     acp_stack::runtime::agent::acp_trace::set_enabled(true);
     let trace_on = TraceOn;
     let bridge = spawn_placebo(&[]).await;
-    let session = bridge
+    let (session, _) = bridge
         .new_session(std::env::temp_dir(), vec![])
         .await
         .expect("session/new");
@@ -289,7 +289,7 @@ async fn agent_exit_during_a_request_carries_no_acp_error() {
 #[tokio::test]
 async fn session_scoped_failure_names_the_session() {
     let bridge = spawn_placebo(&["--fail-set-config-option"]).await;
-    let session = bridge
+    let (session, _) = bridge
         .new_session(std::env::temp_dir(), vec![])
         .await
         .expect("session/new");
@@ -340,7 +340,7 @@ async fn new_session_returns_custom_model_config_option_id() {
     .await
     .expect("spawn");
 
-    let new_session = bridge
+    let (new_session, _) = bridge
         .new_session(std::env::temp_dir(), vec![])
         .await
         .expect("session/new");
@@ -376,7 +376,7 @@ async fn new_session_advertises_config_options_to_strict_agent() {
     .await
     .expect("spawn");
 
-    let new_session = bridge
+    let (new_session, _) = bridge
         .new_session(std::env::temp_dir(), vec![])
         .await
         .expect("session/new");
@@ -414,7 +414,7 @@ async fn set_config_option_sends_boolean_values() {
     .await
     .expect("spawn");
 
-    let new_session = bridge
+    let (new_session, _) = bridge
         .new_session(std::env::temp_dir(), vec![])
         .await
         .expect("session/new");

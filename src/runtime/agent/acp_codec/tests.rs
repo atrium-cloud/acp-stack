@@ -476,8 +476,12 @@ impl SessionEventSink for GatedNotificationSink {
 }
 
 fn tool_call_notification(tool_call_id: &str) -> SessionNotification {
+    session_tool_call_notification("sess_queue", tool_call_id)
+}
+
+fn session_tool_call_notification(session_id: &str, tool_call_id: &str) -> SessionNotification {
     let params = serde_json::json!({
-        "sessionId": "sess_queue",
+        "sessionId": session_id,
         "update": {
             "sessionUpdate": "tool_call",
             "toolCallId": tool_call_id,
@@ -1128,6 +1132,183 @@ async fn received_before_now_barrier_releases_once_earlier_rows_are_appended_whi
     sink.gate.add_permits(1);
     second_enqueue.await.expect("second enqueue task");
     drain.wait_idle().await;
+}
+
+const OPENING_SESSION_ID: &str = "sess_opening";
+const OTHER_SESSION_ID: &str = "sess_other";
+
+/// Register `agent_session_id` the way the ordered `session/new` callback does.
+fn expect_session(
+    queue: &SessionNotificationSender,
+    agent_session_id: &str,
+) -> PendingSessionUpdates {
+    queue
+        .send(SessionQueueItem::Expect {
+            agent_session_id: agent_session_id.to_owned(),
+        })
+        .expect("worker running");
+    PendingSessionUpdates::held(queue.clone(), agent_session_id.to_owned())
+}
+
+/// Tool call ids of the recorded rows, as `session:tool_call_id`.
+fn recorded_tool_calls(sink: &RecordingSink) -> Vec<String> {
+    sink.events
+        .lock()
+        .expect("sink events")
+        .iter()
+        .map(|(session_id, _, payload)| {
+            let payload: serde_json::Value = serde_json::from_str(payload).expect("payload JSON");
+            format!(
+                "{session_id}:{}",
+                payload["update"]["toolCallId"]
+                    .as_str()
+                    .expect("tool call id")
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn updates_for_an_opening_session_are_held_until_release_and_land_in_arrival_order() {
+    let sink = Arc::new(RecordingSink::default());
+    let sink_dyn: Arc<dyn SessionEventSink> = sink.clone();
+    let drain = Arc::new(NotificationDrain::default());
+    let queue = spawn_session_notification_queue(sink_dyn);
+    let pending = expect_session(&queue, OPENING_SESSION_ID);
+
+    for (session_id, tool_call_id) in [
+        (OPENING_SESSION_ID, "first"),
+        (OTHER_SESSION_ID, "unrelated"),
+        (OPENING_SESSION_ID, "second"),
+    ] {
+        enqueue_session_notification(
+            &queue,
+            Arc::clone(&drain),
+            session_tool_call_notification(session_id, tool_call_id),
+        )
+        .await;
+    }
+    tokio::time::timeout(Duration::from_secs(1), drain.wait_idle())
+        .await
+        .expect("held updates must not count as in flight");
+    assert_eq!(recorded_tool_calls(&sink), ["sess_other:unrelated"]);
+
+    pending.release("local_opening").await;
+    enqueue_session_notification(
+        &queue,
+        Arc::clone(&drain),
+        session_tool_call_notification(OPENING_SESSION_ID, "after"),
+    )
+    .await;
+    drain.wait_idle().await;
+
+    assert_eq!(
+        recorded_tool_calls(&sink),
+        [
+            "sess_other:unrelated",
+            "sess_opening:first",
+            "sess_opening:second",
+            "sess_opening:after"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn dropping_the_claim_discards_held_updates_and_later_ones_take_the_normal_path() {
+    let sink = Arc::new(RecordingSink::default());
+    let sink_dyn: Arc<dyn SessionEventSink> = sink.clone();
+    let drain = Arc::new(NotificationDrain::default());
+    let queue = spawn_session_notification_queue(sink_dyn);
+    let pending = expect_session(&queue, OPENING_SESSION_ID);
+
+    enqueue_session_notification(
+        &queue,
+        Arc::clone(&drain),
+        session_tool_call_notification(OPENING_SESSION_ID, "held"),
+    )
+    .await;
+    drop(pending);
+    enqueue_session_notification(
+        &queue,
+        Arc::clone(&drain),
+        session_tool_call_notification(OPENING_SESSION_ID, "later"),
+    )
+    .await;
+    drain.wait_idle().await;
+
+    assert_eq!(recorded_tool_calls(&sink), ["sess_opening:later"]);
+}
+
+#[tokio::test]
+async fn an_overflowing_session_discards_everything_held_until_release() {
+    let sink = Arc::new(RecordingSink::default());
+    let sink_dyn: Arc<dyn SessionEventSink> = sink.clone();
+    let drain = Arc::new(NotificationDrain::default());
+    let queue = spawn_session_notification_queue(sink_dyn);
+    let pending = expect_session(&queue, OPENING_SESSION_ID);
+
+    for index in 0..=HELD_SESSION_UPDATES_PER_SESSION {
+        enqueue_session_notification(
+            &queue,
+            Arc::clone(&drain),
+            session_tool_call_notification(OPENING_SESSION_ID, &format!("held_{index}")),
+        )
+        .await;
+    }
+    enqueue_session_notification(
+        &queue,
+        Arc::clone(&drain),
+        session_tool_call_notification(OPENING_SESSION_ID, "after_overflow"),
+    )
+    .await;
+    pending.release("local_opening").await;
+    enqueue_session_notification(
+        &queue,
+        Arc::clone(&drain),
+        session_tool_call_notification(OPENING_SESSION_ID, "after_release"),
+    )
+    .await;
+    drain.wait_idle().await;
+
+    assert_eq!(recorded_tool_calls(&sink), ["sess_opening:after_release"]);
+}
+
+#[tokio::test]
+async fn the_total_cap_bounds_held_updates_across_sessions() {
+    let sink = Arc::new(RecordingSink::default());
+    let sink_dyn: Arc<dyn SessionEventSink> = sink.clone();
+    let drain = Arc::new(NotificationDrain::default());
+    let queue = spawn_session_notification_queue(sink_dyn);
+    let session_count = HELD_SESSION_UPDATES_TOTAL / HELD_SESSION_UPDATES_PER_SESSION;
+    let mut claims = Vec::new();
+    for session in 0..=session_count {
+        claims.push(expect_session(&queue, &format!("sess_{session}")));
+    }
+    for session in 0..session_count {
+        for index in 0..HELD_SESSION_UPDATES_PER_SESSION {
+            enqueue_session_notification(
+                &queue,
+                Arc::clone(&drain),
+                session_tool_call_notification(&format!("sess_{session}"), &format!("u{index}")),
+            )
+            .await;
+        }
+    }
+    let over_cap_session = format!("sess_{session_count}");
+    enqueue_session_notification(
+        &queue,
+        Arc::clone(&drain),
+        session_tool_call_notification(&over_cap_session, "over_cap"),
+    )
+    .await;
+    for (session, claim) in claims.into_iter().enumerate() {
+        claim.release(&format!("local_{session}")).await;
+    }
+    drain.wait_idle().await;
+
+    let recorded = recorded_tool_calls(&sink);
+    assert_eq!(recorded.len(), HELD_SESSION_UPDATES_TOTAL);
+    assert!(!recorded.contains(&format!("{over_cap_session}:over_cap")));
 }
 
 const FS_SESSION_ID: &str = "sess_fs";
