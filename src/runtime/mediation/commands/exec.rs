@@ -47,6 +47,7 @@ pub(crate) fn spawn_child(
     env: Option<&HashMap<String, String>>,
     sandbox: &crate::runtime::sandbox::SandboxProfile,
     network: Option<&crate::extensions::NetworkProviderExtension>,
+    home: &Path,
 ) -> std::io::Result<(Child, Option<WorkloadCgroup>)> {
     let mut cmd = Command::new(program);
     cmd.args(args);
@@ -79,9 +80,21 @@ pub(crate) fn spawn_child(
     // The network provider's declaration must land after the caller's env so
     // it wins on conflict.
     let mut workload_env = env.cloned().unwrap_or_default();
+    sandbox.layer_workload_env(&mut workload_env);
     crate::extensions::apply_workload_env(&mut workload_env, network);
+    // A spawn without its own PATH takes the managed one under the declared entries, since a
+    // PATH of only those would hide the shell's default search.
+    let prepended_path = sandbox.prepended_workload_path(|| {
+        workload_env
+            .get("PATH")
+            .map(std::ffi::OsString::from)
+            .or_else(|| crate::runtime::agent::acp_bridge::workload_process_path(home, sandbox))
+    });
     for (key, value) in &workload_env {
         cmd.env(key, value);
+    }
+    if let Some(path) = prepended_path {
+        cmd.env("PATH", path);
     }
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
@@ -143,6 +156,7 @@ mod tests {
             env,
             &crate::runtime::sandbox::SandboxProfile::default(),
             network,
+            workspace.path(),
         )
         .expect("spawn workload")
         .0;

@@ -148,6 +148,20 @@ expected_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abc
 - Local sources must not contain symlinks. With `[workspace.sandbox].workload_user` set, they must not contain hard-linked files either.
 - Downloads and extraction are size-capped; archives cannot write outside their destination.
 
+`[workspace.sandbox].workload_env` and `workload_path_prepend` declare the environment every workload spawn starts with, such as a pre-built Python venv:
+
+```toml
+[workspace.sandbox]
+workload_path_prepend = ["/opt/venvs/x/.venv/bin"]
+
+[workspace.sandbox.workload_env]
+VIRTUAL_ENV = "/opt/venvs/x/.venv"
+```
+
+- They apply to the agent process, ACP terminals, and mediated commands in every sandbox mode, and under `workload_user`.
+- Agent spawns, and the terminals they open, read them at the next agent start or restart. Mediated commands read them at `acps serve` start.
+- Precedence, `PATH` composition, and validation are specified in [security.md](security.md#workload-environment).
+
 ## Agent
 
 `[agent]` describes the process `acp-stack` launches:

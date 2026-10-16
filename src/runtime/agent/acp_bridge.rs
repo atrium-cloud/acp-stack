@@ -58,10 +58,13 @@ pub use self::capabilities::{
     IGNORED_FEATURE_AGENT_MODE, IGNORED_FEATURE_AGENT_MODEL, IGNORED_FEATURE_MCP_SERVER,
     IgnoredFeature, PartitionedMcpServers, SkippedMcpServer,
 };
-pub(crate) use self::process_env::{KIMI_CODE_AGENT_ID, kimi_lane_for_provider_id};
+pub(crate) use self::process_env::{
+    KIMI_CODE_AGENT_ID, KIMI_MANAGED_ENV_PREFIX, RUNTIME_MANAGED_LAUNCH_ENV,
+    kimi_lane_for_provider_id,
+};
 pub use self::sessions::ForkPoint;
 pub(crate) use self::spawn::resolve_command_path;
-pub(super) use self::spawn::workload_process_path;
+pub(crate) use self::spawn::workload_process_path;
 
 pub use crate::runtime::agent::acp_codec::{
     PendingSessionUpdates, air_fork_point_message_id, air_fork_point_meta, meta_message_id,

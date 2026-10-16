@@ -815,6 +815,7 @@ pub(crate) async fn handle_create_terminal(
         Some(&env),
         &context.sandbox,
         context.network_provider.as_ref(),
+        &context.home,
     );
     let (child, cgroup) = match spawn_result {
         Ok(spawned) => spawned,

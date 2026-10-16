@@ -290,3 +290,57 @@ async fn spawn_forwards_only_reserved_runtime_context_and_explicit_env() {
     assert_ne!(home, "secret-home");
     bridge.shutdown().await.expect("shutdown ok");
 }
+
+#[tokio::test]
+async fn spawn_layers_the_declared_workload_env_beneath_the_agent_env() {
+    let home_dir = tempfile::tempdir().expect("tempdir");
+    let mut config = fake_agent_config();
+    config.args.extend([
+        "--assert-env-equals".into(),
+        "VIRTUAL_ENV".into(),
+        "/opt/tools".into(),
+        "--assert-env-equals".into(),
+        "ACP_STACK_EXPLICIT_ENV".into(),
+        "agent".into(),
+        "--assert-env-prefix".into(),
+        "PATH".into(),
+        "/opt/tools/bin:/opt/extra/bin".into(),
+    ]);
+    let mut env = fake_env();
+    env.insert("ACP_STACK_EXPLICIT_ENV".into(), "agent".into());
+    let sandbox = acp_stack::runtime::sandbox::SandboxProfile {
+        config: acp_stack::config::SandboxConfig {
+            workload_env: [
+                ("VIRTUAL_ENV", "/opt/tools"),
+                ("ACP_STACK_EXPLICIT_ENV", "declared"),
+            ]
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            .collect(),
+            workload_path_prepend: vec!["/opt/tools/bin".to_owned(), "/opt/extra/bin".to_owned()],
+            ..Default::default()
+        },
+        identity: None,
+    };
+
+    let bridge = AcpBridge::spawn(
+        home_dir.path(),
+        &config,
+        env,
+        std::env::temp_dir(),
+        null_sink(),
+        AcpPermissionPolicy::Cancel,
+        &sandbox,
+        "/bin/sh",
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("bridge spawns");
+    assert_eq!(
+        bridge.capabilities().agent_title.as_deref(),
+        Some("env assertions passed")
+    );
+    bridge.shutdown().await.expect("shutdown ok");
+}

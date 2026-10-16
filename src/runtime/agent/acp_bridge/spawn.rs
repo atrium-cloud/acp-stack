@@ -101,6 +101,7 @@ impl AcpBridge {
             sink: sink.clone(),
         });
         let mut env = build_agent_process_env(agent, home, env)?;
+        sandbox.layer_workload_env(&mut env);
         // Last write wins, so the namespace owner's declaration overrides both
         // `[agent].env` and the runtime-managed rewrites above it.
         crate::extensions::apply_workload_env(&mut env, network_provider);
@@ -252,7 +253,11 @@ fn build_agent_command(
     // registry-installed harnesses, HOME for agent config/cache directories.
     // Both derive from the caller's boot-time home, never the process env at
     // spawn time; HOME is the workload identity's own when one is declared.
-    if let Some(path) = workload_process_path(home, sandbox) {
+    let managed_path = workload_process_path(home, sandbox);
+    if let Some(path) = sandbox
+        .prepended_workload_path(|| managed_path.clone())
+        .or(managed_path)
+    {
         command.env("PATH", path);
     }
     command.env("HOME", sandbox.workload_home(home));

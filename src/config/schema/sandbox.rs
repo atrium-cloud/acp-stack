@@ -34,6 +34,14 @@ pub struct SandboxConfig {
     /// `unshare` and `off` only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workload_user: Option<String>,
+    /// Environment variables every workload spawn (agent, ACP terminals,
+    /// mediated commands) starts with, beneath any per-request env.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub workload_env: BTreeMap<String, String>,
+    /// Absolute directories placed, in order, ahead of every workload spawn's
+    /// `PATH`, for pre-built tool environments such as a Python venv.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workload_path_prepend: Vec<String>,
     /// Refuse an `unshare` spawn when no network-provider extension is
     /// declared, instead of falling back to host networking.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -80,6 +88,9 @@ pub const DEFAULT_NETWORK_PROVIDER_TIMEOUT: &str = "30s";
 pub const MAX_WORKLOAD_ENV_COUNT: usize = 16;
 pub const MAX_WORKLOAD_ENV_NAME_BYTES: usize = 128;
 pub const MAX_WORKLOAD_ENV_VALUE_BYTES: usize = 16 * 1024;
+/// `workload_path_prepend` bounds, sized like `workload_env` so each entry fits one env value.
+pub const MAX_WORKLOAD_PATH_PREPEND_COUNT: usize = MAX_WORKLOAD_ENV_COUNT;
+pub const MAX_WORKLOAD_PATH_PREPEND_ENTRY_BYTES: usize = MAX_WORKLOAD_ENV_VALUE_BYTES;
 
 /// A typed, data-declared extension seam. An `[extensions.<name>]` table
 /// declares one instance of an acp-stack-defined extension type; acp-stack

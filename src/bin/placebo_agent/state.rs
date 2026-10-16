@@ -322,9 +322,26 @@ fn env_assertion_title(args: &AcpArgs) -> String {
             failures.push(format!("env override: {name}"));
         }
     }
+    for [name, value] in args.assert_env_equals.as_chunks::<2>().0 {
+        let actual = std::env::var(name).ok();
+        if actual.as_deref() != Some(value.as_str()) {
+            failures.push(format!("env mismatch: {name}={actual:?}"));
+        }
+    }
+    for [name, prefix] in args.assert_env_prefix.as_chunks::<2>().0 {
+        let actual = std::env::var(name).ok();
+        if !actual
+            .as_deref()
+            .is_some_and(|actual| actual.starts_with(prefix.as_str()))
+        {
+            failures.push(format!("env prefix mismatch: {name}={actual:?}"));
+        }
+    }
     if args.assert_env_absent.is_empty()
         && args.assert_env_present.is_empty()
         && args.assert_env_not_equals.is_empty()
+        && args.assert_env_equals.is_empty()
+        && args.assert_env_prefix.is_empty()
     {
         "ACP placebo agent".to_owned()
     } else if failures.is_empty() {

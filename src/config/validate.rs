@@ -13,6 +13,7 @@ pub mod prompts;
 pub mod sessions;
 pub mod skills;
 pub mod sources;
+pub mod workload_env;
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -183,6 +184,8 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
     validate_secret_refs_not_looking_like_values(config)?;
     validate_mcp(&config.mcp)?;
     validate_secret_refs(config)?;
+    // After the screening sweep: an `[agent].env` overlap error echoes the shared name.
+    self::workload_env::validate_workload_env(config)?;
     validate_supabase_logging(config.logging.supabase.as_ref())?;
 
     Ok(())

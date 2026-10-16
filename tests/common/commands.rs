@@ -48,6 +48,18 @@ impl Harness {
     }
 
     pub async fn spawn_with(overrides: HarnessOverrides) -> Self {
+        Self::spawn_configured(|config| {
+            if let Some(permissions) = overrides.permissions {
+                config.permissions = permissions;
+            }
+            if let Some(commands) = overrides.commands {
+                config.commands = commands;
+            }
+        })
+        .await
+    }
+
+    pub async fn spawn_configured(configure: impl FnOnce(&mut Config)) -> Self {
         let workspace_tempdir = tempfile::tempdir().expect("workspace tempdir");
         let workspace_root = workspace_tempdir.path().to_path_buf();
         let uploads_root = workspace_root.join("uploads");
@@ -58,12 +70,7 @@ impl Harness {
         config.workspace.uploads = uploads_root.to_string_lossy().into_owned();
         // /bin/sh is available on every Unix CI box; /bin/bash is not.
         config.workspace.default_shell = "/bin/sh".to_owned();
-        if let Some(permissions) = overrides.permissions {
-            config.permissions = permissions;
-        }
-        if let Some(commands) = overrides.commands {
-            config.commands = commands;
-        }
+        configure(&mut config);
 
         let state_tempdir = tempfile::tempdir().expect("state tempdir");
         let state_path = state_tempdir.path().join("state.sqlite");

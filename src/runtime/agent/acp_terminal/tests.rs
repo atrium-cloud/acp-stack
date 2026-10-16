@@ -107,6 +107,7 @@ async fn registered_terminal_captures_output_and_exit_code() {
         None,
         &crate::runtime::sandbox::SandboxProfile::default(),
         None,
+        &cwd,
     )
     .expect("spawn");
 
@@ -158,6 +159,7 @@ async fn kill_terminates_long_running_child_and_publishes_signal() {
         None,
         &crate::runtime::sandbox::SandboxProfile::default(),
         None,
+        &cwd,
     )
     .expect("spawn");
 
@@ -643,6 +645,58 @@ async fn create_terminal_with_args_execs_the_program_verbatim() {
 }
 
 #[tokio::test]
+async fn create_terminal_layers_the_declared_workload_env_beneath_the_request_env() {
+    use agent_client_protocol::schema::v1::SessionId;
+
+    let root = tempfile::tempdir().expect("workspace root");
+    let config = crate::config::SandboxConfig {
+        workload_env: [("VIRTUAL_ENV", "/opt/tools"), ("GREETING", "declared")]
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            .collect(),
+        workload_path_prepend: vec!["/opt/tools/bin".to_owned(), "/opt/extra/bin".to_owned()],
+        ..crate::config::SandboxConfig::default()
+    };
+    let context = TerminalHandlerContext {
+        registry: Arc::new(TerminalRegistry::default()),
+        workspace_root: root.path().to_path_buf(),
+        home: root.path().to_path_buf(),
+        sandbox: crate::runtime::sandbox::SandboxProfile {
+            config,
+            identity: None,
+        },
+        shell: TEST_SHELL.to_owned(),
+        network_provider: None,
+        command_log: None,
+        sink: Arc::new(NoopStubSink),
+    };
+    let request = CreateTerminalRequest::new(
+        SessionId::new("sess_agent"),
+        "printf '%s,%s,%s' \"$VIRTUAL_ENV\" \"$GREETING\" \"$PATH\"",
+    )
+    .env(vec![EnvVariable::new("GREETING", "request")])
+    .cwd(Some(root.path().to_path_buf()));
+    let response = handle_create_terminal(&context, request)
+        .await
+        .expect("terminal created");
+
+    let handle = context
+        .registry
+        .get("sess_agent", &response.terminal_id.0)
+        .await
+        .expect("handle");
+    assert_eq!(handle.wait_for_exit().await.exit_code, Some(0));
+    let output = handle.buffer.lock().await.data.clone();
+    let (variables, path) = output.rsplit_once(',').expect("three fields");
+    assert_eq!(variables, "/opt/tools,request");
+    let managed = terminal_environment(root.path(), &context.sandbox, &[])
+        .remove("PATH")
+        .map(|managed| format!(":{managed}"))
+        .unwrap_or_default();
+    assert_eq!(path, format!("/opt/tools/bin:/opt/extra/bin{managed}"));
+}
+
+#[tokio::test]
 async fn create_terminal_runs_the_configured_workspace_shell() {
     use agent_client_protocol::schema::v1::SessionId;
     use std::os::unix::fs::PermissionsExt;
@@ -794,6 +848,7 @@ async fn closed_registry_rejects_registration_and_kills_child() {
         None,
         &crate::runtime::sandbox::SandboxProfile::default(),
         None,
+        &cwd,
     )
     .expect("spawn");
     let pid = child.id().expect("child pid") as i32;

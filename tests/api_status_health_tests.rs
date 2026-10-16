@@ -45,6 +45,7 @@ async fn status_returns_200_with_session_key() {
         "sandbox-require-network-provider",
         "sandbox-off-identity",
         "workload-io-follow-links",
+        "sandbox-workload-env",
     ] {
         assert!(
             features.iter().any(|entry| entry == feature),

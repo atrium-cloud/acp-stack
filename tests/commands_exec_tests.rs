@@ -360,6 +360,91 @@ async fn env_on_allowlist_reaches_child() {
     assert_eq!(final_body["data"]["status"], "exited");
 }
 
+const DECLARED_PATH_PREPEND: [&str; 2] = ["/opt/tools-first/bin", "/opt/tools-second/bin"];
+
+/// A harness whose sandbox declares a workload env and PATH entries, with `GREETING` and
+/// `PATH` allowlisted for per-command env.
+async fn declared_workload_env_harness() -> Harness {
+    Harness::spawn_configured(|config| {
+        config.commands.env_allowlist = vec!["GREETING".to_owned(), "PATH".to_owned()];
+        config.workspace.sandbox.workload_env = [
+            ("VIRTUAL_ENV", "/opt/tools-first"),
+            ("GREETING", "declared"),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+        .collect();
+        config.workspace.sandbox.workload_path_prepend =
+            DECLARED_PATH_PREPEND.map(str::to_owned).to_vec();
+    })
+    .await
+}
+
+async fn command_stdout(harness: &Harness, body: Value) -> String {
+    let response = submit(harness, body).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    let id = body["data"]["id"].as_str().expect("id").to_owned();
+    let final_body = wait_for_terminal(harness, &id).await;
+    assert_eq!(final_body["data"]["status"], "exited", "{final_body}");
+    let output = auth(session_client().get(format!(
+        "{}/v1/commands/{id}/output?order=asc",
+        harness.base_url
+    )))
+    .send()
+    .await
+    .expect("send");
+    let output: Value = output.json().await.expect("json");
+    output["data"]["chunks"]
+        .as_array()
+        .expect("chunks")
+        .iter()
+        .filter(|chunk| chunk["stream"] == "stdout")
+        .map(|chunk| chunk["data"].as_str().expect("chunk data"))
+        .collect()
+}
+
+#[tokio::test]
+async fn declared_workload_env_reaches_a_mediated_command_beneath_request_env() {
+    let harness = declared_workload_env_harness().await;
+    let stdout = command_stdout(
+        &harness,
+        serde_json::json!({
+            "command": "printf '%s,%s,%s' \"$VIRTUAL_ENV\" \"$GREETING\" \"$PATH\"",
+            "env": {"GREETING": "request"},
+        }),
+    )
+    .await;
+    let (variables, path) = stdout.rsplit_once(',').expect("three fields");
+    assert_eq!(variables, "/opt/tools-first,request");
+    // With no request PATH, the declared entries lead the managed workload PATH.
+    let declared = DECLARED_PATH_PREPEND.join(":");
+    assert!(
+        path == declared || path.starts_with(&format!("{declared}:")),
+        "{path}"
+    );
+}
+
+#[tokio::test]
+async fn declared_path_prepend_composes_with_a_request_path() {
+    let harness = declared_workload_env_harness().await;
+    let stdout = command_stdout(
+        &harness,
+        serde_json::json!({
+            "command": "printf %s \"$PATH\"",
+            "env": {"PATH": "/request/bin:/usr/bin:/bin"},
+        }),
+    )
+    .await;
+    assert_eq!(
+        stdout,
+        format!(
+            "{}:/request/bin:/usr/bin:/bin",
+            DECLARED_PATH_PREPEND.join(":")
+        )
+    );
+}
+
 #[tokio::test]
 async fn cwd_outside_workspace_rejected() {
     let harness = Harness::spawn().await;

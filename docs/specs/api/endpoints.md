@@ -1186,7 +1186,7 @@ A `running` row is reconciled to `failed` with `error.code = "deps.apply_abandon
 ```json
 {
   "version": "0.1.9",
-  "features": ["network-provider-workload-env", "agent-test-json", "managed-credential-base-url", "sandbox-mask-files", "managed-node-runtime", "sandbox-workload-user", "sandbox-capability-drop", "sandbox-workload-termination", "workload-io-identity", "host-exec-trusted-inputs", "install-workload-reachability", "sandbox-require-network-provider", "sandbox-off-identity", "workload-io-follow-links"]
+  "features": ["network-provider-workload-env", "agent-test-json", "managed-credential-base-url", "sandbox-mask-files", "managed-node-runtime", "sandbox-workload-user", "sandbox-capability-drop", "sandbox-workload-termination", "workload-io-identity", "host-exec-trusted-inputs", "install-workload-reachability", "sandbox-require-network-provider", "sandbox-off-identity", "workload-io-follow-links", "sandbox-workload-env"]
 }
 ```
 
@@ -1207,6 +1207,7 @@ A `running` row is reconciled to `failed` with `error.code = "deps.apply_abandon
     - `sandbox-require-network-provider` covers `[workspace.sandbox].require_network_provider` and `sandbox_require_network_provider` on the init create body
     - `sandbox-off-identity` covers `off` with a workload identity: the privilege drop without namespaces or masks
     - `workload-io-follow-links` covers workload file I/O following symlinks and hard links under the I/O credentials, workspace paths contained by their resolved path, writes through a link keeping the link, and `403 workspace.permission_denied`
+    - `sandbox-workload-env` covers `[workspace.sandbox].workload_env` and `workload_path_prepend` reaching the agent, ACP terminals, and mediated commands (see [security.md](../security.md#workload-environment))
 
 ### `GET /v1/status/agent`
 

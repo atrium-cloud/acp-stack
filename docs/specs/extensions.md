@@ -38,7 +38,7 @@ A namespace whose policy routes traffic through a proxy or a private CA is usabl
 - They are injected into the workload side only. The provider starts from a cleared environment carrying only the `ACPS_SANDBOX_NETWORK_*` contract variables.
 - Values are passed outside argv, keeping them out of process listings.
 
-The declaration is applied last, after `[agent].env` and after any runtime-managed launch variables, so it wins on conflict.
+The declaration is applied last, after `[agent].env`, after any runtime-managed launch variables, and after `[workspace.sandbox].workload_env`, so it wins on conflict. A name declared both here and in `[workspace.sandbox].workload_env` fails config load.
 
 ### `workload_env` Validation
 

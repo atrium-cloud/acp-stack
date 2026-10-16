@@ -50,6 +50,12 @@ pub(crate) const ANTIGRAVITY_AGENT_ID: &str = "antigravity";
 /// whole value.
 pub(crate) const ANTIGRAVITY_BASE_URL_ENV: &str = "GOOGLE_GEMINI_BASE_URL";
 
+/// Kimi Code's launch namespace, which the runtime writes whole.
+pub(crate) const KIMI_MANAGED_ENV_PREFIX: &str = "KIMI_MODEL_";
+/// Launch vars the runtime derives at every spawn of their agent, whatever the provider.
+pub(crate) const RUNTIME_MANAGED_LAUNCH_ENV: [&str; 2] =
+    [PI_ACP_PI_BIN_ENV, ANTIGRAVITY_BASE_URL_ENV];
+
 pub(super) fn build_agent_process_env(
     agent: &AgentConfig,
     home: &Path,
@@ -231,7 +237,7 @@ fn build_kimi_process_env(
 
     if let Some(name) = env
         .keys()
-        .filter(|name| name.starts_with("KIMI_MODEL_"))
+        .filter(|name| name.starts_with(KIMI_MANAGED_ENV_PREFIX))
         .min()
     {
         return Err(StackError::AgentInitializeFailed {

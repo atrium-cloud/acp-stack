@@ -149,6 +149,34 @@ impl SandboxProfile {
             .collect()
     }
 
+    /// Layer `[workspace.sandbox].workload_env` beneath `env`: a name the spawn already sets
+    /// from a per-request source keeps that value.
+    pub fn layer_workload_env(&self, env: &mut std::collections::HashMap<String, String>) {
+        for (name, value) in &self.config.workload_env {
+            env.entry(name.clone()).or_insert_with(|| value.clone());
+        }
+    }
+
+    /// `PATH` with `[workspace.sandbox].workload_path_prepend` ahead of `base`, or `None` when
+    /// nothing is declared and the spawn's `PATH` stays as it is. Declared entries skip
+    /// [`Self::without_workload_writable`]: no privileged helper resolves through this `PATH`.
+    pub fn prepended_workload_path(
+        &self,
+        base: impl FnOnce() -> Option<std::ffi::OsString>,
+    ) -> Option<std::ffi::OsString> {
+        let declared = &self.config.workload_path_prepend;
+        if declared.is_empty() {
+            return None;
+        }
+        // Load validation refuses `:` and NUL in entries, so a plain join cannot split one.
+        let mut path = std::ffi::OsString::from(declared.join(":"));
+        if let Some(base) = base().filter(|base| !base.is_empty()) {
+            path.push(":");
+            path.push(base);
+        }
+        Some(path)
+    }
+
     /// The uid and gid the wrapper drops to.
     pub fn drop_ids(&self) -> (u32, u32) {
         match &self.identity {

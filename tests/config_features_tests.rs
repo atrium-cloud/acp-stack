@@ -952,6 +952,132 @@ fn rejects_a_blank_workload_user() {
     assert!(err.to_string().contains("workload_user"), "got: {err}");
 }
 
+fn sandbox_workload_env_config(table: &str) -> String {
+    format!(
+        "{VALID_CONFIG}\n\
+         [workspace.sandbox]\n\
+         mode = \"off\"\n\
+         {table}"
+    )
+}
+
+#[test]
+fn sandbox_workload_env_loads_and_round_trips_in_order() {
+    let config_text = sandbox_workload_env_config(
+        "workload_path_prepend = [\"/opt/venvs/x/.venv/bin\", \"/opt/tools/bin\"]\n\
+         [workspace.sandbox.workload_env]\n\
+         VIRTUAL_ENV = \"/opt/venvs/x/.venv\"\n",
+    );
+    let config = load_config_from_str(&config_text).expect("declared workload env loads");
+    let sandbox = &config.workspace.sandbox;
+    assert_eq!(
+        sandbox.workload_env.get("VIRTUAL_ENV").map(String::as_str),
+        Some("/opt/venvs/x/.venv")
+    );
+    assert_eq!(
+        sandbox.workload_path_prepend,
+        ["/opt/venvs/x/.venv/bin", "/opt/tools/bin"]
+    );
+
+    let canonical = config.to_canonical_toml().expect("canonical export");
+    let reparsed = load_config_from_str(&canonical).expect("canonical workload env parses");
+    assert_eq!(reparsed.workspace.sandbox, config.workspace.sandbox);
+}
+
+#[test]
+fn sandbox_workload_env_refuses_malformed_and_runtime_managed_names() {
+    for (name, reason) in [
+        ("\"1VAR\"", "[A-Za-z_][A-Za-z0-9_]*"),
+        ("\"MY-VAR\"", "[A-Za-z_][A-Za-z0-9_]*"),
+        ("\"\"", "[A-Za-z_][A-Za-z0-9_]*"),
+        ("PATH", "workload_path_prepend"),
+        ("HOME", "the runtime sets it"),
+        ("ACPS_SANDBOX_NETWORK_ID", "the runtime sets it"),
+        ("KIMI_MODEL_NAME", "the runtime sets it"),
+        ("PI_ACP_PI_BIN", "the runtime sets it"),
+        ("GOOGLE_GEMINI_BASE_URL", "the runtime sets it"),
+        ("OPENCODE_API_KEY", "[agent].env"),
+    ] {
+        let config_text = sandbox_workload_env_config(&format!(
+            "[workspace.sandbox.workload_env]\n{name} = \"value\"\n"
+        ));
+        let err = load_config_from_str(&config_text).expect_err("refused workload_env name");
+        assert!(
+            err.to_string().contains("workspace.sandbox.workload_env")
+                && err.to_string().contains(reason),
+            "name {name} got: {err}"
+        );
+    }
+}
+
+#[test]
+fn sandbox_workload_env_refuses_a_name_a_network_provider_declares() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [workspace.sandbox]\n\
+         mode = \"unshare\"\n\
+         [workspace.sandbox.workload_env]\n\
+         HTTPS_PROXY = \"http://stale:1\"\n\
+         [extensions.egress]\n\
+         type = \"network-provider\"\n\
+         [extensions.egress.workload_env]\n\
+         HTTPS_PROXY = \"http://127.0.0.1:3128\"\n"
+    );
+    let err = load_config_from_str(&config_text).expect_err("provider overlap is refused");
+    assert!(
+        err.to_string().contains("workspace.sandbox.workload_env")
+            && err.to_string().contains("egress"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn sandbox_workload_env_refuses_out_of_bounds_values() {
+    let too_many = (0..17)
+        .map(|index| format!("VAR_{index} = \"value\"\n"))
+        .collect::<String>();
+    let oversized = "v".repeat(16 * 1024 + 1);
+    for (entries, reason) in [
+        (too_many, "exceeding the limit"),
+        (format!("VAR = \"{oversized}\"\n"), "non-empty"),
+        ("VAR = \"\"\n".to_owned(), "non-empty"),
+        ("VAR = \"a\\u0000b\"\n".to_owned(), "NUL"),
+    ] {
+        let config_text =
+            sandbox_workload_env_config(&format!("[workspace.sandbox.workload_env]\n{entries}"));
+        let err = load_config_from_str(&config_text).expect_err("out-of-bounds workload_env");
+        assert!(
+            err.to_string().contains("workspace.sandbox.workload_env")
+                && err.to_string().contains(reason),
+            "got: {err}"
+        );
+    }
+}
+
+#[test]
+fn sandbox_workload_path_prepend_refuses_invalid_entries() {
+    let too_many = (0..17)
+        .map(|index| format!("\"/opt/{index}/bin\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    for (entries, reason) in [
+        ("\"relative/bin\"".to_owned(), "absolute"),
+        ("\"/opt/a/bin:/opt/b/bin\"".to_owned(), "`:`"),
+        ("\"/opt/a\\u0000/bin\"".to_owned(), "NUL"),
+        (too_many, "exceeding the limit"),
+    ] {
+        let config_text =
+            sandbox_workload_env_config(&format!("workload_path_prepend = [{entries}]\n"));
+        let err = load_config_from_str(&config_text).expect_err("invalid workload_path_prepend");
+        assert!(
+            err.to_string()
+                .contains("workspace.sandbox.workload_path_prepend")
+                && err.to_string().contains(reason),
+            "got: {err}"
+        );
+    }
+}
+
 #[test]
 fn require_network_provider_needs_unshare() {
     let config_text = format!(

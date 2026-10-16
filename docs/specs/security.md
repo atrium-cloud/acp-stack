@@ -188,7 +188,7 @@ The workload process:
 
 - Runs with the identity's uid and primary gid, no supplementary groups, `no_new_privs`, and empty inheritable, ambient, and bounding capability sets, so its effective and permitted sets are empty.
 - Sees the identity's home as `HOME`. Native Agent config and skills live there. Installs, the managed `PATH`, masks, config, and state stay under the runtime home.
-- Gets a `PATH` with every directory the identity can write removed.
+- Gets a `PATH` with every directory the identity can write removed. Entries the operator declares in `[workspace.sandbox].workload_path_prepend` are kept, in order, even when the identity can write them. The sandbox chain runs `setpriv`, `unshare`, and `acps` by absolute path, so no privileged helper resolves anything through the workload `PATH`.
 - Under `off`, gets the privilege drop with no namespaces and no masks.
 
 Termination does not depend on signalling the identity's uid:
@@ -219,6 +219,44 @@ The integrator provisions:
 - Ambient `CAP_SETUID`, `CAP_SETGID`, and `CAP_SETPCAP` for the runtime, plus `CAP_SYS_ADMIN` under `unshare`. `CAP_KILL` is optional.
 - Under `unshare`, util-linux 2.33 or newer for `setpriv --pdeathsig`.
 - Under `off`, a cgroup v2 hierarchy on Linux 5.14 or newer with the runtime's cgroup delegated to the runtime user, for example systemd `Delegate=yes`. The packaged systemd unit grants neither ambient capabilities nor delegation.
+
+### Workload Environment
+
+`[workspace.sandbox].workload_env` declares environment variables, and `workload_path_prepend` an ordered list of absolute directories, that every workload spawn starts with. Pre-built tool environments such as a Python venv use it to become the workload's default:
+
+```toml
+[workspace.sandbox]
+workload_path_prepend = ["/opt/venvs/x/.venv/bin"]
+
+[workspace.sandbox.workload_env]
+VIRTUAL_ENV = "/opt/venvs/x/.venv"
+```
+
+Both reach the agent process, ACP terminals, and mediated commands in every sandbox mode, and under `workload_user`.
+
+Values are literal strings with no `${...}` secret-reference expansion. Secrets belong in `[agent].env` references.
+
+Precedence, lowest first:
+
+1. The environment the spawn otherwise starts with: the managed `PATH` and `HOME` for the agent and terminals, nothing for mediated commands.
+2. `workload_env`.
+3. Per-request env: `[agent].env` and runtime-managed launch variables for the agent, the agent's terminal `env`, and `env` on `POST /v1/commands`.
+4. A network-provider `workload_env`.
+
+`workload_path_prepend` goes ahead of the `PATH` the spawn otherwise gets, in declared order:
+
+- The agent and terminals: the managed `PATH`, or the terminal request's own `PATH`.
+- Mediated commands: the request's allowlisted `PATH`, otherwise the managed workload `PATH`. With nothing declared, a mediated command runs without `PATH`.
+
+Config load refuses, under `workspace.sandbox.workload_env`:
+
+- More than 16 entries, names outside `[A-Za-z_][A-Za-z0-9_]*` or over 128 bytes, and values that are empty, over 16 KiB, or contain NUL.
+- `PATH` (use `workload_path_prepend`), `HOME`, any `ACPS_*` name, and the runtime-managed launch variables `KIMI_MODEL_*`, `PI_ACP_PI_BIN`, and `GOOGLE_GEMINI_BASE_URL`.
+- A name any target's `[agent].env` lists, or a network-provider `workload_env` declares.
+
+The Hermes Agent base-URL variable depends on the selected provider and is settled at spawn: when the runtime sets it for an endpoint override, the runtime value replaces a declared one.
+
+Config load refuses, under `workspace.sandbox.workload_path_prepend`, more than 16 entries and any entry that is relative, over 16 KiB, or contains `:` or NUL.
 
 ### Network isolation (`unshare` only)
 

@@ -55,6 +55,10 @@ pub(crate) struct AcpArgs {
     pub(crate) assert_env_present: Vec<String>,
     #[arg(long, num_args = 2)]
     pub(crate) assert_env_not_equals: Vec<String>,
+    #[arg(long, num_args = 2)]
+    pub(crate) assert_env_equals: Vec<String>,
+    #[arg(long, num_args = 2)]
+    pub(crate) assert_env_prefix: Vec<String>,
     #[arg(long)]
     pub(crate) no_cap_load_session: bool,
     #[arg(long)]

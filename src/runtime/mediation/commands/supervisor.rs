@@ -378,6 +378,7 @@ impl SupervisorTask {
             self.env.as_ref(),
             &self.sandbox,
             self.network_provider.as_ref(),
+            &self.home,
         )
     }
 
