@@ -228,7 +228,7 @@ pub(crate) async fn agent_switch_handler(
     let mut canonical = candidate_config.to_canonical_toml()?;
     let mut candidate_config = reload_candidate_config(&canonical, target_entry)?;
     let secret_migrations = apply_switch_secret_migrations(&home, &plan.secret_migrations)?;
-    let _env = open_agent_env(&state.runtime_paths.home, &candidate_config)?;
+    let _env = open_agent_env(&state, &candidate_config)?;
 
     let install = install_agent_for_config(&state, &candidate_config).await?;
     crate::runtime::agent::provider_model_catalog::refresh_provider_models_best_effort(
@@ -419,7 +419,7 @@ async fn switch_to_existing_array_target(
             .as_ref()
             .map(|provider| provider.id.as_str()),
     )?;
-    let _env = open_agent_env(&state.runtime_paths.home, &candidate_config)?;
+    let _env = open_agent_env(state, &candidate_config)?;
     let required_env_refs = candidate_config.agent.env.clone();
 
     let install = install_agent_for_config(state, &candidate_config).await?;
@@ -614,7 +614,7 @@ async fn reconfigure_primary_target(
         ));
     }
     // The credential the provider resolves through must exist before anything is written.
-    let _env = open_agent_env(&state.runtime_paths.home, &candidate_config)?;
+    let _env = open_agent_env(state, &candidate_config)?;
 
     crate::runtime::agent::provider_model_catalog::refresh_provider_models_best_effort(
         home,
@@ -1228,7 +1228,7 @@ async fn start_agent_with_config(
     target: &AgentTargetRuntime,
     config: &Config,
 ) -> Result<()> {
-    let environment = open_agent_environment(&state.runtime_paths.home, config)?;
+    let environment = open_agent_environment(state, config)?;
     target
         .supervisor
         .start(AgentStartRequest {

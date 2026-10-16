@@ -48,7 +48,7 @@ pub(crate) async fn sessions_prompt_handler(
             &id,
             blocks,
             prompt_json,
-            || open_mcp_servers(&state.runtime_paths.home, &state.config),
+            || open_mcp_servers(&state, &state.config),
             &state.config.workspace.root,
             &state.state,
         )

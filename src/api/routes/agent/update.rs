@@ -42,7 +42,7 @@ pub(crate) async fn agent_update_handler(
     let restart_after = target.supervisor.is_running().await;
     if restart_after {
         ensure_array_process_start_allowed(&config, &target_id)?;
-        open_agent_environment(&state.runtime_paths.home, &config)?;
+        open_agent_environment(&state, &config)?;
         let _mutation = state.lock_agent_config_mutation().await?;
         let stopped = target
             .supervisor

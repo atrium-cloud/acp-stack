@@ -324,6 +324,88 @@ pub fn atomic_write_owner_only(path: &Path, content: &[u8]) -> Result<()> {
     sync_parent_dir(path)
 }
 
+/// What a file looked like when it was last read: device, inode, size, and
+/// modify and change times. Every `atomic_write_owner_only` lands a new inode,
+/// and the change time catches a chmod or an in-place edit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileStamp {
+    device: u64,
+    inode: u64,
+    length: u64,
+    modified_ns: i128,
+    changed_ns: i128,
+}
+
+/// Follows symlinks, so an operator's linked config is stamped by its target.
+/// `None` when the file does not exist.
+pub fn file_stamp(path: &Path) -> std::io::Result<Option<FileStamp>> {
+    use std::os::unix::fs::MetadataExt as _;
+    const NANOS_PER_SECOND: i128 = 1_000_000_000;
+
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    Ok(Some(FileStamp {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        length: metadata.len(),
+        modified_ns: i128::from(metadata.mtime()) * NANOS_PER_SECOND
+            + i128::from(metadata.mtime_nsec()),
+        changed_ns: i128::from(metadata.ctime()) * NANOS_PER_SECOND
+            + i128::from(metadata.ctime_nsec()),
+    }))
+}
+
+/// A value loaded from a set of files, reused until any of their stamps
+/// changes. Stamps are taken before the load, so a write racing a load leaves
+/// an older stamp behind and the next call loads again.
+pub struct StampedCache<T> {
+    paths: Vec<PathBuf>,
+    entry: std::sync::Mutex<Option<(Vec<Option<FileStamp>>, T)>>,
+}
+
+impl<T: Clone> StampedCache<T> {
+    pub fn new(paths: Vec<PathBuf>) -> Self {
+        Self {
+            paths,
+            entry: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// A failed load is returned and not cached. A file that cannot be stat'ed
+    /// bypasses the cache; the load surfaces whatever is wrong with it.
+    pub fn get_or_load(&self, load: impl FnOnce() -> Result<T>) -> Result<T> {
+        let stamps = match self
+            .paths
+            .iter()
+            .map(|path| file_stamp(path))
+            .collect::<std::io::Result<Vec<_>>>()
+        {
+            Ok(stamps) => stamps,
+            Err(error) => {
+                tracing::debug!(error = %error, "file stamp unavailable; loading without the cache");
+                return load();
+            }
+        };
+        if let Some((cached_stamps, value)) = self.lock_entry().as_ref()
+            && *cached_stamps == stamps
+        {
+            return Ok(value.clone());
+        }
+        let value = load()?;
+        *self.lock_entry() = Some((stamps, value.clone()));
+        Ok(value)
+    }
+
+    fn lock_entry(&self) -> std::sync::MutexGuard<'_, Option<(Vec<Option<FileStamp>>, T)>> {
+        self.entry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 /// Validate and prepare a file target below `home` without following symlinked path components;
 /// an existing target must be a current-user-owned, single-link regular file.
 pub fn prepare_owner_managed_file_path(home: &Path, path: &Path) -> Result<()> {
@@ -495,6 +577,14 @@ pub fn set_owner_only_file(_path: &Path) -> Result<()> {
 
 #[cfg(unix)]
 fn set_permissions(path: &Path, mode: u32) -> Result<()> {
+    const PERMISSION_BITS: u32 = 0o7777;
+    // A chmod bumps ctime even when the mode is unchanged, which would defeat
+    // every `StampedCache` over a file its loader repairs.
+    if std::fs::metadata(path)
+        .is_ok_and(|metadata| metadata.permissions().mode() & PERMISSION_BITS == mode)
+    {
+        return Ok(());
+    }
     std::fs::set_permissions(path, Permissions::from_mode(mode)).map_err(|source| {
         StackError::PermissionSet {
             path: path.to_path_buf(),
@@ -533,6 +623,112 @@ fn sync_file(path: &Path, file: &std::fs::File) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    fn read_counted(path: &Path, loads: &Cell<u32>) -> Result<String> {
+        loads.set(loads.get() + 1);
+        std::fs::read_to_string(path).map_err(|source| StackError::FileCreate {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
+    #[test]
+    fn stamped_cache_reuses_the_value_until_an_atomic_rewrite_of_the_same_length() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("config.toml");
+        atomic_write_owner_only(&path, b"aaaa").expect("first write");
+        let cache = StampedCache::new(vec![path.clone()]);
+        let loads = Cell::new(0);
+
+        let first = cache.get_or_load(|| read_counted(&path, &loads));
+        let second = cache.get_or_load(|| read_counted(&path, &loads));
+        assert_eq!(first.expect("first"), "aaaa");
+        assert_eq!(second.expect("second"), "aaaa");
+        assert_eq!(loads.get(), 1);
+
+        atomic_write_owner_only(&path, b"bbbb").expect("rewrite");
+        let reloaded = cache.get_or_load(|| read_counted(&path, &loads));
+        assert_eq!(reloaded.expect("reloaded"), "bbbb");
+        assert_eq!(loads.get(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stamped_cache_reloads_after_a_permission_change() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("secrets.age");
+        atomic_write_owner_only(&path, b"cipher").expect("write");
+        let cache = StampedCache::new(vec![path.clone()]);
+        let loads = Cell::new(0);
+        cache
+            .get_or_load(|| read_counted(&path, &loads))
+            .expect("first");
+
+        std::fs::set_permissions(&path, Permissions::from_mode(0o644)).expect("chmod");
+        cache
+            .get_or_load(|| read_counted(&path, &loads))
+            .expect("after chmod");
+        assert_eq!(loads.get(), 2);
+    }
+
+    #[test]
+    fn stamped_cache_reloads_when_a_missing_file_appears() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("agents.toml");
+        let cache = StampedCache::new(vec![path.clone()]);
+        let loads = Cell::new(0);
+        let absent = cache.get_or_load(|| {
+            loads.set(loads.get() + 1);
+            Ok(String::new())
+        });
+        assert_eq!(absent.expect("absent"), "");
+
+        atomic_write_owner_only(&path, b"override").expect("write");
+        let present = cache.get_or_load(|| read_counted(&path, &loads));
+        assert_eq!(present.expect("present"), "override");
+        assert_eq!(loads.get(), 2);
+    }
+
+    #[test]
+    fn stamped_cache_does_not_keep_a_failed_load() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("config.toml");
+        atomic_write_owner_only(&path, b"valid").expect("write");
+        let cache = StampedCache::new(vec![path.clone()]);
+
+        let failed = cache.get_or_load(|| {
+            Err(StackError::InvalidParam {
+                field: "config",
+                reason: "parse failed".to_owned(),
+            })
+        });
+        assert!(failed.is_err());
+        let loads = Cell::new(0);
+        let loaded = cache.get_or_load(|| read_counted(&path, &loads));
+        assert_eq!(loaded.expect("loaded"), "valid");
+        assert_eq!(loads.get(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stamped_cache_follows_a_symlinked_file_to_its_target() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let target = tempdir.path().join("dotfiles-config.toml");
+        let link = tempdir.path().join("config.toml");
+        atomic_write_owner_only(&target, b"first").expect("target");
+        std::os::unix::fs::symlink(&target, &link).expect("link");
+        let cache = StampedCache::new(vec![link.clone()]);
+        let loads = Cell::new(0);
+        cache
+            .get_or_load(|| read_counted(&link, &loads))
+            .expect("first");
+
+        atomic_write_owner_only(&target, b"edits").expect("edit target");
+        let edited = cache.get_or_load(|| read_counted(&link, &loads));
+        assert_eq!(edited.expect("edited"), "edits");
+        assert_eq!(loads.get(), 2);
+    }
 
     #[cfg(feature = "test-fixtures")]
     #[test]

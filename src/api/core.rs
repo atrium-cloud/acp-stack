@@ -92,13 +92,14 @@ use crate::auth::{AuthVerifierSet, KeyKind};
 use crate::config::{AgentConfig, Config, IMPORT_REQUEST_SIZE_LIMIT, LocalSessionAuth};
 use crate::error::{Result, StackError};
 use crate::events::EventHub;
-use crate::fs_util::{ExclusiveFileLock, acquire_agent_config_mutation_file_lock};
+use crate::fs_util::{ExclusiveFileLock, StampedCache, acquire_agent_config_mutation_file_lock};
 use crate::runtime::agent::model_catalog::AgentModelCatalogManager;
 use crate::runtime::agent::session_changes::SessionChangesHandle;
 use crate::runtime::agent::supervisor::AgentSupervisor;
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::runtime::mediation::commands::CommandGateway;
 use crate::runtime::mediation::permissions::PermissionService;
+use crate::secrets::SecretStore;
 use crate::state::{StateHandle, StateStore};
 
 // === CONSTANTS ===
@@ -133,6 +134,8 @@ pub struct AppState {
     /// mutex, which a minutes-long apply must not park.
     pub(crate) deps_apply_lock: Arc<TokioMutex<()>>,
     pub(crate) session_changes: SessionChangesHandle,
+    pub(crate) runtime_config: Arc<StampedCache<Config>>,
+    pub(crate) secrets: SecretsCache,
     pub event_hub: EventHub,
     pub commands: CommandGateway,
     pub permissions: PermissionService,
@@ -305,10 +308,9 @@ impl AppState {
     }
 
     pub(crate) async fn refresh_array_runtime_from_disk(&self) -> Result<Config> {
-        let config = load_runtime_config_from_disk(
-            &self.runtime_paths.config_path,
-            &self.runtime_paths.home,
-        )?;
+        let config = self.runtime_config.get_or_load(|| {
+            load_runtime_config_from_disk(&self.runtime_paths.config_path, &self.runtime_paths.home)
+        })?;
         self.agent_targets.sync_targets_from_config(&config);
         self.array_enabled
             .store(config.array.enabled, Ordering::Relaxed);
@@ -462,6 +464,8 @@ impl AppState {
         ));
         let local_session_auth = Arc::new(TokioRwLock::new(config_arc.local.session_auth));
         let array_enabled = Arc::new(AtomicBool::new(config_arc.array.enabled));
+        let runtime_config = Arc::new(StampedCache::new(runtime_config_paths(&runtime_paths)));
+        let secrets = SecretsCache::new(&runtime_paths.home);
         Ok(Self {
             config: config_arc,
             live_agent_config,
@@ -483,6 +487,8 @@ impl AppState {
             native_config_mutation_lock: Arc::new(TokioMutex::new(())),
             deps_apply_lock: Arc::new(TokioMutex::new(())),
             session_changes: SessionChangesHandle::new(),
+            runtime_config,
+            secrets,
             event_hub,
             commands,
             permissions,
@@ -509,6 +515,46 @@ pub(crate) fn load_runtime_config_from_disk(config_path: &Path, home: &Path) -> 
     let mut config = crate::config::load_for_runtime_reload(config_path)?;
     populate_agent_adapter_from_active_registry(&mut config, home);
     Ok(config)
+}
+
+/// Every file `load_runtime_config_from_disk` reads, so an edit to any of them
+/// reloads the cached config.
+fn runtime_config_paths(runtime_paths: &RuntimePaths) -> Vec<PathBuf> {
+    let mut paths = vec![
+        runtime_paths.config_path.clone(),
+        registry_override_path(&runtime_paths.home),
+    ];
+    // The path itself, present or not: the loader checks for the file on every load.
+    paths.extend(crate::dev_gates::fixture_path(
+        crate::dev_gates::DEV_PLACEBO_REGISTRY_ENV,
+    ));
+    paths
+}
+
+/// The decrypted secret store, reused until the age key or the ciphertext
+/// changes on disk. Each reload repeats `SecretStore::open`'s permission repair
+/// and redaction registration.
+#[derive(Clone)]
+pub(crate) struct SecretsCache {
+    home: PathBuf,
+    store: Arc<StampedCache<Arc<SecretStore>>>,
+}
+
+impl SecretsCache {
+    fn new(home: &Path) -> Self {
+        Self {
+            home: home.to_path_buf(),
+            store: Arc::new(StampedCache::new(vec![
+                crate::secrets::age_key_path(home),
+                crate::secrets::secret_store_path(home),
+            ])),
+        }
+    }
+
+    pub(crate) fn open(&self) -> Result<Arc<SecretStore>> {
+        self.store
+            .get_or_load(|| SecretStore::open(&self.home).map(Arc::new))
+    }
 }
 
 fn populate_agent_adapter_from_active_registry(config: &mut Config, home: &Path) {
@@ -930,6 +976,25 @@ mod tests {
 
     /// Long enough for a handler that outlives the drain deadline several times over.
     const HANDLER_RUNTIME: Duration = Duration::from_secs(600);
+
+    #[test]
+    fn secrets_cache_reuses_the_store_until_a_secret_is_written() {
+        let home = tempfile::tempdir().expect("home");
+        let mut writer = SecretStore::open_or_create(home.path()).expect("create store");
+        writer.set("FIRST", "one").expect("set first");
+        let secrets = SecretsCache::new(home.path());
+
+        let first = secrets.open().expect("first open");
+        let second = secrets.open().expect("second open");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "an unchanged store must be served from the cache"
+        );
+
+        writer.set("SECOND", "two").expect("set second");
+        let reloaded = secrets.open().expect("reload");
+        assert_eq!(reloaded.get("SECOND").expect("second secret"), "two");
+    }
 
     #[tokio::test(start_paused = true)]
     async fn a_stalled_body_is_dropped_after_the_drain_deadline() {

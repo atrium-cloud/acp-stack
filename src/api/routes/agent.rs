@@ -115,7 +115,7 @@ pub(crate) async fn array_status_handler(
         resolved_config.agent = target_config.agent.clone();
         let (configured_provider_snapshot, provider_error) =
             super::status::configured_providers_or_error(open_agent_environment(
-                &state.runtime_paths.home,
+                &state,
                 &resolved_config,
             ));
         let provider_restart_required = super::status::provider_restart_required_for_status(
@@ -186,7 +186,7 @@ async fn install_agent_for_config(
     let outcome = if let Some(install) = config.agent.install.clone() {
         // Escape-hatch shell recipe. The `running` row is finalized in place on exit, so polling
         // readers see the in-flight install; rows the sink never finalized are appended after.
-        let env = open_agent_env(&home, config)?;
+        let env = open_agent_env(state, config)?;
         let expected_sha256 = config.agent.expected_sha256.clone();
         let agent_id = config.agent.id.clone();
         let agent_command = config.agent.command.clone();
@@ -306,21 +306,20 @@ async fn persist_untracked_installer_rows(
 }
 
 pub(crate) fn open_agent_env(
-    home: &std::path::Path,
+    state: &AppState,
     config: &Config,
 ) -> Result<std::collections::HashMap<String, String>> {
-    Ok(open_agent_environment(home, config)?.env)
+    Ok(open_agent_environment(state, config)?.env)
 }
 
 pub(crate) fn open_agent_environment(
-    home: &std::path::Path,
+    state: &AppState,
     config: &Config,
 ) -> Result<ResolvedAgentEnvironment> {
     if let Some(environment) = resolve_agent_environment_without_secrets(config) {
         return Ok(environment);
     }
-    let store = SecretStore::open(home)?;
-    resolve_agent_environment(config, &store)
+    resolve_agent_environment(config, &*state.secrets.open()?)
 }
 
 async fn load_fresh_config_for_target(
@@ -345,14 +344,17 @@ async fn load_fresh_config_for_target(
 
 /// Resolve every configured `[mcp.servers]` entry into the SDK `McpServer` type.
 pub(super) fn open_mcp_servers(
-    home: &std::path::Path,
+    state: &AppState,
     config: &Config,
 ) -> Result<Vec<agent_client_protocol::schema::v1::McpServer>> {
     if config.mcp.servers.is_empty() {
         return Ok(Vec::new());
     }
-    let store = SecretStore::open(home)?;
-    crate::runtime::agent::mcp::resolve_mcp_servers(&config.mcp, &store, home)
+    crate::runtime::agent::mcp::resolve_mcp_servers(
+        &config.mcp,
+        &*state.secrets.open()?,
+        &state.runtime_paths.home,
+    )
 }
 
 pub(crate) fn ensure_array_process_start_allowed(config: &Config, target_id: &str) -> Result<()> {

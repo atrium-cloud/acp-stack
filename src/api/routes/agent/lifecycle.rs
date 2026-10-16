@@ -88,7 +88,7 @@ pub(crate) async fn start_agent_target_locked(
     // made while the daemon is up are honored by the next start.
     let (config, target) = load_fresh_config_for_target(state, target_id).await?;
     ensure_array_process_start_allowed(&config, target_id)?;
-    let environment = open_agent_environment(&state.runtime_paths.home, &config)?;
+    let environment = open_agent_environment(state, &config)?;
     let capabilities = target
         .supervisor
         .start(AgentStartRequest {
@@ -351,7 +351,7 @@ async fn restart_agent_target(
     // or missing secret fails cleanly instead of taking the agent down with nothing to restart.
     let (fresh_config, target) = load_fresh_config_for_target(state, target_id).await?;
     ensure_array_process_start_allowed(&fresh_config, target_id)?;
-    let environment = open_agent_environment(&state.runtime_paths.home, &fresh_config)?;
+    let environment = open_agent_environment(state, &fresh_config)?;
 
     // `Err(AgentNotRunning)` from `stop` is acceptable: a restart against a stopped agent
     // degenerates into a plain start.

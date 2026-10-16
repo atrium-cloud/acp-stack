@@ -308,7 +308,7 @@ pub(super) async fn start_agent_for_config(state: &AppState, config: &Config) ->
     let target_id = config.array.primary_target.clone();
     ensure_array_process_start_allowed(config, &target_id)?;
     let target = state.agent_target(&target_id)?;
-    let environment = open_agent_environment(&state.runtime_paths.home, config)?;
+    let environment = open_agent_environment(state, config)?;
     *target.live_agent_config.lock().await = config.agent.clone();
     target
         .supervisor
