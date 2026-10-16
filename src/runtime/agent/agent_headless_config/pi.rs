@@ -294,7 +294,7 @@ mod tests {
         let value = pi_models_value(tempdir.path()).expect("models.json written");
         assert_eq!(
             value["providers"]["opencode-go"],
-            json!({ "baseUrl": "http://127.0.0.1:3129/zen/go/v1" })
+            json!({ "baseUrl": "http://127.0.0.1:3129/inference/go/v1" })
         );
     }
 

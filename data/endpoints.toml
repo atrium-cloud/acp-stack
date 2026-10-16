@@ -4,8 +4,8 @@
 # instead. Scoped to OpenCode Zen/Go today.
 #
 # Mirrored from:
-# [OpenCode Zen Docs - Endpoints](https://opencode.ai/docs/zen/#endpoints)
-# [OpenCode Go Docs - Endpoints](https://opencode.ai/docs/go/#endpoints)
+# [OpenCode Zen Docs - Endpoints](https://opencode.ai/v2/docs/console/models/)
+# [OpenCode Go Docs - Endpoints](https://opencode.ai/v2/docs/console/go/)
 # Mirrored on 2026-08-20
 #
 # Refresh ritual: re-check those two pages when Zen/Go rotate models.
