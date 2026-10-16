@@ -29,40 +29,137 @@ References:
 - Roadmap: docs/mgmt/roadmap.md
 - Todos: docs/todos/
 
-## General Behavioral Guidance
+<!-- BEGIN rules:baseline -->
+## General Guidance
 
 - Interactions with humans
-    - Avoid making engineering decisions on behalf of humans when the tradeoff is material. Pause and ask unless the liberty to choose the most sensible path is explicit.
-    - If given an implementation task that has been thoroughly discussed, complete all parts of the task. If a blocker affects implementation, pause and report immediately.
-    - During spec review, rank real issues by priority and avoid fixating on minor wording preferences. Report findings by priority (`P0`, `P1`, `P2`, etc.).
-    - When a human uses "we", they are being nice and collaborative. They might see you as a collaborator, but it is not consent or permission for you to perform the subsequently mentioned actions on their behalf (e.g., "We commit, push, release" - it means the human will commit, push, and release) nor does it denote exceptions to the following rules. You are not an equal.
-    - When ending the current turn, DO NOT include caveats unless truly necessary. If they were important, they should have already been handled. If they were not, they should not be mentioned. Most caveats in your end-turn messages add nothing but psychological burden.
-- Your code
-    - You are a generative AI. You cannot bear responsibility for your work. Humans do.
-    - Do not perform actions that publish your work without human approval.
-    - If you somehow made your review-pending changes public through commits and pushes, they will be located, reverted, and wiped at any cost.
+    - Avoid making engineering decisions on behalf of humans when the tradeoffs/consequences are material. Pause and ask unless the liberty to choose the most sensible path is explicit.
+    - If given an implementation task that has been discussed and decided, complete all parts of the task. If a blocker affects implementation, pause and report it immediately.
+    - The boundary between humans and agents must be upheld strictly. Mutating actions that have effects on the real world, such as deletion, committing, pushing, releasing, running a mutating SQL query, should be performed by humans directly unless explicitly authorized otherwise.
+    - Humans might have a collaborative posture such as by using "we" but this in itself is not consent for actions to be taken on their behalf.
+    - When ending the current turn, do not include caveats such as "one note" "two things worth knowing".
+- Working in codebases
+    - Dependencies: use the latest compatible versions unless the project pins a version.
+    - Exploration: explore this and nearby related codebases liberally.
+
+## Code Quality
+
+- Problem-solving style
+    - Strive for concise, elegant, intuitive solutions for features and bug fixes. Consider fewer roundtrips, lower complexity, and less branching on outcomes for each unit of new code.
+    - Overengineering can be:
+        - Hypothetical scenarios given too much importance.
+        - Tunnel vision on review findings.
+    - Avoid overengineering by:
+        - Assessing likelihood during planning and review finding validation phases.
+        - If multiple attempts are made to fix the same issue, consider accepting a compromise or code simplification.
+- Abstractions
+    - New abstractions should be created to avoid repetition. Only make a new abstraction if it can be reused.
+    - Prefer implementing functionality in existing files unless it is a new logical component. Avoid creating many tiny files for tightly coupled code.
+- Comments and annotations
+    - Intuitiveness of the code is a marker of quality. The intent of a module/function should be evident, and comments should only be used minimally to describe what is a non-obvious motive or decision.
+    - Ideally, max 3 lines for each block of comment. Comments should also be terse.
+    - Use full words for identifiers; avoid abbreviations like `cfg` when `config` is clearer.
+    - No TODO comments. If `docs/todos.md` or other todo files are available, add tasks in there.
+- Fallbacks and constants
+    - Fallbacks and constants should be well-rationalized. Avoid hardcoded values.
+    - If a constant is needed, follow the local centralized convention.
+- Tests
+    - For every new logical unit of code, add tests as needed as part of the feature commit.
+    - Tests must cover realistic scenarios. If the tested scenario is arbitrary, remove the test.
+    - Tests should be concise. Do not overexpand test suite in the name of thoroughness.
+    - Tests should be rerun as needed after code changes.
+    - When building an e2e test harness, its mechanisms must match user-facing system designs, such as frontend.
+    - If one is available, run the full e2e suite after major code changes such as refactoring.
+    - When testing with real LLMs: default to `deepseek-v4.1-flash` via OpenCode Go (`opencode-go`) where supported, otherwise `deepseek/deepseek-v4.1-flash` via OpenRouter. For other cases, consult the human. Do not test with the model family you are running on. The model IDs above are valid as of Oct 2026.
+- Error handling
+    - Classify the failure before choosing a response:
+        - Bugs and violated invariants (impossible states, invalid startup config, corrupt local state): fail fast and loudly with the full failure context.
+        - Environmental or transient failures (network, unavailable dependencies, rate limits, one bad item in a batch): retry with backoff up to 10 times, or skip and continue, and log each occurrence.
+        - Untrusted input and security checks: reject and fail closed.
+    - At the user-facing edge: self-heal where possible but still log it; when terminally failed, show the user their recourse.
+    - Never drop a failure and its reason silently. No catch-all handlers that hide root causes.
+    - Error messages name the failed subsystem and action.
+- Reviews and bug fixes
+    - Review finding classifications:
+        - P0: must be fixed. Issues that fundamentally break the intended design, or major security regression/vulnerability.
+        - P1: should be fixed. Issues that likely occur in common production scenarios.
+        - P2: circumstantial findings or low-probability edge cases; doc issues; strange designs. Might need more verification or context.
+        - P3: fringe or unlikely edge cases. Should be fine if left alone.
+    - Keep software maturity in mind when considering viable fixes. Ideally, do not mask the symptom and resort to a local patch fix.
+    - Evaluate code removal or simplification as a viable bug fix option. Overengineered designs are often a source of bugs.
+    - Prioritize findings that are related to the code changes, but do not ignore old bugs if they are present/now visible.
+- Security
+    - Complex designs are more likely to be vulnerable, and simple designs are easier to make secure.
+    - Run audits when adding or updating deps, and update to non-vulnerable versions as soon as possible.
+- Secrets
+    - You can create, read, and edit `.env.example` for env vars, but do not inspect or edit other `.env*` files.
+    - You can source from shell profile or repo's `.env*` files for env vars for e2e tests.
+    - Do not read or edit shell profiles. Do not read env var values in the shell. If you want a certain env var, ask the user for it.
+    - Keep secrets, tokens, and key material out of process argv and logs, and out of any file in git. Test keys and fixtures must be obviously non-production.
+    - If you read an API key or other type of secret accidentally, report to humans and ask them to rotate.
+
+## Developer Tools
+
 - Git
-    - Do not run `git commit`, `git reset`, or `git restore`. These operations MUST only be performed by humans. Violations invite reprimands.
+    - Do not run `git commit`, `git push`, `git reset`, or `git restore`. They must be performed by humans, unless authorization is given explicitly.
     - Do not run `git checkout` unprovoked. Do not revert user changes unless explicitly asked.
-    - Stage changes that are the results of your session. Do not leave changes unstaged if they are intended to be committed by humans.
-    - When asked to compose a commit message, review the staged changes and base the draft on them. Do not provide a message based on session context alone.
-    - Do not commit generated build output, local editor state, machine metadata, or secrets.
-- Keeping things current
-    - Perform web searches when current external facts matter.
-    - When using web search, keep the current date in mind and run `date` if uncertain.
-    - When setting up dependencies, use the latest compatible versions unless the project pins a version.
+    - Stage changes that are ready for commit once a task is complete. Do not leave intended changes unstaged.
+    - Keep generated build output, local editor state, machine metadata, and secrets out of git.
+- Git commits
+    - When asked to compose a commit message, review staged changes and base the draft on them. Do not provide a message based on session context alone.
+    - Commit message suggestion should also be one-liners starting with "feat:" "fix:" "docs:" "refactor:" "ci:", etc. The theme of the commit should be apparent from the diffs.
+    - Each code change commit should ideally have fewer than 1,000 lines changed. If staged changes are large, suggest humans to make multiple commits instead.
+- Git worktrees
+    - When implementing multi-phase changes, if current repo's main has uncommitted changes, you may (with human permission) make changes on a worktree instead, and create a patch for the human to apply on main later.
+- Pre-commit hook
+    - Run it as needed if there is one, as it typically runs checks over code changes. It may also fix formatting.
+- Code review
+    - You may run a subagent to review your changes once. Human will run a code review using a different-brand coding agent to get a second opinion. Typically this would be the right stopping point.
+
+## Documentation
+
 - Maintaining documentation
-    - Follow Diátaxis principles for writing or updating documentations.
-    - Describe concepts or objects positively (by what it is). Do not use negating or hedging descriptors (e.g., listing what something is not - it is ineffective).
-    - Avoid long continuous blocks of prose. Any prose paragraph written by agent should not exceed 5 wrapped lines.
-    - Avoid unnecessary/irrelevant/off-topic expositions of inner workings. Those should live in code. In user-facing tutorials/how-tos, keep only what is actionable on a need-to-know basis.
-    - No hard wrapping. All text edits must be checked to completely avoid hard wrapping.
-    - No bolding in docs. Use headings and list indentation to build hierarchy.
+    - Treat human-authored specs as readonly unless a human explicitly authorizes edits.
+    - If a task maps to todo checkboxes in the repo, update them as work is completed. Keep todos current when landing or descoping features.
+    - Follow Diátaxis principles when writing or updating documentation.
+    - Describe concepts and objects positively, by what they are. Do not use negating or hedging descriptors.
+    - Keep public docs concise. In user-facing tutorials and how-tos, keep only what is actionable on a need-to-know basis; inner workings live in code.
+    - Avoid long continuous blocks of prose. No prose paragraph exceeds 5 wrapped lines.
+    - No hard wrapping.
+    - No bolding. Use headings and list indentation for hierarchy.
     - No em dashes.
-    - Use 4 spaces for each level of indentation.
+    - Use 4 spaces for each level of list indentation.
+
+## Agent-Specific Notes
+
+### Claude Code
+
+- Do not use `sed` or `cat` to edit files. Use the Edit and Write tools.
+- When available, call advisor for guidance liberally and before asking humans for input on decisions.
+- Use `AskUserQuestion` tool for human input, ideally during planning phase.
+<!-- END rules:baseline -->
+
+<!-- BEGIN rules:lang/rust -->
+## Guidance On Rust
+
+- Keep `main.rs` thin. Put behavior behind focused modules and services.
+- Never create files with `mod.rs` paths; prefer `src/some_module.rs` over `src/some_module/mod.rs`.
+    - Sole exception: `tests/common/mod.rs`, the Cargo-sanctioned shared-helper module for integration tests. A subdirectory module under `tests/` is not compiled as its own test binary; a top-level `tests/common.rs` would be.
+- When splitting a large module, keep the parent file as `src/foo.rs` declaring `mod bar;` with siblings in `src/foo/bar.rs`. Siblings start with `use super::*;` and may re-open `impl TypeName` blocks; moved `pub` items get a `pub use` (named or glob) in the parent so external paths are unchanged.
+- When creating new crates, specify the library root path in `Cargo.toml` using `[lib] path = "...rs"` instead of relying on the default `lib.rs`.
+- Prefer typed domain errors using `thiserror`.
+- Propagate errors with `?` up to the layer that owns the fallback decision.
+- Never use `unwrap()` in production code. Propagate errors with `?` or handle them explicitly.
+- Never use `let _ =` on fallible operations. Never write empty `match` arms that discard errors.
+- Centralize durable constants; test-only constants stay in test code.
+- Dependency changes go through cargo commands (`cargo add`, `cargo update`), never hand-edits to `Cargo.lock`.
+<!-- END rules:lang/rust -->
+
+## Project Guidance
+
+- Documentation
     - After adding a new runtime module or changing module boundaries, update docs/mgmt/architecture.md. After adding a new dependency, update docs/mgmt/tech-stack.md. After changing user-facing behavior, update the relevant file under docs/specs/.
-    - If a task maps to docs/todos/ checkboxes, update them as work is completed.
-    - Keep specs in `docs/specs/`.
+    - Keep specs in `docs/specs/` and todos in `docs/todos/`.
 - Release workflows
     - Public release builds keep default Cargo features and are the only workflow that publishes GitHub Releases.
     - Release types via `scripts/release.sh`: nightly (default; tags `main` HEAD as `vX.Y.Z.N` with no version commit or changelog; published as a GitHub prerelease), `--regular` (`vX.Y.Z` → `vX.Y.(Z+1)`), and `--major` (`vX.Y.Z` → `vX.(Y+1).0`).
@@ -70,68 +167,13 @@ References:
     - A nightly's fourth version component lives only in the git tag and packaging names; Cargo.toml keeps the three-part base version, so nightly binaries report the base version via `acps --version`.
     - Nightlies install via `install.sh --version vX.Y.Z.N` or explicit `acps update --version vX.Y.Z.N`. `acps update` never offers them automatically (prereleases are excluded from the latest channel).
     - Dev-build artifacts must be manual-only Actions artifacts and must build with `scripts/build-release.sh --no-default-features` so the binary omits `acps update`.
-- Before writing code
-    - Explore first. Search for existing modules, docs, patterns, and naming.
-    - Trace the full code path of the area being modified before changing it.
-    - When fixing a bug, identify the root cause before proposing a fix.
-    - After making a change, trace adjacent behavior for regressions.
-- Code quality
-    - Prioritize correctness and clarity. Speed and efficiency are secondary unless specified.
-    - Avoid patch-on-patch fixes. If a change requires repeated boilerplate, special casing, or an architectural workaround, stop and discuss the design.
-    - Avoid creative additions unless explicitly requested.
-- Programmatic code checks
-    - Run these after a logical set of changes are complete, or before commit:
-        - Rust checks: when a Rust workspace exists, use the repository's own Cargo commands for build, test, formatting, and linting.
-        - Pre-commit review: after a logical set of changes, dispatch a subagent to review the staged diff for issues. Validate every finding before acting on it. Subagent review based on same-brand model (e.g., you are Fable, your subagent is Opus) can run only once, and all findings must be final before the human-led review round.
-        - Pre-commit hook at `.git/hooks/pre-commit`, if present. It may stage changes, auto-fix format issues, and run relevant checks. Run this script outside sandbox if it requires internet.
-- Tests
-    - Appropriate tests must be added for every new logical unit of code created, in the same initial feature commit.
-    - When a feature is updated, relevant tests must be updated accordingly after functional code changes.
-    - When a bug fix is implemented or refactoring is performed, tests must be run promptly to check for regressions.
-    - Using real LLMs for testing: default to use `deepseek-v4-flash`. Default to use OpenCode Go (`opencode-go`) as provider where supported, otherwise OpenRouter. For other cases, agent must consult human for specific guidance. Do not use Claude Fable 5 because you are a Claude model.
-- Security
-    - Please refrain from probing into developer secrets like `.env.*` files.
-    - If you have accidentally read a secret, report to the human immediately and ask them to rotate it.
-- Code Review
-    - When asked to perform a code review, review the changes on their own merits and from the perspective of the feature or product.
-    - If provided with a plan or spec, use it as context, but do not ignore bugs simply because they are outside the plan.
 - Testing agent with ACP
     - Run the harness to be tested in interactive shell outside sandbox to make use of existing env vars.
     - Refrain from claiming an agent is supported before the real prompt smoke passes end-to-end.
     - Always add newly supported agents to the end of [agents.toml](./data/agents.toml) and [README.md](./README.md).
-
-## Error Handling
-
-Prefer resilience over failing fast. A long-running runtime should degrade gracefully, not die on the first recoverable error.
-
-- Favor simple fallbacks (defaults, retries, skip-and-continue, degraded mode) over process-ending exceptions or panics.
-- Retries use exponential backoff when possible. Centralize backoff logic in one shared helper; do not hand-roll per-call-site backoff loops.
-- Keep fallbacks simple. One sensible fallback per failure point; do not build layered recovery machinery or try to account for every scenario.
-- Reserve hard failure for genuinely unrecoverable states: corrupt local state, an unparseable config file at startup, security-relevant violations. An individually invalid declaration (e.g. one bad MCP server) must not fail startup: skip it, log a warning, and keep everything else running.
-- Recoverable errors must still be visible: log them with enough context to identify the failed subsystem and action. No silent swallowing.
-- No catch-all error handlers that hide root causes; handle errors where the fallback decision can be made.
-- Rust: propagate errors with `?` up to the layer that owns the fallback. Never use `let _ =` on fallible operations; never write empty `match` arms that discard errors.
-
-## Guidance On Rust
-
-- Comments should explain why, not summarize what the code does.
-- Prefer implementing functionality in existing files unless it is a new logical component.
-- Avoid creating many tiny files for tightly coupled code.
-- Never create files with `mod.rs` paths; prefer `src/some_module.rs` over `src/some_module/mod.rs`.
-    - Sole exception: `tests/common/mod.rs`, the Cargo-sanctioned shared-helper module for integration tests. A subdirectory module under `tests/` is not compiled as its own test binary; a top-level `tests/common.rs` would be.
-- When splitting a large module, keep the parent file as `src/foo.rs` declaring `mod bar;` with siblings in `src/foo/bar.rs`. Siblings start with `use super::*;` and may re-open `impl TypeName` blocks; moved `pub` items get a `pub use` (named or glob) in the parent so external paths are unchanged.
-- When creating new crates, specify the library root path in `Cargo.toml` using `[lib] path = "...rs"` instead of relying on the default `lib.rs`.
-- Never use `unwrap()` in production code. Propagate errors with `?` or handle them explicitly.
-- Never silently discard errors with `let _ =` on fallible operations.
-- Use full words for variable names; avoid abbreviations like `cfg` when `config` is clearer.
-- TODO comments are forbidden unless explicitly approved by a human developer.
-- Keep `main.rs` thin. Put runtime behavior behind focused modules and services.
-- Prefer typed domain errors, ideally using `thiserror`, once the Rust workspace exists.
-- Config, state, secrets, permissions, API, ACP bridge, workspace, command gateway, and runtime supervisor should remain separate concerns.
-
-## Agent-Specific Notes
-
-### Claude Code
-
-- Do not use `sed` or `cat`. Always use Edit/Write tools properly.
-- Always run the appropriate repo checks when you believe changes are ready. Other checks are not a substitute for the pre-commit hook.
+- Error handling
+    - The runtime is long-running: recoverable errors degrade the affected subsystem instead of ending the process.
+    - Retries use one shared backoff helper. Do not hand-roll per-call-site backoff loops.
+    - One invalid declaration (e.g. a bad MCP server) does not fail startup: skip it, log a warning, and keep everything else running.
+- Rust
+    - Config, state, secrets, permissions, API, ACP bridge, workspace, command gateway, and runtime supervisor remain separate concerns.
