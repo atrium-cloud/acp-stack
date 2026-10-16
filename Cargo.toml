@@ -58,7 +58,7 @@ base64 = "0.22.1"
 clap = { version = "4.6.1", features = ["derive"] }
 clap_complete = "4.6.1"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
-serde = { version = "1.0.228", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde_json = { version = "1.0.149", features = ["raw_value"] }
 serde_norway = "0.9.42"
 # Derives the published /v1 JSON Schema from the wire DTOs; some embed ACP SDK

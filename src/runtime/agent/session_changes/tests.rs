@@ -86,6 +86,66 @@ fn tool_call_update_retains_replaces_and_clears_content() {
 }
 
 #[test]
+fn snapshot_shares_diff_text_with_the_store_and_keeps_it_across_a_replacement() {
+    let mut store = SessionChangesStore::with_limits("generation", SessionChangeLimits::default());
+    store.apply(
+        "session",
+        &SessionUpdate::ToolCall(tool_call(
+            "call",
+            vec![diff("/workspace/file", Some("one"), "two")],
+        )),
+    );
+    let before = store.snapshot("session");
+    let stored = &store.sessions["session"].tool_calls["call"];
+    assert!(Arc::ptr_eq(&before.tool_calls[0].content, &stored.content));
+
+    store.apply(
+        "session",
+        &SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+            ToolCallId::new("call"),
+            ToolCallUpdateFields::new().content(vec![diff(
+                "/workspace/file",
+                Some("one"),
+                "three",
+            )]),
+        )),
+    );
+    let before = serde_json::to_value(&before).expect("snapshot JSON");
+    assert_eq!(before["tool_calls"][0]["content"][0]["newText"], "two");
+    assert_eq!(store.retained_bytes, store.recomputed_retained_bytes());
+}
+
+#[test]
+fn unchanged_update_keeps_cached_sizes_current_and_the_stored_diffs() {
+    let mut store = SessionChangesStore::with_limits("generation", SessionChangeLimits::default());
+    let content = vec![diff("/workspace/file", Some("one"), "two")];
+    store.apply(
+        "session",
+        &SessionUpdate::ToolCall(
+            tool_call("call", content.clone()).status(ToolCallStatus::InProgress),
+        ),
+    );
+    let before = Arc::clone(&store.sessions["session"].tool_calls["call"].content);
+    // Same status and diffs as the call above, so no field changes.
+    store.apply(
+        "session",
+        &SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+            ToolCallId::new("call"),
+            ToolCallUpdateFields::new()
+                .status(ToolCallStatus::InProgress)
+                .content(content),
+        )),
+    );
+
+    let stored = &store.sessions["session"].tool_calls["call"];
+    assert!(Arc::ptr_eq(&before, &stored.content));
+    let mut recomputed = stored.clone();
+    recomputed.refresh_cached_sizes();
+    assert_eq!(stored.wire_bytes, recomputed.wire_bytes);
+    assert_eq!(stored.retained_bytes, recomputed.retained_bytes);
+}
+
+#[test]
 fn update_before_initial_preserves_unknown_scalar_fields() {
     let mut store = SessionChangesStore::with_limits("generation", SessionChangeLimits::default());
     store.apply(

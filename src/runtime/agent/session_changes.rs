@@ -31,6 +31,9 @@ pub(crate) const MAX_TRACKED_TOOL_CALLS_PER_SESSION: usize = 512;
 /// Conservative allowance for allocator bookkeeping on every owned heap block.
 const ALLOCATION_OVERHEAD_BYTES: usize = 2 * size_of::<usize>();
 
+/// The strong and weak counts an `Arc` allocation holds ahead of its data.
+const ARC_COUNTS_BYTES: usize = 2 * size_of::<usize>();
+
 /// `HashMap::capacity` reports usable entries rather than allocated buckets.
 /// Charging two full entry slots per usable entry covers the load-factor gap,
 /// control bytes, and alignment without depending on hashbrown internals.
@@ -183,7 +186,8 @@ pub(crate) struct CapturedToolCall {
     title: Option<Box<str>>,
     kind: Option<ToolKind>,
     status: Option<ToolCallStatus>,
-    content: Box<[CapturedToolCallContent]>,
+    // Shared so a snapshot clone copies a pointer, not the diff text.
+    content: Arc<[CapturedToolCallContent]>,
     #[serde(skip)]
     first_seen: u64,
     #[serde(skip)]
@@ -201,7 +205,7 @@ impl CapturedToolCall {
             title: None,
             kind: None,
             status: None,
-            content: Box::default(),
+            content: Arc::default(),
             first_seen: sequence,
             last_updated: sequence,
             wire_bytes: 0,
@@ -236,7 +240,7 @@ impl CapturedToolCall {
         self.retained_bytes = (size_of::<Self>() as u128)
             .saturating_add(allocation_bytes(self.tool_call_id.len()))
             .saturating_add(boxed_str_bytes(self.title.as_deref()))
-            .saturating_add(boxed_slice_bytes::<CapturedToolCallContent>(
+            .saturating_add(arc_slice_bytes::<CapturedToolCallContent>(
                 self.content.len(),
             ))
             .saturating_add(self.content.iter().fold(0u128, |total, content| {
@@ -255,15 +259,42 @@ impl PartialEq for CapturedToolCall {
     }
 }
 
-fn captured_diffs(content: &[ToolCallContent]) -> Box<[CapturedToolCallContent]> {
+fn captured_diffs(content: &[ToolCallContent]) -> Arc<[CapturedToolCallContent]> {
     content
         .iter()
         .filter_map(|content| match content {
             ToolCallContent::Diff(diff) => Some(CapturedToolCallContent::from(diff)),
             _ => None,
         })
-        .collect::<Vec<_>>()
-        .into_boxed_slice()
+        .collect()
+}
+
+/// Compares without capturing, so an update that resends the same diffs
+/// copies no text.
+fn captured_diffs_match(captured: &[CapturedToolCallContent], content: &[ToolCallContent]) -> bool {
+    let mut incoming = content.iter().filter_map(|content| match content {
+        ToolCallContent::Diff(diff) => Some(diff),
+        _ => None,
+    });
+    for CapturedToolCallContent::Diff {
+        path,
+        old_text,
+        new_text,
+        meta,
+    } in captured
+    {
+        let Some(diff) = incoming.next() else {
+            return false;
+        };
+        if **path != *diff.path
+            || old_text.as_deref() != diff.old_text.as_deref()
+            || **new_text != *diff.new_text
+            || *meta != diff.meta.as_ref().map(CapturedMeta::new)
+        {
+            return false;
+        }
+    }
+    incoming.next().is_none()
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, schemars::JsonSchema)]
@@ -706,15 +737,18 @@ fn apply_tool_call_update(
         tool_call.status = Some(status);
         fields_changed = true;
     }
-    if let Some(content) = &update.fields.content {
-        let replacement = captured_diffs(content);
-        if tool_call.content != replacement {
-            tool_call.content = replacement;
-            fields_changed = true;
-        }
+    if let Some(content) = &update.fields.content
+        && !captured_diffs_match(&tool_call.content, content)
+    {
+        tool_call.content = captured_diffs(content);
+        fields_changed = true;
     }
     tool_call.last_updated = sequence;
-    tool_call.refresh_cached_sizes();
+    // Sizing serializes the whole call, diff text included; `last_updated` is
+    // not part of either size.
+    if fields_changed {
+        tool_call.refresh_cached_sizes();
+    }
     let new_visible = tool_call.visible();
     MutationOutcome {
         affected_id: tool_call_id,
@@ -782,8 +816,14 @@ fn string_allocation_bytes(value: &String) -> u128 {
     allocation_bytes(value.capacity())
 }
 
-fn boxed_slice_bytes<T>(length: usize) -> u128 {
-    allocation_bytes(length.saturating_mul(size_of::<T>()))
+/// Charged even when empty: an `Arc` collected from an iterator always
+/// allocates its counts.
+fn arc_slice_bytes<T>(length: usize) -> u128 {
+    allocation_bytes(
+        length
+            .saturating_mul(size_of::<T>())
+            .saturating_add(ARC_COUNTS_BYTES),
+    )
 }
 
 fn hash_map_capacity_bytes<Key, Value>(capacity: usize) -> u128 {
