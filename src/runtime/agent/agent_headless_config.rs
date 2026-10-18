@@ -439,7 +439,7 @@ fn provision_agent_headless_config_with_previous_pi_model(
                     .collect()
             })
         }
-        "pi" => provision_pi_config(config, workload, previous_pi_model, endpoint).map(|path| {
+        "pi" => provision_pi_config(config, workload, previous_pi_model).map(|path| {
             path.into_iter()
                 .map(|path| ProvisionedAgentConfig {
                     label: "Pi settings",
@@ -482,7 +482,7 @@ pub fn cleanup_agent_headless_config(
         OPENCODE_AGENT_ID => cleanup_opencode_config(config, workload),
         "codex" => cleanup_codex_config(config, workload),
         CLAUDE_CODE_AGENT_ID => cleanup_claude_code_config(config, workload, endpoint),
-        "pi" => cleanup_pi_config(config, workload, endpoint),
+        "pi" => cleanup_pi_config(config, workload),
         HERMES_AGENT_ID => cleanup_hermes_config(config, workload),
         ANTIGRAVITY_AGENT_ID => cleanup_antigravity_config(config, workload),
         _ => Ok(Vec::new()),

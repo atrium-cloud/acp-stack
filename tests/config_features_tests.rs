@@ -995,6 +995,7 @@ fn sandbox_workload_env_refuses_malformed_and_runtime_managed_names() {
         ("ACPS_SANDBOX_NETWORK_ID", "the runtime sets it"),
         ("KIMI_MODEL_NAME", "the runtime sets it"),
         ("PI_ACP_PI_BIN", "the runtime sets it"),
+        ("PI_ACP_ORIGIN_OVERRIDES", "the runtime sets it"),
         ("GOOGLE_GEMINI_BASE_URL", "the runtime sets it"),
         ("OPENCODE_API_KEY", "[agent].env"),
     ] {

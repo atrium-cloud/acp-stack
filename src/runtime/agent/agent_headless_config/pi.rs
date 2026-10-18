@@ -1,10 +1,11 @@
 use super::*;
 
+/// An endpoint override reaches Pi through the launch env (see `acp_bridge::process_env`), so
+/// `models.json` carries only a custom provider's own entry.
 pub(super) fn provision_pi_config(
     config: &Config,
     workload: &WorkloadHome,
     previous_model: Option<&str>,
-    endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
 ) -> Result<Option<PathBuf>> {
     let home = workload.home();
     let path = home.join(".pi").join("agent").join("settings.json");
@@ -12,26 +13,9 @@ pub(super) fn provision_pi_config(
         return Ok(None);
     };
     let models_path = home.join(".pi").join("agent").join("models.json");
-    let base_url_override = match provider.custom.as_ref() {
-        Some(custom) => super::rerouted_base_url_for(endpoint, &provider.id, &custom.base_url)?,
-        None => super::rerouted_mapped_base_url_for(
-            endpoint,
-            &config.agent.id,
-            &provider.id,
-            &models_path,
-        )?,
-    };
-    let base_url_override = base_url_override.as_deref();
     if let Some(custom) = provider.custom.as_ref() {
         let api_key_ref = require_agent_env_for_provider(config, &provider.id, &models_path)?;
-        write_pi_custom_models_json(
-            workload,
-            &models_path,
-            provider,
-            custom,
-            api_key_ref,
-            base_url_override,
-        )?;
+        write_pi_custom_models_json(workload, &models_path, provider, custom, api_key_ref)?;
     }
     let mut root = read_json_object(workload, &path)?;
     remove_legacy_pi_enabled_models(&mut root, configured_provider_model(config), previous_model);
@@ -46,11 +30,11 @@ pub(super) fn provision_pi_config(
         })?
     };
     if provider.custom.is_none() {
-        write_pi_mapped_endpoint_override(
+        remove_pi_models_provider(
             workload,
             &models_path,
             native_provider,
-            base_url_override,
+            is_legacy_pi_override,
         )?;
     }
     root.insert("defaultProvider".to_owned(), json!(native_provider));
@@ -73,7 +57,6 @@ pub(super) fn provision_pi_config(
 pub(super) fn cleanup_pi_config(
     config: &Config,
     workload: &WorkloadHome,
-    endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
 ) -> Result<Vec<CleanedAgentConfig>> {
     let home = workload.home();
     let mut cleaned = Vec::new();
@@ -94,87 +77,65 @@ pub(super) fn cleanup_pi_config(
     }
     if let Some(provider) = config.agent.provider.as_ref() {
         // A custom provider owns its whole models.json entry; a mapped one owns
-        // only the endpoint-override entry acps writes under its native id.
-        let owned_key = if provider.custom.is_some() {
-            Some(provider.id.clone())
-        } else {
-            super::endpoint_origin_for(endpoint, &provider.id).and_then(|_| {
-                agent_provider_id_for_provider_id("pi", &provider.id).map(str::to_owned)
-            })
-        };
+        // only a legacy endpoint-override entry under its native id.
         let models_path = home.join(".pi").join("agent").join("models.json");
-        if let Some(owned_key) = owned_key
-            && workload.exists(&models_path)?
-        {
-            let mut root = read_json_object(workload, &models_path)?;
-            let mut changed = false;
-            let mut remove_providers_object = false;
-            if let Some(providers) = root
-                .get_mut("providers")
-                .and_then(serde_json::Value::as_object_mut)
-            {
-                changed |= providers.remove(&owned_key).is_some();
-                remove_providers_object = providers.is_empty();
-            }
-            if remove_providers_object {
-                root.remove("providers");
-            }
-            if changed {
-                write_or_remove_json_object(workload, &models_path, root)?;
-                cleaned.push(CleanedAgentConfig {
-                    label: "Pi custom models",
-                    path: models_path,
-                });
-            }
+        let changed = match provider.custom.as_ref() {
+            Some(_) => remove_pi_models_provider(workload, &models_path, &provider.id, |_| true)?,
+            None => match agent_provider_id_for_provider_id("pi", &provider.id) {
+                Some(native_provider) => remove_pi_models_provider(
+                    workload,
+                    &models_path,
+                    native_provider,
+                    is_legacy_pi_override,
+                )?,
+                None => false,
+            },
+        };
+        if changed {
+            cleaned.push(CleanedAgentConfig {
+                label: "Pi models",
+                path: models_path,
+            });
         }
     }
     Ok(cleaned)
 }
 
-/// Route a mapped pi provider at an override endpoint. Pi treats a providers
-/// entry with connection fields but no `models` array as an override of the
-/// built-in provider, so a lone `baseUrl` is the whole write and removing the
-/// entry restores the vendor endpoint.
-fn write_pi_mapped_endpoint_override(
+/// The `baseUrl`-only entry earlier releases wrote to route a mapped provider. An entry with any
+/// other key is an operator's own override, not ours to delete.
+fn is_legacy_pi_override(entry: &serde_json::Value) -> bool {
+    entry
+        .as_object()
+        .is_some_and(|entry| entry.len() == 1 && entry.contains_key("baseUrl"))
+}
+
+/// Removes `providers.<key>` from Pi's `models.json` when `owned` accepts it, dropping an emptied
+/// `providers` object or file. Returns whether anything changed.
+fn remove_pi_models_provider(
     workload: &WorkloadHome,
     path: &Path,
-    native_provider: &str,
-    base_url: Option<&str>,
-) -> Result<()> {
-    if base_url.is_none() && !workload.exists(path)? {
-        return Ok(());
+    key: &str,
+    owned: impl Fn(&serde_json::Value) -> bool,
+) -> Result<bool> {
+    if !workload.exists(path)? {
+        return Ok(false);
     }
     let mut root = read_json_object(workload, path)?;
-    match base_url {
-        Some(base_url) => {
-            let providers = ensure_object_field(&mut root, "providers", path)?;
-            providers.insert(native_provider.to_owned(), json!({ "baseUrl": base_url }));
-        }
-        None => {
-            let mut providers_empty = false;
-            if let Some(providers) = root
-                .get_mut("providers")
-                .and_then(serde_json::Value::as_object_mut)
-            {
-                // Only the acps-written shape is removed, since an entry with
-                // any other key is an operator's own override, not ours to
-                // delete.
-                let acps_written = providers.get(native_provider).is_some_and(|entry| {
-                    entry
-                        .as_object()
-                        .is_some_and(|entry| entry.len() == 1 && entry.contains_key("baseUrl"))
-                });
-                if acps_written {
-                    providers.remove(native_provider);
-                }
-                providers_empty = providers.is_empty();
-            }
-            if providers_empty {
-                root.remove("providers");
-            }
-        }
+    let Some(providers) = root
+        .get_mut("providers")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return Ok(false);
+    };
+    if !providers.get(key).is_some_and(owned) {
+        return Ok(false);
     }
-    write_or_remove_json_object(workload, path, root)
+    providers.remove(key);
+    if providers.is_empty() {
+        root.remove("providers");
+    }
+    write_or_remove_json_object(workload, path, root)?;
+    Ok(true)
 }
 
 fn write_pi_custom_models_json(
@@ -183,14 +144,13 @@ fn write_pi_custom_models_json(
     provider: &crate::config::AgentProviderConfig,
     custom: &AgentCustomProviderConfig,
     api_key_ref: &str,
-    base_url_override: Option<&str>,
 ) -> Result<()> {
     let mut root = read_json_object(workload, path)?;
     let providers = ensure_object_field(&mut root, "providers", path)?;
     providers.insert(
         provider.id.clone(),
         json!({
-            "baseUrl": base_url_override.unwrap_or(custom.base_url.as_str()),
+            "baseUrl": custom.base_url,
             "api": custom.api.as_pi_api(),
             "apiKey": api_key_ref,
             "models": [{
@@ -233,12 +193,31 @@ mod tests {
     use super::*;
     use serde_json::Value;
 
-    fn pi_endpoint(provider_id: &str) -> crate::secrets::ProviderEndpointOverride {
-        crate::secrets::ProviderEndpointOverride {
-            provider_id: provider_id.to_owned(),
-            base_url: "http://127.0.0.1:3129".to_owned(),
-            companion_values: std::collections::BTreeMap::new(),
-        }
+    /// Stores an endpoint override for `provider_id` the way a managed-state apply does.
+    fn stage_endpoint_override(home: &Path, provider_id: &str, api_key_ref: &str) {
+        let mut store = crate::secrets::SecretStore::open_or_create(home).expect("store");
+        store
+            .apply_managed_state_credential(
+                "managed-state",
+                "provider-credential",
+                1,
+                Some(crate::secrets::ManagedCredentialSelection {
+                    provider_id: provider_id.to_owned(),
+                    values: std::collections::BTreeMap::from([(
+                        api_key_ref.to_owned(),
+                        "sk-test".to_owned(),
+                    )]),
+                    source_refs: std::collections::BTreeMap::new(),
+                    base_url: Some("http://127.0.0.1:3129".to_owned()),
+                }),
+            )
+            .expect("stage endpoint override");
+    }
+
+    fn seed_pi_models(home: &Path, text: &str) {
+        let path = home.join(".pi").join("agent").join("models.json");
+        std::fs::create_dir_all(path.parent().expect("path has parent")).expect("create parent");
+        std::fs::write(path, text).expect("seed models.json");
     }
 
     fn pi_models_value(home: &Path) -> Option<Value> {
@@ -260,26 +239,9 @@ mod tests {
     }
 
     #[test]
-    fn pi_mapped_provider_endpoint_is_an_override_only_entry() {
+    fn pi_mapped_provider_endpoint_writes_no_models_entry() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
-        let config = pi_anthropic_config();
-
-        provision_pi_config(&config, &workload, None, Some(&pi_endpoint("anthropic")))
-            .expect("provision with override");
-
-        // pi's Anthropic client appends `/v1/messages` itself, so the rerouted base is bare.
-        let value = pi_models_value(tempdir.path()).expect("models.json written");
-        assert_eq!(
-            value["providers"]["anthropic"],
-            json!({ "baseUrl": "http://127.0.0.1:3129" })
-        );
-    }
-
-    #[test]
-    fn pi_mapped_provider_endpoint_keeps_the_vendor_path() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
+        stage_endpoint_override(tempdir.path(), "opencode-go", "OPENCODE_API_KEY");
         let mut config = config_with_agent("pi", &["OPENCODE_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "opencode-go".to_owned(),
@@ -288,50 +250,35 @@ mod tests {
             custom: None,
         });
 
-        provision_pi_config(&config, &workload, None, Some(&pi_endpoint("opencode-go")))
-            .expect("provision with override");
+        provision_agent_headless_config(&config, tempdir.path()).expect("provision");
 
-        let value = pi_models_value(tempdir.path()).expect("models.json written");
-        assert_eq!(
-            value["providers"]["opencode-go"],
-            json!({ "baseUrl": "http://127.0.0.1:3129/inference/go/v1" })
-        );
+        assert_eq!(pi_models_value(tempdir.path()), None);
     }
 
     #[test]
-    fn pi_mapped_provider_endpoint_is_removed_when_cleared() {
+    fn pi_reprovision_removes_the_legacy_endpoint_entry() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
-        let config = pi_anthropic_config();
-        provision_pi_config(&config, &workload, None, Some(&pi_endpoint("anthropic")))
-            .expect("provision with override");
-
-        provision_pi_config(&config, &workload, None, None).expect("provision without");
-
-        let value = pi_models_value(tempdir.path());
-        assert!(
-            value
-                .as_ref()
-                .is_none_or(|value| value["providers"]["anthropic"].is_null()),
-            "{value:?}"
+        stage_endpoint_override(tempdir.path(), "anthropic", "ANTHROPIC_API_KEY");
+        seed_pi_models(
+            tempdir.path(),
+            r#"{"providers":{"anthropic":{"baseUrl":"http://127.0.0.1:3129"}}}"#,
         );
+
+        provision_agent_headless_config(&pi_anthropic_config(), tempdir.path()).expect("provision");
+
+        assert_eq!(pi_models_value(tempdir.path()), None);
     }
 
     #[test]
     fn pi_leaves_an_operator_authored_provider_entry_alone() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
-        let models_path = tempdir.path().join(".pi").join("agent").join("models.json");
-        std::fs::create_dir_all(models_path.parent().expect("path has parent"))
-            .expect("create parent");
-        std::fs::write(
-            &models_path,
+        stage_endpoint_override(tempdir.path(), "anthropic", "ANTHROPIC_API_KEY");
+        seed_pi_models(
+            tempdir.path(),
             r#"{"providers":{"anthropic":{"baseUrl":"https://operator.example","headers":{"X":"1"}}}}"#,
-        )
-        .expect("write operator models.json");
+        );
 
-        provision_pi_config(&pi_anthropic_config(), &workload, None, None)
-            .expect("provision without override");
+        provision_agent_headless_config(&pi_anthropic_config(), tempdir.path()).expect("provision");
 
         let value = pi_models_value(tempdir.path()).expect("models.json survives");
         assert_eq!(
@@ -341,19 +288,18 @@ mod tests {
     }
 
     #[test]
-    fn pi_custom_provider_endpoint_overrides_the_declared_base_url() {
+    fn pi_custom_provider_endpoint_keeps_the_declared_base_url() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
+        stage_endpoint_override(tempdir.path(), "myprovider", "CUSTOM_API_KEY");
         let config =
             custom_provider_config("pi", crate::config::CustomProviderApi::ChatCompletions);
 
-        provision_pi_config(&config, &workload, None, Some(&pi_endpoint("myprovider")))
-            .expect("provision");
+        provision_agent_headless_config(&config, tempdir.path()).expect("provision");
 
         let value = pi_models_value(tempdir.path()).expect("models.json written");
         assert_eq!(
             value["providers"]["myprovider"]["baseUrl"],
-            "http://127.0.0.1:3129/v1"
+            "https://api.myprovider.example/v1"
         );
     }
 

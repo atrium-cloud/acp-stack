@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::runtime::agent::agent_headless_config::reroute_base_url;
+use crate::runtime::agent::agent_headless_config::{endpoint_origin, reroute_base_url};
 use crate::runtime::agent::provider_keys::{
     HERMES_AGENT_ID, KIMI_MODEL_API_KEY_ENV, KIMI_MODEL_BASE_URL_ENV, KIMI_MODEL_DISPLAY_NAME_ENV,
     KIMI_MODEL_MAX_CONTEXT_SIZE_ENV, KIMI_MODEL_MAX_OUTPUT_SIZE_ENV, KIMI_MODEL_NAME_ENV,
@@ -44,6 +44,9 @@ pub(crate) const PI_AGENT_ID: &str = "pi";
 pub(crate) const PI_HARNESS_COMMAND: &str = "pi";
 /// The pi-acp bundle ships without Pi; it runs the `pi` this names.
 pub(crate) const PI_ACP_PI_BIN_ENV: &str = "PI_ACP_PI_BIN";
+/// pi-acp's per-request origin rewrite, comma-separated `<authority>=<origin>` entries. Pi
+/// applies a provider `baseUrl` to every model whatever its wire, so an override routes by host.
+pub(crate) const PI_ACP_ORIGIN_OVERRIDES_ENV: &str = "PI_ACP_ORIGIN_OVERRIDES";
 
 pub(crate) const ANTIGRAVITY_AGENT_ID: &str = "antigravity";
 /// The Antigravity CLI's Gemini endpoint setting: a service root, so an override origin is the
@@ -52,9 +55,12 @@ pub(crate) const ANTIGRAVITY_BASE_URL_ENV: &str = "GOOGLE_GEMINI_BASE_URL";
 
 /// Kimi Code's launch namespace, which the runtime writes whole.
 pub(crate) const KIMI_MANAGED_ENV_PREFIX: &str = "KIMI_MODEL_";
-/// Launch vars the runtime derives at every spawn of their agent, whatever the provider.
-pub(crate) const RUNTIME_MANAGED_LAUNCH_ENV: [&str; 2] =
-    [PI_ACP_PI_BIN_ENV, ANTIGRAVITY_BASE_URL_ENV];
+/// Launch vars the runtime owns for their agent; neither `[agent].env` nor workload env may declare them.
+pub(crate) const RUNTIME_MANAGED_LAUNCH_ENV: [&str; 3] = [
+    PI_ACP_PI_BIN_ENV,
+    PI_ACP_ORIGIN_OVERRIDES_ENV,
+    ANTIGRAVITY_BASE_URL_ENV,
+];
 
 pub(super) fn build_agent_process_env(
     agent: &AgentConfig,
@@ -66,7 +72,10 @@ pub(super) fn build_agent_process_env(
             let endpoint = crate::secrets::managed_provider_endpoint_override_for_home(home)?;
             build_kimi_process_env(agent, env, endpoint.as_ref())
         }
-        PI_AGENT_ID => build_pi_process_env(home, env),
+        PI_AGENT_ID => {
+            let endpoint = crate::secrets::managed_provider_endpoint_override_for_home(home)?;
+            build_pi_process_env(agent, home, env, endpoint.as_ref())
+        }
         ANTIGRAVITY_AGENT_ID => {
             let endpoint = crate::secrets::managed_provider_endpoint_override_for_home(home)?;
             build_antigravity_process_env(env, endpoint.as_ref())
@@ -165,13 +174,18 @@ fn build_antigravity_process_env(
 }
 
 fn build_pi_process_env(
+    agent: &AgentConfig,
     home: &Path,
     mut env: HashMap<String, String>,
+    endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
 ) -> Result<HashMap<String, String>> {
-    if env.contains_key(PI_ACP_PI_BIN_ENV) {
+    if let Some(name) = [PI_ACP_PI_BIN_ENV, PI_ACP_ORIGIN_OVERRIDES_ENV]
+        .into_iter()
+        .find(|name| env.contains_key(*name))
+    {
         return Err(StackError::AgentInitializeFailed {
             reason: format!(
-                "Pi Agent launch env `{PI_ACP_PI_BIN_ENV}` is runtime-managed; remove it from [agent].env"
+                "Pi Agent launch env `{name}` is runtime-managed; remove it from [agent].env"
             ),
         });
     }
@@ -187,7 +201,64 @@ fn build_pi_process_env(
         PI_ACP_PI_BIN_ENV.to_owned(),
         pi_path.to_string_lossy().into_owned(),
     );
+    if let Some(origin_override) = pi_origin_override(agent, endpoint)? {
+        env.insert(PI_ACP_ORIGIN_OVERRIDES_ENV.to_owned(), origin_override);
+    }
     Ok(env)
+}
+
+/// The `<authority>=<origin>` entry routing the configured provider's vendor host to the
+/// override origin, or `None` when no override names that provider.
+fn pi_origin_override(
+    agent: &AgentConfig,
+    endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
+) -> Result<Option<String>> {
+    let Some(provider) = agent.provider.as_ref() else {
+        return Ok(None);
+    };
+    let Some(endpoint) = endpoint.filter(|endpoint| endpoint.provider_id == provider.id) else {
+        return Ok(None);
+    };
+    let vendor_base_url = match provider.custom.as_ref() {
+        Some(custom) => custom.base_url.clone(),
+        None => {
+            let Some(template) = vendor_base_url_for_agent_provider_id(PI_AGENT_ID, &provider.id)
+            else {
+                return Err(StackError::AgentInitializeFailed {
+                    reason: format!(
+                        "Pi Agent provider `{}` declares no vendor base URL, so its endpoint override cannot be routed",
+                        provider.id
+                    ),
+                });
+            };
+            resolve_base_url_template(template, &endpoint.companion_values)?
+        }
+    };
+    Ok(Some(format!(
+        "{}={}",
+        https_authority(&vendor_base_url)?,
+        endpoint_origin(&endpoint.base_url)?
+    )))
+}
+
+/// `host[:port]` of an https URL, the port only when it is not 443. pi-acp rewrites `https:`
+/// requests alone, so any other scheme is refused rather than left silently unrouted.
+fn https_authority(base_url: &str) -> Result<String> {
+    let not_https = || StackError::AgentInitializeFailed {
+        reason: format!(
+            "Pi Agent routes an endpoint override by https host, and provider base URL `{base_url}` is not an https URL with a host"
+        ),
+    };
+    let url = reqwest::Url::parse(base_url).map_err(|_| not_https())?;
+    let host = url
+        .host_str()
+        .filter(|_| url.scheme() == "https")
+        .ok_or_else(not_https)?;
+    let port = url
+        .port()
+        .map(|port| format!(":{port}"))
+        .unwrap_or_default();
+    Ok(format!("{host}{port}"))
 }
 
 fn build_kimi_process_env(
@@ -399,14 +470,114 @@ mod tests {
     }
 
     #[test]
-    fn pi_process_env_rejects_a_declared_pi_bin() {
+    fn pi_process_env_rejects_declared_runtime_managed_vars() {
         let home = home_with_managed_pi();
-        let env = HashMap::from([(PI_ACP_PI_BIN_ENV.to_owned(), "/opt/pi".to_owned())]);
+        for name in [PI_ACP_PI_BIN_ENV, PI_ACP_ORIGIN_OVERRIDES_ENV] {
+            let env = HashMap::from([(name.to_owned(), "declared".to_owned())]);
 
-        let error = super::build_agent_process_env(&pi_agent(), home.path(), env)
-            .expect_err("declared PI_ACP_PI_BIN must fail");
+            let error = super::build_agent_process_env(&pi_agent(), home.path(), env)
+                .expect_err("declared runtime-managed var must fail");
 
-        assert!(error.to_string().contains(PI_ACP_PI_BIN_ENV), "{error}");
+            assert!(error.to_string().contains(name), "{error}");
+        }
+    }
+
+    fn pi_agent_on(provider_id: &str) -> AgentConfig {
+        let mut agent = pi_agent();
+        agent.provider = Some(crate::config::AgentProviderConfig {
+            id: provider_id.to_owned(),
+            model: None,
+            api_key_ref: None,
+            custom: None,
+        });
+        agent
+    }
+
+    fn pi_custom_agent(base_url: &str) -> AgentConfig {
+        let mut agent =
+            kimi_agent_with_custom_provider(crate::config::CustomProviderApi::default());
+        agent.id = PI_AGENT_ID.to_owned();
+        agent
+            .provider
+            .as_mut()
+            .and_then(|provider| provider.custom.as_mut())
+            .expect("custom provider")
+            .base_url = base_url.to_owned();
+        agent
+    }
+
+    #[test]
+    fn pi_process_env_routes_the_overridden_provider_host_to_the_origin() {
+        let home = home_with_managed_pi();
+        for (provider_id, expected) in [
+            ("opencode-go", "opencode.ai=http://127.0.0.1:3129"),
+            ("anthropic", "api.anthropic.com=http://127.0.0.1:3129"),
+        ] {
+            let prepared = build_pi_process_env(
+                &pi_agent_on(provider_id),
+                home.path(),
+                HashMap::new(),
+                Some(&override_for(provider_id)),
+            )
+            .expect("pi env");
+
+            assert_eq!(
+                prepared
+                    .get(PI_ACP_ORIGIN_OVERRIDES_ENV)
+                    .map(String::as_str),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn pi_process_env_routes_a_custom_provider_by_its_declared_host() {
+        let home = home_with_managed_pi();
+
+        let prepared = build_pi_process_env(
+            &pi_custom_agent("https://api.myprovider.example:8443/v1"),
+            home.path(),
+            HashMap::new(),
+            Some(&override_for("myprovider")),
+        )
+        .expect("pi env");
+
+        assert_eq!(
+            prepared
+                .get(PI_ACP_ORIGIN_OVERRIDES_ENV)
+                .map(String::as_str),
+            Some("api.myprovider.example:8443=http://127.0.0.1:3129")
+        );
+    }
+
+    #[test]
+    fn pi_process_env_refuses_to_route_a_plain_http_custom_provider() {
+        let home = home_with_managed_pi();
+
+        let error = build_pi_process_env(
+            &pi_custom_agent("http://llm.internal.example/v1"),
+            home.path(),
+            HashMap::new(),
+            Some(&override_for("myprovider")),
+        )
+        .expect_err("non-https base must fail");
+
+        assert!(error.to_string().contains("https"), "{error}");
+    }
+
+    #[test]
+    fn pi_process_env_ignores_an_override_for_another_provider() {
+        let home = home_with_managed_pi();
+
+        let prepared = build_pi_process_env(
+            &pi_agent_on("opencode-go"),
+            home.path(),
+            HashMap::new(),
+            Some(&override_for("anthropic")),
+        )
+        .expect("pi env");
+
+        assert!(!prepared.contains_key(PI_ACP_ORIGIN_OVERRIDES_ENV));
     }
 
     #[test]
