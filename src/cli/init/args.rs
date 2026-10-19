@@ -448,6 +448,10 @@ pub struct InitArgs {
     /// run leaves this false and keeps the hard failure.
     #[arg(skip)]
     pub(super) defer_provider_credentials: bool,
+    /// From the hosted start request (`provider_check`): every discovery close runs one real
+    /// turn with the configured model, and a failed turn parks the run for another close.
+    #[arg(skip)]
+    pub(super) provider_check: bool,
     /// Extension declarations from the hosted start request (`extensions`),
     /// staged into the starter config before any tracked step runs.
     #[arg(skip)]
@@ -570,6 +574,7 @@ impl Default for InitArgs {
             native_config_upload: None,
             native_config_revision: None,
             defer_provider_credentials: false,
+            provider_check: false,
             prompt_extensions: std::collections::BTreeMap::new(),
             prompt_sandbox_mask_paths: Vec::new(),
             prompt_sandbox_mask_files: Vec::new(),

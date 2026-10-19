@@ -42,7 +42,9 @@ use super::prompt::{
 };
 use super::state_signal::InitStateSignal;
 #[cfg(test)]
-use super::state_signal::{ApplicabilitySource, InitCategory, category_for_step_kind};
+use super::state_signal::{
+    ApplicabilitySource, InitCategory, ProviderCheckOutcome, category_for_step_kind,
+};
 use super::{
     ExistingAgentArg, InitArgs, InitMcpHttpHeader, InitMcpHttpServer, InitMcpStdioServer, InitMode,
     InitNativeConfigUpload, reject_starter_only_args_for_existing_config,

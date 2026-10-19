@@ -84,6 +84,33 @@ pub(super) enum InitStateSignal {
         category: InitCategory,
         code: String,
     },
+    /// The provider check run at a discovery close. `code` is the agent test's outcome code;
+    /// the upstream status and reason ride only with `prompt_failed`.
+    ProviderCheck {
+        outcome: ProviderCheckOutcome,
+        code: &'static str,
+        status_code: Option<u16>,
+        reason_category: Option<&'static str>,
+    },
+}
+
+/// Verdict of one provider check. `Failed` parks the run for another close.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ProviderCheckOutcome {
+    Passed,
+    Failed,
+    Skipped,
+}
+
+impl ProviderCheckOutcome {
+    /// Wire token for the `outcome` field of a `provider_check` signal.
+    fn wire(self) -> &'static str {
+        match self {
+            ProviderCheckOutcome::Passed => "passed",
+            ProviderCheckOutcome::Failed => "failed",
+            ProviderCheckOutcome::Skipped => "skipped",
+        }
+    }
 }
 
 /// The category a step's failure badges; steps with no category surface only as
@@ -211,6 +238,31 @@ impl InitStateSignal {
                     Value::String(category.id().to_owned()),
                 );
                 payload.insert("code".to_owned(), Value::String(code.clone()));
+            }
+            InitStateSignal::ProviderCheck {
+                outcome,
+                code,
+                status_code,
+                reason_category,
+            } => {
+                payload.insert(
+                    "signal".to_owned(),
+                    Value::String("provider_check".to_owned()),
+                );
+                payload.insert(
+                    "outcome".to_owned(),
+                    Value::String(outcome.wire().to_owned()),
+                );
+                payload.insert("code".to_owned(), Value::String((*code).to_owned()));
+                if let Some(status_code) = status_code {
+                    payload.insert("status_code".to_owned(), Value::from(*status_code));
+                }
+                if let Some(reason_category) = reason_category {
+                    payload.insert(
+                        "reason_category".to_owned(),
+                        Value::String((*reason_category).to_owned()),
+                    );
+                }
             }
         }
         payload

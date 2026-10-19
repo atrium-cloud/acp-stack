@@ -7,6 +7,7 @@ mod native_config;
 mod preprocess;
 mod prompt;
 mod provider;
+mod provider_check;
 mod registry_apply;
 mod resume;
 mod run;

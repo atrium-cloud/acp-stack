@@ -580,6 +580,87 @@ fn close_discovery_is_refused_before_the_phase_opens_and_while_a_prompt_pends() 
     }
 }
 
+/// The `discovery` event states recorded so far, once there are `count` of them.
+fn wait_for_discovery_states(session: &HostedInitSession, count: usize) -> Vec<String> {
+    for _ in 0..200 {
+        let states: Vec<String> = session
+            .events_after(0)
+            .into_iter()
+            .filter(|event| event["type"] == json!("discovery"))
+            .map(|event| event["state"].as_str().unwrap_or_default().to_owned())
+            .collect();
+        if states.len() >= count {
+            return states;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("timed out waiting for {count} discovery events");
+}
+
+#[test]
+fn a_provider_check_park_opens_a_phase_no_prompt_opened_and_reopens_it() {
+    let session = test_session("init_check_park");
+    let wizard = session.clone();
+    let handle = std::thread::spawn(move || {
+        let first = wizard.park_for_discovery_close()?;
+        let second = wizard.park_for_discovery_close()?;
+        Ok::<_, StackError>(matches!(
+            (first, second),
+            (DiscoveryWait::Closed, DiscoveryWait::Closed)
+        ))
+    });
+
+    wait_for_discovery_states(&session, 1);
+    session
+        .close_discovery()
+        .expect("a parked check takes a close with no prompt issued");
+    assert_eq!(
+        wait_for_discovery_states(&session, 3),
+        ["awaiting_close", "closed", "awaiting_close"]
+    );
+    session
+        .close_discovery()
+        .expect("the reopened phase takes a fresh close");
+    assert!(
+        handle
+            .join()
+            .expect("wizard thread")
+            .expect("wizard result")
+    );
+}
+
+#[test]
+fn a_reopened_phase_takes_a_revision_of_an_earlier_answer() {
+    let session = test_session("init_check_revise");
+    let wizard = session.clone();
+    let handle = std::thread::spawn(move || {
+        wizard.request_input_revisable(revisable_select_request(
+            HostedPromptKind::Model,
+            &["alpha", "beta"],
+        ))?;
+        let first = wizard.park_for_discovery_close()?;
+        let second = wizard.park_for_discovery_close()?;
+        Ok::<_, StackError>((first, second))
+    });
+
+    let model = answer_pending(&session, "model", json!(0));
+    wait_for_discovery_states(&session, 1);
+    session.close_discovery().expect("first close");
+    wait_for_discovery_states(&session, 3);
+    session
+        .submit_input(&model.request_id, json!(1))
+        .expect("a reopened phase accepts a revision");
+    let (first, second) = handle
+        .join()
+        .expect("wizard thread")
+        .expect("wizard result");
+    assert!(matches!(first, DiscoveryWait::Closed));
+    let DiscoveryWait::Revised(revision) = second else {
+        panic!("the reopened park should hand the revision back");
+    };
+    assert_eq!(revision.request_id, model.request_id);
+}
+
 #[test]
 fn awaiting_discovery_close_keeps_the_session_active() {
     let session = test_session("init_close_active");

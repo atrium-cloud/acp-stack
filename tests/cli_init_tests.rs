@@ -20,6 +20,8 @@ mod endpoint_override;
 mod existing_agent;
 #[path = "cli_init_tests/mcp_validation.rs"]
 mod mcp_validation;
+#[path = "cli_init_tests/provider_check.rs"]
+mod provider_check;
 #[path = "cli_init_tests/skills_flags.rs"]
 mod skills_flags;
 #[path = "cli_init_tests/workspace_edge.rs"]

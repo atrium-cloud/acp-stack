@@ -41,6 +41,7 @@ use super::provider::{
     pending_deferred_provider_credential, pending_provider_credential_reason,
     primary_provider_is_custom,
 };
+use super::provider_check::{await_discovery_close_checked, provider_check_active};
 use super::registry_apply::is_custom_agent;
 use super::state_signal::{ApplicabilitySource, InitCategory, InitStateSignal};
 use super::{InitArgs, prompt, prompts_enabled};
@@ -72,6 +73,8 @@ pub(super) struct ModelModeOutcome {
     pub(super) effort_action: ModelModeAction,
     pub(super) config_options_changed: bool,
     pub(super) acp_verified: bool,
+    /// A discovery close already ran the provider check to a pass or a skip.
+    pub(super) provider_check_settled: bool,
 }
 
 /// Capability gates for all three lanes, evaluated before any side effects.
@@ -190,6 +193,33 @@ pub(super) fn preflight_model_and_mode_for_init(
 
 /// Drives the model, mode, and effort ACP-discovery flows during `acps init`.
 pub(super) fn configure_model_and_mode_for_init(
+    args: &InitArgs,
+    home: &Path,
+    registry: &RegistryCatalog,
+    config: &mut Config,
+    config_path: &Path,
+    secrets: &SharedSecretStore,
+) -> Result<ModelModeOutcome> {
+    let mut outcome =
+        configure_session_config_lanes(args, home, registry, config, config_path, secrets)?;
+    // Lanes that returned before any close wait, a pending credential's skip included, still
+    // owe the provider check its close.
+    while provider_check_active(args) && !outcome.provider_check_settled {
+        match await_discovery_close_checked(args, home, registry, config)? {
+            DiscoveryWait::Closed => outcome.provider_check_settled = true,
+            DiscoveryWait::Revised(revision) => init_progress(
+                args,
+                &format!(
+                    "`{}` revision not applied: no discovery answer was given",
+                    revision.kind.as_str()
+                ),
+            ),
+        }
+    }
+    Ok(outcome)
+}
+
+fn configure_session_config_lanes(
     args: &InitArgs,
     home: &Path,
     registry: &RegistryCatalog,
@@ -494,6 +524,7 @@ pub(super) fn configure_model_and_mode_for_init(
                 match await_phase_close_or_model_revision(
                     args,
                     home,
+                    registry,
                     config,
                     &mut outcome,
                     set_provider,
@@ -544,6 +575,7 @@ pub(super) fn configure_model_and_mode_for_init(
                     match await_phase_close_or_model_revision(
                         args,
                         home,
+                        registry,
                         config,
                         &mut outcome,
                         set_provider,
@@ -616,12 +648,14 @@ pub(super) fn configure_model_and_mode_for_init(
                     phase.apply_revision(revision, config, &mut outcome, &mut queue)?;
                 }
             }
-            // A run that asked nothing opened no phase, so no client can close one.
-            if !prompt::hosted_driver_active() || !discovery_prompt_issued() {
+            if !discovery_close_owed(args) {
                 break;
             }
-            match prompt::await_discovery_close()? {
-                DiscoveryWait::Closed => break,
+            match await_discovery_close_checked(args, home, registry, config)? {
+                DiscoveryWait::Closed => {
+                    outcome.provider_check_settled = provider_check_active(args);
+                    break;
+                }
                 DiscoveryWait::Revised(revision) => {
                     phase.apply_revision(revision, config, &mut outcome, &mut queue)?;
                 }
@@ -677,21 +711,25 @@ enum PhaseExit {
 }
 
 /// Park for the client's close signal when discovery gives up before any
-/// advertisement exists. Without a hosted client, or with no prompt yet issued,
-/// there is no phase and this returns at once.
+/// advertisement exists. Without a close owed there is no phase, and this
+/// returns at once.
 fn await_phase_close_or_model_revision(
     args: &InitArgs,
     home: &Path,
+    registry: &RegistryCatalog,
     config: &mut Config,
     outcome: &mut ModelModeOutcome,
     set_provider: bool,
 ) -> Result<PhaseExit> {
-    if !prompt::hosted_driver_active() || !discovery_prompt_issued() {
+    if !discovery_close_owed(args) {
         return Ok(PhaseExit::Closed);
     }
     loop {
-        match prompt::await_discovery_close()? {
-            DiscoveryWait::Closed => return Ok(PhaseExit::Closed),
+        match await_discovery_close_checked(args, home, registry, config)? {
+            DiscoveryWait::Closed => {
+                outcome.provider_check_settled = provider_check_active(args);
+                return Ok(PhaseExit::Closed);
+            }
             DiscoveryWait::Revised(revision) => {
                 if apply_catalog_model_revision(
                     args,
@@ -1295,6 +1333,13 @@ fn mark_discovery_prompt_issued() {
 
 fn discovery_prompt_issued() -> bool {
     DISCOVERY_PROMPT_ISSUED.with(std::cell::Cell::get)
+}
+
+/// Whether a hosted client owes this run a discovery close: a prompt opened the phase, or the
+/// provider check needs a close to run on. A run that asked nothing and checks nothing walks
+/// straight through.
+fn discovery_close_owed(args: &InitArgs) -> bool {
+    provider_check_active(args) || (prompt::hosted_driver_active() && discovery_prompt_issued())
 }
 
 /// A revision reached a call that cannot service one. Unreachable by

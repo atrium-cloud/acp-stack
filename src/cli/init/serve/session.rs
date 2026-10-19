@@ -600,6 +600,16 @@ impl HostedInitSession {
     /// revises an earlier answer. Shares `input_ready` with `request_input`, so
     /// one notify wakes whichever call the wizard is parked in.
     pub(super) fn await_discovery_close(&self) -> Result<DiscoveryWait> {
+        self.wait_for_discovery_close(false)
+    }
+
+    /// `await_discovery_close` for a provider check: opens the phase when no prompt did, and
+    /// reopens a closed one, so the client owes a close every time the check needs one.
+    pub(super) fn park_for_discovery_close(&self) -> Result<DiscoveryWait> {
+        self.wait_for_discovery_close(true)
+    }
+
+    fn wait_for_discovery_close(&self, always_park: bool) -> Result<DiscoveryWait> {
         let entry_frame = {
             let mut inner = lock_unpoisoned(&self.inner);
             terminal_status_error(&inner)?;
@@ -608,13 +618,24 @@ impl HostedInitSession {
             }
             // A run that issued no discovery prompt has nothing to close, and no
             // client could close it, so it walks straight through.
-            match inner.discovery.as_mut() {
-                None => return Ok(DiscoveryWait::Closed),
-                Some(phase) if phase.state == DiscoveryState::Closed => {
-                    return Ok(DiscoveryWait::Closed);
-                }
-                Some(phase) => phase.state = DiscoveryState::AwaitingClose,
+            let phase_closed = inner
+                .discovery
+                .as_ref()
+                .is_none_or(|phase| phase.state == DiscoveryState::Closed);
+            if phase_closed && !always_park {
+                return Ok(DiscoveryWait::Closed);
             }
+            let phase = inner.discovery.get_or_insert_with(|| DiscoveryPhase {
+                state: DiscoveryState::AwaitingClose,
+                accepted: Vec::new(),
+                queued: Vec::new(),
+                close_requested: false,
+            });
+            if phase.state == DiscoveryState::Closed {
+                // The close that ended the phase is spent; a reopened phase waits for a new one.
+                phase.close_requested = false;
+            }
+            phase.state = DiscoveryState::AwaitingClose;
             inner.status = AWAITING_DISCOVERY_CLOSE_STATUS.to_owned();
             self.emit_event_locked(
                 &mut inner,

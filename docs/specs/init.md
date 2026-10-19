@@ -273,10 +273,21 @@ The hosted flow follows the same init steps as interactive `acps init`, but stre
 - The post-install MCP configuration step streams its prompts only when the start request declared no MCP server. Declaring servers up front still wins and skips the wizard outright.
 - MCP declarations the installed agent's capabilities do not cover are reported only through the result frame's `ignored_features`, never through progress frames.
 - Prompt answers arrive over the WebSocket `input` frame or the REST twin `POST /v1/init/sessions/{id}/input`, interchangeably. The bootstrap server also mounts `GET /v1/models` (with `?target_id=` target selection) so a backend renders pickers while the session runs.
-- Discovery answers stay revisable while the run is live. The phase opens on the first accepted model, mode, effort, or `config_option` answer; after the forward pass the session parks in `awaiting_discovery_close`, and until it closes an `input` naming an earlier discovery prompt replaces that answer. A run that streamed a model prompt parks there even when it settled on no model or its probe gave up, and a model revision sent there runs discovery again. A run that issues no discovery prompt opens no phase and waits for nothing.
+- Discovery answers stay revisable while the run is live. The phase opens on the first accepted model, mode, effort, or `config_option` answer; after the forward pass the session parks in `awaiting_discovery_close`, and until it closes an `input` naming an earlier discovery prompt replaces that answer. A run that streamed a model prompt parks there even when it settled on no model or its probe gave up, and a model revision sent there runs discovery again. A run that issues no discovery prompt opens no phase and waits for nothing, unless it asked for a provider check.
 - A revision re-runs the lanes below it. A revised model re-probes the agent and re-issues the mode, effort, and `config_option` prompts with new `request_id`s, and their previous ids stop being addressable. Other lanes re-issue nothing. The revised prompt keeps its own `request_id`, so a client holds one stable address per lane.
 - The close signal is the `close_discovery` frame or `POST /v1/init/sessions/{id}/discovery/close`. It is accepted once the session reports `awaiting_discovery_close`, refused as `init.discovery_busy` while discovery is still in progress, and as `init.discovery_not_open` before the phase opens and after it closes.
 - Revisions ride the ordinary `input` frame and its REST twin. The full contract, including the `init.revision_rejected` refusal and the `discovery` event, is in [endpoints.md](api/endpoints.md).
+
+### Provider Check
+
+`provider_check: true` in the start request checks that the credential works end to end with the chosen model before init commits:
+
+- After the model lane the run always parks in `awaiting_discovery_close`, whichever path the lane took. That includes a run that issued no discovery prompt, such as one whose deferred credential is still pending.
+- Each accepted close re-provisions the agent's native config from the secret store, then runs one real turn with the configured model and mode, the minimal `acps agent test --one-shot` prompt with no file check. The close request returns at once and the verdict arrives as a `provider_check` signal.
+- `passed` lets the run continue. `skipped` does too, for an agent the agent test cannot drive at all, such as a custom agent; its code is `agent_unsupported`.
+- `failed` parks the run in `awaiting_discovery_close` again. The client deposits a credential at a higher revision through `POST /v1/init/credential`, or revises an earlier discovery answer, then closes again, and the next close runs the check again. The native config written for the failed turn stays in place.
+- While the check runs the phase is closed, so a close is refused as `init.discovery_not_open`. The client waits for the session to return to `awaiting_discovery_close`.
+- The signal carries `outcome` (`passed`, `failed`, or `skipped`) and the agent test's outcome `code` verbatim. `status_code`, the upstream HTTP status, and `reason_category` ride along only with `prompt_failed`, as the agent test reports them. The frame shape is in [endpoints.md](api/endpoints.md#signal-frames).
 
 ### Extension Declarations And In-Stream Credential Deposit
 
@@ -298,7 +309,7 @@ While the session runs, the platform pushes the sealed provider credential throu
 
 Alongside the prompt stream, the session reports structured readiness through `signal` events:
 
-- Each signal is one raw fact: a step starting or finishing, or one of the ten categories (agent, provider, model, mode, effort, workspace, native config, MCP, skills, dependencies) becoming applicable, settled, or failed.
+- Each signal is one raw fact: a step starting or finishing, one of the ten categories (agent, provider, model, mode, effort, workspace, native config, MCP, skills, dependencies) becoming applicable, settled, or failed, or a provider check verdict.
 - The instance forwards the facts and does not derive a rendered view; the client folds the stream into one.
 - The whole signal stream so far rides the `hello` frame and the status response, so a client that connects late folds the same input without parsing progress text.
 - The signal shapes, the fold's category vocabulary, and its status values are in [api.md](api/api.md#bootstrap-init-api).

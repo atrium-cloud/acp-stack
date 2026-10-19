@@ -35,6 +35,19 @@ fn start_init_request_maps_acp_prompt_action_into_args() {
 }
 
 #[test]
+fn start_init_request_maps_provider_check_into_args() {
+    let args = request_from_json(r#"{"agent":"placebo","provider_check":true}"#)
+        .into_init_args()
+        .expect("valid request");
+    assert!(args.provider_check);
+    // Absent keeps today's flow, which parks only when a discovery prompt opened the phase.
+    let args = request_from_json(r#"{"agent":"placebo"}"#)
+        .into_init_args()
+        .expect("valid request");
+    assert!(!args.provider_check);
+}
+
+#[test]
 fn start_init_request_maps_custom_agent_declaration_into_args() {
     let args = request_from_json(
         r#"{

@@ -22,14 +22,15 @@ pub(super) fn run_provider_configure_step(flow: &mut InitFlow) -> Result<()> {
         step_kind::PROVIDER_CONFIGURE,
         || {
             // Idempotent only when no lane this step owns has an explicit change
-            // requested; otherwise a resumed `--model`/`--mode`/`--effort` would be
-            // skipped because the prior succeeded row passes the verifier. Reads
-            // ride the shared handle rather than a fresh `open`: the serve process
-            // keeps exactly one decrypted store instance.
+            // requested; otherwise a resumed `--model`/`--mode`/`--effort`, or a
+            // requested provider check, would be skipped because the prior succeeded
+            // row passes the verifier. Reads ride the shared handle rather than a
+            // fresh `open`: the serve process keeps exactly one decrypted store instance.
             Ok(args.provider.is_none()
                 && args.model.is_none()
                 && args.mode.is_none()
                 && args.effort.is_none()
+                && !args.provider_check
                 && configured_provider_refs_satisfied(
                     registry,
                     &provider_verify_config,

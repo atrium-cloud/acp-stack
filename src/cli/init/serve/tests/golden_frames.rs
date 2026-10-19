@@ -107,6 +107,32 @@ fn golden_signal_event_bytes() {
 }
 
 #[test]
+fn golden_provider_check_signal_bytes() {
+    // The status and reason ride only with `prompt_failed`; a pass carries the code alone.
+    let session = test_session("init_golden_check");
+    session.apply_state_signal(InitStateSignal::ProviderCheck {
+        outcome: ProviderCheckOutcome::Failed,
+        code: "prompt_failed",
+        status_code: Some(401),
+        reason_category: Some("client_error"),
+    });
+    session.apply_state_signal(InitStateSignal::ProviderCheck {
+        outcome: ProviderCheckOutcome::Passed,
+        code: "ok",
+        status_code: None,
+        reason_category: None,
+    });
+    assert_eq!(
+        recorded_frame(&session, 2),
+        r#"{"code":"prompt_failed","outcome":"failed","reason_category":"client_error","seq":2,"session_id":"init_golden_check","signal":"provider_check","status_code":401,"type":"signal"}"#
+    );
+    assert_eq!(
+        recorded_frame(&session, 3),
+        r#"{"code":"ok","outcome":"passed","seq":3,"session_id":"init_golden_check","signal":"provider_check","type":"signal"}"#
+    );
+}
+
+#[test]
 fn golden_result_ready_result_frame_and_result_acked_bytes() {
     let session = test_session("init_golden_result");
     // Nested objects and non-ASCII text pin that the stored result is

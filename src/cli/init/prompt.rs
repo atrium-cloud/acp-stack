@@ -499,6 +499,11 @@ pub(super) trait HostedPromptDriver: Send + Sync {
     fn await_discovery_close(&self) -> Result<DiscoveryWait> {
         Ok(DiscoveryWait::Closed)
     }
+    /// `await_discovery_close` that parks even when no prompt opened the phase, and reopens a
+    /// closed one, so a provider check always has a close to run on.
+    fn park_for_discovery_close(&self) -> Result<DiscoveryWait> {
+        Ok(DiscoveryWait::Closed)
+    }
     /// Drop the named lanes' accepted prompts and any queued revisions of them,
     /// after an upstream revision invalidated their option sets.
     fn supersede_discovery_lanes(&self, _kinds: &[HostedPromptKind]) {}
@@ -974,6 +979,15 @@ fn select_inner<T: Clone + Eq>(
 pub(super) fn await_discovery_close() -> Result<DiscoveryWait> {
     match HOSTED_DRIVER.with(|slot| slot.borrow().clone()) {
         Some(driver) => driver.await_discovery_close(),
+        None => Ok(DiscoveryWait::Closed),
+    }
+}
+
+/// [`await_discovery_close`] that parks with or without an open phase. `Closed` at once without a
+/// hosted driver.
+pub(super) fn park_for_discovery_close() -> Result<DiscoveryWait> {
+    match HOSTED_DRIVER.with(|slot| slot.borrow().clone()) {
+        Some(driver) => driver.park_for_discovery_close(),
         None => Ok(DiscoveryWait::Closed),
     }
 }

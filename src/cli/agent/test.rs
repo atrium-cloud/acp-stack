@@ -456,6 +456,50 @@ pub(in crate::cli) fn run_init_testflight(
     }
 }
 
+/// One provider-check turn as init reports it: the agent test's outcome code verbatim and, for
+/// `prompt_failed`, the classifier's upstream status and reason.
+pub(in crate::cli) struct ProviderCheckTurn {
+    pub(in crate::cli) code: &'static str,
+    pub(in crate::cli) status_code: Option<u16>,
+    pub(in crate::cli) reason_category: Option<&'static str>,
+}
+
+impl ProviderCheckTurn {
+    pub(in crate::cli) fn passed(&self) -> bool {
+        self.code == CODE_OK
+    }
+
+    /// The agent cannot run headless at all, the case the init testflight skips as unsupported.
+    pub(in crate::cli) fn unsupported(&self) -> bool {
+        self.code == CODE_AGENT_UNSUPPORTED
+    }
+}
+
+/// One real turn with the configured model and mode: a single attempt on the minimal prompt.
+pub(in crate::cli) fn run_provider_check_turn(
+    home: &Path,
+    config: &Config,
+    registry: &RegistryCatalog,
+) -> ProviderCheckTurn {
+    let args = AgentTestArgs {
+        // Explicit, so a registry testflight prompt and its artifact check never apply.
+        prompt: Some(DEFAULT_AGENT_TEST_PROMPT.to_owned()),
+        timeout: DEFAULT_AGENT_TEST_TIMEOUT.to_owned(),
+        progress_timeout: DEFAULT_AGENT_TEST_PROGRESS_TIMEOUT.to_owned(),
+        one_shot: true,
+    };
+    let run = run_agent_test_with(home, config, registry, args);
+    if let Some(error) = &run.error {
+        tracing::warn!(error = %crate::error::report(error), "provider check turn failed");
+    }
+    let prompt_failure = run.outcome.prompt_failure;
+    ProviderCheckTurn {
+        code: run.outcome.code,
+        status_code: prompt_failure.and_then(|failure| failure.status_code),
+        reason_category: prompt_failure.map(|failure| failure.reason_category),
+    }
+}
+
 pub(super) fn run_agent_test(args: AgentTestArgs, format: OutputFormat) -> Result<()> {
     let home = home_dir()?;
     let config = Config::load_from_default_path()?;

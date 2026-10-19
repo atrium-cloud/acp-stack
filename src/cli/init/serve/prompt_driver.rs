@@ -154,6 +154,10 @@ impl HostedPromptDriver for SessionPromptDriver {
         self.session.await_discovery_close()
     }
 
+    fn park_for_discovery_close(&self) -> Result<DiscoveryWait> {
+        self.session.park_for_discovery_close()
+    }
+
     fn supersede_discovery_lanes(&self, kinds: &[HostedPromptKind]) {
         self.session.supersede_discovery_lanes(kinds);
     }

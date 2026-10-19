@@ -266,6 +266,8 @@ pub(super) fn fold_state(signals: &[Value], awaiting: Option<InitCategory>) -> V
                 let code = signal["code"].as_str().unwrap_or_default().to_owned();
                 map.fail(category, code);
             }
+            // A verdict on the discovery close, not a category fact.
+            "provider_check" => {}
             other => panic!("unknown signal `{other}` in stream"),
         }
     }

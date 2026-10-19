@@ -160,6 +160,12 @@ pub(super) struct StartInitRequest {
     /// provider's refs cannot arrive through the push and still hard-fail.
     /// Absent → false.
     defer_provider_credentials: Option<bool>,
+    /// Check the credential end to end before init commits: each discovery close runs one real
+    /// turn with the configured model and reports a `provider_check` signal. The run parks for
+    /// the close even when no discovery prompt was issued, and a failed check parks it again,
+    /// so a credential deposited at a higher revision is checked on the next close. Absent →
+    /// false.
+    provider_check: Option<bool>,
     /// `[extensions]` tables staged into a freshly-created starter config,
     /// e.g. `{ "network-egress": { "type": "network-provider", "provider": [...] } }`.
     /// Semantic validation (name shape, per-type field discipline, the
@@ -745,6 +751,7 @@ impl StartInitRequest {
             .transpose()?;
         args.acp_prompt_action = self.acp_prompt_action;
         args.defer_provider_credentials = self.defer_provider_credentials.unwrap_or(false);
+        args.provider_check = self.provider_check.unwrap_or(false);
         args.prompt_extensions = self.extensions;
         args.prompt_sandbox_mask_paths = self.sandbox_mask_paths;
         args.prompt_sandbox_mask_files = self.sandbox_mask_files;

@@ -47,6 +47,7 @@ async fn status_returns_200_with_session_key() {
         "workload-io-follow-links",
         "sandbox-workload-env",
         "provider-http-proxy",
+        "init-provider-check",
     ] {
         assert!(
             features.iter().any(|entry| entry == feature),

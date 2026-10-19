@@ -140,7 +140,7 @@ Coverage of the typed handler surface is verified in CI (`cargo run --features d
 
 ### Session Lifecycle
 
-- A run that issued a discovery prompt parks in `awaiting_discovery_close` after the last one and continues once the client closes the discovery phase. This is a change in required client behavior: hosted clients must send `close_discovery` after discovery, and a backend that answers prompts but never closes the phase never reaches a result.
+- A run that issued a discovery prompt, or asked for a provider check, parks in `awaiting_discovery_close` after the forward pass and continues once the client closes the discovery phase. This is a change in required client behavior: hosted clients must send `close_discovery` after discovery, and a backend that answers prompts but never closes the phase never reaches a result.
 - After `result`, the session waits in `completed_awaiting_ack`. `ack_result` is terminal: the server clears the in-memory handoff payload, closes the session, and exits successfully.
 - A failure after key handover still delivers a `result` frame through the same ack path.
 - A failure before key handover parks the session in `errored` and keeps the server up, so the backend learns the typed failure instead of a dead port. `ack_error` releases the server, which exits non-zero. A 2-minute grace (reason `error_ack_timeout`) bounds the wait.

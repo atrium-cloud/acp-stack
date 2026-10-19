@@ -34,7 +34,7 @@ pub(in crate::cli) use self::set::{
     resolve_agent_model_value, seed_kilo_mapped_key_env_declaration,
     validate_agent_session_config_value, validate_custom_provider_api_for_agent,
 };
-pub(in crate::cli) use self::test::run_init_testflight;
+pub(in crate::cli) use self::test::{run_init_testflight, run_provider_check_turn};
 
 pub(super) const DEFAULT_AGENT_TEST_PROMPT: &str =
     "Reply with exactly this text and nothing else: acp-stack test ok";

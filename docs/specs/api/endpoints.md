@@ -72,6 +72,7 @@ Session-tier HTTP routes are also mounted on the local socket and serve only whi
         - `existing_agent` (`use-existing` | `replace-latest` | `replace-version`): what init does with an agent CLI acp-stack did not install. `replace-latest` also clears `[agent].harness_version`. `replace-version` requires `agent_version`; `use-existing` and `replace-latest` conflict with it; each violation is a `400`.
         - Absent `existing_agent` replaces such a CLI with `agent_version` when given, else with the configured `[agent].harness_version`, else with its latest release. An ACP adapter acp-stack did not install is always replaced with its latest release.
     - `defer_provider_credentials` (boolean, default `false`): declares that the caller will push the configured provider's credential through the managed-state extension after init. A missing ref the push can deliver is not prompted and soft-passes, covering a custom provider's api-key ref, or a mapped key-based provider's api-key and companion env vars under the names the agent reads. A ref the push cannot deliver stays required and fails the session: a noncanonical api-key alias, a `VAR=template` inner ref, and an agent-native-auth provider's refs. Without the declaration, a missing provider ref fails the session.
+    - `provider_check` (boolean, default `false`): every discovery close runs one real turn with the configured model and reports a `provider_check` signal. The run parks for the close even when no discovery prompt was issued, and a failed check parks it again for the next close. See [init.md](../init.md#provider-check).
 - Response: `{ "session_id": "...", "status": "running" }` in the standard success envelope. `status` is one of `running`, `waiting_for_input`, `awaiting_discovery_close`, `completed_awaiting_ack`, `errored`, `cancelled`, or `closed`. The same set backs the status route and the cancel route's `{session_id, status}` body.
 - Errors:
     - `409 init.session_active` is returned when another session is running or awaiting result acknowledgement. Also returned while a failure is parked (see lifecycle below).
@@ -145,7 +146,7 @@ Session-tier HTTP routes are also mounted on the local socket and serve only whi
 - Notes:
     - Client `input` frames must include the active `request_id`; stale input is rejected. Unknown fields on a client frame are ignored rather than rejected.
     - For a `config_option` prompt, the input frame's `value` is `{ "config_id": "...", "value": <string|boolean|null> }`. The id and typed value are checked against the advertised option; `null` keeps the agent's current value without writing an override.
-    - The discovery phase opens on the first accepted `model`, `mode`, `effort`, or `config_option` answer and spans every later one. A run that issues no discovery prompt never opens the phase and never waits for its close.
+    - The discovery phase opens on the first accepted `model`, `mode`, `effort`, or `config_option` answer and spans every later one. A run that issues no discovery prompt never opens the phase and never waits for its close, unless it asked for a provider check.
     - An `input` frame naming an accepted discovery prompt of the open phase revises that answer. The value uses the same grammar as the first answer (index, `{"index"}`, `{"value"}`, label, or `null`; the `{config_id, value}` shape for a `config_option`), and `deferred` is ignored. An accepted revision is acknowledged with `input_accepted`; one the phase cannot take is refused as `init.revision_rejected` and the previously accepted answer stands, including one arriving after a close was accepted but before the wizard observed it.
     - A revision that arrives while the wizard is busy is queued and picked up at its next blocking call. One revision is kept per lane, the latest replacing the earlier, and lanes are drained in the order they were first revised.
     - Revising to `null` clears what the lane wrote: the model, mode, or effort field, or a `config_option` override. The model, mode, and effort lanes re-settle with `category_settled` carrying `value: null`.
@@ -161,7 +162,7 @@ Session-tier HTTP routes are also mounted on the local socket and serve only whi
 
 #### Signal Frames
 
-Each `signal` frame reports one raw fact the wizard observed: a step starting or finishing, or a category becoming applicable, settled, or failed. A client renders progress from structure instead of parsing `progress` text.
+Each `signal` frame reports one raw fact the wizard observed: a step starting or finishing, a category becoming applicable, settled, or failed, or a provider check verdict. A client renders progress from structure instead of parsing `progress` text.
 
 - Signals are seq-bearing events. They appear in event replay (`after_seq`) alongside `progress`, one event per fact and no dedup.
 - The instance forwards these facts raw; the client folds the stream into a rendered category view.
@@ -176,10 +177,12 @@ Each `signal` frame reports one raw fact the wizard observed: a step starting or
 { "signal": "category_settled", "category": "agent", "value": "opencode", "seq": 15, "session_id": "...", "type": "signal" }
 { "signal": "category_provisionally_settled", "category": "mode", "value": "default", "seq": 16, "session_id": "...", "type": "signal" }
 { "signal": "category_failed", "category": "skills", "code": "init.skills_install_failed", "seq": 17, "session_id": "...", "type": "signal" }
+{ "signal": "provider_check", "outcome": "failed", "code": "prompt_failed", "status_code": 401, "reason_category": "client_error", "seq": 18, "session_id": "...", "type": "signal" }
 ```
 
 - `error_code` is present only on a failed step. `reason` is present only on an inapplicable verdict. A `category_settled` `value` is `null` for a settlement that wrote nothing.
 - `source` is one of `args`, `registry`, `probe`, `discovery`, `discovery_unavailable`.
+- `provider_check.outcome` is `passed`, `failed`, or `skipped`, and `code` is the `acps agent test` outcome code verbatim (`ok`, `prompt_failed`, `prompt_timeout`, `agent_spawn_failed`, `agent_unsupported`, and the rest). `status_code`, the upstream HTTP status, and `reason_category` appear only with `prompt_failed`, `status_code` only when the upstream status was found. The fold takes no category from it.
 - Settlement values are ids and secret ref names only (the provider settles with the configured provider id, not the key behind it), never secret values.
 
 #### Signal Fold Model
@@ -216,7 +219,7 @@ The client also folds `current_step` from the `step_started`/`step_finished` str
 
 #### Init Session Lifecycle
 
-- A run that issued a discovery prompt parks in `awaiting_discovery_close` after the forward pass. The session stays active there, revisions are still accepted, and the run continues once the client sends `close_discovery` or posts its REST twin. Reaching `--idle-timeout` in that state cancels with reason `discovery_close_timeout`, regardless of connected WebSockets.
+- A run that issued a discovery prompt, or asked for a provider check, parks in `awaiting_discovery_close` after the forward pass. The session stays active there, revisions are still accepted, and the run continues once the client sends `close_discovery` or posts its REST twin. Reaching `--idle-timeout` in that state cancels with reason `discovery_close_timeout`, regardless of connected WebSockets.
 - After `result`, the session remains `completed_awaiting_ack`. If the WebSocket drops before acknowledgement, the backend reconnects and sends `replay_result`. `ack_result` is terminal: the server clears the in-memory handoff payload, closes the session, and exits successfully.
 - A failure after key handover still delivers a `result` frame (with `"status": "failed"` and any freshly generated keys) through the normal result/ack path.
 - A failure with no result payload to deliver, meaning one that happened before key handover completed, parks instead: the session enters `errored` and the server stays up so the backend can learn the typed failure instead of a dead port.
@@ -1186,7 +1189,7 @@ A `running` row is reconciled to `failed` with `error.code = "deps.apply_abandon
 ```json
 {
   "version": "0.1.9",
-  "features": ["network-provider-workload-env", "agent-test-json", "managed-credential-base-url", "sandbox-mask-files", "managed-node-runtime", "sandbox-workload-user", "sandbox-capability-drop", "sandbox-workload-termination", "workload-io-identity", "host-exec-trusted-inputs", "install-workload-reachability", "sandbox-require-network-provider", "sandbox-off-identity", "workload-io-follow-links", "sandbox-workload-env", "provider-http-proxy"]
+  "features": ["network-provider-workload-env", "agent-test-json", "managed-credential-base-url", "sandbox-mask-files", "managed-node-runtime", "sandbox-workload-user", "sandbox-capability-drop", "sandbox-workload-termination", "workload-io-identity", "host-exec-trusted-inputs", "install-workload-reachability", "sandbox-require-network-provider", "sandbox-off-identity", "workload-io-follow-links", "sandbox-workload-env", "provider-http-proxy", "init-provider-check"]
 }
 ```
 
@@ -1209,6 +1212,7 @@ A `running` row is reconciled to `failed` with `error.code = "deps.apply_abandon
     - `workload-io-follow-links` covers workload file I/O following symlinks and hard links under the I/O credentials, workspace paths contained by their resolved path, writes through a link keeping the link, and `403 workspace.permission_denied`
     - `sandbox-workload-env` covers `[workspace.sandbox].workload_env` and `workload_path_prepend` reaching the agent, ACP terminals, and mediated commands (see [security.md](../security.md#workload-environment))
     - `provider-http-proxy` covers `ACPS_PROVIDER_HTTP_PROXY` carrying provider-keyed requests through an HTTP proxy, loopback destinations excepted (see [runtime.md](../runtime.md#provider-request-proxy))
+    - `init-provider-check` covers `provider_check` on the init create body, the discovery-close park it adds, and the `provider_check` signal (see [init.md](../init.md#provider-check))
 
 ### `GET /v1/status/agent`
 

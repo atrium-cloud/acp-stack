@@ -56,6 +56,7 @@ pub const FEATURE_SANDBOX_OFF_IDENTITY: &str = "sandbox-off-identity";
 pub const FEATURE_WORKLOAD_IO_FOLLOW_LINKS: &str = "workload-io-follow-links";
 pub const FEATURE_SANDBOX_WORKLOAD_ENV: &str = "sandbox-workload-env";
 pub const FEATURE_PROVIDER_HTTP_PROXY: &str = "provider-http-proxy";
+pub const FEATURE_INIT_PROVIDER_CHECK: &str = "init-provider-check";
 
 const SERVER_FEATURES: &[&str] = &[
     FEATURE_NETWORK_PROVIDER_WORKLOAD_ENV,
@@ -74,6 +75,7 @@ const SERVER_FEATURES: &[&str] = &[
     FEATURE_WORKLOAD_IO_FOLLOW_LINKS,
     FEATURE_SANDBOX_WORKLOAD_ENV,
     FEATURE_PROVIDER_HTTP_PROXY,
+    FEATURE_INIT_PROVIDER_CHECK,
 ];
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -88,9 +90,9 @@ pub(crate) struct ServerInfo {
     /// `sandbox-workload-termination`, `workload-io-identity`,
     /// `host-exec-trusted-inputs`, `install-workload-reachability`,
     /// `sandbox-require-network-provider`, `sandbox-off-identity`,
-    /// `workload-io-follow-links`, `sandbox-workload-env`, and
-    /// `provider-http-proxy`. The list grows over time; an absent or empty
-    /// list means none are present.
+    /// `workload-io-follow-links`, `sandbox-workload-env`,
+    /// `provider-http-proxy`, and `init-provider-check`. The list grows over
+    /// time; an absent or empty list means none are present.
     features: &'static [&'static str],
 }
 
@@ -433,6 +435,7 @@ mod tests {
                 "workload-io-follow-links",
                 "sandbox-workload-env",
                 "provider-http-proxy",
+                "init-provider-check",
             ])
         );
     }
