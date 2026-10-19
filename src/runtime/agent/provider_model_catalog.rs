@@ -215,14 +215,12 @@ async fn fetch_provider_models(
 }
 
 async fn fetch_models_payload(provider_id: &str, models_url: &str, api_key: &str) -> Result<Value> {
-    let client = crate::http_client::client_builder()
+    let client_build_failed =
+        |reason: String| catalog_error(provider_id, format!("client build failed: {reason}"));
+    let client = crate::http_client::provider_client_builder()
+        .map_err(|error| client_build_failed(crate::error::report(&error)))?
         .build()
-        .map_err(|error| {
-            catalog_error(
-                provider_id,
-                format!("client build failed: {}", crate::error::report(&error)),
-            )
-        })?;
+        .map_err(|error| client_build_failed(crate::error::report(&error)))?;
     let response = client
         .get(models_url)
         .bearer_auth(api_key)

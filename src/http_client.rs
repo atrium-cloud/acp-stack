@@ -10,6 +10,11 @@ const DEAD_PROXY_URL: &str = "http://127.0.0.1:1";
 /// than this. The text kept in the error is cut far shorter after redaction.
 const ERROR_BODY_READ_MAX_BYTES: usize = 16 * 1024;
 const EMPTY_ERROR_BODY: &str = "(empty body)";
+/// acp-stack's own proxy for the requests it sends with a provider credential. Nothing else reads
+/// it: installs, release fetches, data sources, logging, and child processes keep their routing.
+pub const PROVIDER_HTTP_PROXY_ENV: &str = "ACPS_PROVIDER_HTTP_PROXY";
+/// Loopback destinations bypass the provider proxy, so a local endpoint override keeps working.
+const PROVIDER_PROXY_LOOPBACK_BYPASS: &str = "localhost,127.0.0.0/8,::1";
 
 /// The body of a non-2xx response, redacted and bounded for an error. A failed read is noted in
 /// its place so the caller still reports the status.
@@ -55,6 +60,41 @@ pub fn client_builder() -> reqwest::ClientBuilder {
     } else {
         builder
     }
+}
+
+/// Builder for requests that present a provider credential: through `ACPS_PROVIDER_HTTP_PROXY`
+/// when it is set, loopback excepted. A proxy refusal is the answer; nothing falls back to direct.
+pub fn provider_client_builder() -> crate::error::Result<reqwest::ClientBuilder> {
+    let proxy_url = match std::env::var(PROVIDER_HTTP_PROXY_ENV) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(crate::error::StackError::InvalidParam {
+                field: PROVIDER_HTTP_PROXY_ENV,
+                reason: "the value is not valid UTF-8".to_owned(),
+            });
+        }
+    };
+    with_provider_proxy(client_builder(), proxy_url.as_deref())
+}
+
+/// Appended after the builder's own proxies, so a fixture guard that intercepts a destination
+/// still wins.
+fn with_provider_proxy(
+    builder: reqwest::ClientBuilder,
+    proxy_url: Option<&str>,
+) -> crate::error::Result<reqwest::ClientBuilder> {
+    let Some(proxy_url) = proxy_url.map(str::trim).filter(|url| !url.is_empty()) else {
+        return Ok(builder);
+    };
+    let proxy =
+        reqwest::Proxy::all(proxy_url).map_err(|error| crate::error::StackError::InvalidParam {
+            field: PROVIDER_HTTP_PROXY_ENV,
+            reason: crate::error::report(&error),
+        })?;
+    Ok(builder.proxy(proxy.no_proxy(reqwest::NoProxy::from_string(
+        PROVIDER_PROXY_LOOPBACK_BYPASS,
+    ))))
 }
 
 pub fn blocking_client_builder() -> reqwest::blocking::ClientBuilder {
@@ -270,6 +310,81 @@ mod tests {
             .expect("body");
         assert_eq!(body, "ok");
         server.join().expect("server thread");
+    }
+
+    /// A one-shot HTTP proxy on loopback that hands back the request line it received.
+    fn spawn_recording_proxy() -> (String, std::thread::JoinHandle<String>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind proxy");
+        let proxy_url = format!("http://{}", listener.local_addr().expect("proxy addr"));
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut head = Vec::new();
+            let mut buffer = [0u8; 1024];
+            while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).expect("read request");
+                assert!(read > 0, "client closed before sending a request head");
+                head.extend_from_slice(&buffer[..read]);
+            }
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\nproxied",
+                )
+                .expect("write response");
+            let head = String::from_utf8_lossy(&head).into_owned();
+            head.lines().next().unwrap_or_default().to_owned()
+        });
+        (proxy_url, handle)
+    }
+
+    #[tokio::test]
+    async fn provider_proxy_carries_remote_requests() {
+        let (proxy_url, proxy) = spawn_recording_proxy();
+        let client = with_provider_proxy(reqwest::Client::builder(), Some(&proxy_url))
+            .expect("provider proxy")
+            .build()
+            .expect("client");
+        // A proxied request leaves name resolution to the proxy, so `.invalid` never hits DNS.
+        let body = client
+            .get("http://provider.invalid/v1/models")
+            .send()
+            .await
+            .expect("proxied request")
+            .text()
+            .await
+            .expect("body");
+        assert_eq!(body, "proxied");
+        assert_eq!(
+            proxy.join().expect("proxy thread"),
+            "GET http://provider.invalid/v1/models HTTP/1.1"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_proxy_skips_loopback_and_rejects_a_malformed_url() {
+        let server = test_server::spawn(
+            axum::Router::new().route("/models", axum::routing::get(|| async { "direct" })),
+        );
+        // Nothing listens on the proxy address, so only a bypassed request can succeed.
+        let client = with_provider_proxy(reqwest::Client::builder(), Some(DEAD_PROXY_URL))
+            .expect("provider proxy")
+            .build()
+            .expect("client");
+        let body = client
+            .get(server.url("/models"))
+            .send()
+            .await
+            .expect("loopback request")
+            .text()
+            .await
+            .expect("body");
+        assert_eq!(body, "direct");
+
+        let error = with_provider_proxy(reqwest::Client::builder(), Some("http://[::1"))
+            .expect_err("a malformed proxy must fail closed");
+        assert!(
+            error.to_string().contains(PROVIDER_HTTP_PROXY_ENV),
+            "{error}"
+        );
     }
 
     #[test]

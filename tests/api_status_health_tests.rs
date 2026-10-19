@@ -46,6 +46,7 @@ async fn status_returns_200_with_session_key() {
         "sandbox-off-identity",
         "workload-io-follow-links",
         "sandbox-workload-env",
+        "provider-http-proxy",
     ] {
         assert!(
             features.iter().any(|entry| entry == feature),
