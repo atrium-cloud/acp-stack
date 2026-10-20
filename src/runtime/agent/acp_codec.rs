@@ -619,6 +619,56 @@ pub fn session_mode_values(response: &NewSessionResponse) -> Result<Vec<String>>
     )
 }
 
+/// One typed lane as the agent offers it, for a client presenting it as a picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdvertisedSelect {
+    /// The agent's own order, deduped keeping the first occurrence.
+    pub values: Vec<String>,
+    /// The value the session holds.
+    pub current: String,
+}
+
+/// The advertised lane for `category`. Unlike [`session_config_values`] the agent's order is
+/// kept and the current value carried; mode falls back to the native `modes` field like
+/// [`session_mode_values`].
+pub fn session_advertised_select(
+    response: &NewSessionResponse,
+    category: AgentSessionConfigCategory,
+) -> Result<AdvertisedSelect> {
+    let option = match find_config_option(response.config_options.as_deref(), category) {
+        Ok(option) => option,
+        Err(error) => {
+            return match (category, response.modes.as_ref()) {
+                (AgentSessionConfigCategory::Mode, Some(modes)) => Ok(AdvertisedSelect {
+                    values: first_occurrences(
+                        modes
+                            .available_modes
+                            .iter()
+                            .map(|mode| mode.id.0.to_string()),
+                    ),
+                    current: modes.current_mode_id.0.to_string(),
+                }),
+                _ => Err(error),
+            };
+        }
+    };
+    let SessionConfigKind::Select(select) = &option.kind else {
+        return Err(missing_config_option(category));
+    };
+    Ok(AdvertisedSelect {
+        values: first_occurrences(session_config_option_values(option)),
+        current: select.current_value.0.to_string(),
+    })
+}
+
+fn first_occurrences(values: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    values
+        .into_iter()
+        .filter(|value| seen.insert(value.clone()))
+        .collect()
+}
+
 pub(crate) fn session_config_option_contains_value(
     option: &SessionConfigOption,
     value: &str,

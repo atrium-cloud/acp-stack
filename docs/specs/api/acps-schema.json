@@ -5235,14 +5235,17 @@
             "items": {
               "type": "string"
             },
-            "description": "ACP-advertised `mode` values. Empty when the agent does not\nexpose a mode option (or, on the catalog fallback path, when ACP\ndiscovery failed)."
+            "description": "ACP-advertised `mode` values, in the agent's order. Empty when the\nagent does not expose a mode option (or, on the catalog fallback path,\nwhen ACP discovery failed)."
           },
           "efforts": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "Reasoning-effort values for the configured model: the ACP-advertised\n`thought_level` session config option, or the provider catalog's list\nwhen the harness takes the effort from on-disk config. On the\n`acp_advertised` source the values belong to the `model` query param when\none is given, else the configured model, else the model the probed\nharness booted with. Empty when neither source reports any (or, on the\ncatalog fallback path, when ACP discovery failed)."
+            "description": "Reasoning-effort values for the configured model: the ACP-advertised\n`thought_level` session config option in the agent's order, or the\nprovider catalog's list when the harness takes the effort from on-disk\nconfig. On the `acp_advertised` source the values belong to the `model`\nquery param when one is given, else the configured model, else the model\nthe probed harness booted with. Empty when neither source reports any\n(or, on the catalog fallback path, when ACP discovery failed)."
+          },
+          "current": {
+            "$ref": "#/$defs/response/ModelsCurrentJson"
           },
           "catalog_error": {
             "type": [
@@ -5257,8 +5260,41 @@
           "source",
           "models",
           "modes",
-          "efforts"
+          "efforts",
+          "current"
         ]
+      },
+      "ModelsCurrentJson": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The model a new session runs on; the configured model where the harness takes it from disk."
+          },
+          "mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The mode a new session starts in."
+          },
+          "effort": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The reasoning effort a new session starts on."
+          }
+        },
+        "required": [
+          "model",
+          "mode",
+          "effort"
+        ],
+        "description": "What a session started on the probed model begins with, per lane: the\nconfigured value where session create would apply it, else the agent's\nown. `null` for a lane with nothing to report: no configured model on a\nharness that takes it from disk, an option the agent does not advertise,\nor a failed ACP discovery on the catalog path."
       },
       "NativeConfigInspection": {
         "type": "object",

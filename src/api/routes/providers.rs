@@ -9,9 +9,11 @@ use crate::envelope::ApiSuccess;
 use crate::error::{Result, StackError};
 use crate::redaction::{bounded, redact_text};
 use crate::runtime::agent::acp_bridge::AgentSessionConfigCategory;
-use crate::runtime::agent::acp_codec::session_model_choices;
+use crate::runtime::agent::acp_codec::{
+    AdvertisedSelect, session_advertised_select, session_model_choices,
+};
 use crate::runtime::agent::model_discovery::{
-    DEFAULT_MODELS_DISCOVERY_TIMEOUT, advertised_values_for_category, configured_model_value,
+    DEFAULT_MODELS_DISCOVERY_TIMEOUT, configured_model_value,
     effort_value_is_explicit_without_discovery, fetch_session_config_with_timeout,
     harness_accepted_efforts, model_value_is_explicit_without_discovery,
 };
@@ -80,18 +82,19 @@ pub(crate) struct ModelsResponse {
     #[schemars(extend("enum" = ["provider_catalog", "acp_advertised"]))]
     source: &'static str,
     models: Vec<ModelJson>,
-    /// ACP-advertised `mode` values. Empty when the agent does not
-    /// expose a mode option (or, on the catalog fallback path, when ACP
-    /// discovery failed).
+    /// ACP-advertised `mode` values, in the agent's order. Empty when the
+    /// agent does not expose a mode option (or, on the catalog fallback path,
+    /// when ACP discovery failed).
     modes: Vec<String>,
     /// Reasoning-effort values for the configured model: the ACP-advertised
-    /// `thought_level` session config option, or the provider catalog's list
-    /// when the harness takes the effort from on-disk config. On the
-    /// `acp_advertised` source the values belong to the `model` query param when
-    /// one is given, else the configured model, else the model the probed
-    /// harness booted with. Empty when neither source reports any (or, on the
-    /// catalog fallback path, when ACP discovery failed).
+    /// `thought_level` session config option in the agent's order, or the
+    /// provider catalog's list when the harness takes the effort from on-disk
+    /// config. On the `acp_advertised` source the values belong to the `model`
+    /// query param when one is given, else the configured model, else the model
+    /// the probed harness booted with. Empty when neither source reports any
+    /// (or, on the catalog fallback path, when ACP discovery failed).
     efforts: Vec<String>,
+    current: ModelsCurrentJson,
     /// Set when the provider declares a model listing endpoint and the catalog
     /// fetch failed: redacted and cut at 1024 bytes. `models` then comes from
     /// the cached catalog when one exists, else from ACP discovery.
@@ -110,6 +113,21 @@ pub(crate) struct ModelJson {
     /// the provider marks as effort-selectable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) efforts: Vec<String>,
+}
+
+/// What a session started on the probed model begins with, per lane: the
+/// configured value where session create would apply it, else the agent's
+/// own. `null` for a lane with nothing to report: no configured model on a
+/// harness that takes it from disk, an option the agent does not advertise,
+/// or a failed ACP discovery on the catalog path.
+#[derive(Serialize, schemars::JsonSchema)]
+pub(crate) struct ModelsCurrentJson {
+    /// The model a new session runs on; the configured model where the harness takes it from disk.
+    model: Option<String>,
+    /// The mode a new session starts in.
+    mode: Option<String>,
+    /// The reasoning effort a new session starts on.
+    effort: Option<String>,
 }
 
 const MODELS_SOURCE_PROVIDER_CATALOG: &str = "provider_catalog";
@@ -229,7 +247,7 @@ pub(crate) async fn models_response_for_config(
     if let Some(models) = catalog {
         // A discovery failure must not take down a response the catalog can
         // serve on its own.
-        let (modes, advertised_efforts) = match fetch_session_config_with_timeout(
+        let (mode_lane, effort_lane) = match fetch_session_config_with_timeout(
             home,
             config,
             probe_model,
@@ -240,8 +258,8 @@ pub(crate) async fn models_response_for_config(
             Ok(discovered) => {
                 let applied = discovered.applied();
                 (
-                    advertised_or_empty(&applied, AgentSessionConfigCategory::Mode),
-                    advertised_or_empty(&applied, AgentSessionConfigCategory::Effort),
+                    advertised_lane(&applied, AgentSessionConfigCategory::Mode),
+                    advertised_lane(&applied, AgentSessionConfigCategory::Effort),
                 )
             }
             Err(error) => {
@@ -250,7 +268,7 @@ pub(crate) async fn models_response_for_config(
                     agent_id = %agent_id,
                     "config-option discovery failed; serving catalog models without modes or efforts"
                 );
-                (Vec::new(), Vec::new())
+                (None, None)
             }
         };
         // A harness that pins the effort on disk advertises none over ACP, so
@@ -259,14 +277,30 @@ pub(crate) async fn models_response_for_config(
         // The catalog lane reports the configured model's values, which a probe
         // model named for the ACP lane must not redirect.
         let configured_model = configured_model_value(&config.agent);
-        let efforts = if catalog_effort_lane {
-            models
+        let configured_effort = config.agent.effort.as_deref();
+        let (efforts, current_effort) = if catalog_effort_lane {
+            let efforts = models
                 .iter()
                 .find(|model| Some(model.value.as_str()) == configured_model)
                 .map(|model| harness_accepted_efforts(&config.agent, model.efforts.clone()))
-                .unwrap_or_default()
+                .unwrap_or_default();
+            // The codex config writer withholds the pin from a model the catalog lists without it
+            // (`codex_catalog_effort_applies`); a model it does not list has no efforts to pick.
+            let current = configured_effort
+                .filter(|effort| efforts.iter().any(|value| value == effort))
+                .map(str::to_owned);
+            (efforts, current)
         } else {
-            advertised_efforts
+            (
+                lane_values(effort_lane.as_ref()),
+                start_value(configured_effort, effort_lane.as_ref()),
+            )
+        };
+        let current = ModelsCurrentJson {
+            // The catalog serves only harnesses that take the model verbatim from their own config.
+            model: configured_model.map(str::to_owned),
+            mode: start_value(config.agent.mode.as_deref(), mode_lane.as_ref()),
+            effort: current_effort,
         };
         return Ok(ModelsResponse {
             agent_id,
@@ -283,8 +317,9 @@ pub(crate) async fn models_response_for_config(
                     },
                 })
                 .collect(),
-            modes,
+            modes: lane_values(mode_lane.as_ref()),
             efforts,
+            current,
             catalog_error,
         });
     }
@@ -317,26 +352,51 @@ pub(crate) async fn models_response_for_config(
         }
         Err(error) => return Err(error),
     };
-    let modes = advertised_or_empty(&applied, AgentSessionConfigCategory::Mode);
-    let efforts = advertised_or_empty(&applied, AgentSessionConfigCategory::Effort);
+    let mode_lane = advertised_lane(&applied, AgentSessionConfigCategory::Mode);
+    let effort_lane = advertised_lane(&applied, AgentSessionConfigCategory::Effort);
+    let current = ModelsCurrentJson {
+        model: if model_value_is_explicit_without_discovery(&config.agent) {
+            configured_model_value(&config.agent).map(str::to_owned)
+        } else {
+            // The probe applied the requested or configured model where the agent advertises it.
+            advertised_lane(&applied, AgentSessionConfigCategory::Model).map(|lane| lane.current)
+        },
+        mode: start_value(config.agent.mode.as_deref(), mode_lane.as_ref()),
+        effort: start_value(config.agent.effort.as_deref(), effort_lane.as_ref()),
+    };
 
     Ok(ModelsResponse {
         agent_id,
         source: MODELS_SOURCE_ACP_ADVERTISED,
         models: advertised_models(model_choices),
-        modes,
-        efforts,
+        modes: lane_values(mode_lane.as_ref()),
+        efforts: lane_values(effort_lane.as_ref()),
+        current,
         catalog_error,
     })
 }
 
 /// The only error is the category's option being absent, which the response reports as the
 /// documented empty list rather than a failure.
-fn advertised_or_empty(
+fn advertised_lane(
     response: &NewSessionResponse,
     category: AgentSessionConfigCategory,
-) -> Vec<String> {
-    advertised_values_for_category(response, category).unwrap_or_default()
+) -> Option<AdvertisedSelect> {
+    session_advertised_select(response, category).ok()
+}
+
+fn lane_values(lane: Option<&AdvertisedSelect>) -> Vec<String> {
+    lane.map(|lane| lane.values.clone()).unwrap_or_default()
+}
+
+/// Session create applies a configured value only where the agent advertises it, and records an
+/// unadvertised one as ignored, so the agent's own value stands then (`supervisor/sessions.rs`).
+fn start_value(configured: Option<&str>, lane: Option<&AdvertisedSelect>) -> Option<String> {
+    let lane = lane?;
+    let value = configured
+        .filter(|value| lane.values.iter().any(|candidate| candidate == value))
+        .unwrap_or(lane.current.as_str());
+    Some(value.to_owned())
 }
 
 /// Map advertised `(value, name)` choices to wire models. `display_name` is the

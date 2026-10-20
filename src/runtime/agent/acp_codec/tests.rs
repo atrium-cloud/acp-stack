@@ -220,6 +220,53 @@ fn session_mode_values_prefers_config_option_over_native() {
     );
 }
 
+// Pi's thinking levels arrive mildest first; a picker must not see them alphabetized.
+#[test]
+fn advertised_select_keeps_the_agent_order_and_current_value() {
+    let options: Vec<SessionConfigOption> = serde_json::from_str(
+        r#"[
+                {
+                    "id": "thought_level",
+                    "name": "Thinking",
+                    "category": "thought_level",
+                    "type": "select",
+                    "currentValue": "max",
+                    "options": [
+                        {"value": "off", "name": "off"},
+                        {"value": "low", "name": "low"},
+                        {"value": "high", "name": "high"},
+                        {"value": "low", "name": "low (again)"},
+                        {"value": "max", "name": "max"}
+                    ]
+                }
+            ]"#,
+    )
+    .expect("session config options deserialize");
+    let response = agent_client_protocol::schema::v1::NewSessionResponse::new("session")
+        .config_options(options);
+    assert_eq!(
+        session_advertised_select(&response, AgentSessionConfigCategory::Effort)
+            .expect("effort lane"),
+        AdvertisedSelect {
+            values: vec!["off".into(), "low".into(), "high".into(), "max".into()],
+            current: "max".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn advertised_select_reads_native_modes_without_a_mode_option() {
+    let response = response_with_native_modes_only();
+    assert_eq!(
+        session_advertised_select(&response, AgentSessionConfigCategory::Mode).expect("mode lane"),
+        AdvertisedSelect {
+            values: vec!["default".into(), "dont_ask".into()],
+            current: "default".to_owned(),
+        }
+    );
+    assert!(session_advertised_select(&response, AgentSessionConfigCategory::Effort).is_err());
+}
+
 fn response_with_model_option(
     option: agent_client_protocol::schema::v1::SessionConfigOption,
 ) -> agent_client_protocol::schema::v1::NewSessionResponse {

@@ -170,10 +170,16 @@ async fn models_returns_fixture_advertised_values() {
         modes.iter().any(|m| m.as_str() == Some("default")),
         "advertised mode values missing: {modes:?}",
     );
-    let efforts = body["data"]["efforts"].as_array().expect("efforts array");
-    assert!(
-        efforts.iter().any(|e| e.as_str() == Some("medium")),
-        "advertised effort values missing: {efforts:?}",
+    assert_eq!(
+        body["data"]["efforts"],
+        json!(["low", "medium", "high"]),
+        "efforts keep the agent's order: {body}"
+    );
+    // Nothing is configured beyond the agent, so each lane starts on the agent's own value.
+    assert_eq!(
+        body["data"]["current"],
+        json!({ "model": "openai/gpt-4o", "mode": "default", "effort": "medium" }),
+        "{body}"
     );
 }
 
@@ -380,8 +386,9 @@ async fn models_serves_provider_catalog_for_codex_openrouter() {
     }));
     let _guards = catalog_fixture_env(&home, &base, fixture_path);
 
-    let harness =
-        AgentHarness::spawn_with_config_and_home(codex_openrouter_config(), home.clone()).await;
+    let mut config = codex_openrouter_config();
+    config.agent.effort = Some("high".to_owned());
+    let harness = AgentHarness::spawn_with_config_and_home(config, home.clone()).await;
     let response = http()
         .await
         .get(format!("{}/v1/models", harness.base_url))
@@ -398,6 +405,12 @@ async fn models_serves_provider_catalog_for_codex_openrouter() {
     assert!(
         body["data"].get("catalog_error").is_none(),
         "unexpected catalog_error: {body}"
+    );
+    // Codex reads the model and the effort pin from its own config, so both start as configured.
+    assert_eq!(
+        body["data"]["current"],
+        json!({ "model": "deepseek/deepseek-v4-flash", "mode": "default", "effort": "high" }),
+        "{body}"
     );
     let models = body["data"]["models"].as_array().expect("models array");
     let gpt = models
@@ -676,11 +689,13 @@ async fn agent_config_options_keeps_options_a_partial_set_response_omits() {
 }
 
 /// Adapters advertise reasoning-effort values per model, so `?model=` must reach the discovery
-/// probe rather than reporting the model the harness booted with.
+/// probe rather than reporting the model the harness booted with. The configured effort starts
+/// a session only on a model that advertises it, as session create applies it.
 #[tokio::test]
 async fn models_reports_the_requested_models_efforts() {
     let _fixture_guard = EnvVarGuard::unset("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH");
     let mut config = test_config();
+    config.agent.effort = Some("low".to_owned());
     config.agent.args = vec![
         "acp".to_owned(),
         "--config-option-select".to_owned(),
@@ -708,6 +723,11 @@ async fn models_reports_the_requested_models_efforts() {
     let body: Value = serde_json::from_str(&body_text).expect("models json");
     assert_eq!(body["data"]["source"], "acp_advertised");
     assert_eq!(body["data"]["efforts"], json!(["high", "xhigh"]), "{body}");
+    assert_eq!(
+        body["data"]["current"],
+        json!({ "model": "fixture/model-b", "mode": null, "effort": "high" }),
+        "model-b does not offer the configured `low`, so the agent's own level stands: {body}"
+    );
 
     // Without the query param the probe applies the configured model, which this config leaves
     // unset, so the harness's boot model answers.
@@ -723,6 +743,11 @@ async fn models_reports_the_requested_models_efforts() {
     assert_eq!(
         default_body["data"]["efforts"],
         json!(["low", "medium"]),
+        "{default_body}"
+    );
+    assert_eq!(
+        default_body["data"]["current"],
+        json!({ "model": "fixture/model-a", "mode": null, "effort": "low" }),
         "{default_body}"
     );
 }
