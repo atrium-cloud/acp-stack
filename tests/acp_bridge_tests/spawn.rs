@@ -107,38 +107,6 @@ async fn shutdown_keeps_the_last_stderr_lines_past_the_rate_limit() {
 }
 
 #[tokio::test]
-async fn spawn_rejects_an_incompatible_protocol_version() {
-    let mut config = fake_agent_config();
-    config.args.push("--initialize-protocol-v0".into());
-    let error = match AcpBridge::spawn(
-        &std::env::temp_dir(),
-        &config,
-        fake_env(),
-        std::env::temp_dir(),
-        null_sink(),
-        AcpPermissionPolicy::Cancel,
-        &Default::default(),
-        "/bin/sh",
-        None,
-        None,
-        None,
-    )
-    .await
-    {
-        Ok(bridge) => {
-            bridge.shutdown().await.expect("shutdown ok");
-            panic!("protocol v0 must be rejected");
-        }
-        Err(error) => error,
-    };
-    assert!(matches!(
-        error,
-        acp_stack::error::StackError::AgentInitializeFailed { .. }
-    ));
-    assert!(error.to_string().contains("agent returned 0"), "{error}");
-}
-
-#[tokio::test]
 async fn unadvertised_http_mcp_transport_is_skipped_not_fatal() {
     use agent_client_protocol::schema::v1::{McpServer, McpServerHttp};
 

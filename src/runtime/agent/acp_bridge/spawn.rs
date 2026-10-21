@@ -628,8 +628,8 @@ fn spawn_connection_task(
     }
 }
 
-/// Await the handshake result, validate the protocol version, and snapshot the
-/// agent's capabilities. Every failure path MUST tear the spawned child down
+/// Await the handshake result and snapshot the agent's capabilities; the SDK's
+/// v1 client rejects any other protocol version before the response arrives. Every failure path MUST tear the spawned child down
 /// and consume `connection_task`; only the success path hands it back.
 async fn complete_initialize(
     child: &mut Child,
@@ -663,17 +663,6 @@ async fn complete_initialize(
         }
     };
 
-    if init_response.protocol_version != ProtocolVersion::V1 {
-        let returned = init_response.protocol_version.as_u16();
-        fail_spawn(child, cgroup, connection_task, stderr).await;
-        return Err(initialize_failed(
-            format!(
-                "requested ACP protocol version {} but agent returned {returned}",
-                ProtocolVersion::V1.as_u16()
-            ),
-            stderr,
-        ));
-    }
     let capabilities = match AgentCapabilitiesDto::from_initialize_response(&init_response) {
         Ok(capabilities) => capabilities,
         Err(error) => {

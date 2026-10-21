@@ -111,8 +111,6 @@ pub(crate) struct AcpArgs {
     #[arg(long)]
     pub(crate) initialize_error: bool,
     #[arg(long)]
-    pub(crate) initialize_protocol_v0: bool,
-    #[arg(long)]
     pub(crate) require_client_info: bool,
     #[arg(long)]
     pub(crate) session_new_error: bool,

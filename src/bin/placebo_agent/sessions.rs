@@ -51,16 +51,12 @@ pub(crate) async fn handle_initialize(
         capabilities = capabilities.mcp_capabilities(McpCapabilities::new().http(true));
     }
     responder.respond(
-        InitializeResponse::new(if state.args.initialize_protocol_v0 {
-            ProtocolVersion::V0
-        } else {
-            ProtocolVersion::V1
-        })
-        .agent_capabilities(capabilities)
-        .agent_info(
-            Implementation::new("placebo-agent", env!("CARGO_PKG_VERSION"))
-                .title(state.title.clone()),
-        ),
+        InitializeResponse::new(ProtocolVersion::V1)
+            .agent_capabilities(capabilities)
+            .agent_info(
+                Implementation::new("placebo-agent", env!("CARGO_PKG_VERSION"))
+                    .title(state.title.clone()),
+            ),
     )
 }
 
