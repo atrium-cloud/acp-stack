@@ -103,6 +103,10 @@
               "selection"
             ],
             "properties": {
+              "kind": {
+                "type": "string",
+                "const": "provider-credential"
+              },
               "selection": {
                 "anyOf": [
                   {
@@ -112,10 +116,6 @@
                     "type": "null"
                   }
                 ]
-              },
-              "kind": {
-                "type": "string",
-                "const": "provider-credential"
               }
             },
             "additionalProperties": false
@@ -1896,6 +1896,10 @@
               "path"
             ],
             "properties": {
+              "type": {
+                "type": "string",
+                "const": "local"
+              },
               "name": {
                 "type": [
                   "string",
@@ -1904,10 +1908,6 @@
               },
               "path": {
                 "type": "string"
-              },
-              "type": {
-                "type": "string",
-                "const": "local"
               }
             },
             "additionalProperties": false
@@ -1919,6 +1919,10 @@
               "url"
             ],
             "properties": {
+              "type": {
+                "type": "string",
+                "const": "https"
+              },
               "name": {
                 "type": [
                   "string",
@@ -1949,10 +1953,6 @@
                 ],
                 "format": "uint64",
                 "minimum": 0
-              },
-              "type": {
-                "type": "string",
-                "const": "https"
               }
             },
             "additionalProperties": false
@@ -1967,6 +1967,10 @@
               "secret_key_ref"
             ],
             "properties": {
+              "type": {
+                "type": "string",
+                "const": "s3"
+              },
               "name": {
                 "type": [
                   "string",
@@ -1990,10 +1994,6 @@
               },
               "secret_key_ref": {
                 "type": "string"
-              },
-              "type": {
-                "type": "string",
-                "const": "s3"
               }
             },
             "additionalProperties": false
@@ -3175,12 +3175,12 @@
           {
             "type": "object",
             "properties": {
-              "version": {
-                "type": "string"
-              },
               "status": {
                 "type": "string",
                 "const": "up_to_date"
+              },
+              "version": {
+                "type": "string"
               }
             },
             "required": [
@@ -3192,15 +3192,15 @@
           {
             "type": "object",
             "properties": {
+              "status": {
+                "type": "string",
+                "const": "stale"
+              },
               "installed": {
                 "type": "string"
               },
               "latest": {
                 "type": "string"
-              },
-              "status": {
-                "type": "string",
-                "const": "stale"
               }
             },
             "required": [
@@ -3213,12 +3213,12 @@
           {
             "type": "object",
             "properties": {
-              "reason": {
-                "type": "string"
-              },
               "status": {
                 "type": "string",
                 "const": "unknown"
+              },
+              "reason": {
+                "type": "string"
               }
             },
             "required": [
@@ -3795,14 +3795,14 @@
           {
             "type": "object",
             "properties": {
+              "kind": {
+                "type": "string",
+                "const": "privilege_required"
+              },
               "uid": {
                 "type": "integer",
                 "format": "uint32",
                 "minimum": 0
-              },
-              "kind": {
-                "type": "string",
-                "const": "privilege_required"
               }
             },
             "required": [
@@ -3814,6 +3814,10 @@
           {
             "type": "object",
             "properties": {
+              "kind": {
+                "type": "string",
+                "const": "failed"
+              },
               "exit_code": {
                 "type": [
                   "integer",
@@ -3823,10 +3827,6 @@
               },
               "stderr_tail": {
                 "type": "string"
-              },
-              "kind": {
-                "type": "string",
-                "const": "failed"
               }
             },
             "required": [
@@ -6205,6 +6205,10 @@
           {
             "type": "object",
             "properties": {
+              "type": {
+                "type": "string",
+                "const": "diff"
+              },
               "path": {
                 "type": "string"
               },
@@ -6227,10 +6231,6 @@
                     "type": "null"
                   }
                 ]
-              },
-              "type": {
-                "type": "string",
-                "const": "diff"
               }
             },
             "required": [
@@ -9465,6 +9465,10 @@
               "command"
             ],
             "properties": {
+              "type": {
+                "type": "string",
+                "const": "stdio"
+              },
               "name": {
                 "type": "string"
               },
@@ -9482,10 +9486,6 @@
                 "items": {
                   "type": "string"
                 }
-              },
-              "type": {
-                "type": "string",
-                "const": "stdio"
               }
             },
             "additionalProperties": false
@@ -9498,6 +9498,10 @@
               "url"
             ],
             "properties": {
+              "type": {
+                "type": "string",
+                "const": "http"
+              },
               "name": {
                 "type": "string"
               },
@@ -9509,10 +9513,6 @@
                 "items": {
                   "$ref": "#/$defs/config/HttpHeaderRef"
                 }
-              },
-              "type": {
-                "type": "string",
-                "const": "http"
               }
             },
             "additionalProperties": false
