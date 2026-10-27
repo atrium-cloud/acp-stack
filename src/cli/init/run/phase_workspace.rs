@@ -389,7 +389,7 @@ pub(super) fn run_capability_probe_step(flow: &mut InitFlow) -> Result<()> {
                         &lock_shared_secret_store(&secret_store),
                         home,
                     )
-                    .and_then(|declared| capabilities.ignored_mcp_features(declared))
+                    .and_then(|resolved| capabilities.ignored_mcp_features(&resolved.accepted))
                     {
                         Ok(ignored) => *ignored_features = ignored,
                         Err(error) => {

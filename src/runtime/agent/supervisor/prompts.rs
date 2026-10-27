@@ -19,7 +19,7 @@ impl AgentSupervisor {
         session_id: &str,
         prompt_blocks: Vec<ContentBlock>,
         prompt_json: String,
-        open_mcp_servers: impl FnOnce() -> Result<Vec<McpServer>>,
+        open_mcp_servers: impl FnOnce() -> Result<PartitionedMcpServers>,
         workspace_root: &str,
         state: &StateHandle,
     ) -> Result<PromptRecord> {
@@ -292,7 +292,7 @@ impl AgentSupervisor {
         &self,
         session_id: &str,
         bridge: &AcpBridge,
-        open_mcp_servers: impl FnOnce() -> Result<Vec<McpServer>>,
+        open_mcp_servers: impl FnOnce() -> Result<PartitionedMcpServers>,
         workspace_root: &str,
         state: &StateHandle,
     ) -> Result<()> {
@@ -722,7 +722,7 @@ mod tests {
                 session_id,
                 Vec::new(),
                 "[]".to_owned(),
-                || Ok(Vec::new()),
+                || Ok(PartitionedMcpServers::default()),
                 "/workspace",
                 state,
             )

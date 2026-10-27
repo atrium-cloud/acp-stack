@@ -108,6 +108,7 @@ async fn shutdown_keeps_the_last_stderr_lines_past_the_rate_limit() {
 
 #[tokio::test]
 async fn unadvertised_http_mcp_transport_is_skipped_not_fatal() {
+    use acp_stack::runtime::agent::acp_bridge::{McpSkipReason, PartitionedMcpServers};
     use agent_client_protocol::schema::v1::{McpServer, McpServerHttp};
 
     let bridge = AcpBridge::spawn(
@@ -127,15 +128,23 @@ async fn unadvertised_http_mcp_transport_is_skipped_not_fatal() {
     .expect("spawn");
     let partitioned = bridge
         .capabilities()
-        .partition_mcp_servers(vec![McpServer::Http(McpServerHttp::new(
-            "test-http",
-            "https://example.invalid/mcp",
-        ))])
+        .partition_mcp_servers(PartitionedMcpServers {
+            accepted: vec![McpServer::Http(McpServerHttp::new(
+                "test-http",
+                "https://example.invalid/mcp",
+            ))],
+            skipped: Vec::new(),
+        })
         .expect("an unadvertised transport is skipped, not an error");
     assert!(partitioned.accepted.is_empty());
     assert_eq!(partitioned.skipped.len(), 1);
     assert_eq!(partitioned.skipped[0].name, "test-http");
-    assert_eq!(partitioned.skipped[0].capability, "mcpCapabilities.http");
+    assert_eq!(
+        partitioned.skipped[0].reason,
+        McpSkipReason::UnadvertisedCapability {
+            capability: "mcpCapabilities.http"
+        }
+    );
 
     bridge
         .new_session(std::env::temp_dir(), partitioned.accepted)

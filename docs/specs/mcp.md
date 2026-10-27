@@ -67,7 +67,15 @@ Config validation rejects duplicate server names, empty stdio commands, empty HT
 
 At daemon startup a server declaration that fails these per-server rules is skipped with a startup warning rather than failing the boot, so the daemon degrades instead of bricking on one bad declaration. Declaration and config-write paths (init flags, API config writes, candidate-config validation) still reject. Cross-source rules (a whole-value ref duplicated against `agent.env`, Supabase, or workspace sources) are config-level conflicts and still fail startup. Reloads of a hand-edited config while the daemon runs drop bad declarations quietly: the warning fires at startup (or after a restart), not per reload, so a broken declaration introduced at runtime surfaces through the strict config endpoints (`/v1/config/export`, `/v1/config/validate`) until then.
 
-Native-config import validates secret references without requiring stdio executables to be installed yet. Session attachment resolves each stdio command and fails with `config.invalid` before dispatch when it is missing or not executable. HTTP and SSE servers are attached only when the agent advertises `mcpCapabilities.http` / `mcpCapabilities.sse`; stdio servers only when the agent advertises at least one MCP capability. A server the advertisement does not cover is skipped for the session (recorded as an `mcp.session_skipped` session event) and the session is still created with the remaining servers. Skipped declarations stay in config; `acps init` probes the advertisement after agent install and reports them as ignored.
+Native-config import validates secret references without requiring stdio executables to be installed yet.
+
+Each session open (create, load, resume, fork, and the re-attach a prompt or command performs for a session the running agent has not opened) resolves every server on its own:
+
+- A server referencing a secret that is not set is skipped for that session, and the session opens with the remaining servers. The server attaches at the first session open after the secret is set (`acps secrets set`), with no config change or restart.
+- A stdio command that is missing or not executable fails the open with `config.invalid` before dispatch.
+- HTTP and SSE servers are attached only when the agent advertises `mcpCapabilities.http` / `mcpCapabilities.sse`; stdio servers only when the agent advertises at least one MCP capability. A server the advertisement does not cover is skipped for that session.
+- Each skip is recorded as an `mcp.session_skipped` session event naming the server and its reason: the unset secret ref names, or the capability the agent would have had to advertise.
+- Skipped declarations stay in config. `acps init` probes the advertisement after agent install and reports transport skips as ignored.
 
 `GET /v1/health/ready` reports MCP declaration health:
 
@@ -84,4 +92,4 @@ Workarounds:
 - use separate runtime configs for different MCP server sets
 - declare required stdio binaries under `[dependencies.commands]`
 - store credentials with `acps secrets set`
-- inspect `acps deps check`, `acps status`, and `/v1/health/ready` when MCP attachment fails
+- inspect `acps deps check`, `acps status`, `/v1/health/ready`, and the session's `mcp.session_skipped` events when an MCP server is absent from a session

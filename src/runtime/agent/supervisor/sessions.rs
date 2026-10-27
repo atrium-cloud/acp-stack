@@ -13,7 +13,7 @@ impl AgentSupervisor {
         agent: &AgentConfig,
         workspace_root: &str,
         cwd: Option<String>,
-        mcp_servers: Vec<McpServer>,
+        mcp_servers: PartitionedMcpServers,
         state: &StateHandle,
     ) -> Result<SessionAttachOutcome> {
         let bridge = self.bridge().await?;
@@ -274,7 +274,7 @@ impl AgentSupervisor {
         &self,
         session_id: &str,
         cwd: Option<String>,
-        mcp_servers: Vec<McpServer>,
+        mcp_servers: PartitionedMcpServers,
         workspace_root: &str,
         state: &StateHandle,
     ) -> Result<SessionAttachOutcome> {
@@ -294,7 +294,7 @@ impl AgentSupervisor {
         &self,
         session_id: &str,
         cwd: Option<String>,
-        mcp_servers: Vec<McpServer>,
+        mcp_servers: PartitionedMcpServers,
         workspace_root: &str,
         state: &StateHandle,
     ) -> Result<SessionAttachOutcome> {
@@ -316,7 +316,7 @@ impl AgentSupervisor {
         &self,
         session_id: &str,
         cwd: Option<String>,
-        mcp_servers: Vec<McpServer>,
+        mcp_servers: PartitionedMcpServers,
         workspace_root: &str,
         state: &StateHandle,
         kind: SessionAttachKind,
@@ -464,7 +464,7 @@ impl AgentSupervisor {
         &self,
         parent_session_id: &str,
         cwd: Option<String>,
-        mcp_servers: Vec<McpServer>,
+        mcp_servers: PartitionedMcpServers,
         workspace_root: &str,
         message_id: Option<String>,
         state: &StateHandle,

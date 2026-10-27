@@ -245,9 +245,8 @@ pub enum AgentStartReadiness {
     Unavailable,
 }
 
-/// Record the MCP servers that were dropped from a session because the running
-/// agent does not advertise their transport. Silent when nothing was dropped so
-/// the common path adds no rows.
+/// Record the configured MCP servers left out of a session, each with its
+/// reason. Silent when nothing was dropped so the common path adds no rows.
 fn append_mcp_skipped_event(
     store: &StateStore,
     session_id: &str,
@@ -259,7 +258,7 @@ fn append_mcp_skipped_event(
     tracing::warn!(
         session_id,
         skipped = skipped.len(),
-        "dropping MCP servers whose transport the agent does not advertise"
+        "MCP servers skipped for session"
     );
     let payload = json!({
         "session_id": session_id,
@@ -831,6 +830,7 @@ pub(crate) async fn demote_sessions_on_agent_teardown(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::agent::acp_bridge::McpSkipReason;
 
     #[test]
     fn terminal_outcome_classifies_agent_process_failures() {
@@ -900,7 +900,9 @@ mod tests {
             "sess_skip",
             &[SkippedMcpServer {
                 name: "linear".to_owned(),
-                capability: "mcpCapabilities.http",
+                reason: McpSkipReason::UnadvertisedCapability {
+                    capability: "mcpCapabilities.http",
+                },
             }],
         )
         .expect("skip recorded");

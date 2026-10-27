@@ -342,13 +342,14 @@ async fn load_fresh_config_for_target(
     Ok((config, target))
 }
 
-/// Resolve every configured `[mcp.servers]` entry into the SDK `McpServer` type.
+/// Resolve the configured `[mcp.servers]` entries for one session open, with
+/// the ones whose secrets are not set yet skipped.
 pub(super) fn open_mcp_servers(
     state: &AppState,
     config: &Config,
-) -> Result<Vec<agent_client_protocol::schema::v1::McpServer>> {
+) -> Result<crate::runtime::agent::acp_bridge::PartitionedMcpServers> {
     if config.mcp.servers.is_empty() {
-        return Ok(Vec::new());
+        return Ok(Default::default());
     }
     crate::runtime::agent::mcp::resolve_mcp_servers(
         &config.mcp,

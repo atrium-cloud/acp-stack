@@ -8,8 +8,8 @@ mod common;
 use std::time::Duration;
 
 use acp_stack::config::{
-    AgentConfigOptionValue, ArrayTargetConfig, Config, McpHttpServer, McpServerConfig,
-    McpStdioServer,
+    AgentConfigOptionValue, ArrayTargetConfig, Config, HttpHeaderRef, McpHttpServer,
+    McpServerConfig, McpStdioServer,
 };
 use acp_stack::secrets::SecretStore;
 use acp_stack::state::{NewPermissionRequest, NewPromptRecord, NewSessionRecord};
@@ -2017,6 +2017,126 @@ async fn attached_mcp_event_lists_servers_for_an_mcp_capable_agent() {
             .iter()
             .all(|event| event.kind != "mcp.session_skipped"),
         "{events:?}"
+    );
+}
+
+/// Room for every event of a session that has run one turn.
+const SESSION_EVENT_QUERY_LIMIT: u32 = 500;
+
+/// One server whose secret the tests seed and one whose secret starts unset.
+fn mcp_servers_with_secret_refs() -> Vec<McpServerConfig> {
+    vec![
+        McpServerConfig::Stdio(McpStdioServer {
+            name: "local-stdio".into(),
+            command: "/bin/sh".into(),
+            args: vec![],
+            env: vec!["LOCAL_TOKEN".into()],
+        }),
+        McpServerConfig::Http(McpHttpServer {
+            name: "remote-http".into(),
+            url: "https://example.invalid/mcp".into(),
+            headers: vec![HttpHeaderRef::from_ref("Authorization", "REMOTE_TOKEN")],
+        }),
+    ]
+}
+
+/// A store holding only the stdio server's secret.
+fn secret_store_without_remote_token(home: &std::path::Path) -> SecretStore {
+    let mut store = SecretStore::open_or_create(home).expect("secret store initializes");
+    store
+        .set_many([("LOCAL_TOKEN", "test-local-token")])
+        .expect("local secret stored");
+    store
+}
+
+/// Parsed payloads of one event kind in a session, oldest first.
+async fn event_payloads(harness: &Harness, session_id: &str, kind: &'static str) -> Vec<Value> {
+    let session_id = session_id.to_owned();
+    let events = harness
+        .state
+        .read(move |store| store.query_session_events(&session_id, None, SESSION_EVENT_QUERY_LIMIT))
+        .await
+        .expect("session events");
+    events
+        .iter()
+        .filter(|event| event.kind == kind)
+        .map(|event| serde_json::from_str(&event.payload_json).expect("event payload json"))
+        .collect()
+}
+
+#[tokio::test]
+async fn an_mcp_server_with_an_unset_secret_is_skipped_until_the_secret_is_set() {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let mut store = secret_store_without_remote_token(home.path());
+    let harness = Harness::spawn_with_and_home(
+        |config| {
+            config.agent.args.push("--cap-mcp-http".to_owned());
+            config.mcp.servers = mcp_servers_with_secret_refs();
+        },
+        home.path().to_path_buf(),
+    )
+    .await;
+
+    let session_id = create_session(&harness).await;
+    let attached = event_payloads(&harness, &session_id, "mcp.session_attached").await;
+    assert_eq!(attached.len(), 1, "{attached:?}");
+    assert_eq!(attached[0]["server_names"], json!(["local-stdio"]));
+    let skipped = event_payloads(&harness, &session_id, "mcp.session_skipped").await;
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert_eq!(
+        skipped[0]["skipped"],
+        json!([{
+            "name": "remote-http",
+            "reason": "missing_secrets",
+            "missing_secret_refs": ["REMOTE_TOKEN"],
+        }])
+    );
+
+    // The running server re-reads the store once it changes on disk.
+    store
+        .set_many([("REMOTE_TOKEN", "test-remote-token")])
+        .expect("remote secret stored");
+    let session_id = create_session(&harness).await;
+    let attached = event_payloads(&harness, &session_id, "mcp.session_attached").await;
+    assert_eq!(
+        attached[0]["server_names"],
+        json!(["local-stdio", "remote-http"])
+    );
+    assert!(
+        event_payloads(&harness, &session_id, "mcp.session_skipped")
+            .await
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn a_prompt_reattach_skips_an_mcp_server_with_an_unset_secret() {
+    let home = tempfile::tempdir().expect("home tempdir");
+    secret_store_without_remote_token(home.path());
+    let harness = Harness::spawn_with_and_home(
+        |config| {
+            reject_unopened_session_prompt(config);
+            config.agent.args.push("--cap-mcp-http".to_owned());
+            config.mcp.servers = mcp_servers_with_secret_refs();
+        },
+        home.path().to_path_buf(),
+    )
+    .await;
+    let session_id = create_session(&harness).await;
+    harness.stop_agent().await;
+
+    submit_and_settle(&harness, &session_id, "turn after restart").await;
+
+    assert_eq!(
+        event_kind_count(&harness, &session_id, "session.resumed").await,
+        1
+    );
+    // One skip from the create, one from the re-attach.
+    let skipped = event_payloads(&harness, &session_id, "mcp.session_skipped").await;
+    assert_eq!(skipped.len(), 2, "{skipped:?}");
+    assert_eq!(
+        skipped[1]["skipped"][0]["missing_secret_refs"],
+        json!(["REMOTE_TOKEN"])
     );
 }
 

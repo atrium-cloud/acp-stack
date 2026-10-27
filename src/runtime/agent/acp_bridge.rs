@@ -56,7 +56,7 @@ use self::process_env::build_agent_process_env;
 pub use self::capabilities::{
     AgentCapabilitiesDto, IGNORED_FEATURE_AGENT_CONFIG_OPTION, IGNORED_FEATURE_AGENT_EFFORT,
     IGNORED_FEATURE_AGENT_MODE, IGNORED_FEATURE_AGENT_MODEL, IGNORED_FEATURE_MCP_SERVER,
-    IgnoredFeature, PartitionedMcpServers, SkippedMcpServer,
+    IgnoredFeature, McpSkipReason, PartitionedMcpServers, SkippedMcpServer,
 };
 pub(crate) use self::process_env::{
     KIMI_CODE_AGENT_ID, KIMI_MANAGED_ENV_PREFIX, RUNTIME_MANAGED_LAUNCH_ENV,

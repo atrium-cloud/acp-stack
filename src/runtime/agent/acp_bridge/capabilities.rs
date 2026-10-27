@@ -55,16 +55,27 @@ pub struct AgentCapabilitiesDto {
     pub fork_point: ForkPointDialect,
 }
 
-/// A configured MCP server the running agent cannot be given, plus the
-/// capability it would have had to advertise. Recorded per session so the
-/// degraded set is visible in durable logs.
+/// A configured MCP server left out of one session open, and why. Recorded per
+/// session so the degraded set is visible in durable logs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SkippedMcpServer {
     pub name: String,
-    pub capability: &'static str,
+    #[serde(flatten)]
+    pub reason: McpSkipReason,
 }
 
-/// Resolved MCP servers split against the agent's advertised transports.
+/// Why a configured MCP server was left out of a session. Carries names only,
+/// never secret values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum McpSkipReason {
+    /// The agent does not advertise the capability the server's transport needs.
+    UnadvertisedCapability { capability: &'static str },
+    /// Secret refs the server's env or headers name are not set in the store.
+    MissingSecrets { missing_secret_refs: Vec<String> },
+}
+
+/// The MCP servers a session receives and the configured ones left out of it.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct PartitionedMcpServers {
     pub accepted: Vec<McpServer>,
@@ -316,20 +327,26 @@ impl AgentCapabilitiesDto {
         }
     }
 
-    /// Split the resolved MCP servers into the ones this agent can accept and
-    /// the ones whose transport it does not advertise.
+    /// Move the resolved servers whose transport this agent does not advertise
+    /// into `skipped`, after any servers resolution already left out.
     ///
     /// One undeliverable integration must not make sessions uncreatable: an
     /// operator declaring an HTTP MCP server against an adapter that only
     /// speaks stdio still gets a working session, minus that server. Callers
     /// are responsible for recording the skipped set.
-    pub fn partition_mcp_servers(&self, servers: Vec<McpServer>) -> Result<PartitionedMcpServers> {
-        let mut partitioned = PartitionedMcpServers::default();
-        for server in servers {
+    pub fn partition_mcp_servers(
+        &self,
+        resolved: PartitionedMcpServers,
+    ) -> Result<PartitionedMcpServers> {
+        let mut partitioned = PartitionedMcpServers {
+            accepted: Vec::with_capacity(resolved.accepted.len()),
+            skipped: resolved.skipped,
+        };
+        for server in resolved.accepted {
             match self.unsupported_mcp_capability(&server)? {
                 Some(capability) => partitioned.skipped.push(SkippedMcpServer {
                     name: crate::runtime::agent::mcp::server_name(&server).to_owned(),
-                    capability,
+                    reason: McpSkipReason::UnadvertisedCapability { capability },
                 }),
                 None => partitioned.accepted.push(server),
             }
@@ -337,22 +354,23 @@ impl AgentCapabilitiesDto {
         Ok(partitioned)
     }
 
-    /// Config-level MCP assessment for init reporting. Wraps
-    /// `partition_mcp_servers` so init reports and session-time partitioning
-    /// cannot drift apart.
-    pub fn ignored_mcp_features(&self, servers: Vec<McpServer>) -> Result<Vec<IgnoredFeature>> {
-        let partitioned = self.partition_mcp_servers(servers)?;
-        Ok(partitioned
-            .skipped
-            .into_iter()
-            .map(|skipped| IgnoredFeature {
-                feature: IGNORED_FEATURE_MCP_SERVER,
-                value: skipped.name,
-                capability: skipped.capability,
-                reason: "agent does not advertise this MCP transport".to_owned(),
-                option_id: None,
-            })
-            .collect())
+    /// Config-level MCP assessment for init reporting. Shares
+    /// `unsupported_mcp_capability` with `partition_mcp_servers` so init
+    /// reports and session-time partitioning cannot drift apart.
+    pub fn ignored_mcp_features(&self, servers: &[McpServer]) -> Result<Vec<IgnoredFeature>> {
+        let mut ignored = Vec::new();
+        for server in servers {
+            if let Some(capability) = self.unsupported_mcp_capability(server)? {
+                ignored.push(IgnoredFeature {
+                    feature: IGNORED_FEATURE_MCP_SERVER,
+                    value: crate::runtime::agent::mcp::server_name(server).to_owned(),
+                    capability,
+                    reason: "agent does not advertise this MCP transport".to_owned(),
+                    option_id: None,
+                });
+            }
+        }
+        Ok(ignored)
     }
 
     /// Invariant guard on the bridge's own request paths. Transport support is
@@ -642,11 +660,18 @@ mod tests {
         ))
     }
 
+    fn resolved(servers: Vec<McpServer>) -> PartitionedMcpServers {
+        PartitionedMcpServers {
+            accepted: servers,
+            skipped: Vec::new(),
+        }
+    }
+
     #[test]
     fn partition_keeps_servers_the_agent_advertises() {
         let capabilities = capabilities_with(json!({ "http": true }));
         let partitioned = capabilities
-            .partition_mcp_servers(vec![stdio_server("local"), http_server("linear")])
+            .partition_mcp_servers(resolved(vec![stdio_server("local"), http_server("linear")]))
             .expect("partition");
 
         assert_eq!(partitioned.accepted.len(), 2);
@@ -657,7 +682,7 @@ mod tests {
     fn partition_drops_every_server_when_no_mcp_capability_is_claimed() {
         let capabilities = capabilities_with(json!({ "http": false }));
         let partitioned = capabilities
-            .partition_mcp_servers(vec![stdio_server("local"), http_server("linear")])
+            .partition_mcp_servers(resolved(vec![stdio_server("local"), http_server("linear")]))
             .expect("partition");
 
         assert!(partitioned.accepted.is_empty());
@@ -666,21 +691,46 @@ mod tests {
             vec![
                 SkippedMcpServer {
                     name: "local".to_owned(),
-                    capability: "mcpCapabilities",
+                    reason: McpSkipReason::UnadvertisedCapability {
+                        capability: "mcpCapabilities",
+                    },
                 },
                 SkippedMcpServer {
                     name: "linear".to_owned(),
-                    capability: "mcpCapabilities.http",
+                    reason: McpSkipReason::UnadvertisedCapability {
+                        capability: "mcpCapabilities.http",
+                    },
                 }
             ]
         );
     }
 
     #[test]
+    fn partition_keeps_servers_resolution_already_skipped() {
+        let capabilities = capabilities_with(json!({}));
+        let missing_secret = SkippedMcpServer {
+            name: "db".to_owned(),
+            reason: McpSkipReason::MissingSecrets {
+                missing_secret_refs: vec!["DB_PASS".to_owned()],
+            },
+        };
+        let partitioned = capabilities
+            .partition_mcp_servers(PartitionedMcpServers {
+                accepted: vec![http_server("linear")],
+                skipped: vec![missing_secret.clone()],
+            })
+            .expect("partition");
+
+        assert!(partitioned.accepted.is_empty());
+        assert_eq!(partitioned.skipped[0], missing_secret);
+        assert_eq!(partitioned.skipped[1].name, "linear");
+    }
+
+    #[test]
     fn partition_keeps_stdio_when_any_mcp_capability_is_claimed() {
         let capabilities = capabilities_with(json!({ "sse": true }));
         let partitioned = capabilities
-            .partition_mcp_servers(vec![stdio_server("local"), http_server("linear")])
+            .partition_mcp_servers(resolved(vec![stdio_server("local"), http_server("linear")]))
             .expect("partition");
 
         assert_eq!(partitioned.accepted.len(), 1);
@@ -697,7 +747,7 @@ mod tests {
         // session create impossible.
         let capabilities = capabilities_with(json!({}));
         let partitioned = capabilities
-            .partition_mcp_servers(vec![http_server("linear")])
+            .partition_mcp_servers(resolved(vec![http_server("linear")]))
             .expect("partition must not error on an unadvertised transport");
 
         assert!(partitioned.accepted.is_empty());
@@ -708,7 +758,7 @@ mod tests {
     fn ignored_mcp_features_reports_all_servers_when_no_mcp_is_claimed() {
         let capabilities = capabilities_with(json!({ "http": false }));
         let ignored = capabilities
-            .ignored_mcp_features(vec![stdio_server("local"), http_server("linear")])
+            .ignored_mcp_features(&[stdio_server("local"), http_server("linear")])
             .expect("assess");
 
         assert_eq!(ignored.len(), 2);
@@ -723,7 +773,7 @@ mod tests {
     fn ignored_mcp_features_is_empty_when_transports_are_advertised() {
         let capabilities = capabilities_with(json!({ "http": true }));
         let ignored = capabilities
-            .ignored_mcp_features(vec![stdio_server("local"), http_server("linear")])
+            .ignored_mcp_features(&[stdio_server("local"), http_server("linear")])
             .expect("assess");
         assert!(ignored.is_empty());
     }

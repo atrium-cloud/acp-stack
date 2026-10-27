@@ -221,7 +221,10 @@ Cancelling a session settles its still-pending requests as `cancelled` and answe
 
 Configured MCP servers are attached to ACP sessions when the agent and SDK support session MCP configuration. Secret refs for MCP env vars and headers are resolved at attach time; the resolved values stay out of logs and API responses.
 
-Servers whose transport the running agent's advertisement omits are skipped for that session, so create, load, resume, and fork proceed with the remaining servers. Each skip is recorded as a session-scoped `mcp.session_skipped` event at level `warn`. The event carries the server name and the capability the agent would have had to advertise.
+Servers whose transport the running agent's advertisement omits, and servers referencing a secret that is not set, are skipped for that session. Create, load, resume, fork, and a prompt's re-attach proceed with the remaining servers. Each skip is recorded as a session-scoped `mcp.session_skipped` event at level `warn`, whose `skipped` entries carry the server `name` and a `reason`:
+
+- `unadvertised_capability`, with the `capability` the agent would have had to advertise.
+- `missing_secrets`, with the unset ref names in `missing_secret_refs`.
 
 Session create applies the same routing in a fixed order: `agent.mode`, then the configured model, then `agent.effort`, and finally every `[agent.config_options]` entry. `agent.effort` maps to the agent's `thought_level` config option and applies after the model, since adapters advertise effort levels per model. Codex with OpenRouter pins `agent.effort` in `~/.codex/config.toml` (`model_reasoning_effort`) at provisioning and skips the ACP set. `agent.mode` resolves against `config_options` first; an agent that advertises modes only in the `session/new` `modes` field has the value applied through `session/set_mode` instead. That native set applies once at create and is not carried in the config-option snapshot below.
 
