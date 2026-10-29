@@ -44,9 +44,9 @@ pub(crate) async fn sessions_get_handler(
     Path(id): Path<String>,
     Query(params): Query<SessionsTargetParams>,
 ) -> std::result::Result<ApiSuccess<SessionResponse>, StackError> {
-    let record = state
+    let (record, subagent) = state
         .state
-        .read(move |store| store.require_live_session(&id))
+        .read(move |store| Ok((store.require_live_session(&id)?, store.get_subagent(&id)?)))
         .await?;
     if let Some(asserted) = params.target_id.as_deref()
         && asserted != record.target_id
@@ -59,7 +59,9 @@ pub(crate) async fn sessions_get_handler(
             ),
         });
     }
-    Ok(ApiSuccess::new(SessionResponse::from(record)))
+    Ok(ApiSuccess::new(
+        SessionResponse::from(record).with_subagent(subagent),
+    ))
 }
 
 #[derive(Deserialize, Default, schemars::JsonSchema)]

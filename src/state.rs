@@ -61,7 +61,7 @@ pub use metrics::{
 pub use permissions::{
     NewPermissionRequest, PermissionDecisionRecord, PermissionRequestRecord, PermissionStatus,
 };
-pub use records::{CommandFilter, EventFilter, LogFilter, LogOrder, SessionFilter};
+pub use records::{CommandFilter, EventFilter, LogFilter, LogOrder, SessionFilter, SessionTree};
 pub use security::{
     NewSecurityFinding, NewSecurityRun, SECURITY_FINDING_SEVERITY_CRITICAL,
     SECURITY_FINDING_SEVERITY_WARNING, SECURITY_RUN_FAILED, SECURITY_RUN_SUCCEEDED,
@@ -89,7 +89,7 @@ pub use sessions::{
     SessionChangeRecord, SessionChangesPage, SessionEventCursor, SessionRecord,
     SessionStatusPermissionRecord, SessionStatusPromptRecord, SessionStatusRecord,
     SessionUpdateBounds, StalledPrompt, SubagentApplied, SubagentPatch, SubagentRecord,
-    SubagentRejection,
+    SubagentRejection, SubagentStatusRecord,
 };
 pub use stack_update::{
     NewStackUpdateRun, STACK_UPDATE_OPERATION_CHECK, STACK_UPDATE_OPERATION_INSTALL,

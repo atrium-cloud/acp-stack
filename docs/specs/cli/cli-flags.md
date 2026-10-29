@@ -668,7 +668,7 @@ Lists, inspects, and drives inference sessions.
 ### Synopsis
 
 ```sh
-acps sessions list [--range <day|week|month|year|all|duration>] [--range-start <datetime>] [--range-end <datetime>] [--limit <n>]
+acps sessions list [--range <day|week|month|year|all|duration>] [--range-start <datetime>] [--range-end <datetime>] [--limit <n>] [--parent <session-id>]
 acps sessions status [--window <duration>] [--threshold <duration>] [--limit <n>]
 acps sessions new [--session-key <key>]
 acps sessions load <session-id> [--cwd <path>] [--session-key <key>]
@@ -684,6 +684,7 @@ acps sessions close <session-id> [--session-key <key>]
 ### Flags
 
 - `--range`, `--range-start`, `--range-end`, `--limit`: list filters.
+- `--parent <session-id>`: list that session's subagent sessions instead of root sessions. The range defaults to `all`.
 - `--window` (default `8h`; accepts `1m` through `999h`): rolling activity window for `status`.
 - `--threshold`: recency threshold for the `recent` field.
 - `--cwd <path>`: session working directory. CWD values must be existing absolute directories that canonicalize under `[workspace].root`; stored CWD defaults are rechecked before load, resume, or fork.
@@ -693,7 +694,7 @@ acps sessions close <session-id> [--session-key <key>]
 
 ### Output
 
-- `sessions list` shows the durable local session list after any supported ACP session-list sync. Sessions discovered from the agent but not loaded locally are shown as `available`.
+- `sessions list` shows the durable local session list after any supported ACP session-list sync. Sessions discovered from the agent but not loaded locally are shown as `available`. Subagent sessions appear only under `--parent`.
 - `sessions list` and `sessions status` use the local read-only socket and do not require a session key.
 - `sessions status` prints sessions with activity in the window and a derived turn state such as `prompt_sent`, `working`, `permission_required`, `done`, or `error`.
 - `sessions commands list` prints the slash commands the agent last advertised for the session over ACP.

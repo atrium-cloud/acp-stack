@@ -18,7 +18,8 @@ use crate::state::{
     MAX_SESSION_STATUS_WINDOW_SECS, MIN_SESSION_STATUS_WINDOW_SECS, PromptRecord,
     SESSION_METADATA_AVAILABLE_COMMANDS, SESSION_METADATA_AVAILABLE_COMMANDS_UPDATED_AT,
     SESSION_STATUS_ACTIVE, SESSION_STATUS_CLOSED, SessionAvailableCommand, SessionEventCursor,
-    SessionRecord, SessionStatusRecord, SessionUpdateBounds,
+    SessionRecord, SessionStatusRecord, SessionTree, SessionUpdateBounds, SubagentRecord,
+    SubagentStatusRecord,
 };
 
 pub(crate) mod commands;
@@ -73,6 +74,53 @@ pub(crate) struct SessionResponse {
     /// nothing was ignored, so list/read responses are unchanged.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     ignored: Vec<crate::runtime::agent::acp_bridge::IgnoredFeature>,
+    /// Set for a subagent session: an agent-created child of another session.
+    subagent: Option<SubagentResponse>,
+}
+
+/// A subagent session's place in its tree and the agent's latest report on it.
+#[derive(Serialize, schemars::JsonSchema)]
+pub(crate) struct SubagentResponse {
+    parent_session_id: String,
+    root_session_id: String,
+    title: Option<String>,
+    description: Option<String>,
+    /// The ACP work state the agent last reported, verbatim: `{ "state": "running" }`,
+    /// `{ "state": "idle", "stopReason": ... }`, `requires_action`, or `unknown`.
+    state: Option<serde_json::Value>,
+    /// Whether the live agent connection reported `state`. Agent restarts and session
+    /// loads clear it until the agent reports again.
+    state_current: bool,
+    /// Whether the agent lets the client cancel this subagent's current work.
+    can_cancel: bool,
+}
+
+impl From<SubagentRecord> for SubagentResponse {
+    fn from(record: SubagentRecord) -> Self {
+        let state = record.state_json.as_deref().and_then(|state_json| {
+            serde_json::from_str(state_json)
+                .inspect_err(|err| {
+                    tracing::warn!(error = %err, session_id = %record.session_id, "stored subagent state is not JSON");
+                })
+                .ok()
+        });
+        Self {
+            parent_session_id: record.parent_session_id,
+            root_session_id: record.root_session_id,
+            title: record.title,
+            description: record.description,
+            state,
+            state_current: record.state_current,
+            can_cancel: record.cancel_granted,
+        }
+    }
+}
+
+impl SessionResponse {
+    fn with_subagent(mut self, subagent: Option<SubagentRecord>) -> Self {
+        self.subagent = subagent.map(SubagentResponse::from);
+        self
+    }
 }
 
 impl From<SessionRecord> for SessionResponse {
@@ -91,6 +139,7 @@ impl From<SessionRecord> for SessionResponse {
             change_seq: record.change_seq,
             event_seq: record.event_seq,
             ignored: Vec::new(),
+            subagent: None,
         }
     }
 }

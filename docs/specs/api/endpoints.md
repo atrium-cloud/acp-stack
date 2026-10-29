@@ -729,9 +729,10 @@ Session creation proceeds when a configured `agent.mode`, model, `agent.effort`,
 ### `GET /v1/sessions`
 
 - Tier: `session`
-- Request: filters accept `limit`, time bounds, and range values. Duration suffixes such as `30m`, `12h`, `60d`, `8w`, `6mo`, and `1y` are interpreted relative to request time. `sync=true` runs the ACP session-list sync before reading.
+- Request: filters accept `limit`, time bounds, and range values. Duration suffixes such as `30m`, `12h`, `60d`, `8w`, `6mo`, and `1y` are interpreted relative to request time. `sync=true` runs the ACP session-list sync before reading. `parent_session_id=<id>` lists that session's direct subagents; without it the list holds root sessions only.
 - Response: `{ sessions, agent_sync, feed_epoch }`.
     - Each session carries `change_seq`, its position in the change feed, and `event_seq`, the `seq` of its newest event (`0` when it has none). The session object every `/v1/sessions` route returns carries both.
+    - The session object's `subagent` is `null` except on a subagent session, where it is `{ parent_session_id, root_session_id, title, description, state, state_current, can_cancel }`. `state` is the ACP work state the agent last reported, verbatim. `state_current` tells whether the live agent connection reported it; agent restarts clear it. `can_cancel` is the agent's per-subagent `cancel` grant.
     - `feed_epoch` names the change-feed epoch the `change_seq` values belong to (see `GET /v1/sessions/-/changes`).
     - `agent_sync` is `{ attempted, status, upserted, updated, synced_at }`, reporting the ACP session-list sync. `attempted` is true when this request ran it. `upserted` counts rows the reported sync inserted, `updated` counts stored rows it changed, and `synced_at` is when it finished.
     - `status` is one of:
@@ -747,9 +748,11 @@ Session creation proceeds when a configured `agent.mode`, model, `agent.effort`,
 ### `GET /v1/sessions/-/status`
 
 - Tier: `session`
-- Request: `window=<duration>` from `1m` through `999h`. Defaults to a rolling `8h` activity window.
-- Response: compact windowed session turn status. Each row includes a derived `state`: `idle`, `prompt_sent`, `working`, `permission_required`, `done`, `stopped`, `error`, `cancelled`, or `closed`.
+- Request: `window=<duration>` from `1m` through `999h`. Defaults to a rolling `8h` activity window. `parent_session_id=<id>` reads that session's direct subagents; without it the rows are root sessions only.
+- Response: compact windowed session turn status. Each row includes a derived `state`: `idle`, `prompt_sent`, `working`, `permission_required`, `done`, `stopped`, `error`, `cancelled`, `closed`, or `unknown`.
     - `done` means the latest prompt completed with `stop_reason = "end_turn"`.
+    - A root reads `permission_required` while any session of its subagent tree has a pending ACP permission request. The row's `permission` is the oldest of them, and its `session_id` names the session that raised it.
+    - A subagent row derives `state` from the work state its agent last reported: `running` is `working`, `requires_action` is `permission_required`, and `idle` maps its `stopReason` to `done` (`end_turn`), `cancelled`, `error`, `stopped` (any other reason), or `idle` (none). A state the live agent connection has not reported reads `unknown`.
     - `available` rows derive their `state` from activity like `active` rows do; the durable `status` field on the same row tells them apart.
     - A fork child's state starts from its own prompts: a new fork reports `idle` until it is first prompted.
     - Each row carries `change_seq` and `event_seq`, and the response carries `feed_epoch`, as on `GET /v1/sessions`.

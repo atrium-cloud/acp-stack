@@ -50,6 +50,9 @@ pub(crate) struct SessionsListParams {
     /// running agent's last successful sync.
     #[serde(default)]
     sync: bool,
+    /// List the direct subagents of this session instead of the sessions that are
+    /// no subagent's.
+    parent_session_id: Option<String>,
 }
 
 pub(crate) async fn sessions_list_handler(
@@ -74,23 +77,36 @@ pub(crate) async fn sessions_list_handler(
         target.supervisor.last_listed_sessions_sync().await
     };
     let list_target_id = target.target_id.clone();
-    let sessions = state
+    let (sessions, mut subagents) = state
         .state
         .read(move |store| {
             let bounds = store.session_update_bounds()?;
             let (since, until) = resolve_session_list_bounds(&params, bounds.as_ref(), now)?;
-            store.query_sessions(crate::state::SessionFilter {
+            let sessions = store.query_sessions(crate::state::SessionFilter {
                 limit,
                 since: since.as_deref(),
                 until: until.as_deref(),
                 target_id: Some(&list_target_id),
+                tree: match params.parent_session_id.as_deref() {
+                    Some(parent_session_id) => SessionTree::ChildrenOf(parent_session_id),
+                    None => SessionTree::Roots,
+                },
                 ..Default::default()
-            })
+            })?;
+            let ids: Vec<&str> = sessions.iter().map(|session| session.id.as_str()).collect();
+            let subagents = store.get_subagents(&ids)?;
+            Ok((sessions, subagents))
         })
         .await?;
     let feed_epoch = state.state.feed_epoch().to_owned();
     Ok(ApiSuccess::new(SessionsListResponse {
-        sessions: sessions.into_iter().map(SessionResponse::from).collect(),
+        sessions: sessions
+            .into_iter()
+            .map(|session| {
+                let subagent = subagents.remove(&session.id);
+                SessionResponse::from(session).with_subagent(subagent)
+            })
+            .collect(),
         agent_sync: agent_sync.into(),
         feed_epoch,
     }))

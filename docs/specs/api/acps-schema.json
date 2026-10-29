@@ -1114,6 +1114,13 @@
             "type": "boolean",
             "description": "Run the ACP session-list sync before reading, instead of reporting the\nrunning agent's last successful sync.",
             "default": false
+          },
+          "parent_session_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "List the direct subagents of this session instead of the sessions that are\nno subagent's."
           }
         }
       },
@@ -1170,6 +1177,13 @@
               "null"
             ],
             "default": null
+          },
+          "parent_session_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Read the direct subagents of this session instead of the sessions that are\nno subagent's."
           }
         }
       },
@@ -6418,6 +6432,17 @@
               "$ref": "#/$defs/response/IgnoredFeature"
             },
             "description": "Configured features (mode, model) the agent's advertised capabilities\ncould not honor; the session proceeded on agent defaults. Omitted when\nnothing was ignored, so list/read responses are unchanged."
+          },
+          "subagent": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/response/SubagentResponse"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Set for a subagent session: an agent-created child of another session."
           }
         },
         "required": [
@@ -6432,7 +6457,8 @@
           "title",
           "metadata_json",
           "change_seq",
-          "event_seq"
+          "event_seq",
+          "subagent"
         ]
       },
       "IgnoredFeature": {
@@ -6475,6 +6501,50 @@
           "reason"
         ],
         "description": "A configured feature the runtime routes around because the agent does not\nadvertise the capability backing it. The feature stays in config; this\nrecord surfaces the omission through init reports and session events."
+      },
+      "SubagentResponse": {
+        "type": "object",
+        "properties": {
+          "parent_session_id": {
+            "type": "string"
+          },
+          "root_session_id": {
+            "type": "string"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "description": "The ACP work state the agent last reported, verbatim: `{ \"state\": \"running\" }`,\n`{ \"state\": \"idle\", \"stopReason\": ... }`, `requires_action`, or `unknown`."
+          },
+          "state_current": {
+            "type": "boolean",
+            "description": "Whether the live agent connection reported `state`. Agent restarts and session\nloads clear it until the agent reports again."
+          },
+          "can_cancel": {
+            "type": "boolean",
+            "description": "Whether the agent lets the client cancel this subagent's current work."
+          }
+        },
+        "required": [
+          "parent_session_id",
+          "root_session_id",
+          "title",
+          "description",
+          "state",
+          "state_current",
+          "can_cancel"
+        ],
+        "description": "A subagent session's place in its tree and the agent's latest report on it."
       },
       "SessionSnapshotResponse": {
         "type": "object",
@@ -6740,7 +6810,7 @@
           },
           "state": {
             "type": "string",
-            "description": "Derived per request from the durable row plus in-flight prompt and\npermission state; a wider set than the durable `status`.",
+            "description": "Derived per request from the durable row plus in-flight prompt and\npermission state; a wider set than the durable `status`. A subagent's\nderives from the work state its agent last reported.",
             "enum": [
               "closed",
               "permission_required",
@@ -6750,7 +6820,8 @@
               "done",
               "stopped",
               "error",
-              "cancelled"
+              "cancelled",
+              "unknown"
             ]
           },
           "status": {
@@ -6913,12 +6984,17 @@
           },
           "updated_at": {
             "type": "string"
+          },
+          "session_id": {
+            "type": "string",
+            "description": "The session that raised the request: this row's, or on a root one of its\nsubagents'."
           }
         },
         "required": [
           "id",
           "created_at",
-          "updated_at"
+          "updated_at",
+          "session_id"
         ]
       },
       "SkillSourceAddResponse": {

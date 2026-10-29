@@ -244,6 +244,7 @@ pub(crate) async fn logs_sessions_handler(
                 status: params.status.as_deref(),
                 after_id: params.after.as_deref(),
                 target_id: None,
+                tree: crate::state::SessionTree::All,
                 order,
             })
         })

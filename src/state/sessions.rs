@@ -10,7 +10,7 @@ use super::events::{
     row_to_event,
 };
 use super::ids::{current_timestamp, next_event_id, next_prompt_id, next_session_id};
-use super::records::{LogOrder, SessionFilter};
+use super::records::{LogOrder, SessionFilter, SessionTree};
 use super::rows::{sequence_column, sequence_param, validate_json_payload};
 use super::sink_outbox;
 
@@ -164,10 +164,20 @@ pub struct SessionStatusRecord {
     pub last_activity_at: String,
     pub last_activity_from: String,
     pub latest_prompt: Option<SessionStatusPromptRecord>,
+    /// The session's oldest pending ACP permission request; for a root, its
+    /// subagents' requests count too.
     pub pending_permission: Option<SessionStatusPermissionRecord>,
     pub prompt_stream_started_at: Option<String>,
     pub change_seq: u64,
     pub event_seq: u64,
+    /// The agent's work state for a subagent session; `None` for any other session.
+    pub subagent: Option<SubagentStatusRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubagentStatusRecord {
+    pub state_json: Option<String>,
+    pub state_current: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,6 +198,8 @@ pub struct SessionStatusPermissionRecord {
     pub id: String,
     pub created_at: String,
     pub updated_at: String,
+    /// The session that raised the request: a root's own, or one of its subagents.
+    pub session_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -12,6 +12,7 @@ use super::core::{
 const DEFAULT_SESSION_LIST_LIMIT: u32 = 50;
 const DEFAULT_SESSION_STATUS_LIMIT: u32 = 1000;
 const SESSION_LIST_DEFAULT_RANGE: &str = "month";
+const SESSION_LIST_ALL_RANGE: &str = "all";
 
 #[derive(Debug, Subcommand)]
 pub enum SessionsCommand {
@@ -55,6 +56,10 @@ pub struct SessionsListArgs {
     /// Array target id to list.
     #[arg(long)]
     target: Option<String>,
+    /// List the subagent sessions this session's agent created, across all time
+    /// unless a range is given.
+    #[arg(long)]
+    parent: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -450,10 +455,15 @@ fn sessions_list_path(args: &SessionsListArgs, query_limit: u32) -> Result<Strin
     };
     let until = resolve_time_bound(args.range_end.as_deref(), "range-end", now)?;
     let mut query = format!("limit={query_limit}");
+    // A subagent roster is small and belongs to one root, so it is read whole.
+    let default_range = match args.parent {
+        Some(_) => SESSION_LIST_ALL_RANGE,
+        None => SESSION_LIST_DEFAULT_RANGE,
+    };
     let range = args
         .range
         .as_deref()
-        .or_else(|| (!explicit_bound_mode).then_some(SESSION_LIST_DEFAULT_RANGE));
+        .or_else(|| (!explicit_bound_mode).then_some(default_range));
     if let Some(range) = range {
         validate_session_range(range)?;
         query.push_str("&range=");
@@ -473,6 +483,10 @@ fn sessions_list_path(args: &SessionsListArgs, query_limit: u32) -> Result<Strin
     if let Some(target) = args.target.as_deref() {
         query.push_str("&target=");
         query.push_str(&encode_query_value(target));
+    }
+    if let Some(parent) = args.parent.as_deref() {
+        query.push_str("&parent_session_id=");
+        query.push_str(&encode_query_value(parent));
     }
     // An operator listing wants the agent's sessions now, not as of the last background sync.
     query.push_str("&sync=true");
@@ -848,12 +862,34 @@ mod tests {
                 range_start: None,
                 range_end: None,
                 target: None,
+                parent: None,
             },
             51,
         )
         .expect("list path");
 
         assert_eq!(path, "/v1/sessions?limit=51&range=month&sync=true");
+    }
+
+    #[test]
+    fn list_path_reads_a_parents_subagents_across_all_time() {
+        let path = sessions_list_path(
+            &SessionsListArgs {
+                limit: 50,
+                range: None,
+                range_start: None,
+                range_end: None,
+                target: None,
+                parent: Some("sess_root".to_owned()),
+            },
+            51,
+        )
+        .expect("list path");
+
+        assert_eq!(
+            path,
+            "/v1/sessions?limit=51&range=all&parent_session_id=sess_root&sync=true"
+        );
     }
 
     #[test]
@@ -865,6 +901,7 @@ mod tests {
                 range_start: None,
                 range_end: None,
                 target: Some("codex".to_owned()),
+                parent: None,
             },
             51,
         )
@@ -906,6 +943,7 @@ mod tests {
                 range_start: Some("2026-05-01T00:00:00Z".to_owned()),
                 range_end: Some("7d".to_owned()),
                 target: None,
+                parent: None,
             },
             51,
         )
@@ -924,6 +962,7 @@ mod tests {
                 range_start: Some("2026-05-01T00:00:00Z".to_owned()),
                 range_end: None,
                 target: None,
+                parent: None,
             },
             51,
         )

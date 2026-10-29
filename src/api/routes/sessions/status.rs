@@ -10,6 +10,9 @@ pub(crate) struct SessionsStatusParams {
     limit: u32,
     #[serde(default, alias = "target")]
     target_id: Option<String>,
+    /// Read the direct subagents of this session instead of the sessions that are
+    /// no subagent's.
+    parent_session_id: Option<String>,
 }
 
 fn default_session_status_threshold() -> String {
@@ -44,8 +47,9 @@ pub(crate) struct SessionsStatusResponse {
 pub(crate) struct SessionStatusSessionResponse {
     id: String,
     /// Derived per request from the durable row plus in-flight prompt and
-    /// permission state; a wider set than the durable `status`.
-    #[schemars(extend("enum" = ["closed", "permission_required", "idle", "working", "prompt_sent", "done", "stopped", "error", "cancelled"]))]
+    /// permission state; a wider set than the durable `status`. A subagent's
+    /// derives from the work state its agent last reported.
+    #[schemars(extend("enum" = ["closed", "permission_required", "idle", "working", "prompt_sent", "done", "stopped", "error", "cancelled", "unknown"]))]
     state: &'static str,
     /// Durable session status as stored.
     #[schemars(extend("enum" = ["active", "available", "closed"]))]
@@ -85,6 +89,9 @@ pub(crate) struct SessionStatusPermissionResponse {
     id: String,
     created_at: String,
     updated_at: String,
+    /// The session that raised the request: this row's, or on a root one of its
+    /// subagents'.
+    session_id: String,
 }
 
 impl SessionStatusSessionResponse {
@@ -119,6 +126,7 @@ impl SessionStatusSessionResponse {
                     id: permission.id,
                     created_at: permission.created_at,
                     updated_at: permission.updated_at,
+                    session_id: permission.session_id,
                 });
         Ok(Self {
             id: record.id,
@@ -150,6 +158,9 @@ fn derived_session_state(record: &SessionStatusRecord) -> &'static str {
     if record.pending_permission.is_some() {
         return "permission_required";
     }
+    if let Some(subagent) = record.subagent.as_ref() {
+        return subagent_state(subagent);
+    }
     let Some(prompt) = record.latest_prompt.as_ref() else {
         return "idle";
     };
@@ -166,6 +177,29 @@ fn derived_session_state(record: &SessionStatusRecord) -> &'static str {
         "errored" | "stalled" => "error",
         "cancelled" => "cancelled",
         _ => "idle",
+    }
+}
+
+/// A subagent has no prompts of its own: its state is the ACP work state its agent
+/// last reported, and `unknown` once that report no longer holds for the live agent.
+fn subagent_state(subagent: &SubagentStatusRecord) -> &'static str {
+    let reported = subagent
+        .state_json
+        .as_deref()
+        .filter(|_| subagent.state_current)
+        .and_then(|state_json| serde_json::from_str::<serde_json::Value>(state_json).ok());
+    let Some(reported) = reported else {
+        return "unknown";
+    };
+    match (reported["state"].as_str(), reported["stopReason"].as_str()) {
+        (Some("running"), _) => "working",
+        (Some("requires_action"), _) => "permission_required",
+        (Some("idle"), Some("end_turn")) => "done",
+        (Some("idle"), Some("cancelled")) => "cancelled",
+        (Some("idle"), Some("error")) => "error",
+        (Some("idle"), Some(_)) => "stopped",
+        (Some("idle"), None) => "idle",
+        _ => "unknown",
     }
 }
 
@@ -200,12 +234,14 @@ pub(crate) async fn sessions_status_handler(
         .await?;
     let status_window_start = window_start_text.clone();
     let status_target_id = target.target_id.clone();
+    let parent_session_id = params.parent_session_id.clone();
     let mut rows = state
         .state
         .read(move |store| {
             store.query_session_status_window(
                 &status_window_start,
                 Some(&status_target_id),
+                parent_session_id.as_deref(),
                 query_limit,
             )
         })
@@ -251,4 +287,51 @@ fn parse_session_status_window(raw: &str) -> Result<chrono::Duration> {
         });
     }
     Ok(duration)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_subagent_state_follows_the_work_state_its_agent_reported() {
+        for (state_json, state_current, expected) in [
+            (Some(r#"{"state":"running"}"#), true, "working"),
+            (
+                Some(r#"{"state":"requires_action"}"#),
+                true,
+                "permission_required",
+            ),
+            (
+                Some(r#"{"state":"idle","stopReason":"end_turn"}"#),
+                true,
+                "done",
+            ),
+            (
+                Some(r#"{"state":"idle","stopReason":"cancelled"}"#),
+                true,
+                "cancelled",
+            ),
+            (
+                Some(r#"{"state":"idle","stopReason":"error"}"#),
+                true,
+                "error",
+            ),
+            (
+                Some(r#"{"state":"idle","stopReason":"refusal"}"#),
+                true,
+                "stopped",
+            ),
+            (Some(r#"{"state":"idle"}"#), true, "idle"),
+            (Some(r#"{"state":"unknown"}"#), true, "unknown"),
+            (Some(r#"{"state":"running"}"#), false, "unknown"),
+            (None, false, "unknown"),
+        ] {
+            let subagent = SubagentStatusRecord {
+                state_json: state_json.map(str::to_owned),
+                state_current,
+            };
+            assert_eq!(subagent_state(&subagent), expected, "{state_json:?}");
+        }
+    }
 }

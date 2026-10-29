@@ -167,7 +167,19 @@ pub struct SessionFilter<'a> {
     pub until: Option<&'a str>,
     pub status: Option<&'a str>,
     pub target_id: Option<&'a str>,
+    pub tree: SessionTree<'a>,
     pub order: LogOrder,
+}
+
+/// Which sessions of the subagent trees a query returns.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SessionTree<'a> {
+    #[default]
+    All,
+    /// Sessions that are not subagents of another session.
+    Roots,
+    /// The direct subagents of one session.
+    ChildrenOf(&'a str),
 }
 
 #[derive(Debug, Clone, Copy, Default)]

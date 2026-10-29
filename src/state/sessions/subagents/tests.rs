@@ -277,6 +277,44 @@ fn subagent_traffic_keeps_the_roots_turn_alive() {
 }
 
 #[test]
+fn a_state_patch_keeps_its_child_in_the_status_window() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = store_with_root(&dir);
+    let child = announce(&store, "sess_root", "agent_child");
+    // Aged so the window opens after the announcement and before the patch.
+    store
+        .connection()
+        .execute(
+            "UPDATE sessions SET updated_at = '2020-01-01T00:00:00.000000000Z' WHERE id = ?1",
+            params![child],
+        )
+        .expect("age child");
+    let since = "2021-01-01T00:00:00.000000000Z";
+
+    store
+        .record_subagent_update(
+            "sess_root",
+            SUBAGENT_UPDATE_PAYLOAD,
+            SubagentPatch {
+                state_json: FieldPatch::Set(r#"{"state":"requires_action"}"#.to_owned()),
+                ..patch("agent_child")
+            },
+        )
+        .expect("patch recorded");
+
+    let window = store
+        .query_session_status_window(since, None, Some("sess_root"), 10)
+        .expect("status window");
+    assert_eq!(
+        window
+            .iter()
+            .map(|record| record.id.as_str())
+            .collect::<Vec<_>>(),
+        [child.as_str()]
+    );
+}
+
+#[test]
 fn reconcile_withdraws_the_live_state_and_cancel_grant_of_its_targets_subagents() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = store_with_root(&dir);

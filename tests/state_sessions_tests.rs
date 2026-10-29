@@ -305,7 +305,7 @@ fn sessions_store_target_id_and_agent_session_id() {
     assert_eq!(ids, vec!["sess_secondary"]);
 
     let status_rows = store
-        .query_session_status_window("1970-01-01T00:00:00.000000000Z", Some("codex"), 10)
+        .query_session_status_window("1970-01-01T00:00:00.000000000Z", Some("codex"), None, 10)
         .expect("target-scoped status query");
     let status_ids: Vec<&str> = status_rows.iter().map(|row| row.id.as_str()).collect();
     assert_eq!(status_ids, vec!["sess_secondary"]);
@@ -827,7 +827,7 @@ fn session_status_window_reports_latest_prompt_and_stream_start() {
         .expect("prompt running");
 
     let rows = store
-        .query_session_status_window("1970-01-01T00:00:00.000000000Z", None, 10)
+        .query_session_status_window("1970-01-01T00:00:00.000000000Z", None, None, 10)
         .expect("status rows");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, "sess_status");
@@ -853,7 +853,7 @@ fn session_status_window_reports_latest_prompt_and_stream_start() {
         .expect("session update");
 
     let rows = store
-        .query_session_status_window("1970-01-01T00:00:00.000000000Z", None, 10)
+        .query_session_status_window("1970-01-01T00:00:00.000000000Z", None, None, 10)
         .expect("status rows");
     assert_eq!(
         rows[0].prompt_stream_started_at.as_deref(),
@@ -897,7 +897,7 @@ fn session_status_window_reports_the_newest_event_and_its_actor() {
         .expect("agent event");
 
     let rows = store
-        .query_session_status_window("1970-01-01T00:00:00.000000000Z", None, 10)
+        .query_session_status_window("1970-01-01T00:00:00.000000000Z", None, None, 10)
         .expect("status rows");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].last_activity_at, agent_event.created_at);
@@ -931,7 +931,7 @@ fn session_status_window_skips_demotions_and_activity_before_the_window() {
         .expect("demotion event");
 
     let rows = store
-        .query_session_status_window(&since, None, 10)
+        .query_session_status_window(&since, None, None, 10)
         .expect("status rows");
     assert!(rows.is_empty(), "a demotion alone is not activity");
 
@@ -946,7 +946,7 @@ fn session_status_window_skips_demotions_and_activity_before_the_window() {
         )
         .expect("agent event");
     let rows = store
-        .query_session_status_window(&since, None, 10)
+        .query_session_status_window(&since, None, None, 10)
         .expect("status rows");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].last_activity_at, event.created_at);
@@ -983,7 +983,7 @@ fn session_status_window_ignores_non_acp_session_update_for_stream_start() {
         .expect("system session update");
 
     let rows = store
-        .query_session_status_window("1970-01-01T00:00:00.000000000Z", None, 10)
+        .query_session_status_window("1970-01-01T00:00:00.000000000Z", None, None, 10)
         .expect("status rows");
     assert_eq!(rows.len(), 1);
     assert_eq!(
@@ -1041,7 +1041,7 @@ fn session_status_window_uses_oldest_in_flight_prompt_for_streaming() {
         .expect("session update");
 
     let rows = store
-        .query_session_status_window("1970-01-01T00:00:00.000000000Z", None, 10)
+        .query_session_status_window("1970-01-01T00:00:00.000000000Z", None, None, 10)
         .expect("status rows");
     assert_eq!(
         rows[0]
@@ -1079,7 +1079,7 @@ fn session_status_window_includes_pending_acp_permission() {
         .expect("permission inserted");
 
     let rows = store
-        .query_session_status_window("1970-01-01T00:00:00.000000000Z", None, 10)
+        .query_session_status_window("1970-01-01T00:00:00.000000000Z", None, None, 10)
         .expect("status rows");
     assert_eq!(
         rows[0]
@@ -1375,7 +1375,7 @@ fn mark_idle_sessions_skips_inflight_and_fresh_rows() {
         )
         .expect("demotion event appended");
     let window = store
-        .query_session_status_window("1970-01-01T00:00:00.000000000Z", None, 10)
+        .query_session_status_window("1970-01-01T00:00:00.000000000Z", None, None, 10)
         .expect("status window");
     let idle_row = window
         .iter()
@@ -1846,7 +1846,7 @@ fn a_fork_child_reports_idle_until_its_own_first_prompt() {
     fork_child(&store, FORK_CHILD, FORK_PARENT, Some(&third.prompt_id));
     let child_status = |store: &StateStore| {
         store
-            .query_session_status_window("1970-01-01T00:00:00.000000000Z", None, 10)
+            .query_session_status_window("1970-01-01T00:00:00.000000000Z", None, None, 10)
             .expect("status rows")
             .into_iter()
             .find(|row| row.id == FORK_CHILD)

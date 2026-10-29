@@ -229,6 +229,12 @@ fn apply_subagent_patch(
             }
         }
     };
+    // The parent reports the child's work, so its patches are the child's activity for list
+    // ranges and status windows.
+    conn.execute(
+        "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+        params![now, child_session_id],
+    )?;
 
     let state_current = match &patch.state_json {
         FieldPatch::Keep => stored.as_ref().is_some_and(|stored| stored.state_current),
@@ -339,7 +345,18 @@ impl StateStore {
                 }
                 Some(event)
             }
-            _ => None,
+            SubagentApplied::Updated { child_session_id } => {
+                if self.external_logging_enabled() {
+                    sink_outbox::enqueue(
+                        &tx,
+                        "sessions",
+                        child_session_id,
+                        &update_event.created_at,
+                    )?;
+                }
+                None
+            }
+            SubagentApplied::Rejected(_) => None,
         };
         tx.commit()?;
         self.publish_session_event(parent_session_id, &update_event);
@@ -351,6 +368,25 @@ impl StateStore {
 
     pub fn get_subagent(&self, session_id: &str) -> Result<Option<SubagentRecord>> {
         subagent_on(self.connection(), session_id)
+    }
+
+    /// The subagent rows of those `session_ids` that are subagents, keyed by session id.
+    pub fn get_subagents(
+        &self,
+        session_ids: &[&str],
+    ) -> Result<std::collections::HashMap<String, SubagentRecord>> {
+        if session_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let placeholders = vec!["?"; session_ids.len()].join(", ");
+        let mut statement = self.connection().prepare(&format!(
+            "SELECT {SUBAGENT_COLUMNS} FROM session_subagents WHERE session_id IN ({placeholders})"
+        ))?;
+        let records = statement
+            .query_map(rusqlite::params_from_iter(session_ids), row_to_subagent)?
+            .map(|record| record.map(|record| (record.session_id.clone(), record)))
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(records)
     }
 
     /// Session rows of every subagent in the tree `root_session_id` heads.

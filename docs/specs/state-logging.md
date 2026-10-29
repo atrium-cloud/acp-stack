@@ -39,6 +39,17 @@ Schema: `migrations/022_array_sessions.sqlite.sql` (and the `.postgres.sql` twin
 
 Each session row carries `target_id` (the Array target that owns the session) and `agent_session_id` (the agent-assigned id) alongside the local `id`. `UNIQUE(target_id, agent_session_id)` makes the agent's session id the stable per-target identity; the same agent session id may recur under different targets. Legacy single-agent databases backfill `target_id` from `agent_id` and `agent_session_id` from the local `id`. See [array.md](array.md).
 
+### Subagent Sessions Table
+
+Schema: `migrations/030_session_subagents.sqlite.sql` (and the `.postgres.sql` twin).
+
+A subagent session is an ordinary session row of its parent's target, whose `updated_at` moves with each patch for it. Its `session_subagents` row links it to the session that announced it through ACP `subagent_update` and to the root of its tree, and holds the merged patches that parent sent for it:
+
+- `session_id`, `parent_session_id`, `root_session_id`: references to `sessions`.
+- `title`, `description`, `state_json`: the latest values, merged per field (omitted keeps, `null` clears, a value replaces). `state_json` is the ACP work state verbatim.
+- `state_current`: `state_json` came from the agent connection that is live now. Startup reconcile, agent teardown, and the root's close clear it.
+- `cancel_granted`: the agent's per-child `cancel` capability, cleared the same way.
+
 ## Auth Keys Table
 
 `auth_keys` stores one verifier row per auth key kind: `session` and `admin`. Rows contain the verifier algorithm, salt, digest, and timestamps. Plaintext auth keys stay out of SQLite, config, and `secrets.age`; only verifier rows are persisted.
@@ -174,6 +185,7 @@ Session-scoped events written when a prompt reaches a terminal status:
 | ------------------- | ----- | -------- | -------------------------------------------------------------- | ------------------------------------------------------------ |
 | `session.available` | info  | `system` | `{ "reason": "<label>", "threshold_secs"?: <u64> }`            | Startup reconcile, agent teardown, and the idle session sweep |
 | `session.list_synced` | info | `system` | `{ "target_id", "agent_id", "upserted": <u32>, "updated": <u32>, "skipped_invalid_cwd": <u32> }` | ACP session-list sync, in the transaction that writes the rows |
+| `session.subagent_announced` | info | `system` | `{ "child_session_id", "agent_session_id", "root_session_id" }` | On the parent, in the transaction that records the first `subagent_update` naming a child |
 
 `reason` is one of `daemon_restart`, `agent_stopped`, `agent_exited`, or `idle`; `threshold_secs` appears only on idle-sweep demotions.
 
@@ -339,6 +351,8 @@ The `security_category` filter clusters the flat `security.*` kinds into operato
 `prompt_failures` counts terminal `errored` and `stalled` prompt rows by `failure_class` using `prompts.updated_at` for the metrics window. The inference breakdowns are derived from sanitized `prompt.inference_failed` events.
 
 `turns` and `prompt_failures` count each session's own prompt rows and events. A fork child's inherited rows count once, on the session that ran the turn (see [Fork Inheritance](#fork-inheritance)).
+
+`sessions` and `usage` count root sessions only; a subagent's usage stays on its own session's events.
 
 ### Usage Fields
 

@@ -104,7 +104,7 @@ pub(crate) async fn sessions_snapshot_handler(
     Path(id): Path<String>,
     Query(params): Query<SessionsTargetParams>,
 ) -> std::result::Result<ApiSuccess<SessionSnapshotResponse>, StackError> {
-    let (session, in_flight, recent) = state
+    let (session, subagent, in_flight, recent) = state
         .state
         .read(move |store| {
             let session = store.require_live_session(&id)?;
@@ -119,9 +119,10 @@ pub(crate) async fn sessions_snapshot_handler(
                     ),
                 });
             }
+            let subagent = store.get_subagent(&id)?;
             let in_flight = store.in_flight_prompts_for_session(&id)?;
             let recent = store.latest_session_events(&id, SNAPSHOT_RECENT_EVENTS_LIMIT)?;
-            Ok((session, in_flight, recent))
+            Ok((session, subagent, in_flight, recent))
         })
         .await?;
     let available_commands = stored_available_commands(&session.metadata_json)
@@ -142,7 +143,7 @@ pub(crate) async fn sessions_snapshot_handler(
         .map(PromptStatusResponse::from)
         .collect();
     Ok(ApiSuccess::new(SessionSnapshotResponse {
-        session: SessionResponse::from(session),
+        session: SessionResponse::from(session).with_subagent(subagent),
         in_flight_prompts,
         last_event_id,
         recent_events,

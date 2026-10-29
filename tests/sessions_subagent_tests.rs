@@ -38,6 +38,20 @@ async fn a_subagent_streams_into_its_own_session_and_its_permission_reaches_the_
                 .is_some_and(|payload| payload.contains("subagent-chunk"))),
         "the subagent's chunk lands in its own log"
     );
+    let status =
+        body(request(&harness, Method::GET, "/v1/sessions/-/status?window=1h").await).await;
+    let [row] = status["data"]["sessions"]
+        .as_array()
+        .expect("status sessions")
+        .as_slice()
+    else {
+        panic!("one root row: {status}");
+    };
+    assert_eq!(
+        (&row["id"], &row["state"], &row["permission"]["session_id"]),
+        (&json!(root), &json!("permission_required"), &json!(child)),
+        "the root waits on its subagent's request"
+    );
     let approve = request(
         &harness,
         Method::POST,
@@ -47,6 +61,68 @@ async fn a_subagent_streams_into_its_own_session_and_its_permission_reaches_the_
     assert_eq!(approve.status(), StatusCode::OK);
 
     await_prompt_status(&harness, &root, &prompt_id, "completed").await;
+}
+
+#[tokio::test]
+async fn listings_show_roots_and_a_parents_subagents_on_request() {
+    let harness = spawn(&["--announce-subagent"]).await;
+    let root = create_session(&harness).await;
+    let prompt_id = submit_prompt(&harness, &root).await;
+    await_prompt_status(&harness, &root, &prompt_id, "completed").await;
+    let [child] = await_subagents(&harness, &root).await;
+
+    let roots = body(request(&harness, Method::GET, "/v1/sessions").await).await;
+    let root_ids: Vec<&str> = roots["data"]["sessions"]
+        .as_array()
+        .expect("sessions array")
+        .iter()
+        .filter_map(|session| session["id"].as_str())
+        .collect();
+    assert!(
+        root_ids.contains(&root.as_str()) && !root_ids.contains(&child.as_str()),
+        "{root_ids:?}"
+    );
+
+    let children = body(
+        request(
+            &harness,
+            Method::GET,
+            &format!("/v1/sessions?parent_session_id={root}"),
+        )
+        .await,
+    )
+    .await;
+    let [listed] = children["data"]["sessions"]
+        .as_array()
+        .expect("sessions array")
+        .as_slice()
+    else {
+        panic!("one subagent listed: {children}");
+    };
+    assert_eq!(listed["id"], child.as_str());
+    assert_eq!(
+        listed["subagent"],
+        json!({
+            "parent_session_id": root,
+            "root_session_id": root,
+            "title": "placebo subagent",
+            "description": null,
+            "state": { "state": "idle", "stopReason": "end_turn" },
+            "state_current": true,
+            "can_cancel": true,
+        })
+    );
+    let read = body(request(&harness, Method::GET, &format!("/v1/sessions/{child}")).await).await;
+    assert_eq!(read["data"]["subagent"], listed["subagent"]);
+
+    assert_eq!(
+        status_states(&harness, "").await,
+        [(root.clone(), "done".to_owned())]
+    );
+    assert_eq!(
+        status_states(&harness, &format!("&parent_session_id={root}")).await,
+        [(child, "done".to_owned())]
+    );
 }
 
 /// The root's cancel ends the subagent's work without answering its request;
@@ -265,6 +341,30 @@ async fn await_pending_permission(harness: &Harness, subject_id: &str) -> String
         );
         tokio::time::sleep(POLL_INTERVAL).await;
     }
+}
+
+/// `(id, state)` of each row `GET /v1/sessions/-/status` returns with `query` appended.
+async fn status_states(harness: &Harness, query: &str) -> Vec<(String, String)> {
+    let status = body(
+        request(
+            harness,
+            Method::GET,
+            &format!("/v1/sessions/-/status?window=1h{query}"),
+        )
+        .await,
+    )
+    .await;
+    status["data"]["sessions"]
+        .as_array()
+        .expect("status sessions")
+        .iter()
+        .map(|row| {
+            (
+                row["id"].as_str().expect("id").to_owned(),
+                row["state"].as_str().expect("state").to_owned(),
+            )
+        })
+        .collect()
 }
 
 async fn session_events(harness: &Harness, session_id: &str) -> Vec<Value> {

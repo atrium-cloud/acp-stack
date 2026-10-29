@@ -6,12 +6,22 @@ use super::*;
 
 /// `query_session_status_window`'s statement, kept apart so its query plan is testable.
 /// ?1 window start, ?2 user actor, ?3 agent actor, ?4 ACP event source, ?5 target id or
-/// NULL, ?6 row limit, ?7 the demotion event kind.
+/// NULL, ?6 row limit, ?7 the demotion event kind, ?8 the parent whose subagents to read,
+/// or NULL for the sessions that are no subagent's.
 pub(super) const SESSION_STATUS_WINDOW_SQL: &str = r#"
             WITH scoped_sessions AS (
                 SELECT id, updated_at
                 FROM sessions
                 WHERE (?5 IS NULL OR target_id = ?5)
+                  AND CASE
+                      WHEN ?8 IS NULL THEN NOT EXISTS (
+                          SELECT 1 FROM session_subagents sa WHERE sa.session_id = sessions.id
+                      )
+                      ELSE EXISTS (
+                          SELECT 1 FROM session_subagents sa
+                          WHERE sa.session_id = sessions.id AND sa.parent_session_id = ?8
+                      )
+                  END
             ),
             -- Created prompts and events contribute only their newest in-window row per
             -- session, found by an index seek on that session, so a streaming turn's
@@ -120,19 +130,31 @@ pub(super) const SESSION_STATUS_WINDOW_SQL: &str = r#"
                 )
                 WHERE row_number = 1
             ),
+            -- A root also waits on its subagents' requests, so theirs count as its own.
+            owned_acp_permissions AS (
+                SELECT pr.id, ws.session_id, pr.created_at, pr.updated_at, pr.subject_id
+                FROM permission_requests pr
+                JOIN window_sessions ws ON ws.session_id = pr.subject_id
+                WHERE pr.status = 'pending'
+                  AND pr.source = 'acp'
+                  AND pr.subject_id IS NOT NULL
+                UNION ALL
+                SELECT pr.id, ws.session_id, pr.created_at, pr.updated_at, pr.subject_id
+                FROM window_sessions ws
+                JOIN session_subagents sa ON sa.root_session_id = ws.session_id
+                JOIN permission_requests pr ON pr.subject_id = sa.session_id
+                WHERE pr.status = 'pending'
+                  AND pr.source = 'acp'
+            ),
             pending_acp_permissions AS (
-                SELECT id, session_id, created_at, updated_at
+                SELECT id, session_id, created_at, updated_at, subject_id
                 FROM (
-                    SELECT pr.id, pr.subject_id AS session_id, pr.created_at, pr.updated_at,
+                    SELECT id, session_id, created_at, updated_at, subject_id,
                            ROW_NUMBER() OVER (
-                               PARTITION BY pr.subject_id
-                               ORDER BY pr.created_at ASC, pr.id ASC
+                               PARTITION BY session_id
+                               ORDER BY created_at ASC, id ASC
                            ) AS row_number
-                    FROM permission_requests pr
-                    JOIN window_sessions ws ON ws.session_id = pr.subject_id
-                    WHERE pr.status = 'pending'
-                      AND pr.source = 'acp'
-                      AND pr.subject_id IS NOT NULL
+                    FROM owned_acp_permissions
                 )
                 WHERE row_number = 1
             )
@@ -174,11 +196,16 @@ pub(super) const SESSION_STATUS_WINDOW_SQL: &str = r#"
                        SELECT COALESCE(MAX(e.seq), 0)
                        FROM events e
                        WHERE e.session_id = s.id
-                   ) AS event_seq
+                   ) AS event_seq,
+                   sa.session_id,
+                   sa.state_json,
+                   sa.state_current,
+                   pp.subject_id
             FROM sessions s
             JOIN window_sessions r ON r.session_id = s.id
             LEFT JOIN latest_prompts lp ON lp.session_id = s.id
             LEFT JOIN pending_acp_permissions pp ON pp.session_id = s.id
+            LEFT JOIN session_subagents sa ON sa.session_id = s.id
             ORDER BY r.activity_at DESC, s.id DESC
             LIMIT ?6
             "#;
@@ -354,6 +381,18 @@ impl StateStore {
         if let Some(target_id) = filter.target_id {
             sql.push_str(" AND target_id = ?");
             bindings.push(rusqlite::types::Value::Text(target_id.to_owned()));
+        }
+        match filter.tree {
+            SessionTree::All => {}
+            SessionTree::Roots => sql.push_str(
+                " AND NOT EXISTS (SELECT 1 FROM session_subagents sa WHERE sa.session_id = sessions.id)",
+            ),
+            SessionTree::ChildrenOf(parent_session_id) => {
+                sql.push_str(
+                    " AND id IN (SELECT session_id FROM session_subagents WHERE parent_session_id = ?)",
+                );
+                bindings.push(rusqlite::types::Value::Text(parent_session_id.to_owned()));
+            }
         }
         if let Some(after) = filter.after_id {
             match filter.order {
@@ -531,10 +570,13 @@ impl StateStore {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Status rows of the sessions active since `since`: the direct subagents of
+    /// `parent_session_id`, or with `None` the sessions that are no subagent's.
     pub fn query_session_status_window(
         &self,
         since: &str,
         target_id: Option<&str>,
+        parent_session_id: Option<&str>,
         limit: u32,
     ) -> Result<Vec<SessionStatusRecord>> {
         let mut statement = self.connection().prepare(SESSION_STATUS_WINDOW_SQL)?;
@@ -547,6 +589,7 @@ impl StateStore {
                 target_id,
                 i64::from(limit),
                 EVENT_KIND_SESSION_AVAILABLE,
+                parent_session_id,
             ],
             |row| {
                 let prompt_id: Option<String> = row.get(11)?;
@@ -570,6 +613,7 @@ impl StateStore {
                         id,
                         created_at: row.get(21)?,
                         updated_at: row.get(22)?,
+                        session_id: row.get(29)?,
                     }),
                     None => None,
                 };
@@ -590,6 +634,13 @@ impl StateStore {
                     prompt_stream_started_at: row.get(23)?,
                     change_seq: sequence_column(row, 24)?,
                     event_seq: sequence_column(row, 25)?,
+                    subagent: match row.get::<_, Option<String>>(26)? {
+                        Some(_) => Some(SubagentStatusRecord {
+                            state_json: row.get(27)?,
+                            state_current: row.get::<_, i64>(28)? != 0,
+                        }),
+                        None => None,
+                    },
                 })
             },
         )?;
@@ -1264,7 +1315,7 @@ mod tests {
     fn the_status_window_seeks_events_and_prompts_per_session() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = migrated_store(&dir);
-        for target_id in [None, Some("codex")] {
+        for (target_id, parent_session_id) in [(None, None), (Some("codex"), Some("sess_root"))] {
             let plan = query_plan(
                 &store,
                 SESSION_STATUS_WINDOW_SQL,
@@ -1276,6 +1327,7 @@ mod tests {
                     target_id,
                     10_i64,
                     EVENT_KIND_SESSION_AVAILABLE,
+                    parent_session_id,
                 ],
             );
             for step in &plan {
