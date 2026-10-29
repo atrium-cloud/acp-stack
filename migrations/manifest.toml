@@ -171,3 +171,9 @@ id = 29
 name = "session_log_sequences"
 sqlite_file = "029_session_log_sequences.sqlite.sql"
 postgres_file = "029_session_log_sequences.postgres.sql"
+
+[[migration]]
+id = 30
+name = "session_subagents"
+sqlite_file = "030_session_subagents.sqlite.sql"
+postgres_file = "030_session_subagents.postgres.sql"

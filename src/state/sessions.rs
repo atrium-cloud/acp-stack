@@ -9,7 +9,7 @@ use super::events::{
     EVENT_COLUMNS, EVENT_SOURCE_ACP, EVENT_SOURCE_SYSTEM, Event, insert_unscoped_event_row,
     row_to_event,
 };
-use super::ids::{current_timestamp, next_event_id, next_prompt_id};
+use super::ids::{current_timestamp, next_event_id, next_prompt_id, next_session_id};
 use super::records::{LogOrder, SessionFilter};
 use super::rows::{sequence_column, sequence_param, validate_json_payload};
 use super::sink_outbox;
@@ -19,9 +19,13 @@ mod events;
 mod fork;
 mod prompts;
 mod queries;
+mod subagents;
 
 pub use changes::{SessionChangeRecord, SessionChangesPage};
 pub use events::SessionEventCursor;
+pub use subagents::{
+    FieldPatch, SubagentApplied, SubagentPatch, SubagentRecord, SubagentRejection,
+};
 
 pub(super) use changes::bump_session_change;
 use changes::{clear_session_tombstone, insert_session_tombstone, next_change_seq};
@@ -65,6 +69,9 @@ pub const EVENT_KIND_SESSION_AVAILABLE: &str = "session.available";
 pub const EVENT_KIND_SESSION_CANCEL_REQUESTED: &str = "session.cancel_requested";
 /// An ACP `session/list` sync inserted or changed stored session rows.
 pub const EVENT_KIND_SESSION_LIST_SYNCED: &str = "session.list_synced";
+/// The agent announced a subagent session on this parent; payload maps the
+/// agent's id for the child to its local session id and names the tree's root.
+pub const EVENT_KIND_SESSION_SUBAGENT_ANNOUNCED: &str = "session.subagent_announced";
 /// Permission decisions; an ACP-source decision is scoped to the session that
 /// raised the request.
 pub const EVENT_KIND_PERMISSION_APPROVED: &str = "permission.approved";

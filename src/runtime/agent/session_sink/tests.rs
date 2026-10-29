@@ -1125,3 +1125,72 @@ async fn the_last_stamped_chunk_id_is_taken_once_per_session() {
         "forgetting a deleted session clears its slot"
     );
 }
+
+#[tokio::test]
+async fn an_announced_child_resolves_once_enqueued_and_streams_into_its_own_log() {
+    use crate::runtime::agent::acp_bridge::NotificationDrain;
+    use crate::runtime::agent::acp_codec::{
+        enqueue_session_notification, spawn_session_notification_queue,
+    };
+    use crate::runtime::agent::session_sink::{SessionEventSink, StateStoreSessionSink};
+    use agent_client_protocol::schema::v1::SessionNotification;
+    use std::sync::Arc;
+
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let state = StateHandle::start(sink_store_with_session(&tempdir)).expect("start state handle");
+    let sink: Arc<dyn SessionEventSink> = Arc::new(StateStoreSessionSink::new(
+        "target_a".to_owned(),
+        state.clone(),
+    ));
+    let queue = spawn_session_notification_queue(Arc::clone(&sink));
+    let drain = Arc::new(NotificationDrain::default());
+    let parent_chunk: SessionNotification =
+        serde_json::from_str(&chunk_payload("before")).expect("parent chunk");
+    let announcement: SessionNotification = serde_json::from_str(
+        r#"{"sessionId":"agent_sess_1","update":{"sessionUpdate":"subagent_update","sessionId":"agent_child","title":"Explore","capabilities":{"cancel":{}},"state":{"state":"running"}}}"#,
+    )
+    .expect("announcement");
+    enqueue_session_notification(&queue, Arc::clone(&drain), parent_chunk).await;
+    enqueue_session_notification(&queue, Arc::clone(&drain), announcement).await;
+
+    // No drain wait here: the child's first request is dispatched right after the
+    // announcement is enqueued.
+    let child_session_id = sink
+        .local_session_id("agent_child")
+        .await
+        .expect("child resolves");
+    let child_chunk: SessionNotification =
+        serde_json::from_str(&chunk_payload("from child").replace("agent_sess_1", "agent_child"))
+            .expect("child chunk");
+    enqueue_session_notification(&queue, Arc::clone(&drain), child_chunk).await;
+    drain.wait_idle().await;
+    sink.drain().await;
+
+    let (parent_events, child_events, subagent) = state
+        .read(move |store| {
+            Ok((
+                store.query_session_events("sess_local", None, 10)?,
+                store.query_session_events(&child_session_id, None, 10)?,
+                store.get_subagent(&child_session_id)?,
+            ))
+        })
+        .await
+        .expect("read logs");
+    let parent_log: Vec<(&str, bool)> = parent_events
+        .iter()
+        .map(|event| (event.kind.as_str(), event.payload_json.contains("before")))
+        .collect();
+    assert_eq!(
+        parent_log,
+        [
+            ("session.update", true),
+            ("session.update", false),
+            ("session.subagent_announced", false)
+        ]
+    );
+    assert_eq!(child_events.len(), 1);
+    assert!(child_events[0].payload_json.contains("from child"));
+    let subagent = subagent.expect("subagent row");
+    assert_eq!(subagent.title.as_deref(), Some("Explore"));
+    assert!(subagent.cancel_granted && subagent.state_current);
+}

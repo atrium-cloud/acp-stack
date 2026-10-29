@@ -187,6 +187,11 @@ async fn record_session_update(
     update: &SessionUpdate,
     payload: &str,
 ) {
+    if let SessionUpdate::SubagentUpdate(subagent) = update {
+        sink.record_subagent_update(agent_session_id, subagent, payload)
+            .await;
+        return;
+    }
     if sink.capture_session_update(agent_session_id, update).await {
         sink.append(agent_session_id, EVENT_KIND_SESSION_UPDATE, payload)
             .await;
@@ -1055,6 +1060,7 @@ pub(super) async fn enqueue_session_notification(
         }
     };
     let agent_session_id = note.session_id.0.to_string();
+    let announces_subagent = matches!(note.update, SessionUpdate::SubagentUpdate(_));
     let notification = QueuedSessionNotification {
         agent_session_id,
         update: note.update,
@@ -1070,7 +1076,13 @@ pub(super) async fn enqueue_session_notification(
     }
     // Ownership must transfer to the drain-owned worker BEFORE this await, or
     // a notification in flight is lost at shutdown.
-    drain.wait_at_most(SESSION_NOTIFICATION_BACKLOG).await;
+    if announces_subagent {
+        // The child's first request may be the next message, and it must find the
+        // child's row, so nothing is dispatched until this update is recorded.
+        drain.wait_idle().await;
+    } else {
+        drain.wait_at_most(SESSION_NOTIFICATION_BACKLOG).await;
+    }
 }
 
 #[cfg(test)]

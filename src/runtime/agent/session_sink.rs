@@ -7,14 +7,15 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::{
     MaybeUndefined,
-    v1::{AvailableCommandInput, SessionUpdate},
+    v1::{AvailableCommandInput, SessionUpdate, SubagentUpdate},
 };
 use tokio::sync::{Mutex as TokioMutex, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::runtime::agent::session_changes::SessionChangesHandle;
 use crate::state::{
-    MAX_SESSION_AVAILABLE_COMMANDS, SessionAvailableCommand, StateHandle, StateStore,
+    EVENT_KIND_SESSION_UPDATE, FieldPatch, MAX_SESSION_AVAILABLE_COMMANDS, SessionAvailableCommand,
+    StateHandle, StateStore, SubagentApplied, SubagentPatch,
 };
 
 /// Sink for ACP `session/update` notifications. `append` must accept events in
@@ -97,6 +98,18 @@ pub trait SessionEventSink: Send + Sync + 'static {
         kind: &'a str,
         payload_json: &'a str,
     ) -> futures::future::BoxFuture<'a, ()>;
+
+    /// Record a `subagent_update` that arrived on `agent_session_id`. Returns once the child
+    /// it names resolves through `local_session_id`, since the child's own requests may
+    /// follow it right away.
+    fn record_subagent_update<'a>(
+        &'a self,
+        agent_session_id: &'a str,
+        _update: &'a SubagentUpdate,
+        payload_json: &'a str,
+    ) -> futures::future::BoxFuture<'a, ()> {
+        self.append(agent_session_id, EVENT_KIND_SESSION_UPDATE, payload_json)
+    }
 
     /// Wait until every `append` accepted before this call has been written.
     /// The sink stays open afterwards.
@@ -366,6 +379,47 @@ fn project_config_options_update(
         );
     }
     Ok(())
+}
+
+fn field_patch(value: &MaybeUndefined<String>) -> FieldPatch<String> {
+    match value {
+        MaybeUndefined::Undefined => FieldPatch::Keep,
+        MaybeUndefined::Null => FieldPatch::Clear,
+        MaybeUndefined::Value(value) => FieldPatch::Set(value.clone()),
+    }
+}
+
+/// The store's patch for a `subagent_update`. A cleared capability set withdraws the
+/// cancel grant, as does a set without `cancel`.
+fn subagent_patch(update: &SubagentUpdate) -> SubagentPatch {
+    let agent_session_id = update.session_id.0.to_string();
+    let state_json = match &update.state {
+        MaybeUndefined::Undefined => FieldPatch::Keep,
+        MaybeUndefined::Null => FieldPatch::Clear,
+        MaybeUndefined::Value(state) => match serde_json::to_string(state) {
+            Ok(state_json) => FieldPatch::Set(state_json),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    agent_session_id,
+                    "failed to encode ACP subagent state; keeping the stored state"
+                );
+                FieldPatch::Keep
+            }
+        },
+    };
+    let cancel_granted = match &update.capabilities {
+        MaybeUndefined::Undefined => None,
+        MaybeUndefined::Null => Some(false),
+        MaybeUndefined::Value(capabilities) => Some(capabilities.cancel.is_some()),
+    };
+    SubagentPatch {
+        agent_session_id,
+        title: field_patch(&update.title),
+        description: field_patch(&update.description),
+        state_json,
+        cancel_granted,
+    }
 }
 
 /// Derive a `tool.execute` event from an `execute`-kind tool call. Updates
@@ -838,6 +892,54 @@ impl SessionEventSink for StateStoreSessionSink {
                     agent_session_id,
                     "session event writer task ended; dropping update"
                 );
+            }
+        })
+    }
+
+    fn record_subagent_update<'a>(
+        &'a self,
+        agent_session_id: &'a str,
+        update: &'a SubagentUpdate,
+        payload_json: &'a str,
+    ) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            let Some(parent_session_id) = self.local_session_id(agent_session_id).await else {
+                return;
+            };
+            let patch = subagent_patch(update);
+            let child_agent_session_id = patch.agent_session_id.clone();
+            // Written directly rather than through the batched writer, so the parent's
+            // earlier updates still queued there go first to keep its log in arrival order.
+            self.drain().await;
+            let payload_json = payload_json.to_owned();
+            let applied = self
+                .state
+                .write(move |store| {
+                    store.record_subagent_update(&parent_session_id, &payload_json, patch)
+                })
+                .await;
+            match applied {
+                Ok(SubagentApplied::Announced {
+                    child_session_id, ..
+                }) => {
+                    self.remember_local_session(&child_agent_session_id, &child_session_id)
+                        .await;
+                }
+                Ok(SubagentApplied::Updated { .. }) => {}
+                Ok(SubagentApplied::Rejected(reason)) => tracing::warn!(
+                    target_id = %self.target_id,
+                    agent_session_id,
+                    child_agent_session_id,
+                    reason = reason.as_str(),
+                    "ignoring ACP subagent update that conflicts with stored sessions"
+                ),
+                Err(err) => tracing::warn!(
+                    error = %err,
+                    target_id = %self.target_id,
+                    agent_session_id,
+                    child_agent_session_id,
+                    "failed to record ACP subagent update"
+                ),
             }
         })
     }

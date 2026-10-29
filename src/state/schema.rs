@@ -32,6 +32,7 @@ const MIGRATED_TABLES: &[(&str, i64)] = &[
     ("deps_apply_runs", 25),
     ("session_change_counter", 29),
     ("session_tombstones", 29),
+    ("session_subagents", 30),
 ];
 
 const MANIFEST_TOML: &str = include_str!("../../migrations/manifest.toml");
@@ -283,6 +284,14 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         postgres_file: "029_session_log_sequences.postgres.sql",
         sqlite: include_str!("../../migrations/029_session_log_sequences.sqlite.sql"),
         postgres: include_str!("../../migrations/029_session_log_sequences.postgres.sql"),
+    },
+    Migration {
+        id: 30,
+        name: "session_subagents",
+        sqlite_file: "030_session_subagents.sqlite.sql",
+        postgres_file: "030_session_subagents.postgres.sql",
+        sqlite: include_str!("../../migrations/030_session_subagents.sqlite.sql"),
+        postgres: include_str!("../../migrations/030_session_subagents.postgres.sql"),
     },
 ];
 

@@ -1041,6 +1041,9 @@ impl StateStore {
     /// `updated_at` is deliberately left untouched: it doubles as the
     /// last-activity timestamp for list ranges, `since` pagination, and the
     /// status window, and a demotion is not activity.
+    ///
+    /// The same scope's subagents lose their current state and cancel grant,
+    /// both of which held only for the connection that ended.
     pub fn reconcile_orphaned_sessions(&self, target_id: Option<&str>) -> Result<Vec<String>> {
         const SQL: &str = r#"
             UPDATE sessions
@@ -1048,6 +1051,13 @@ impl StateStore {
             WHERE status = ?2
               AND (?3 IS NULL OR target_id = ?3)
             RETURNING id
+        "#;
+        const SUBAGENT_SQL: &str = r#"
+            UPDATE session_subagents
+            SET state_current = 0, cancel_granted = 0
+            WHERE (state_current = 1 OR cancel_granted = 1)
+              AND (?1 IS NULL OR session_id IN (SELECT id FROM sessions WHERE target_id = ?1))
+            RETURNING session_id
         "#;
         let now = current_timestamp();
         self.persist_many_with_outbox("sessions", &now, |conn| {
@@ -1059,7 +1069,13 @@ impl StateStore {
                 )?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()?
             };
-            for id in &ids {
+            let subagent_ids = {
+                let mut statement = conn.prepare(SUBAGENT_SQL)?;
+                let rows =
+                    statement.query_map(params![target_id], |row| row.get::<_, String>(0))?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            for id in ids.iter().chain(&subagent_ids) {
                 bump_session_change(conn, id)?;
             }
             Ok(ids)

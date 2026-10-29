@@ -7,6 +7,10 @@ use rusqlite::{OptionalExtension, params};
 use super::core::StateStore;
 use super::sessions::{EVENT_KIND_PROMPT_INFERENCE_FAILED, FailureClass};
 
+/// `sessions` predicate that leaves out subagent sessions.
+const NOT_SUBAGENT_SESSION: &str =
+    "NOT EXISTS (SELECT 1 FROM session_subagents sa WHERE sa.session_id = sessions.id)";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StateCounts {
     pub events: i64,
@@ -268,9 +272,13 @@ impl StateStore {
     }
 
     fn session_metrics(&self, window: &MetricsWindow) -> Result<SessionMetrics> {
+        // Subagent sessions are work inside a root's turns, so only roots count.
         let active: i64 = self.connection().query_row(
-            "SELECT COUNT(*) FROM sessions \
-             WHERE status = 'active' AND created_at >= ?1 AND created_at < ?2",
+            &format!(
+                "SELECT COUNT(*) FROM sessions \
+                 WHERE status = 'active' AND created_at >= ?1 AND created_at < ?2 \
+                   AND {NOT_SUBAGENT_SESSION}"
+            ),
             params![window.since, window.until],
             |row| row.get(0),
         )?;
@@ -278,15 +286,19 @@ impl StateStore {
         // sessions there, so counting them as closed would skew both the count
         // and the duration samples.
         let closed: i64 = self.connection().query_row(
-            "SELECT COUNT(*) FROM sessions \
-             WHERE status = 'closed' AND created_at >= ?1 AND created_at < ?2",
+            &format!(
+                "SELECT COUNT(*) FROM sessions \
+                 WHERE status = 'closed' AND created_at >= ?1 AND created_at < ?2 \
+                   AND {NOT_SUBAGENT_SESSION}"
+            ),
             params![window.since, window.until],
             |row| row.get(0),
         )?;
-        let mut statement = self.connection().prepare(
+        let mut statement = self.connection().prepare(&format!(
             "SELECT created_at, updated_at FROM sessions \
-             WHERE status = 'closed' AND created_at >= ?1 AND created_at < ?2",
-        )?;
+             WHERE status = 'closed' AND created_at >= ?1 AND created_at < ?2 \
+               AND {NOT_SUBAGENT_SESSION}"
+        ))?;
         let durations: Vec<i64> = statement
             .query_map(params![window.since, window.until], |row| {
                 let created_at: String = row.get(0)?;
@@ -657,7 +669,8 @@ impl StateStore {
 
     fn usage_metrics(&self, window: &MetricsWindow) -> Result<UsageMetrics> {
         // Context fields use MAX because ACP usage updates report snapshots,
-        // not deltas.
+        // not deltas. A root's reported usage may already cover its subagents',
+        // so subagent rows are left out rather than added to it.
         let row = self
             .connection()
             .query_row(
@@ -667,7 +680,10 @@ impl StateStore {
                     MAX(CAST(json_extract(payload_json, '$.context_window_used') AS INTEGER)), \
                     MAX(CAST(json_extract(payload_json, '$.context_window_max') AS INTEGER)) \
                  FROM events \
-                 WHERE kind = 'usage.reported' AND created_at >= ?1 AND created_at < ?2",
+                 WHERE kind = 'usage.reported' AND created_at >= ?1 AND created_at < ?2 \
+                   AND NOT EXISTS ( \
+                       SELECT 1 FROM session_subagents sa WHERE sa.session_id = events.session_id \
+                   )",
                 params![window.since, window.until],
                 |row| {
                     Ok(UsageMetrics {

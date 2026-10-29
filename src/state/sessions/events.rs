@@ -26,9 +26,30 @@ pub(super) fn next_session_event_seq(conn: &rusqlite::Connection, session_id: &s
 /// `message` of every agent-streamed `session.update` row.
 const SESSION_UPDATE_EVENT_MESSAGE: &str = "ACP session update";
 
+/// An agent-streamed row for `session_id`'s log, not yet written.
+pub(super) fn session_update_event(
+    session_id: &str,
+    kind: &str,
+    payload_json: &str,
+) -> Result<Event> {
+    serde_json::from_str::<serde::de::IgnoredAny>(payload_json)
+        .map_err(|_| StackError::InvalidEventPayload)?;
+    Ok(Event {
+        id: next_event_id(),
+        created_at: current_timestamp(),
+        level: "info".to_owned(),
+        kind: kind.to_owned(),
+        message: SESSION_UPDATE_EVENT_MESSAGE.to_owned(),
+        payload_json: payload_json.to_owned(),
+        source: EVENT_SOURCE_ACP.to_owned(),
+        session_id: Some(session_id.to_owned()),
+        seq: None,
+    })
+}
+
 /// Insert `event` as the next row of `session_id`'s log and return its `seq`. The caller owns
 /// the transaction, the change-feed bump, the outbox row, and the publish after commit.
-fn insert_session_event_row(
+pub(super) fn insert_session_event_row(
     conn: &rusqlite::Connection,
     session_id: &str,
     event: &Event,
@@ -106,42 +127,47 @@ impl StateStore {
         Ok(event)
     }
 
-    /// Append one agent-streamed ACP `session/update` row and touch the session's in-flight
-    /// prompt in one transaction, so a streamed chunk costs one commit. The touch keeps the
-    /// stale-prompt sweeper off a turn that is still streaming; ACP updates carry no prompt id,
-    /// so it lands on the session's oldest in-flight prompt.
+    /// Append one agent-streamed ACP `session/update` row and touch the in-flight prompt of
+    /// the session's tree in one transaction, so a streamed chunk costs one commit.
     pub fn append_session_update(
         &self,
         session_id: &str,
         kind: &str,
         payload_json: &str,
     ) -> Result<Event> {
-        serde_json::from_str::<serde::de::IgnoredAny>(payload_json)
-            .map_err(|_| StackError::InvalidEventPayload)?;
-        let mut event = Event {
-            id: next_event_id(),
-            created_at: current_timestamp(),
-            level: "info".to_owned(),
-            kind: kind.to_owned(),
-            message: SESSION_UPDATE_EVENT_MESSAGE.to_owned(),
-            payload_json: payload_json.to_owned(),
-            source: EVENT_SOURCE_ACP.to_owned(),
-            session_id: Some(session_id.to_owned()),
-            seq: None,
-        };
-
+        let mut event = session_update_event(session_id, kind, payload_json)?;
         let tx = self.begin_immediate("events")?;
-        let seq = insert_session_event_row(&tx, session_id, &event)?;
-        bump_session_change(&tx, session_id)?;
+        event.seq = Some(self.insert_session_update_row(&tx, session_id, &event)?);
+        tx.commit()?;
+        self.publish_session_event(session_id, &event);
+        Ok(event)
+    }
+
+    /// Write `event` as the next row of `session_id`'s log inside the caller's transaction and
+    /// touch an in-flight prompt, which keeps the stale-prompt sweeper off a turn that is still
+    /// streaming. ACP updates carry no prompt id, so the touch lands on the oldest in-flight
+    /// prompt of the tree's root: a subagent's traffic is work of the root's turn.
+    pub(super) fn insert_session_update_row(
+        &self,
+        conn: &rusqlite::Connection,
+        session_id: &str,
+        event: &Event,
+    ) -> Result<u64> {
+        let seq = insert_session_event_row(conn, session_id, event)?;
+        bump_session_change(conn, session_id)?;
         // Only `updated_at` moves: an in-flight prompt has no stop reason or error to keep.
-        let touched_prompt_id: Option<String> = tx
+        let touched_prompt_id: Option<String> = conn
             .query_row(
                 r#"
                 UPDATE prompts
                 SET updated_at = ?1
                 WHERE id = (
                     SELECT id FROM prompts
-                    WHERE session_id = ?2 AND status IN ('pending', 'running')
+                    WHERE session_id = COALESCE(
+                            (SELECT root_session_id FROM session_subagents WHERE session_id = ?2),
+                            ?2
+                        )
+                      AND status IN ('pending', 'running')
                     ORDER BY created_at ASC, id ASC
                     LIMIT 1
                 )
@@ -152,18 +178,15 @@ impl StateStore {
             )
             .optional()?;
         if self.external_logging_enabled() {
-            sink_outbox::enqueue(&tx, "events", &event.id, &event.created_at)?;
+            sink_outbox::enqueue(conn, "events", &event.id, &event.created_at)?;
             if let Some(prompt_id) = &touched_prompt_id {
-                sink_outbox::enqueue(&tx, "prompts", prompt_id, &event.created_at)?;
+                sink_outbox::enqueue(conn, "prompts", prompt_id, &event.created_at)?;
             }
         }
-        tx.commit()?;
-        event.seq = Some(seq);
-        self.publish_session_event(session_id, &event);
-        Ok(event)
+        Ok(seq)
     }
 
-    fn publish_session_event(&self, session_id: &str, event: &Event) {
+    pub(super) fn publish_session_event(&self, session_id: &str, event: &Event) {
         let session_id = session_id.to_owned();
         let event = event.clone();
         self.publish(move |hub| {
