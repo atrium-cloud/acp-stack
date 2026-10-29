@@ -705,7 +705,7 @@ All skill routes load config leniently, dropping individually invalid `[[skills.
 
 A session route answering `502 agent.request_failed` because the agent returned a JSON-RPC error carries that error in `details.acp_error` (see [Error Codes](api.md#error-codes)).
 
-A subagent session, which the agent announces through ACP `subagent_update`, is read-only to clients: the prompt, commands, load, resume, fork, config-options, cancel, close, and delete routes answer it with `409 session.subagent_restricted` (see [Subagent Sessions](../runtime.md#subagent-sessions)).
+A subagent session, which the agent announces through ACP `subagent_update`, is read-only to clients: the prompt, commands, load, resume, fork, config-options, close, and delete routes answer it with `409 session.subagent_restricted`, and cancel runs only on the agent's grant (see [Subagent Sessions](../runtime.md#subagent-sessions)).
 
 ### `POST /v1/sessions`
 
@@ -888,9 +888,12 @@ The `agent.inference_*` codes carry a sanitized public message of the form `"inf
 - Tier: `session`
 - Request: none.
 - Response: standard envelope.
-- Errors: `502 agent.request_failed` is returned when the live prompt did not settle as `cancelled`.
+- Errors:
+    - `502 agent.request_failed` is returned when the live prompt did not settle as `cancelled`.
+    - `409 session.subagent_cancel_unavailable` is returned for a subagent session whose agent grants no `cancel` for it, or whose root the running agent has not attached or is still loading or resuming.
 - Notes:
     - Cancels an in-flight prompt. ACP `session/cancel` goes out first, then the runtime waits up to 20 seconds for the live prompt row to reach a terminal status.
+    - On a subagent session with a `cancel` grant, ACP `session/cancel` goes out with the subagent's id, its pending ACP permission requests are settled as `cancelled`, and the call returns without waiting. The agent's report on the subagent's work follows in `subagent.state`.
     - Any pending ACP permission request for the session is settled as `cancelled` while that wait runs, as the ACP cancellation contract requires. An agent parked on a permission it raised ends its turn once that answer arrives.
     - Success means the prompt row is already `cancelled` when the response returns.
     - A prompt that instead reaches `completed` or `errored` means the agent ended the turn on its own terms, and the call fails. The prompt row keeps whatever status the agent produced.

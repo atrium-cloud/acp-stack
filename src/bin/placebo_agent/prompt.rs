@@ -296,17 +296,16 @@ async fn delegate_to_subagent(
     responder: Responder<PromptResponse>,
     connection: ConnectionTo<Client>,
 ) -> agent_client_protocol::Result<()> {
+    // An adapter announces subagents only to a client that advertised them.
+    if !state.lock().await.client_advertised_subagents() {
+        return responder.respond_with_error(Error::new(
+            -32000,
+            "client did not advertise the subagents capability",
+        ));
+    }
     let parent = request.session_id.clone();
     let child = subagent_of(&parent);
-    connection.send_notification(subagent_update(
-        &parent,
-        SubagentUpdate::new(child.clone())
-            .title(SUBAGENT_TITLE.to_owned())
-            .capabilities(
-                SubagentSessionCapabilities::new().cancel(SessionCancelCapabilities::new()),
-            )
-            .state(StateUpdate::Running(RunningStateUpdate::new())),
-    ))?;
+    connection.send_notification(granted_running_subagent(&parent))?;
     connection.send_notification(subagent_chunk(&child))?;
     if args.subagent_nested {
         let grandchild = subagent_of(&child);
@@ -329,6 +328,7 @@ async fn delegate_to_subagent(
         return finish_prompt(state, request, responder).await;
     }
     let fields = ResponseFields::from_args(args);
+    let child_start_cancels = state.lock().await.cancel_count(child.0.as_ref());
     let task_connection = connection.clone();
     connection.spawn(async move {
         let permission = task_connection.send_request(RequestPermissionRequest::new(
@@ -349,9 +349,19 @@ async fn delegate_to_subagent(
             () = cancel_aimed_at(&state, &parent, start_cancels) => true,
         };
         if !parent_cancelled {
+            // A cancel aimed at the subagent alone ends its work; the parent's turn goes on.
+            let stop_reason = if state
+                .lock()
+                .await
+                .cancelled_since(child.0.as_ref(), child_start_cancels)
+            {
+                IdleStopReason::Cancelled
+            } else {
+                IdleStopReason::EndTurn
+            };
             task_connection.send_notification(subagent_update(
                 &parent,
-                SubagentUpdate::new(child).state(idle(IdleStopReason::EndTurn)),
+                SubagentUpdate::new(child).state(idle(stop_reason)),
             ))?;
             return respond_to_prompt(request, responder, StopReason::EndTurn, fields);
         }
@@ -374,12 +384,25 @@ async fn delegate_to_subagent(
     })
 }
 
-fn subagent_of(session_id: &SessionId) -> SessionId {
+pub(crate) fn subagent_of(session_id: &SessionId) -> SessionId {
     SessionId::new(format!("{}{SUBAGENT_SESSION_SUFFIX}", session_id.0))
 }
 
-fn subagent_update(parent: &SessionId, update: SubagentUpdate) -> SessionNotification {
+pub(crate) fn subagent_update(parent: &SessionId, update: SubagentUpdate) -> SessionNotification {
     SessionNotification::new(parent.clone(), SessionUpdate::SubagentUpdate(update))
+}
+
+/// `parent`'s subagent reported running, with a cancel grant.
+pub(crate) fn granted_running_subagent(parent: &SessionId) -> SessionNotification {
+    subagent_update(
+        parent,
+        SubagentUpdate::new(subagent_of(parent))
+            .title(SUBAGENT_TITLE.to_owned())
+            .capabilities(
+                SubagentSessionCapabilities::new().cancel(SessionCancelCapabilities::new()),
+            )
+            .state(StateUpdate::Running(RunningStateUpdate::new())),
+    )
 }
 
 fn subagent_chunk(session_id: &SessionId) -> SessionNotification {
@@ -391,7 +414,7 @@ fn subagent_chunk(session_id: &SessionId) -> SessionNotification {
     )
 }
 
-fn idle(stop_reason: IdleStopReason) -> StateUpdate {
+pub(crate) fn idle(stop_reason: IdleStopReason) -> StateUpdate {
     StateUpdate::Idle(IdleStateUpdate::new().stop_reason(stop_reason))
 }
 

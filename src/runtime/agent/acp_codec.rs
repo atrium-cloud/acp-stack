@@ -95,6 +95,19 @@ pub(super) enum SessionQueueItem {
     Abandon {
         agent_session_id: String,
     },
+    /// A `session/load` (`replay`) or `session/resume` of this root is about to be sent:
+    /// its subagents' live state is withdrawn, and with `replay` their snapshots are
+    /// history until the matching [`Self::AttachEnd`].
+    AttachStart {
+        agent_session_id: String,
+        replay: bool,
+    },
+    /// The agent answered, or will not; a failed attach withdraws the live state again.
+    AttachEnd {
+        agent_session_id: String,
+        replay: bool,
+        succeeded: bool,
+    },
 }
 
 pub(super) type SessionNotificationSender = mpsc::UnboundedSender<SessionQueueItem>;
@@ -184,16 +197,46 @@ fn warn_discarded(agent_session_id: &str, count: usize, reason: &'static str) {
     }
 }
 
+/// Agent session ids, each with how many operations of one kind are in flight for it.
+#[derive(Default)]
+pub(super) struct SessionCounts(HashMap<String, usize>);
+
+impl SessionCounts {
+    pub(super) fn add(&mut self, agent_session_id: &str) {
+        *self.0.entry(agent_session_id.to_owned()).or_default() += 1;
+    }
+
+    pub(super) fn remove(&mut self, agent_session_id: &str) {
+        if let Some(count) = self.0.get_mut(agent_session_id) {
+            *count -= 1;
+            if *count == 0 {
+                self.0.remove(agent_session_id);
+            }
+        }
+    }
+
+    pub(super) fn contains(&self, agent_session_id: &str) -> bool {
+        self.0.contains_key(agent_session_id)
+    }
+
+    fn agent_session_ids(&self) -> Vec<String> {
+        self.0.keys().cloned().collect()
+    }
+}
+
+/// `replaying` holds the roots whose `session/load` is replaying history.
 async fn record_session_update(
     sink: &Arc<dyn SessionEventSink>,
     permissions: &AcpPermissionPolicy,
+    replaying: &SessionCounts,
     agent_session_id: &str,
     update: &SessionUpdate,
     payload: &str,
 ) {
     if let SessionUpdate::SubagentUpdate(subagent) = update {
+        let replaying = replaying.agent_session_ids();
         let child_session_id = sink
-            .record_subagent_update(agent_session_id, subagent, payload)
+            .record_subagent_update(agent_session_id, subagent, payload, &replaying)
             .await;
         // The agent stopped this child's work, so its open requests no longer apply; ACP
         // has the client settle them as if it had cancelled the child itself.
@@ -226,6 +269,61 @@ fn reports_cancelled(update: &SubagentUpdate) -> bool {
             ..
         }))
     )
+}
+
+/// The span of a root's `session/load` or `session/resume`, in the notification queue's
+/// order: opened before the request is sent and closed by the request's ordered answer
+/// callback, before any later message is dispatched. ACP makes the attach drop what the
+/// client knew live about the root's subagents, and makes a load's answer the boundary
+/// between replayed subagent snapshots and current ones.
+pub(super) struct AttachWindow {
+    queue: SessionNotificationSender,
+    agent_session_id: String,
+    replay: bool,
+    succeeded: bool,
+}
+
+impl AttachWindow {
+    pub(super) fn open(
+        queue: SessionNotificationSender,
+        agent_session_id: String,
+        replay: bool,
+    ) -> Self {
+        let start = SessionQueueItem::AttachStart {
+            agent_session_id: agent_session_id.clone(),
+            replay,
+        };
+        if queue.send(start).is_err() {
+            tracing::debug!(
+                agent_session_id,
+                "session/update worker already stopped; no attach to track"
+            );
+        }
+        Self {
+            queue,
+            agent_session_id,
+            replay,
+            succeeded: false,
+        }
+    }
+
+    /// Close the window on the agent's answer. A window dropped unanswered counts as failed.
+    pub(super) fn close(mut self, succeeded: bool) {
+        self.succeeded = succeeded;
+    }
+}
+
+impl Drop for AttachWindow {
+    fn drop(&mut self) {
+        let end = SessionQueueItem::AttachEnd {
+            agent_session_id: std::mem::take(&mut self.agent_session_id),
+            replay: self.replay,
+            succeeded: self.succeeded,
+        };
+        if self.queue.send(end).is_err() {
+            tracing::debug!("session/update worker already stopped; no attach to close");
+        }
+    }
 }
 
 /// Updates held for a session the agent opened through `session/new` or
@@ -295,6 +393,7 @@ pub(super) fn spawn_session_notification_queue(
     let (sender, mut receiver) = mpsc::unbounded_channel::<SessionQueueItem>();
     let worker = tokio::spawn(async move {
         let mut held = HeldSessionUpdates::default();
+        let mut replaying = SessionCounts::default();
         while let Some(item) = receiver.recv().await {
             match item {
                 SessionQueueItem::Notification(notification) => {
@@ -302,6 +401,7 @@ pub(super) fn spawn_session_notification_queue(
                         record_session_update(
                             &sink,
                             &permissions,
+                            &replaying,
                             &notification.agent_session_id,
                             &notification.update,
                             &notification.payload,
@@ -323,6 +423,7 @@ pub(super) fn spawn_session_notification_queue(
                             record_session_update(
                                 &sink,
                                 &permissions,
+                                &replaying,
                                 &agent_session_id,
                                 &update.update,
                                 &update.payload,
@@ -339,6 +440,27 @@ pub(super) fn spawn_session_notification_queue(
                 }
                 SessionQueueItem::Abandon { agent_session_id } => {
                     held.discard(&agent_session_id, "abandoned");
+                }
+                SessionQueueItem::AttachStart {
+                    agent_session_id,
+                    replay,
+                } => {
+                    sink.withdraw_subagent_state(&agent_session_id).await;
+                    if replay {
+                        replaying.add(&agent_session_id);
+                    }
+                }
+                SessionQueueItem::AttachEnd {
+                    agent_session_id,
+                    replay,
+                    succeeded,
+                } => {
+                    if replay {
+                        replaying.remove(&agent_session_id);
+                    }
+                    if !succeeded {
+                        sink.withdraw_subagent_state(&agent_session_id).await;
+                    }
                 }
             }
         }

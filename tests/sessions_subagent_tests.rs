@@ -148,27 +148,10 @@ async fn cancelling_the_root_settles_the_request_its_cancelled_subagent_left_ope
     .expect("cancel returned well inside the settle budget");
     assert_eq!(cancel.status(), StatusCode::OK);
 
-    let cancelled = body(
-        request(
-            &harness,
-            Method::GET,
-            "/v1/logs/permissions?kind=permission.cancelled",
-        )
-        .await,
-    )
-    .await;
-    let reasons: Vec<Value> = cancelled["data"]["events"]
-        .as_array()
-        .expect("events array")
-        .iter()
-        .map(|event| {
-            serde_json::from_str::<Value>(event["payload_json"].as_str().expect("payload"))
-                .expect("payload json")
-        })
-        .filter(|payload| payload["permission_id"] == permission_id.as_str())
-        .map(|payload| payload["reason"].clone())
-        .collect();
-    assert_eq!(reasons, [json!("subagent-cancelled")]);
+    assert_eq!(
+        cancel_reasons(&harness, &permission_id).await,
+        [json!("subagent-cancelled")]
+    );
     let prompt = body(
         request(
             &harness,
@@ -183,14 +166,27 @@ async fn cancelling_the_root_settles_the_request_its_cancelled_subagent_left_ope
 
 #[tokio::test]
 async fn client_mutations_on_a_subagent_session_are_refused() {
-    let harness = spawn(&["--announce-subagent"]).await;
+    let harness = spawn(&["--announce-subagent", "--subagent-nested"]).await;
     let root = create_session(&harness).await;
     let prompt_id = submit_prompt(&harness, &root).await;
     await_prompt_status(&harness, &root, &prompt_id, "completed").await;
-    let [child] = await_subagents(&harness, &root).await;
+    let [child] = subagents_of(&harness, &root).await;
+    let [grandchild] = subagents_of(&harness, &child).await;
 
     let read = request(&harness, Method::GET, &format!("/v1/sessions/{child}")).await;
     assert_eq!(read.status(), StatusCode::OK);
+    // The agent granted no cancel for the grandchild.
+    let cancel = request(
+        &harness,
+        Method::POST,
+        &format!("/v1/sessions/{grandchild}/cancel"),
+    )
+    .await;
+    assert_eq!(cancel.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        body(cancel).await["error"]["code"],
+        "session.subagent_cancel_unavailable"
+    );
     for (method, route, payload) in [
         (Method::POST, "/prompt", json!({ "prompt": "hello" })),
         (Method::POST, "/commands", json!({ "command": "review" })),
@@ -202,7 +198,6 @@ async fn client_mutations_on_a_subagent_session_are_refused() {
             "/config-options",
             json!({ "config_id": "model", "value": "other" }),
         ),
-        (Method::POST, "/cancel", json!({})),
         (Method::POST, "/delete", json!({})),
         (Method::DELETE, "", json!({})),
     ] {
@@ -223,6 +218,152 @@ async fn client_mutations_on_a_subagent_session_are_refused() {
             "{method} {route}: {error}"
         );
     }
+}
+
+/// A cancel the agent granted goes to the subagent alone: its request is answered
+/// at once, it reports its work cancelled, and the root's turn goes on.
+#[tokio::test]
+async fn a_granted_subagent_cancel_reaches_the_agent_and_settles_its_request() {
+    let harness = spawn(&["--announce-subagent", "--subagent-permission"]).await;
+    let root = create_session(&harness).await;
+    let prompt_id = submit_prompt(&harness, &root).await;
+    let [child] = await_subagents(&harness, &root).await;
+    let permission_id = await_pending_permission(&harness, &child).await;
+
+    let cancel = request(
+        &harness,
+        Method::POST,
+        &format!("/v1/sessions/{child}/cancel"),
+    )
+    .await;
+    assert_eq!(cancel.status(), StatusCode::OK);
+
+    // Settled by the cancel itself, ahead of the subagent's own cancelled report.
+    assert_eq!(
+        cancel_reasons(&harness, &permission_id).await,
+        [json!("session-cancelled")]
+    );
+    await_prompt_status(&harness, &root, &prompt_id, "completed").await;
+    let read = body(request(&harness, Method::GET, &format!("/v1/sessions/{child}")).await).await;
+    assert_eq!(
+        read["data"]["subagent"]["state"],
+        json!({ "state": "idle", "stopReason": "cancelled" })
+    );
+    assert!(
+        session_events(&harness, &child)
+            .await
+            .iter()
+            .any(|event| event["kind"] == "session.cancel_requested")
+    );
+}
+
+/// Snapshots the agent replays before answering `session/load` are history: the
+/// replayed cancel grant authorizes nothing, and the state and grants the agent
+/// reports after the answer are current.
+#[tokio::test]
+async fn a_loaded_roots_replayed_subagent_grant_authorizes_nothing() {
+    let harness = spawn(&["--subagent-load-replay", "--announce-subagent"]).await;
+    let root = create_session(&harness).await;
+
+    let load = request(&harness, Method::POST, &format!("/v1/sessions/{root}/load")).await;
+    assert_eq!(load.status(), StatusCode::OK);
+
+    let [child] = await_subagents(&harness, &root).await;
+    let deadline = tokio::time::Instant::now() + POLL_BUDGET;
+    let subagent = loop {
+        let read =
+            body(request(&harness, Method::GET, &format!("/v1/sessions/{child}")).await).await;
+        if read["data"]["subagent"]["state_current"] == true {
+            break read["data"]["subagent"].clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the post-load state never arrived: {read}"
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
+    };
+    assert_eq!(
+        (&subagent["state"], &subagent["can_cancel"]),
+        (
+            &json!({ "state": "idle", "stopReason": "end_turn" }),
+            &json!(false)
+        )
+    );
+    let cancel_path = format!("/v1/sessions/{child}/cancel");
+    let cancel = request(&harness, Method::POST, &cancel_path).await;
+    assert_eq!(cancel.status(), StatusCode::CONFLICT);
+
+    // A turn on the loaded root re-grants cancel for the same subagent, live.
+    let prompt_id = submit_prompt(&harness, &root).await;
+    await_prompt_status(&harness, &root, &prompt_id, "completed").await;
+    let cancel = request(&harness, Method::POST, &cancel_path).await;
+    assert_eq!(cancel.status(), StatusCode::OK);
+}
+
+/// A grant the agent reports while resuming without replay is current, but the cancel it
+/// allows waits for the resume to succeed.
+#[tokio::test]
+async fn a_subagent_grant_reported_during_a_resume_waits_for_its_success() {
+    let harness = spawn(&["--subagent-resume-grant"]).await;
+    let root = create_session(&harness).await;
+    let resume = request(
+        &harness,
+        Method::POST,
+        &format!("/v1/sessions/{root}/resume"),
+    )
+    .await;
+    assert_eq!(resume.status(), StatusCode::OK);
+    let [child] = await_subagents(&harness, &root).await;
+    let cancel = request(
+        &harness,
+        Method::POST,
+        &format!("/v1/sessions/{child}/cancel"),
+    )
+    .await;
+    assert_eq!(cancel.status(), StatusCode::OK);
+
+    let marker_dir = tempfile::tempdir().expect("marker tempdir");
+    let marker = marker_dir
+        .path()
+        .join("resume-parked")
+        .to_string_lossy()
+        .into_owned();
+    let harness = spawn(&[
+        "--subagent-resume-grant",
+        "--session-resume-stall-marker",
+        &marker,
+    ])
+    .await;
+    let root = create_session(&harness).await;
+    let parked_resume = tokio::spawn({
+        let base_url = harness.base_url.clone();
+        let root = root.clone();
+        async move {
+            http()
+                .post(format!("{base_url}/v1/sessions/{root}/resume"))
+                .header("Authorization", session_bearer())
+                .json(&json!({}))
+                .send()
+                .await
+        }
+    });
+    // The announcement carrying the grant is what creates the subagent's row.
+    let [child] = await_subagents(&harness, &root).await;
+    let cancel = request(
+        &harness,
+        Method::POST,
+        &format!("/v1/sessions/{child}/cancel"),
+    )
+    .await;
+    assert_eq!(cancel.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        body(cancel).await["error"]["code"],
+        "session.subagent_cancel_unavailable"
+    );
+    assert!(
+        !parked_resume.is_finished(),
+        "the resume must still be in flight"
+    );
 }
 
 #[tokio::test]
@@ -299,6 +440,26 @@ async fn submit_prompt(harness: &Harness, session_id: &str) -> String {
         .to_owned()
 }
 
+/// Ids of `parent`'s direct subagents, as `GET /v1/sessions?parent_session_id=` lists them.
+async fn subagents_of<const N: usize>(harness: &Harness, parent: &str) -> [String; N] {
+    let listed = body(
+        request(
+            harness,
+            Method::GET,
+            &format!("/v1/sessions?range=all&parent_session_id={parent}"),
+        )
+        .await,
+    )
+    .await;
+    let ids: Vec<String> = listed["data"]["sessions"]
+        .as_array()
+        .expect("sessions array")
+        .iter()
+        .map(|session| session["id"].as_str().expect("id").to_owned())
+        .collect();
+    <[String; N]>::try_from(ids).unwrap_or_else(|ids| panic!("`{parent}` lists {ids:?}"))
+}
+
 /// Local ids of the subagents in the tree `root` heads, once there are `N`.
 async fn await_subagents<const N: usize>(harness: &Harness, root: &str) -> [String; N] {
     let deadline = tokio::time::Instant::now() + POLL_BUDGET;
@@ -341,6 +502,30 @@ async fn await_pending_permission(harness: &Harness, subject_id: &str) -> String
         );
         tokio::time::sleep(POLL_INTERVAL).await;
     }
+}
+
+/// Decision reasons of the `permission.cancelled` events that settled `permission_id`.
+async fn cancel_reasons(harness: &Harness, permission_id: &str) -> Vec<Value> {
+    let cancelled = body(
+        request(
+            harness,
+            Method::GET,
+            "/v1/logs/permissions?kind=permission.cancelled",
+        )
+        .await,
+    )
+    .await;
+    cancelled["data"]["events"]
+        .as_array()
+        .expect("events array")
+        .iter()
+        .map(|event| {
+            serde_json::from_str::<Value>(event["payload_json"].as_str().expect("payload"))
+                .expect("payload json")
+        })
+        .filter(|payload| payload["permission_id"] == permission_id)
+        .map(|payload| payload["reason"].clone())
+        .collect()
 }
 
 /// `(id, state)` of each row `GET /v1/sessions/-/status` returns with `query` appended.

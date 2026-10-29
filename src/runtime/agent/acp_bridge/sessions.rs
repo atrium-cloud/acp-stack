@@ -58,6 +58,30 @@ impl Drop for CancelUnansweredRequest {
     }
 }
 
+/// Counts a `session/load` or `session/resume` as in flight until dropped.
+struct AttachInFlight<'a> {
+    bridge: &'a AcpBridge,
+    agent_session_id: &'a str,
+}
+
+impl<'a> AttachInFlight<'a> {
+    fn start(bridge: &'a AcpBridge, agent_session_id: &'a str) -> Self {
+        bridge.attaching_sessions().add(agent_session_id);
+        Self {
+            bridge,
+            agent_session_id,
+        }
+    }
+}
+
+impl Drop for AttachInFlight<'_> {
+    fn drop(&mut self) {
+        self.bridge
+            .attaching_sessions()
+            .remove(self.agent_session_id);
+    }
+}
+
 impl AcpBridge {
     pub(super) async fn connection(&self) -> Result<ConnectionTo<Agent>> {
         let guard = self.connection.lock().await;
@@ -93,8 +117,7 @@ impl AcpBridge {
     /// Send a request that opens a session (`session/new`, `session/fork`). The agent may
     /// stream updates for the new session right after answering, before the caller writes
     /// its local row, so the session is registered with the notification worker inside the
-    /// SDK's ordered response callback: the dispatch loop releases no later message until
-    /// the callback returns, and every later update for the session is held.
+    /// ordered answer callback, and every later update for the session is held.
     async fn open_session_request<Request>(
         &self,
         connection: &ConnectionTo<Agent>,
@@ -107,36 +130,64 @@ impl AcpBridge {
         Request: JsonRpcRequest,
         Request::Response: Send + 'static,
     {
-        let started_at = Instant::now();
         let holds = self.sink.holds_new_session_updates();
         let queue = self.notification_queue.clone();
+        self.ordered_request(
+            connection,
+            method,
+            acp_session_id,
+            request,
+            move |result| match result {
+                Ok(response) if holds => {
+                    let agent_session_id = opened_session_id(response).0.to_string();
+                    let expect = SessionQueueItem::Expect {
+                        agent_session_id: agent_session_id.clone(),
+                    };
+                    if queue.send(expect).is_err() {
+                        tracing::debug!(
+                            agent_session_id,
+                            "session/update worker already stopped; nothing to hold"
+                        );
+                    }
+                    PendingSessionUpdates::held(queue, agent_session_id)
+                }
+                _ => PendingSessionUpdates::inert(),
+            },
+        )
+        .await
+    }
+
+    /// Send a request whose answer is a boundary for the notification worker. `on_answer`
+    /// runs inside the SDK's ordered response callback, where the dispatch loop releases no
+    /// later message until it returns, so whatever it enqueues lands ahead of every update
+    /// the agent sends after answering.
+    async fn ordered_request<Request, Boundary>(
+        &self,
+        connection: &ConnectionTo<Agent>,
+        method: &'static str,
+        acp_session_id: Option<&str>,
+        request: Request,
+        on_answer: impl FnOnce(&std::result::Result<Request::Response, AcpError>) -> Boundary
+        + Send
+        + 'static,
+    ) -> Result<(Request::Response, Boundary)>
+    where
+        Request: JsonRpcRequest,
+        Request::Response: Send + 'static,
+        Boundary: Send + 'static,
+    {
+        let started_at = Instant::now();
         let (answer_tx, answer_rx) = oneshot::channel();
         // Prepared rather than sent: ordering must be selected before publication, or a
-        // fast answer routed in between releases the next update ahead of `Expect`.
+        // fast answer routed in between releases the next update ahead of the boundary.
         let prepared = connection.prepare_request(request);
         let cancel_on_drop = CancelUnansweredRequest(Some(prepared.cancellation_handle()));
         prepared
             .on_receiving_result(move |result| {
-                let pending = match &result {
-                    Ok(response) if holds => {
-                        let agent_session_id = opened_session_id(response).0.to_string();
-                        let expect = SessionQueueItem::Expect {
-                            agent_session_id: agent_session_id.clone(),
-                        };
-                        if queue.send(expect).is_err() {
-                            tracing::debug!(
-                                agent_session_id,
-                                "session/update worker already stopped; nothing to hold"
-                            );
-                        }
-                        PendingSessionUpdates::held(queue, agent_session_id)
-                    }
-                    _ => PendingSessionUpdates::inert(),
-                };
-                // A caller that stopped waiting drops the claim here, which abandons
-                // whatever the worker holds for the session.
-                if answer_tx.send((result, pending)).is_err() {
-                    tracing::debug!(method, "session open caller stopped waiting for the answer");
+                let boundary = on_answer(&result);
+                // A caller that stopped waiting drops the boundary here.
+                if answer_tx.send((result, boundary)).is_err() {
+                    tracing::debug!(method, "caller stopped waiting for the agent's answer");
                 }
                 std::future::ready(Ok(()))
             })
@@ -156,7 +207,7 @@ impl AcpBridge {
             );
         }
         // The SDK skips the callback only when no response arrives at all.
-        let Ok((result, pending)) = answer else {
+        let Ok((result, boundary)) = answer else {
             return Err(self.local_request_failure(
                 method,
                 acp_session_id,
@@ -164,7 +215,7 @@ impl AcpBridge {
             ));
         };
         let response = result.map_err(|err| self.request_failed(method, acp_session_id, err))?;
-        Ok((response, pending))
+        Ok((response, boundary))
     }
 
     fn request_context(&self, acp_session_id: Option<&str>) -> AgentRequestContext {
@@ -408,7 +459,9 @@ impl AcpBridge {
         .map_err(|err| self.request_failed("session/set_mode", Some(&acp_session_id), err))
     }
 
-    /// `session/load`. Requires the `loadSession` capability.
+    /// `session/load`. Requires the `loadSession` capability. The agent replays the
+    /// session's history before answering, so the subagent snapshots it sends until the
+    /// answer are history.
     pub async fn load_session(
         &self,
         session_id: SessionId,
@@ -425,10 +478,39 @@ impl AcpBridge {
         let connection = self.connection().await?;
         let attached_id = session_id.0.to_string();
         let request = LoadSessionRequest::new(session_id, cwd).mcp_servers(mcp_servers);
-        self.timed_request(&connection, "session/load", Some(&attached_id), request)
+        self.attach_request(&connection, "session/load", &attached_id, request, true)
             .await
-            .map_err(|err| self.request_failed("session/load", Some(&attached_id), err))?;
-        self.mark_session_attached(&attached_id).await;
+    }
+
+    /// Send `session/load` or `session/resume` inside an [`AttachWindow`] for the root.
+    async fn attach_request<Request>(
+        &self,
+        connection: &ConnectionTo<Agent>,
+        method: &'static str,
+        agent_session_id: &str,
+        request: Request,
+        replay: bool,
+    ) -> Result<()>
+    where
+        Request: JsonRpcRequest,
+        Request::Response: Send + 'static,
+    {
+        // Held until the attach settles: a cancel grant reported meanwhile is not yet usable.
+        let _in_flight = AttachInFlight::start(self, agent_session_id);
+        let window = AttachWindow::open(
+            self.notification_queue.clone(),
+            agent_session_id.to_owned(),
+            replay,
+        );
+        self.ordered_request(
+            connection,
+            method,
+            Some(agent_session_id),
+            request,
+            move |result| window.close(result.is_ok()),
+        )
+        .await?;
+        self.mark_session_attached(agent_session_id).await;
         Ok(())
     }
 
@@ -449,11 +531,8 @@ impl AcpBridge {
         let connection = self.connection().await?;
         let attached_id = session_id.0.to_string();
         let request = ResumeSessionRequest::new(session_id, cwd).mcp_servers(mcp_servers);
-        self.timed_request(&connection, "session/resume", Some(&attached_id), request)
+        self.attach_request(&connection, "session/resume", &attached_id, request, false)
             .await
-            .map_err(|err| self.request_failed("session/resume", Some(&attached_id), err))?;
-        self.mark_session_attached(&attached_id).await;
-        Ok(())
     }
 
     /// `session/close`, gated only by the agent's advertised capability.

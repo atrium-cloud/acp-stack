@@ -812,6 +812,10 @@ pub enum StackError {
     #[error("session `{id}` is a subagent session and accepts no client mutations")]
     SubagentSessionRestricted { id: String },
 
+    /// The agent grants no cancel for this subagent on the live connection.
+    #[error("subagent session `{id}` cannot be cancelled now")]
+    SubagentCancelUnavailable { id: String },
+
     /// The id names a session `POST /v1/sessions/{id}/delete` removed; its
     /// tombstone outlives the rows until the retention window prunes it.
     #[error("session `{id}` was deleted")]

@@ -5,6 +5,9 @@ use super::events::next_session_event_seq;
 use super::queries::{insert_session_row, new_active_session_row};
 use super::*;
 
+/// `sessionUpdate` tag of an ACP `subagent_update`.
+const SUBAGENT_UPDATE_KIND: &str = "subagent_update";
+
 /// Session-scoped event kinds that make up a conversation. A fork child
 /// inherits these rows; every other session-scoped kind records the parent's
 /// own lifecycle or derived accounting and stays with the parent, so a
@@ -143,18 +146,29 @@ impl StateStore {
                 |row| row.get(0),
             )
             .optional()?;
+        // The parent's `subagent_update` rows stay with it: the fork owns no subagents.
         let parent_events: Vec<(String, String, String)> = {
             let mut statement = transaction.prepare(
                 r#"
                 SELECT id, created_at, kind
                 FROM events
                 WHERE session_id = ?1 AND (?2 IS NULL OR created_at < ?2)
+                  AND NOT (
+                      kind = ?3
+                      AND json_extract(payload_json, '$.update.sessionUpdate') IS ?4
+                  )
                 ORDER BY seq ASC
                 "#,
             )?;
-            let rows = statement.query_map(params![parent_session_id, cut], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })?;
+            let rows = statement.query_map(
+                params![
+                    parent_session_id,
+                    cut,
+                    EVENT_KIND_SESSION_UPDATE,
+                    SUBAGENT_UPDATE_KIND
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
         {

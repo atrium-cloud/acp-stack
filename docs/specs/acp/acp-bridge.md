@@ -34,6 +34,7 @@ The initialize request advertises the client capabilities `acp-stack` implements
 | `fs.writeTextFile`      | yes        | Workspace-contained atomic write-through plus a durable `fs.write` audit event                          |
 | `terminal`              | yes        | All five `terminal/*` methods, backed by the terminal registry below                                    |
 | `session.configOptions` | yes        | Without the `boolean` sub-capability: `session/set_config_option` currently sends value-id options only |
+| `subagents`             | yes        | Unstable: agent-created child sessions, see [Subagent Sessions](#subagent-sessions)                      |
 | `auth.terminal`         | no         | Interactive login flows are excluded by the headless scope                                              |
 | `elicitation`           | no         | Interactive user prompts are excluded by the headless scope                                             |
 | `mcp/*` over ACP        | no         | Unstable upstream                                                                                       |
@@ -174,6 +175,17 @@ ACP session lifecycle calls pass CWDs as paths because ACP has no directory-hand
 - The runtime then hard-deletes the local session row together with its prompts and per-session events.
 - Permission log rows stay in the durable security log, and the external log mirror is upsert-only, so mirrored rows are not retracted.
 - Repeat deletes and unknown ids succeed silently, matching ACP's idempotency requirement.
+
+### Subagent Sessions
+
+An agent that sees the `subagents` client capability may create child sessions and announce them on a parent with the unstable `subagent_update` session update. The bridge handles them as follows:
+
+- The first `subagent_update` naming a child writes the child's local session row under the parent's target and a `session.subagent_announced` event on the parent. Every `subagent_update` is also stored verbatim on the parent.
+- The notification worker records an announcement before the agent's next message is dispatched, so the child's first agent-to-client request resolves to its row. The child's own updates and requests then route like any session's.
+- Each `subagent_update` is a patch: an omitted field keeps the stored value, `null` clears it, a value replaces it. The `cancel` capability is the only control a child grants.
+- A patch is ignored, though still stored, when it names the parent itself, the root of the parent's tree, a child of another parent, a session a client prompted, or a session with subagents of its own.
+- `session/load` and `session/resume` of a root run inside an attach window in the notification worker's queue, opened before the request is sent and closed in the ordered answer callback. Opening it withdraws the subagents' live state and grants, as does a failed attach. For a load, the answer is also the boundary between replayed history and current state. A grant reported during a resume is current but becomes usable only once the resume succeeds.
+- Client-side restrictions, cancel, and wind-down are described in [Subagent Sessions](../runtime.md#subagent-sessions). ACP close and delete go to the root only; the agent ends its children's work with it.
 
 ### Session Resume Capability Matrix
 

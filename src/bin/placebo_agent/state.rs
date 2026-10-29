@@ -123,6 +123,12 @@ impl PlaceboState {
         self.cancel_count(session_id) > start
     }
 
+    pub(crate) fn client_advertised_subagents(&self) -> bool {
+        self.client_capabilities
+            .as_ref()
+            .is_some_and(|caps| caps.subagents.is_some())
+    }
+
     pub(crate) fn client_advertised_config_options(&self) -> bool {
         self.client_capabilities
             .as_ref()

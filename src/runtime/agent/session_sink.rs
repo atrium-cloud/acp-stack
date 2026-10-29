@@ -101,18 +101,31 @@ pub trait SessionEventSink: Send + Sync + 'static {
 
     /// Record a `subagent_update` that arrived on `agent_session_id`. Returns once the child
     /// it names resolves through `local_session_id`, since the child's own requests may
-    /// follow it right away, with the child's local id when the patch was applied to it.
+    /// follow it right away, with the child's local id when the patch was applied to it as
+    /// current. `replaying` are the agent session ids of roots whose load is replaying
+    /// history, whose trees take patches as history.
     fn record_subagent_update<'a>(
         &'a self,
         agent_session_id: &'a str,
         _update: &'a SubagentUpdate,
         payload_json: &'a str,
+        _replaying: &'a [String],
     ) -> futures::future::BoxFuture<'a, Option<String>> {
         Box::pin(async move {
             self.append(agent_session_id, EVENT_KIND_SESSION_UPDATE, payload_json)
                 .await;
             None
         })
+    }
+
+    /// Withdraw the live state and cancel grants of the subagents of the root
+    /// `agent_session_id` names, as a load or resume of it starts or fails.
+    fn withdraw_subagent_state<'a>(
+        &'a self,
+        agent_session_id: &'a str,
+    ) -> futures::future::BoxFuture<'a, ()> {
+        let _ = agent_session_id;
+        Box::pin(async {})
     }
 
     /// Wait until every `append` accepted before this call has been written.
@@ -905,11 +918,18 @@ impl SessionEventSink for StateStoreSessionSink {
         agent_session_id: &'a str,
         update: &'a SubagentUpdate,
         payload_json: &'a str,
+        replaying: &'a [String],
     ) -> futures::future::BoxFuture<'a, Option<String>> {
         Box::pin(async move {
             let parent_session_id = self.local_session_id(agent_session_id).await?;
             let patch = subagent_patch(update);
             let child_agent_session_id = patch.agent_session_id.clone();
+            let mut replaying_roots = Vec::with_capacity(replaying.len());
+            for root_agent_session_id in replaying {
+                if let Some(root_session_id) = self.local_session_id(root_agent_session_id).await {
+                    replaying_roots.push(root_session_id);
+                }
+            }
             // Written directly rather than through the batched writer, so the parent's
             // earlier updates still queued there go first to keep its log in arrival order.
             self.drain().await;
@@ -917,18 +937,28 @@ impl SessionEventSink for StateStoreSessionSink {
             let applied = self
                 .state
                 .write(move |store| {
-                    store.record_subagent_update(&parent_session_id, &payload_json, patch)
+                    store.record_subagent_update(
+                        &parent_session_id,
+                        &payload_json,
+                        patch,
+                        &replaying_roots,
+                    )
                 })
                 .await;
             match applied {
                 Ok(SubagentApplied::Announced {
-                    child_session_id, ..
+                    child_session_id,
+                    historical,
+                    ..
                 }) => {
                     self.remember_local_session(&child_agent_session_id, &child_session_id)
                         .await;
-                    Some(child_session_id)
+                    (!historical).then_some(child_session_id)
                 }
-                Ok(SubagentApplied::Updated { child_session_id }) => Some(child_session_id),
+                Ok(SubagentApplied::Updated {
+                    child_session_id,
+                    historical,
+                }) => (!historical).then_some(child_session_id),
                 Ok(SubagentApplied::Rejected(reason)) => {
                     tracing::warn!(
                         target_id = %self.target_id,
@@ -949,6 +979,29 @@ impl SessionEventSink for StateStoreSessionSink {
                     );
                     None
                 }
+            }
+        })
+    }
+
+    fn withdraw_subagent_state<'a>(
+        &'a self,
+        agent_session_id: &'a str,
+    ) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            let Some(root_session_id) = self.local_session_id(agent_session_id).await else {
+                return;
+            };
+            if let Err(err) = self
+                .state
+                .write(move |store| store.withdraw_subagent_state(&root_session_id))
+                .await
+            {
+                tracing::warn!(
+                    error = %err,
+                    target_id = %self.target_id,
+                    agent_session_id,
+                    "failed to withdraw the live state of ACP subagents"
+                );
             }
         })
     }

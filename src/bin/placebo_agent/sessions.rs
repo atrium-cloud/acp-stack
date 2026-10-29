@@ -259,14 +259,24 @@ pub(crate) async fn handle_load_session(
     state: SharedState,
     request: LoadSessionRequest,
     responder: Responder<LoadSessionResponse>,
-    _connection: ConnectionTo<Client>,
+    connection: ConnectionTo<Client>,
 ) -> agent_client_protocol::Result<()> {
-    state
-        .lock()
-        .await
-        .opened_sessions
-        .insert(request.session_id.0.to_string());
-    responder.respond(LoadSessionResponse::new())
+    let replays_subagent = {
+        let mut state = state.lock().await;
+        state
+            .opened_sessions
+            .insert(request.session_id.0.to_string());
+        state.args.subagent_load_replay
+    };
+    if !replays_subagent {
+        return responder.respond(LoadSessionResponse::new());
+    }
+    connection.send_notification(granted_running_subagent(&request.session_id))?;
+    responder.respond(LoadSessionResponse::new())?;
+    connection.send_notification(subagent_update(
+        &request.session_id,
+        SubagentUpdate::new(subagent_of(&request.session_id)).state(idle(IdleStopReason::EndTurn)),
+    ))
 }
 
 pub(crate) async fn handle_resume_session(
@@ -276,6 +286,9 @@ pub(crate) async fn handle_resume_session(
     connection: ConnectionTo<Client>,
 ) -> agent_client_protocol::Result<()> {
     let mut state = state.lock().await;
+    if state.args.subagent_resume_grant {
+        connection.send_notification(granted_running_subagent(&request.session_id))?;
+    }
     if let Some(marker) = state.args.session_resume_stall_marker.clone() {
         drop(state);
         return connection.spawn(async move {

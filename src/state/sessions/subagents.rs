@@ -72,9 +72,12 @@ pub enum SubagentApplied {
     Announced {
         child_session_id: String,
         root_session_id: String,
+        /// Replayed while its root loads: stored as history, granting nothing.
+        historical: bool,
     },
     Updated {
         child_session_id: String,
+        historical: bool,
     },
     Rejected(SubagentRejection),
 }
@@ -155,17 +158,21 @@ fn session_on(conn: &rusqlite::Connection, session_id: &str) -> Result<SessionRe
     })
 }
 
-/// Apply `patch` from `parent_session_id` inside the caller's transaction.
+/// Apply `patch` from `parent_session_id` inside the caller's transaction. A patch whose
+/// root is in `replaying_roots` is history: its state is stored as not current and its
+/// capabilities are ignored.
 fn apply_subagent_patch(
     conn: &rusqlite::Connection,
     parent_session_id: &str,
     patch: SubagentPatch,
+    replaying_roots: &[String],
 ) -> Result<SubagentApplied> {
     let parent = session_on(conn, parent_session_id)?;
     let root_session_id = subagent_on(conn, &parent.id)?.map_or_else(
         || parent.id.clone(),
         |association| association.root_session_id,
     );
+    let historical = replaying_roots.contains(&root_session_id);
     let existing = conn
         .query_row(
             &format!(
@@ -229,20 +236,23 @@ fn apply_subagent_patch(
             }
         }
     };
-    // The parent reports the child's work, so its patches are the child's activity for list
-    // ranges and status windows.
-    conn.execute(
-        "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
-        params![now, child_session_id],
-    )?;
+    // The parent reports the child's work, so its current patches are the child's activity
+    // for list ranges and status windows.
+    if !historical {
+        conn.execute(
+            "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+            params![now, child_session_id],
+        )?;
+    }
 
     let state_current = match &patch.state_json {
         FieldPatch::Keep => stored.as_ref().is_some_and(|stored| stored.state_current),
         FieldPatch::Clear => false,
-        FieldPatch::Set(_) => true,
+        FieldPatch::Set(_) => !historical,
     };
     let cancel_granted = patch
         .cancel_granted
+        .filter(|_| !historical)
         .unwrap_or_else(|| stored.as_ref().is_some_and(|stored| stored.cancel_granted));
     let (title, description, state_json) = match &stored {
         Some(stored) => (
@@ -274,7 +284,10 @@ fn apply_subagent_patch(
             ],
         )?;
         bump_session_change(conn, &child_session_id)?;
-        return Ok(SubagentApplied::Updated { child_session_id });
+        return Ok(SubagentApplied::Updated {
+            child_session_id,
+            historical,
+        });
     }
     conn.execute(
         &format!(
@@ -296,19 +309,41 @@ fn apply_subagent_patch(
     Ok(SubagentApplied::Announced {
         child_session_id,
         root_session_id,
+        historical,
     })
+}
+
+/// Withdraw the live state and cancel grants of the tree `root_session_id` heads,
+/// returning the subagents it changed.
+fn withdraw_subagent_tree(
+    conn: &rusqlite::Connection,
+    root_session_id: &str,
+) -> Result<Vec<String>> {
+    let mut statement = conn.prepare(
+        "UPDATE session_subagents SET state_current = 0, cancel_granted = 0 \
+         WHERE root_session_id = ?1 AND (state_current = 1 OR cancel_granted = 1) \
+         RETURNING session_id",
+    )?;
+    let ids = statement
+        .query_map(params![root_session_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for id in &ids {
+        bump_session_change(conn, id)?;
+    }
+    Ok(ids)
 }
 
 impl StateStore {
     /// Record one ACP `subagent_update` that arrived on `parent_session_id`: its verbatim
     /// `session.update` row, the patch applied to the child it names, and for a new child
     /// its session row and a `session.subagent_announced` event on the parent, all in one
-    /// transaction.
+    /// transaction. `replaying_roots` are the roots whose load is replaying history.
     pub fn record_subagent_update(
         &self,
         parent_session_id: &str,
         payload_json: &str,
         patch: SubagentPatch,
+        replaying_roots: &[String],
     ) -> Result<SubagentApplied> {
         let mut update_event =
             session_update_event(parent_session_id, EVENT_KIND_SESSION_UPDATE, payload_json)?;
@@ -316,11 +351,12 @@ impl StateStore {
         let tx = self.begin_immediate("session_subagents")?;
         update_event.seq =
             Some(self.insert_session_update_row(&tx, parent_session_id, &update_event)?);
-        let applied = apply_subagent_patch(&tx, parent_session_id, patch)?;
+        let applied = apply_subagent_patch(&tx, parent_session_id, patch, replaying_roots)?;
         let announced_event = match &applied {
             SubagentApplied::Announced {
                 child_session_id,
                 root_session_id,
+                ..
             } => {
                 let mut event = Event {
                     id: next_event_id(),
@@ -345,8 +381,11 @@ impl StateStore {
                 }
                 Some(event)
             }
-            SubagentApplied::Updated { child_session_id } => {
-                if self.external_logging_enabled() {
+            SubagentApplied::Updated {
+                child_session_id,
+                historical,
+            } => {
+                if !historical && self.external_logging_enabled() {
                     sink_outbox::enqueue(
                         &tx,
                         "sessions",
@@ -400,16 +439,22 @@ impl StateStore {
         Ok(records)
     }
 
+    /// Withdraw the live state and cancel grants of the tree `root_session_id` heads, as a
+    /// load or resume of the root starts and when it fails: until the agent reports them
+    /// again, they describe a runtime that may be gone.
+    pub fn withdraw_subagent_state(&self, root_session_id: &str) -> Result<Vec<String>> {
+        let now = current_timestamp();
+        self.persist_many_with_outbox("sessions", &now, |conn| {
+            withdraw_subagent_tree(conn, root_session_id)
+        })
+    }
+
     /// Close the subagents of the tree `root_session_id` heads, whose work ends with the
     /// root's close, and withdraw their live state. Returns the ids it closed.
     pub fn close_subagent_sessions(&self, root_session_id: &str) -> Result<Vec<String>> {
         let now = current_timestamp();
         self.persist_many_with_outbox("sessions", &now, |conn| {
-            conn.execute(
-                "UPDATE session_subagents SET state_current = 0, cancel_granted = 0 \
-                 WHERE root_session_id = ?1",
-                params![root_session_id],
-            )?;
+            withdraw_subagent_tree(conn, root_session_id)?;
             let ids = {
                 let mut statement = conn.prepare(&format!(
                     "UPDATE sessions SET status = ?2, updated_at = ?3 \

@@ -31,6 +31,7 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         SessionNotFound { .. } => "session.not_found",
         SessionClosed { .. } => "session.closed",
         SubagentSessionRestricted { .. } => "session.subagent_restricted",
+        SubagentCancelUnavailable { .. } => "session.subagent_cancel_unavailable",
         SessionDeleted { .. } => "session.deleted",
         SessionReattachUnsupported { .. } => "session.reattach_unsupported",
         SessionEventCursorUnknown { .. } => "session.event_cursor_unknown",
@@ -55,6 +56,9 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
         SubagentSessionRestricted { id } => {
             format!("session `{id}` is a subagent session and accepts no client mutations")
         }
+        SubagentCancelUnavailable { id } => format!(
+            "subagent session `{id}` cannot be cancelled now: its agent grants no cancel on the live connection"
+        ),
         SessionDeleted { id } => format!("session `{id}` was deleted"),
         SessionReattachUnsupported { id } => format!(
             "session `{id}` cannot be re-attached: the agent advertises neither `session/resume` nor `session/load`"
@@ -96,6 +100,7 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         }
         SessionClosed { .. }
         | SubagentSessionRestricted { .. }
+        | SubagentCancelUnavailable { .. }
         | PromptInFlight { .. }
         | PromptSessionMismatch { .. } => StatusCode::CONFLICT,
         SessionTargetRenameConflict { .. } => StatusCode::CONFLICT,

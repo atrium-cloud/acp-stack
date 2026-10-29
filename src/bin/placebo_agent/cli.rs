@@ -181,6 +181,16 @@ pub(crate) struct AcpArgs {
     /// With `--announce-subagent`, the subagent delegates to a subagent of its own.
     #[arg(long)]
     pub(crate) subagent_nested: bool,
+    /// On `session/load`, replay a subagent of the loaded session as running with a
+    /// cancel grant before answering, then report it idle with no capabilities after
+    /// the answer, the way an adapter separates history from current state.
+    #[arg(long)]
+    pub(crate) subagent_load_replay: bool,
+    /// On `session/resume`, report a subagent of the resumed session as running with a
+    /// cancel grant before answering, the way an adapter reports current state without
+    /// replay.
+    #[arg(long)]
+    pub(crate) subagent_resume_grant: bool,
     /// Run one `execute` tool call that stays silent for this long: announce it
     /// `in_progress`, send nothing until the hold ends, then complete it and end
     /// the turn, the way an adapter reports a long shell command.

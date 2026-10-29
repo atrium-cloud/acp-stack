@@ -379,7 +379,9 @@ idle_threshold = "30s"
 
 A subagent session is a child session the agent announces on a parent through ACP `subagent_update`. It is a session row of the parent's target, linked to its parent and to the root of its tree.
 
-- Subagent sessions are read-only to clients: prompt, commands, load, resume, fork, config-options, cancel, close, and delete answer `409 session.subagent_restricted`.
+- Subagent sessions are read-only to clients: prompt, commands, load, resume, fork, config-options, close, and delete answer `409 session.subagent_restricted`.
+- Cancel reaches a subagent only while its agent grants `cancel` for it and the root is attached to the running agent with no load or resume of it in flight; otherwise it answers `409 session.subagent_cancel_unavailable`. A granted cancel sends ACP `session/cancel` with the subagent's id and settles its pending ACP permission requests at once; the agent reports the outcome through the subagent's work state.
+- Loading or resuming the root withdraws its subagents' live state and cancel grants, and so does a failed load or resume. During a load, the subagent snapshots the agent replays before answering are stored as history and grant nothing; the snapshots after the answer are current.
 - Closing the root closes every subagent session in its tree and settles their pending ACP permission requests as `cancelled`. Deleting the root deletes the tree.
 - A subagent that reports `idle` with `stopReason: "cancelled"` has its pending ACP permission requests settled as `cancelled` with the reason `subagent-cancelled`.
 - A subagent's updates advance the root's in-flight prompt, so a turn waiting on a subagent stays clear of the stale-prompt sweeper.

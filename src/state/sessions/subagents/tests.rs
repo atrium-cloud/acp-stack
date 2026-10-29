@@ -3,6 +3,8 @@ use crate::state::MetricsWindow;
 
 const SUBAGENT_UPDATE_PAYLOAD: &str = r#"{"sessionId":"agent_root","update":{"sessionUpdate":"subagent_update","sessionId":"agent_child"}}"#;
 const RUNNING_STATE: &str = r#"{"state":"running"}"#;
+/// No root is loading, so every patch is current.
+const NO_REPLAY: &[String] = &[];
 
 fn store_with_root(dir: &tempfile::TempDir) -> StateStore {
     let store = StateStore::open(dir.path().join("state.sqlite")).expect("open state");
@@ -47,6 +49,7 @@ fn announce(store: &StateStore, parent_session_id: &str, agent_session_id: &str)
                 cancel_granted: Some(true),
                 ..patch(agent_session_id)
             },
+            NO_REPLAY,
         )
         .expect("announcement recorded");
     match applied {
@@ -103,11 +106,13 @@ fn an_announcement_creates_the_child_and_later_patches_merge_onto_it() {
                 cancel_granted: Some(true),
                 ..patch("agent_child")
             },
+            NO_REPLAY,
         )
         .expect("announcement recorded");
     let SubagentApplied::Announced {
         child_session_id,
         root_session_id,
+        historical: false,
     } = applied
     else {
         panic!("expected an announcement, got {applied:?}");
@@ -152,12 +157,14 @@ fn an_announcement_creates_the_child_and_later_patches_merge_onto_it() {
                 cancel_granted: Some(false),
                 ..patch("agent_child")
             },
+            NO_REPLAY,
         )
         .expect("patch recorded");
     assert_eq!(
         applied,
         SubagentApplied::Updated {
-            child_session_id: child_session_id.clone()
+            child_session_id: child_session_id.clone(),
+            historical: false,
         }
     );
     let record = store
@@ -186,21 +193,34 @@ fn an_announcement_creates_the_child_and_later_patches_merge_onto_it() {
 }
 
 #[test]
-fn a_nested_child_belongs_to_the_root_of_its_parents_tree() {
+/// A grandchild replayed while its root loads is history: its state is kept but
+/// not current, and its grant authorizes nothing until a current patch arrives.
+fn a_nested_child_replayed_while_its_root_loads_is_history_of_that_root() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = store_with_root(&dir);
     let child = announce(&store, "sess_root", "agent_child");
+    let granted_running = SubagentPatch {
+        state_json: FieldPatch::Set(RUNNING_STATE.to_owned()),
+        cancel_granted: Some(true),
+        ..patch("agent_grandchild")
+    };
 
     let applied = store
-        .record_subagent_update(&child, SUBAGENT_UPDATE_PAYLOAD, patch("agent_grandchild"))
+        .record_subagent_update(
+            &child,
+            SUBAGENT_UPDATE_PAYLOAD,
+            granted_running.clone(),
+            &["sess_root".to_owned()],
+        )
         .expect("nested announcement recorded");
 
     let SubagentApplied::Announced {
         child_session_id,
         root_session_id,
+        historical: true,
     } = applied
     else {
-        panic!("expected an announcement, got {applied:?}");
+        panic!("expected a replayed announcement, got {applied:?}");
     };
     assert_eq!(root_session_id, "sess_root");
     let record = store
@@ -209,6 +229,17 @@ fn a_nested_child_belongs_to_the_root_of_its_parents_tree() {
         .expect("subagent row");
     assert_eq!(record.parent_session_id, child);
     assert_eq!(record.root_session_id, "sess_root");
+    assert_eq!(record.state_json.as_deref(), Some(RUNNING_STATE));
+    assert!(!record.state_current && !record.cancel_granted);
+
+    store
+        .record_subagent_update(&child, SUBAGENT_UPDATE_PAYLOAD, granted_running, NO_REPLAY)
+        .expect("current patch recorded");
+    let record = store
+        .get_subagent(&child_session_id)
+        .expect("subagent lookup")
+        .expect("subagent row");
+    assert!(record.state_current && record.cancel_granted);
 }
 
 #[test]
@@ -232,7 +263,12 @@ fn patches_that_contradict_stored_sessions_are_rejected_and_still_logged() {
     ] {
         assert_eq!(
             store
-                .record_subagent_update(parent, SUBAGENT_UPDATE_PAYLOAD, patch(agent_session_id))
+                .record_subagent_update(
+                    parent,
+                    SUBAGENT_UPDATE_PAYLOAD,
+                    patch(agent_session_id),
+                    NO_REPLAY
+                )
                 .expect("update recorded"),
             SubagentApplied::Rejected(rejection),
         );
@@ -299,6 +335,7 @@ fn a_state_patch_keeps_its_child_in_the_status_window() {
                 state_json: FieldPatch::Set(r#"{"state":"requires_action"}"#.to_owned()),
                 ..patch("agent_child")
             },
+            NO_REPLAY,
         )
         .expect("patch recorded");
 
@@ -312,6 +349,42 @@ fn a_state_patch_keeps_its_child_in_the_status_window() {
             .collect::<Vec<_>>(),
         [child.as_str()]
     );
+}
+
+#[test]
+fn a_fork_leaves_its_parents_subagent_updates_behind() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = store_with_root(&dir);
+    store
+        .append_session_update(
+            "sess_root",
+            EVENT_KIND_SESSION_UPDATE,
+            r#"{"sessionId":"agent_root","update":{"sessionUpdate":"agent_message_chunk"}}"#,
+        )
+        .expect("chunk appended");
+    announce(&store, "sess_root", "agent_child");
+
+    let fork = store
+        .insert_forked_session(
+            "target_a",
+            "agent_fork".to_owned(),
+            NewSessionRecord {
+                id: "sess_fork".to_owned(),
+                agent_id: "target_a".to_owned(),
+                cwd: "/work".to_owned(),
+                title: None,
+                metadata_json: "{}".to_owned(),
+            },
+            "sess_root",
+            None,
+        )
+        .expect("fork inserted");
+
+    let copied = store
+        .query_session_events(&fork.id, None, 100)
+        .expect("fork events");
+    assert_eq!(copied.len(), 1);
+    assert!(copied[0].payload_json.contains("agent_message_chunk"));
 }
 
 #[test]

@@ -47,7 +47,7 @@ A subagent session is an ordinary session row of its parent's target, whose `upd
 
 - `session_id`, `parent_session_id`, `root_session_id`: references to `sessions`.
 - `title`, `description`, `state_json`: the latest values, merged per field (omitted keeps, `null` clears, a value replaces). `state_json` is the ACP work state verbatim.
-- `state_current`: `state_json` came from the agent connection that is live now. Startup reconcile, agent teardown, and the root's close clear it.
+- `state_current`: `state_json` came from the agent connection that is live now. Startup reconcile, agent teardown, the root's close, and the start or failure of a load or resume of the root clear it. A snapshot replayed during a load of the root is stored with it unset.
 - `cancel_granted`: the agent's per-child `cancel` capability, cleared the same way.
 
 ## Auth Keys Table
@@ -284,6 +284,7 @@ The child receives:
     - `session.capability_ignored`, `mcp.session_attached`, and `mcp.session_skipped` record what the parent's create or attach provisioned. The fork writes the child's own `mcp.session_skipped` when it skips servers.
     - `session.config_option_set` records a config change a client made on the parent through `POST /v1/sessions/{id}/config-options`. The child keeps that change's effect in the adapter's forked session and through the inherited `config_option_update` rows.
     - `usage.reported` and `tool.execute` are derived from `session.update` payloads the child already carries verbatim, so each usage report and shell run counts once, on the session that produced it.
+    - `session.update` rows carrying a `subagent_update`, and `session.subagent_announced`, describe the parent's own subagents; the fork starts with none.
 - Prompts: a copy of each held prompt row, with the parent's message id, acknowledgement, `agent_message_id` anchor, status, and timestamps. A breakpoint fork of the child resolves an inherited message id exactly as it does on the parent. Copies take fresh prompt ids minted in the parent's submission order, so they sort before every prompt later sent to the child.
 
 Copies are verbatim in every column but the row id, `session_id`, and an event's `seq`:

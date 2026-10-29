@@ -32,9 +32,9 @@ use tokio::time::timeout;
 use crate::config::AgentConfig;
 use crate::error::{Result, StackError};
 use crate::runtime::agent::acp_codec::{
-    AcpFsContext, SessionNotificationSender, SessionQueueItem, auto_approve_acp_permission,
-    enqueue_session_notification, handle_read_text_file, handle_write_text_file,
-    resolve_acp_permission, spawn_session_notification_queue,
+    AcpFsContext, AttachWindow, SessionCounts, SessionNotificationSender, SessionQueueItem,
+    auto_approve_acp_permission, enqueue_session_notification, handle_read_text_file,
+    handle_write_text_file, resolve_acp_permission, spawn_session_notification_queue,
 };
 use crate::runtime::agent::acp_terminal::{
     TerminalHandlerContext, TerminalRegistry, handle_create_terminal, handle_kill_terminal,
@@ -196,6 +196,8 @@ pub struct AcpBridge {
     /// says nothing about whether the currently running adapter can be prompted
     /// for it; this set does.
     attached_sessions: TokioMutex<HashSet<String>>,
+    /// Agent session ids with a `session/load` or `session/resume` in flight.
+    attaching_sessions: Mutex<SessionCounts>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -334,6 +336,20 @@ impl AcpBridge {
             .lock()
             .await
             .contains(agent_session_id)
+    }
+
+    /// Whether `agent_session_id` is attached with no load or resume of it in flight. ACP
+    /// keeps the subagent controls an agent grants on a root unusable until its attach
+    /// succeeds.
+    pub async fn has_settled_attach(&self, agent_session_id: &str) -> bool {
+        let attaching = self.attaching_sessions().contains(agent_session_id);
+        !attaching && self.has_attached_session(agent_session_id).await
+    }
+
+    fn attaching_sessions(&self) -> MutexGuard<'_, SessionCounts> {
+        self.attaching_sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Record a session the agent has just confirmed it holds open.

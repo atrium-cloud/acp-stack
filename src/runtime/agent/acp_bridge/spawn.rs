@@ -189,6 +189,7 @@ impl AcpBridge {
             notification_queue,
             terminals,
             attached_sessions: TokioMutex::new(HashSet::new()),
+            attaching_sessions: Mutex::default(),
         })
     }
 }
@@ -696,6 +697,7 @@ fn client_capabilities() -> ClientCapabilities {
         .session(ClientSessionCapabilities::new().config_options(
             SessionConfigOptionsCapabilities::new().boolean(BooleanConfigOptionCapabilities::new()),
         ))
+        .subagents(agent_client_protocol::schema::v1::SubagentCapabilities::new())
 }
 
 fn spawn_child_exit_watcher(child: Arc<TokioMutex<Option<Child>>>, exit: ExitReporter) {

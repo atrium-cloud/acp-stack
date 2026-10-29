@@ -1,7 +1,8 @@
 //! Prompt submission, cancellation, and the in-flight prompt registry.
 
-use super::sessions::{SessionAttachKind, fetch_open_session, lookup_client_session};
+use super::sessions::{SessionAttachKind, fetch_open_session};
 use super::*;
+use crate::state::SubagentRecord;
 
 impl AgentSupervisor {
     /// `POST /v1/sessions/{id}/prompt`. Fire-and-forget: inserts a `pending`
@@ -330,12 +331,22 @@ impl AgentSupervisor {
         let dispatch_guard = self.dispatch_gate.read().await;
         let session_guard = self.session_locks.lock(session_id).await;
         let bridge = self.bridge().await?;
-        let agent_session_id = lookup_client_session(state, session_id)
-            .await?
-            .ok_or_else(|| StackError::SessionNotFound {
-                id: session_id.to_owned(),
-            })?
-            .agent_session_id;
+        let lookup_session_id = session_id.to_owned();
+        let (session, subagent) = state
+            .read(move |store| {
+                Ok((
+                    store.get_session(&lookup_session_id)?,
+                    store.get_subagent(&lookup_session_id)?,
+                ))
+            })
+            .await?;
+        let session = session.ok_or_else(|| StackError::SessionNotFound {
+            id: session_id.to_owned(),
+        })?;
+        if let Some(subagent) = subagent {
+            return cancel_subagent(&bridge, session, subagent, state, permissions).await;
+        }
+        let agent_session_id = session.agent_session_id;
         let live_prompts = self.live_prompts_for_session(session_id, state).await?;
         bridge
             .cancel_session(AcpSessionId::new(agent_session_id.clone()))
@@ -586,6 +597,54 @@ impl AgentSupervisor {
             }
         }
     }
+}
+
+/// A subagent's cancel, which only the agent's per-subagent grant on the live connection
+/// allows. The subagent confirms through its reported work state rather than a prompt
+/// response, so nothing here waits for it to settle.
+async fn cancel_subagent(
+    bridge: &AcpBridge,
+    session: SessionRecord,
+    subagent: SubagentRecord,
+    state: &StateHandle,
+    permissions: &PermissionService,
+) -> Result<()> {
+    let root_session_id = subagent.root_session_id.clone();
+    let root = state
+        .read(move |store| store.get_session(&root_session_id))
+        .await?
+        .ok_or_else(|| StackError::SessionNotFound {
+            id: subagent.root_session_id.clone(),
+        })?;
+    if !subagent.cancel_granted || !bridge.has_settled_attach(&root.agent_session_id).await {
+        return Err(StackError::SubagentCancelUnavailable { id: session.id });
+    }
+    bridge
+        .cancel_session(AcpSessionId::new(session.agent_session_id.clone()))
+        .await?;
+    // ACP has the client answer the cancelled session's open requests itself.
+    if let Err(error) = permissions
+        .cancel_pending_for_session(&session.id, CANCELLED_SESSION_PERMISSION_REASON)
+        .await
+    {
+        tracing::warn!(
+            error = %crate::error::report(&error),
+            session_id = %session.id,
+            "failed to settle a cancelled subagent's pending permissions"
+        );
+    }
+    state
+        .write(move |store| {
+            store.append_session_event(
+                &session.id,
+                "info",
+                EVENT_KIND_SESSION_CANCEL_REQUESTED,
+                "cancel requested",
+                &json!({ "agent_session_id": session.agent_session_id }).to_string(),
+            )?;
+            Ok(())
+        })
+        .await
 }
 
 /// Event message on a durable user-prompt row. The prompt text lives in the
