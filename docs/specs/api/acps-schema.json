@@ -6173,7 +6173,7 @@
             "description": "Other tool types (default)."
           }
         ],
-        "description": "Categories of tools that can be invoked.\n\nTool kinds help clients choose appropriate icons and optimize how they\ndisplay tool execution progress.\n\nSee protocol docs: [Creating](https://agentclientprotocol.com/protocol/tool-calls#creating)"
+        "description": "Categories of tools that can be invoked.\n\nTool kinds help clients choose appropriate icons and optimize how they\ndisplay tool execution progress.\n\nSee protocol docs: [Creating](https://agentclientprotocol.com/protocol/v1/tool-calls#creating)"
       },
       "ToolCallStatus": {
         "oneOf": [
@@ -6198,7 +6198,7 @@
             "description": "The tool call failed with an error."
           }
         ],
-        "description": "Execution status of a tool call.\n\nTool calls progress through different statuses during their lifecycle.\n\nSee protocol docs: [Status](https://agentclientprotocol.com/protocol/tool-calls#status)"
+        "description": "Execution status of a tool call.\n\nTool calls progress through different statuses during their lifecycle.\n\nSee protocol docs: [Status](https://agentclientprotocol.com/protocol/v1/tool-calls#status)"
       },
       "CapturedToolCallContent": {
         "oneOf": [
