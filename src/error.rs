@@ -807,6 +807,11 @@ pub enum StackError {
     #[error("session `{id}` is closed")]
     SessionClosed { id: String },
 
+    /// The id names a subagent session, which belongs to the agent that
+    /// announced it; the client may read it but not drive it.
+    #[error("session `{id}` is a subagent session and accepts no client mutations")]
+    SubagentSessionRestricted { id: String },
+
     /// The id names a session `POST /v1/sessions/{id}/delete` removed; its
     /// tombstone outlives the rows until the retention window prunes it.
     #[error("session `{id}` was deleted")]

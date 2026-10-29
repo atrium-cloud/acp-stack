@@ -705,6 +705,8 @@ All skill routes load config leniently, dropping individually invalid `[[skills.
 
 A session route answering `502 agent.request_failed` because the agent returned a JSON-RPC error carries that error in `details.acp_error` (see [Error Codes](api.md#error-codes)).
 
+A subagent session, which the agent announces through ACP `subagent_update`, is read-only to clients: the prompt, commands, load, resume, fork, config-options, cancel, close, and delete routes answer it with `409 session.subagent_restricted` (see [Subagent Sessions](../runtime.md#subagent-sessions)).
+
 ### `POST /v1/sessions`
 
 - Tier: `session`
@@ -900,6 +902,7 @@ The `agent.inference_*` codes carry a sanitized public message of the form `"inf
 - Notes:
     - Closes the agent-side session and preserves local history.
     - The runtime calls ACP `session/close` when supported, marks the local row `closed`, and keeps durable events/query history.
+    - The session's subagent sessions close with it, and their pending ACP permission requests are settled as `cancelled`.
     - Permanent deletion is deferred until product semantics are defined.
 
 ### `POST /v1/sessions/{id}/delete`
@@ -909,8 +912,8 @@ The `agent.inference_*` codes carry a sanitized public message of the form `"inf
 - Response: includes a `deleted` boolean.
 - Errors: `501 agent.unsupported_capability` is returned when the agent does not advertise `sessionCapabilities.delete`. The local row is kept.
 - Notes:
-    - Forwards ACP `session/delete` and hard-deletes local history.
-    - The deletion leaves a tombstone: `GET /v1/sessions/-/changes` reports it with `deleted: true`, and the other per-session routes answer the id with `410 session.deleted`.
+    - Forwards ACP `session/delete` and hard-deletes local history, the session's subagent sessions included.
+    - The deletion leaves a tombstone per deleted session: `GET /v1/sessions/-/changes` reports it with `deleted: true`, and the other per-session routes answer the id with `410 session.deleted`.
     - Tombstones are pruned 30 days after the deletion. The id then answers `404 session.not_found`, and the feed's `pruned_through` tells a reader further behind than that to re-read from `0`.
     - Idempotent: an unknown or already-deleted id returns success with `deleted: false` and never dials the agent.
 

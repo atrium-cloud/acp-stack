@@ -30,6 +30,7 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
     Some(match err {
         SessionNotFound { .. } => "session.not_found",
         SessionClosed { .. } => "session.closed",
+        SubagentSessionRestricted { .. } => "session.subagent_restricted",
         SessionDeleted { .. } => "session.deleted",
         SessionReattachUnsupported { .. } => "session.reattach_unsupported",
         SessionEventCursorUnknown { .. } => "session.event_cursor_unknown",
@@ -51,6 +52,9 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
     Some(match err {
         SessionNotFound { id } => format!("session `{id}` was not found"),
         SessionClosed { id } => format!("session `{id}` is closed"),
+        SubagentSessionRestricted { id } => {
+            format!("session `{id}` is a subagent session and accepts no client mutations")
+        }
         SessionDeleted { id } => format!("session `{id}` was deleted"),
         SessionReattachUnsupported { id } => format!(
             "session `{id}` cannot be re-attached: the agent advertises neither `session/resume` nor `session/load`"
@@ -90,9 +94,10 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         SessionNotFound { .. } | PromptNotFound { .. } | SessionEventCursorUnknown { .. } => {
             StatusCode::NOT_FOUND
         }
-        SessionClosed { .. } | PromptInFlight { .. } | PromptSessionMismatch { .. } => {
-            StatusCode::CONFLICT
-        }
+        SessionClosed { .. }
+        | SubagentSessionRestricted { .. }
+        | PromptInFlight { .. }
+        | PromptSessionMismatch { .. } => StatusCode::CONFLICT,
         SessionTargetRenameConflict { .. } => StatusCode::CONFLICT,
         SessionDeleted { .. } => StatusCode::GONE,
         SessionReattachUnsupported { .. } => StatusCode::NOT_IMPLEMENTED,

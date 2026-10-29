@@ -375,6 +375,15 @@ idle_threshold = "30s"
 - The default is `30s`. The sweep shares the `[prompts].sweep_interval` cadence, so worst-case demotion latency is `idle_threshold` plus one interval.
 - The sweep compares stored wall-clock timestamps at scan time, so it fires correctly after a host suspend/resume.
 
+### Subagent Sessions
+
+A subagent session is a child session the agent announces on a parent through ACP `subagent_update`. It is a session row of the parent's target, linked to its parent and to the root of its tree.
+
+- Subagent sessions are read-only to clients: prompt, commands, load, resume, fork, config-options, cancel, close, and delete answer `409 session.subagent_restricted`.
+- Closing the root closes every subagent session in its tree and settles their pending ACP permission requests as `cancelled`. Deleting the root deletes the tree.
+- A subagent that reports `idle` with `stopReason: "cancelled"` has its pending ACP permission requests settled as `cancelled` with the reason `subagent-cancelled`.
+- A subagent's updates advance the root's in-flight prompt, so a turn waiting on a subagent stays clear of the stale-prompt sweeper.
+
 ## Dependencies And MCP
 
 ### Dependency Declarations

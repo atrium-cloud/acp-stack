@@ -6,13 +6,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agent_client_protocol::RequestCancellation;
+use agent_client_protocol::schema::MaybeUndefined;
 use agent_client_protocol::schema::v1::{
-    ContentBlock, ContentChunk, MessageId, Meta, NewSessionResponse, PermissionOption,
-    PermissionOptionId, PermissionOptionKind, ReadTextFileRequest, ReadTextFileResponse,
-    RequestPermissionOutcome, RequestPermissionRequest, SelectedPermissionOutcome,
-    SessionConfigKind, SessionConfigOption, SessionConfigOptionValue, SessionConfigSelectOptions,
-    SessionId as AcpSessionId, SessionNotification, SessionUpdate, WriteTextFileRequest,
-    WriteTextFileResponse,
+    ContentBlock, ContentChunk, IdleStateUpdate, IdleStopReason, MessageId, Meta,
+    NewSessionResponse, PermissionOption, PermissionOptionId, PermissionOptionKind,
+    ReadTextFileRequest, ReadTextFileResponse, RequestPermissionOutcome, RequestPermissionRequest,
+    SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionValue,
+    SessionConfigSelectOptions, SessionId as AcpSessionId, SessionNotification, SessionUpdate,
+    StateUpdate, SubagentUpdate, WriteTextFileRequest, WriteTextFileResponse,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -29,9 +30,11 @@ use crate::runtime::mediation::permissions::{
 /// Stable audit reason shared by the durable permission decision and its
 /// published cancellation event when ACP `$/cancel_request` wins the race.
 const ACP_REQUEST_CANCELLED_REASON: &str = "acp-request-cancelled";
+/// Decision reason on the pending permissions of a subagent that reported its work cancelled.
+const SUBAGENT_CANCELLED_PERMISSION_REASON: &str = "subagent-cancelled";
 use crate::state::{EVENT_KIND_SESSION_UPDATE, StateHandle};
 
-use super::acp_bridge::{NotificationDrain, NotificationGuard};
+use super::acp_bridge::{AcpPermissionPolicy, NotificationDrain, NotificationGuard};
 
 /// `_meta` namespace for acp-stack's local protocol extensions (also read by
 /// `AgentCapabilitiesDto::supports_fork_message_id`).
@@ -183,19 +186,46 @@ fn warn_discarded(agent_session_id: &str, count: usize, reason: &'static str) {
 
 async fn record_session_update(
     sink: &Arc<dyn SessionEventSink>,
+    permissions: &AcpPermissionPolicy,
     agent_session_id: &str,
     update: &SessionUpdate,
     payload: &str,
 ) {
     if let SessionUpdate::SubagentUpdate(subagent) = update {
-        sink.record_subagent_update(agent_session_id, subagent, payload)
+        let child_session_id = sink
+            .record_subagent_update(agent_session_id, subagent, payload)
             .await;
+        // The agent stopped this child's work, so its open requests no longer apply; ACP
+        // has the client settle them as if it had cancelled the child itself.
+        if let Some(child_session_id) = child_session_id
+            && reports_cancelled(subagent)
+            && let AcpPermissionPolicy::Service(service) = permissions
+            && let Err(error) = service
+                .cancel_pending_for_session(&child_session_id, SUBAGENT_CANCELLED_PERMISSION_REASON)
+                .await
+        {
+            tracing::warn!(
+                error = %crate::error::report(&error),
+                session_id = %child_session_id,
+                "failed to cancel the pending permissions of a cancelled ACP subagent"
+            );
+        }
         return;
     }
     if sink.capture_session_update(agent_session_id, update).await {
         sink.append(agent_session_id, EVENT_KIND_SESSION_UPDATE, payload)
             .await;
     }
+}
+
+fn reports_cancelled(update: &SubagentUpdate) -> bool {
+    matches!(
+        &update.state,
+        MaybeUndefined::Value(StateUpdate::Idle(IdleStateUpdate {
+            stop_reason: Some(IdleStopReason::Cancelled),
+            ..
+        }))
+    )
 }
 
 /// Updates held for a session the agent opened through `session/new` or
@@ -260,6 +290,7 @@ impl Drop for PendingSessionUpdates {
 
 pub(super) fn spawn_session_notification_queue(
     sink: Arc<dyn SessionEventSink>,
+    permissions: AcpPermissionPolicy,
 ) -> SessionNotificationSender {
     let (sender, mut receiver) = mpsc::unbounded_channel::<SessionQueueItem>();
     let worker = tokio::spawn(async move {
@@ -270,6 +301,7 @@ pub(super) fn spawn_session_notification_queue(
                     if let Some(notification) = held.hold(notification) {
                         record_session_update(
                             &sink,
+                            &permissions,
                             &notification.agent_session_id,
                             &notification.update,
                             &notification.payload,
@@ -290,6 +322,7 @@ pub(super) fn spawn_session_notification_queue(
                         for update in session.updates {
                             record_session_update(
                                 &sink,
+                                &permissions,
                                 &agent_session_id,
                                 &update.update,
                                 &update.payload,

@@ -167,6 +167,20 @@ pub(crate) struct AcpArgs {
     /// answering for as long as the turn is open.
     #[arg(long, default_value_t = 1)]
     pub(crate) prompt_await_permission_rounds: u32,
+    /// Delegate each turn to a subagent: announce `<session>:subagent` on the prompted
+    /// session with a cancel grant, stream one chunk on it, and report it idle before the
+    /// turn ends.
+    #[arg(long)]
+    pub(crate) announce_subagent: bool,
+    /// With `--announce-subagent`, the subagent raises a `session/request_permission` and
+    /// the turn waits for the answer. A `session/cancel` of the parent meanwhile cancels the
+    /// subagent's work: it reports `idle` with `stopReason: "cancelled"` and leaves its
+    /// request open for the client to settle.
+    #[arg(long)]
+    pub(crate) subagent_permission: bool,
+    /// With `--announce-subagent`, the subagent delegates to a subagent of its own.
+    #[arg(long)]
+    pub(crate) subagent_nested: bool,
     /// Run one `execute` tool call that stays silent for this long: announce it
     /// `in_progress`, send nothing until the hold ends, then complete it and end
     /// the turn, the way an adapter reports a long shell command.

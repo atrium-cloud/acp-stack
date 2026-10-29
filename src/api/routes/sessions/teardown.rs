@@ -33,8 +33,15 @@ pub(crate) async fn sessions_close_handler(
     Query(params): Query<SessionsTargetParams>,
 ) -> std::result::Result<ApiSuccess<SessionResponse>, StackError> {
     let target = target_for_session_wind_down(&state, &id, params.target_id.as_deref()).await?;
-    let record = target.supervisor.close_session(&id, &state.state).await?;
-    cancel_pending_acp_permissions_for_session(&state, &id, SESSION_CLOSED_PERMISSION_REASON).await;
+    let (record, closed_subagents) = target.supervisor.close_session(&id, &state.state).await?;
+    for session_id in std::iter::once(&id).chain(&closed_subagents) {
+        cancel_pending_acp_permissions_for_session(
+            &state,
+            session_id,
+            SESSION_CLOSED_PERMISSION_REASON,
+        )
+        .await;
+    }
     Ok(ApiSuccess::new(SessionResponse::from(record)))
 }
 

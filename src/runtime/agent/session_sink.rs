@@ -101,14 +101,18 @@ pub trait SessionEventSink: Send + Sync + 'static {
 
     /// Record a `subagent_update` that arrived on `agent_session_id`. Returns once the child
     /// it names resolves through `local_session_id`, since the child's own requests may
-    /// follow it right away.
+    /// follow it right away, with the child's local id when the patch was applied to it.
     fn record_subagent_update<'a>(
         &'a self,
         agent_session_id: &'a str,
         _update: &'a SubagentUpdate,
         payload_json: &'a str,
-    ) -> futures::future::BoxFuture<'a, ()> {
-        self.append(agent_session_id, EVENT_KIND_SESSION_UPDATE, payload_json)
+    ) -> futures::future::BoxFuture<'a, Option<String>> {
+        Box::pin(async move {
+            self.append(agent_session_id, EVENT_KIND_SESSION_UPDATE, payload_json)
+                .await;
+            None
+        })
     }
 
     /// Wait until every `append` accepted before this call has been written.
@@ -901,11 +905,9 @@ impl SessionEventSink for StateStoreSessionSink {
         agent_session_id: &'a str,
         update: &'a SubagentUpdate,
         payload_json: &'a str,
-    ) -> futures::future::BoxFuture<'a, ()> {
+    ) -> futures::future::BoxFuture<'a, Option<String>> {
         Box::pin(async move {
-            let Some(parent_session_id) = self.local_session_id(agent_session_id).await else {
-                return;
-            };
+            let parent_session_id = self.local_session_id(agent_session_id).await?;
             let patch = subagent_patch(update);
             let child_agent_session_id = patch.agent_session_id.clone();
             // Written directly rather than through the batched writer, so the parent's
@@ -924,22 +926,29 @@ impl SessionEventSink for StateStoreSessionSink {
                 }) => {
                     self.remember_local_session(&child_agent_session_id, &child_session_id)
                         .await;
+                    Some(child_session_id)
                 }
-                Ok(SubagentApplied::Updated { .. }) => {}
-                Ok(SubagentApplied::Rejected(reason)) => tracing::warn!(
-                    target_id = %self.target_id,
-                    agent_session_id,
-                    child_agent_session_id,
-                    reason = reason.as_str(),
-                    "ignoring ACP subagent update that conflicts with stored sessions"
-                ),
-                Err(err) => tracing::warn!(
-                    error = %err,
-                    target_id = %self.target_id,
-                    agent_session_id,
-                    child_agent_session_id,
-                    "failed to record ACP subagent update"
-                ),
+                Ok(SubagentApplied::Updated { child_session_id }) => Some(child_session_id),
+                Ok(SubagentApplied::Rejected(reason)) => {
+                    tracing::warn!(
+                        target_id = %self.target_id,
+                        agent_session_id,
+                        child_agent_session_id,
+                        reason = reason.as_str(),
+                        "ignoring ACP subagent update that conflicts with stored sessions"
+                    );
+                    None
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        target_id = %self.target_id,
+                        agent_session_id,
+                        child_agent_session_id,
+                        "failed to record ACP subagent update"
+                    );
+                    None
+                }
             }
         })
     }

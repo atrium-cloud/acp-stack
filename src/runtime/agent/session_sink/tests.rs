@@ -1128,7 +1128,7 @@ async fn the_last_stamped_chunk_id_is_taken_once_per_session() {
 
 #[tokio::test]
 async fn an_announced_child_resolves_once_enqueued_and_streams_into_its_own_log() {
-    use crate::runtime::agent::acp_bridge::NotificationDrain;
+    use crate::runtime::agent::acp_bridge::{AcpPermissionPolicy, NotificationDrain};
     use crate::runtime::agent::acp_codec::{
         enqueue_session_notification, spawn_session_notification_queue,
     };
@@ -1142,7 +1142,7 @@ async fn an_announced_child_resolves_once_enqueued_and_streams_into_its_own_log(
         "target_a".to_owned(),
         state.clone(),
     ));
-    let queue = spawn_session_notification_queue(Arc::clone(&sink));
+    let queue = spawn_session_notification_queue(Arc::clone(&sink), AcpPermissionPolicy::Cancel);
     let drain = Arc::new(NotificationDrain::default());
     let parent_chunk: SessionNotification =
         serde_json::from_str(&chunk_payload("before")).expect("parent chunk");

@@ -124,6 +124,10 @@ pub(crate) async fn handle_prompt(
     // An inline await (as `--prompt-stall-after-update` does) would park the
     // loop instead and the notification would never be read.
     let fields = ResponseFields::from_args(&args);
+    if args.announce_subagent {
+        return delegate_to_subagent(state, &args, start_cancels, request, responder, connection)
+            .await;
+    }
     if args.prompt_await_permission {
         let rounds = args.prompt_await_permission_rounds;
         let permission_connection = connection.clone();
@@ -200,20 +204,7 @@ pub(crate) async fn handle_prompt(
     if let Some(delay_ms) = args.prompt_settle_cancel_after_ms {
         let state_for_task = Arc::clone(&state);
         return connection.spawn(async move {
-            // Wait for a cancel aimed at this turn: one that arrives after it started,
-            // lifting the session's count past the value captured at start. The check
-            // is non-consuming and epoch-gated, so every turn parked at cancel time
-            // settles while a turn that starts later does not inherit that cancel.
-            loop {
-                let cancelled = {
-                    let state = state_for_task.lock().await;
-                    state.cancelled_since(request.session_id.0.as_ref(), start_cancels)
-                };
-                if cancelled {
-                    break;
-                }
-                tokio::time::sleep(CANCEL_WAIT_POLL_INTERVAL).await;
-            }
+            cancel_aimed_at(&state_for_task, &request.session_id, start_cancels).await;
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             respond_to_prompt(request, responder, StopReason::Cancelled, fields)
         });
@@ -279,6 +270,129 @@ pub(crate) async fn handle_prompt(
         });
     }
     finish_prompt(state, request, responder).await
+}
+
+/// Wait for a cancel aimed at this turn: one that arrives after it started, lifting the
+/// session's count past the value captured at start. The check is non-consuming and
+/// epoch-gated, so every turn parked at cancel time settles while a turn that starts
+/// later does not inherit that cancel.
+async fn cancel_aimed_at(state: &SharedState, session_id: &SessionId, start_cancels: u64) {
+    while !state
+        .lock()
+        .await
+        .cancelled_since(session_id.0.as_ref(), start_cancels)
+    {
+        tokio::time::sleep(CANCEL_WAIT_POLL_INTERVAL).await;
+    }
+}
+
+/// `--announce-subagent`: the turn delegates to `<session>:subagent` and ends once the
+/// subagent reports idle.
+async fn delegate_to_subagent(
+    state: SharedState,
+    args: &AcpArgs,
+    start_cancels: u64,
+    request: PromptRequest,
+    responder: Responder<PromptResponse>,
+    connection: ConnectionTo<Client>,
+) -> agent_client_protocol::Result<()> {
+    let parent = request.session_id.clone();
+    let child = subagent_of(&parent);
+    connection.send_notification(subagent_update(
+        &parent,
+        SubagentUpdate::new(child.clone())
+            .title(SUBAGENT_TITLE.to_owned())
+            .capabilities(
+                SubagentSessionCapabilities::new().cancel(SessionCancelCapabilities::new()),
+            )
+            .state(StateUpdate::Running(RunningStateUpdate::new())),
+    ))?;
+    connection.send_notification(subagent_chunk(&child))?;
+    if args.subagent_nested {
+        let grandchild = subagent_of(&child);
+        connection.send_notification(subagent_update(
+            &child,
+            SubagentUpdate::new(grandchild.clone())
+                .state(StateUpdate::Running(RunningStateUpdate::new())),
+        ))?;
+        connection.send_notification(subagent_chunk(&grandchild))?;
+        connection.send_notification(subagent_update(
+            &child,
+            SubagentUpdate::new(grandchild).state(idle(IdleStopReason::EndTurn)),
+        ))?;
+    }
+    if !args.subagent_permission {
+        connection.send_notification(subagent_update(
+            &parent,
+            SubagentUpdate::new(child).state(idle(IdleStopReason::EndTurn)),
+        ))?;
+        return finish_prompt(state, request, responder).await;
+    }
+    let fields = ResponseFields::from_args(args);
+    let task_connection = connection.clone();
+    connection.spawn(async move {
+        let permission = task_connection.send_request(RequestPermissionRequest::new(
+            child.clone(),
+            ToolCallUpdate::new(SUBAGENT_TOOL_CALL_ID, ToolCallUpdateFields::new()),
+            vec![PermissionOption::new(
+                "allow",
+                "Allow",
+                PermissionOptionKind::AllowOnce,
+            )],
+        ));
+        let mut answer = std::pin::pin!(permission.block_task());
+        let parent_cancelled = tokio::select! {
+            answered = &mut answer => match answered {
+                Ok(_) => false,
+                Err(error) => return responder.respond_with_error(error),
+            },
+            () = cancel_aimed_at(&state, &parent, start_cancels) => true,
+        };
+        if !parent_cancelled {
+            task_connection.send_notification(subagent_update(
+                &parent,
+                SubagentUpdate::new(child).state(idle(IdleStopReason::EndTurn)),
+            ))?;
+            return respond_to_prompt(request, responder, StopReason::EndTurn, fields);
+        }
+        // The parent's cancel ends the work it waits on. The subagent reports that and
+        // leaves its request open: settling it is the client's part.
+        task_connection.send_notification(subagent_update(
+            &parent,
+            SubagentUpdate::new(child).state(idle(IdleStopReason::Cancelled)),
+        ))?;
+        match answer.await {
+            Ok(response) if matches!(response.outcome, RequestPermissionOutcome::Cancelled) => {
+                respond_to_prompt(request, responder, StopReason::Cancelled, fields)
+            }
+            Ok(_) => responder.respond_with_error(Error::new(
+                -32000,
+                "the client granted a cancelled subagent's permission",
+            )),
+            Err(error) => responder.respond_with_error(error),
+        }
+    })
+}
+
+fn subagent_of(session_id: &SessionId) -> SessionId {
+    SessionId::new(format!("{}{SUBAGENT_SESSION_SUFFIX}", session_id.0))
+}
+
+fn subagent_update(parent: &SessionId, update: SubagentUpdate) -> SessionNotification {
+    SessionNotification::new(parent.clone(), SessionUpdate::SubagentUpdate(update))
+}
+
+fn subagent_chunk(session_id: &SessionId) -> SessionNotification {
+    SessionNotification::new(
+        session_id.clone(),
+        SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(TextContent::new(
+            SUBAGENT_CHUNK,
+        )))),
+    )
+}
+
+fn idle(stop_reason: IdleStopReason) -> StateUpdate {
+    StateUpdate::Idle(IdleStateUpdate::new().stop_reason(stop_reason))
 }
 
 fn execute_tool_call_started(session_id: &SessionId) -> SessionNotification {

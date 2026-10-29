@@ -13,6 +13,9 @@ const SUBAGENT_ANNOUNCED_EVENT_MESSAGE: &str = "ACP subagent session announced";
 const SUBAGENT_COLUMNS: &str = "session_id, parent_session_id, root_session_id, title, \
      description, state_json, state_current, cancel_granted, announced_at, updated_at";
 
+const ROOT_SUBAGENT_IDS: &str =
+    "SELECT session_id FROM session_subagents WHERE root_session_id = ?1";
+
 /// One field of a [`SubagentPatch`]: `Keep` leaves the stored value, `Clear`
 /// nulls it, and `Set` replaces it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -126,6 +129,18 @@ fn subagent_on(conn: &rusqlite::Connection, session_id: &str) -> Result<Option<S
             row_to_subagent,
         )
         .optional()?)
+}
+
+/// Ids of every subagent in the tree `root_session_id` heads.
+pub(super) fn subagent_ids_of_root(
+    conn: &rusqlite::Connection,
+    root_session_id: &str,
+) -> Result<Vec<String>> {
+    let mut statement = conn.prepare(ROOT_SUBAGENT_IDS)?;
+    let ids = statement
+        .query_map(params![root_session_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(ids)
 }
 
 fn session_on(conn: &rusqlite::Connection, session_id: &str) -> Result<SessionRecord> {
@@ -336,6 +351,46 @@ impl StateStore {
 
     pub fn get_subagent(&self, session_id: &str) -> Result<Option<SubagentRecord>> {
         subagent_on(self.connection(), session_id)
+    }
+
+    /// Session rows of every subagent in the tree `root_session_id` heads.
+    pub fn subagent_sessions(&self, root_session_id: &str) -> Result<Vec<SessionRecord>> {
+        let mut statement = self.connection().prepare(&format!(
+            "SELECT {SESSION_COLUMNS} FROM sessions WHERE id IN ({ROOT_SUBAGENT_IDS}) ORDER BY id"
+        ))?;
+        let records = statement
+            .query_map(params![root_session_id], row_to_session)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(records)
+    }
+
+    /// Close the subagents of the tree `root_session_id` heads, whose work ends with the
+    /// root's close, and withdraw their live state. Returns the ids it closed.
+    pub fn close_subagent_sessions(&self, root_session_id: &str) -> Result<Vec<String>> {
+        let now = current_timestamp();
+        self.persist_many_with_outbox("sessions", &now, |conn| {
+            conn.execute(
+                "UPDATE session_subagents SET state_current = 0, cancel_granted = 0 \
+                 WHERE root_session_id = ?1",
+                params![root_session_id],
+            )?;
+            let ids = {
+                let mut statement = conn.prepare(&format!(
+                    "UPDATE sessions SET status = ?2, updated_at = ?3 \
+                     WHERE id IN ({ROOT_SUBAGENT_IDS}) AND status != ?2 RETURNING id"
+                ))?;
+                statement
+                    .query_map(
+                        params![root_session_id, SESSION_STATUS_CLOSED, now],
+                        |row| row.get::<_, String>(0),
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            for id in &ids {
+                bump_session_change(conn, id)?;
+            }
+            Ok(ids)
+        })
     }
 }
 

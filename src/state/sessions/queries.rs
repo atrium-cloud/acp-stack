@@ -982,17 +982,27 @@ impl StateStore {
     /// tombstone that reports the deletion on the change feed. Returns `None`
     /// for an unknown id (repeat deletes succeed silently per ACP
     /// `session/delete`). Permission rows stay: they are the durable security
-    /// log, not session history.
+    /// log, not session history. A root's subagents are deleted with it.
     pub fn delete_session(&self, id: &str) -> Result<Option<SessionRecord>> {
         let Some(record) = self.get_session(id)? else {
             return Ok(None);
         };
         let now = current_timestamp();
-        self.persist_with_outbox("sessions", id, &now, |conn| {
-            conn.execute("DELETE FROM prompts WHERE session_id = ?1", params![id])?;
-            conn.execute("DELETE FROM events WHERE session_id = ?1", params![id])?;
-            conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
-            insert_session_tombstone(conn, id, &now)
+        self.persist_many_with_outbox("sessions", &now, |conn| {
+            let mut ids = super::subagents::subagent_ids_of_root(conn, id)?;
+            // The associations reference the rows below, so they go first.
+            conn.execute(
+                "DELETE FROM session_subagents WHERE root_session_id = ?1",
+                params![id],
+            )?;
+            ids.push(id.to_owned());
+            for id in &ids {
+                conn.execute("DELETE FROM prompts WHERE session_id = ?1", params![id])?;
+                conn.execute("DELETE FROM events WHERE session_id = ?1", params![id])?;
+                conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
+                insert_session_tombstone(conn, id, &now)?;
+            }
+            Ok(ids)
         })?;
         Ok(Some(record))
     }

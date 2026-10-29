@@ -1036,7 +1036,7 @@ async fn usage_update_notifications_deserialize_and_enqueue() {
     let sink = Arc::new(RecordingSink::default());
     let sink_dyn: Arc<dyn SessionEventSink> = sink.clone();
     let drain = Arc::new(NotificationDrain::default());
-    let queue = spawn_session_notification_queue(sink_dyn);
+    let queue = spawn_session_notification_queue(sink_dyn, AcpPermissionPolicy::Cancel);
     enqueue_session_notification(&queue, Arc::clone(&drain), note).await;
     drain.wait_idle().await;
 
@@ -1074,7 +1074,7 @@ async fn diff_notification_updates_transient_snapshot_and_preserves_raw_event() 
     let sink = Arc::new(RecordingSink::default());
     let sink_dyn: Arc<dyn SessionEventSink> = sink.clone();
     let drain = Arc::new(NotificationDrain::default());
-    let queue = spawn_session_notification_queue(sink_dyn);
+    let queue = spawn_session_notification_queue(sink_dyn, AcpPermissionPolicy::Cancel);
     enqueue_session_notification(&queue, Arc::clone(&drain), note).await;
     drain.wait_idle().await;
 
@@ -1100,7 +1100,7 @@ async fn queued_notification_survives_backpressured_producer_cancellation_in_fif
     let sink = Arc::new(BlockingNotificationSink::default());
     let sink_dyn: Arc<dyn SessionEventSink> = sink.clone();
     let drain = Arc::new(NotificationDrain::default());
-    let queue = spawn_session_notification_queue(sink_dyn);
+    let queue = spawn_session_notification_queue(sink_dyn, AcpPermissionPolicy::Cancel);
 
     enqueue_session_notification(&queue, Arc::clone(&drain), tool_call_notification("first")).await;
     sink.first_capture_started.notified().await;
@@ -1144,7 +1144,7 @@ async fn received_before_now_barrier_releases_once_earlier_rows_are_appended_whi
     let sink = Arc::new(GatedNotificationSink::default());
     let sink_dyn: Arc<dyn SessionEventSink> = sink.clone();
     let drain = Arc::new(NotificationDrain::default());
-    let queue = spawn_session_notification_queue(sink_dyn);
+    let queue = spawn_session_notification_queue(sink_dyn, AcpPermissionPolicy::Cancel);
 
     enqueue_session_notification(&queue, Arc::clone(&drain), tool_call_notification("first")).await;
     sink.capture_started.notified().await;
@@ -1220,7 +1220,7 @@ async fn updates_for_an_opening_session_are_held_until_release_and_land_in_arriv
     let sink = Arc::new(RecordingSink::default());
     let sink_dyn: Arc<dyn SessionEventSink> = sink.clone();
     let drain = Arc::new(NotificationDrain::default());
-    let queue = spawn_session_notification_queue(sink_dyn);
+    let queue = spawn_session_notification_queue(sink_dyn, AcpPermissionPolicy::Cancel);
     let pending = expect_session(&queue, OPENING_SESSION_ID);
 
     for (session_id, tool_call_id) in [
@@ -1265,7 +1265,7 @@ async fn dropping_the_claim_discards_held_updates_and_later_ones_take_the_normal
     let sink = Arc::new(RecordingSink::default());
     let sink_dyn: Arc<dyn SessionEventSink> = sink.clone();
     let drain = Arc::new(NotificationDrain::default());
-    let queue = spawn_session_notification_queue(sink_dyn);
+    let queue = spawn_session_notification_queue(sink_dyn, AcpPermissionPolicy::Cancel);
     let pending = expect_session(&queue, OPENING_SESSION_ID);
 
     enqueue_session_notification(
@@ -1291,7 +1291,7 @@ async fn an_overflowing_session_discards_everything_held_until_release() {
     let sink = Arc::new(RecordingSink::default());
     let sink_dyn: Arc<dyn SessionEventSink> = sink.clone();
     let drain = Arc::new(NotificationDrain::default());
-    let queue = spawn_session_notification_queue(sink_dyn);
+    let queue = spawn_session_notification_queue(sink_dyn, AcpPermissionPolicy::Cancel);
     let pending = expect_session(&queue, OPENING_SESSION_ID);
 
     for index in 0..=HELD_SESSION_UPDATES_PER_SESSION {
@@ -1325,7 +1325,7 @@ async fn the_total_cap_bounds_held_updates_across_sessions() {
     let sink = Arc::new(RecordingSink::default());
     let sink_dyn: Arc<dyn SessionEventSink> = sink.clone();
     let drain = Arc::new(NotificationDrain::default());
-    let queue = spawn_session_notification_queue(sink_dyn);
+    let queue = spawn_session_notification_queue(sink_dyn, AcpPermissionPolicy::Cancel);
     let session_count = HELD_SESSION_UPDATES_TOTAL / HELD_SESSION_UPDATES_PER_SESSION;
     let mut claims = Vec::new();
     for session in 0..=session_count {

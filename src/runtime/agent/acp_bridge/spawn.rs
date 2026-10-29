@@ -350,7 +350,7 @@ fn spawn_connection_task(
     let (init_tx, connection_rx) = oneshot::channel::<InitializeOutcome>();
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
-    let notification_queue = spawn_session_notification_queue(sink.clone());
+    let notification_queue = spawn_session_notification_queue(sink.clone(), permissions.clone());
     let bridge_notification_queue = notification_queue.clone();
     let permission_sink = sink;
     let create_context = Arc::clone(&terminal_context);

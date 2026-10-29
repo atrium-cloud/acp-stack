@@ -593,16 +593,16 @@ impl AgentSupervisor {
     }
 
     /// `DELETE /v1/sessions/{id}`. Ordering matters: `session/close` goes to the agent first,
-    /// and only on success are local prompts cancelled and the row marked closed.
+    /// and only on success are local prompts cancelled and the row marked closed. The
+    /// agent ends the work of the session's subagents with it, so their rows close too;
+    /// their ids are returned beside the closed row.
     pub async fn close_session(
         &self,
         session_id: &str,
         state: &StateHandle,
-    ) -> Result<SessionRecord> {
+    ) -> Result<(SessionRecord, Vec<String>)> {
         let bridge = self.bridge().await?;
-        let lookup_session_id = session_id.to_owned();
-        let record = state
-            .read(move |store| store.get_session(&lookup_session_id))
+        let record = lookup_client_session(state, session_id)
             .await?
             .ok_or_else(|| StackError::SessionNotFound {
                 id: session_id.to_owned(),
@@ -616,6 +616,7 @@ impl AgentSupervisor {
         state
             .write(move |store| {
                 store.update_session_status(&session_id, SESSION_STATUS_CLOSED)?;
+                let closed_subagents = store.close_subagent_sessions(&session_id)?;
                 if let Err(error) = store.append_session_event(
                     &session_id,
                     "info",
@@ -625,15 +626,17 @@ impl AgentSupervisor {
                 ) {
                     tracing::warn!(%error, session = %session_id, "session.closed event write failed");
                 }
-                store
+                let record = store
                     .get_session(&session_id)?
-                    .ok_or_else(|| StackError::SessionNotFound { id: session_id })
+                    .ok_or_else(|| StackError::SessionNotFound { id: session_id })?;
+                Ok((record, closed_subagents))
             })
             .await
     }
 
     /// `POST /v1/sessions/{id}/delete`. The agent confirms first, then the local row and its
-    /// prompts/events are hard-deleted; an unknown id returns `Ok(None)` per ACP's silent-repeat rule.
+    /// prompts/events are hard-deleted along with its subagents; an unknown id returns
+    /// `Ok(None)` per ACP's silent-repeat rule.
     pub async fn delete_session(
         &self,
         session_id: &str,
@@ -641,42 +644,49 @@ impl AgentSupervisor {
         permissions: &PermissionService,
         permission_reason: &str,
     ) -> Result<Option<SessionRecord>> {
-        let lookup_session_id = session_id.to_owned();
-        let agent_session_id = match state
-            .read(move |store| store.get_session(&lookup_session_id))
-            .await?
-        {
-            Some(record) => record.agent_session_id,
-            None => return Ok(None),
+        let Some(record) = lookup_client_session(state, session_id).await? else {
+            return Ok(None);
         };
         let bridge = self.bridge().await?;
         bridge
-            .delete_session(AcpSessionId::new(agent_session_id.clone()))
+            .delete_session(AcpSessionId::new(record.agent_session_id.clone()))
             .await?;
         self.cancel_prompts_for_session(session_id).await;
+        // Updates already queued land before the wipe and are deleted with the session,
+        // and any subagent they announce is in the tree read below.
+        bridge.drain_session_events().await;
+        let root_session_id = session_id.to_owned();
+        let subagents = state
+            .read(move |store| store.subagent_sessions(&root_session_id))
+            .await?;
+        let doomed: Vec<&SessionRecord> = std::iter::once(&record).chain(&subagents).collect();
         // Settled before the wipe, so the decision events land in the log the
         // delete removes instead of opening a new one under the deleted id.
-        if let Err(error) = permissions
-            .cancel_pending_for_session(session_id, permission_reason)
-            .await
-        {
-            tracing::warn!(
-                %error,
-                session_id,
-                "failed to cancel pending ACP permissions before session delete"
-            );
+        for session in &doomed {
+            if let Err(error) = permissions
+                .cancel_pending_for_session(&session.id, permission_reason)
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    session_id = %session.id,
+                    "failed to cancel pending ACP permissions before session delete"
+                );
+            }
         }
-        // Updates already queued land before the wipe and are deleted with the session.
-        bridge.drain_session_events().await;
         // A cached id would route later updates for this agent session to the deleted
         // row. Forgotten before the delete so updates in between re-read it, and again
         // after so an entry they cached from the pre-delete row goes too.
-        bridge.forget_session(&agent_session_id).await;
-        let session_id = session_id.to_owned();
+        for session in &doomed {
+            bridge.forget_session(&session.agent_session_id).await;
+        }
+        let delete_session_id = session_id.to_owned();
         let deleted = state
-            .write(move |store| store.delete_session(&session_id))
+            .write(move |store| store.delete_session(&delete_session_id))
             .await;
-        bridge.forget_session(&agent_session_id).await;
+        for session in &doomed {
+            bridge.forget_session(&session.agent_session_id).await;
+        }
         deleted
     }
 
@@ -763,11 +773,36 @@ impl SessionAttachKind {
     }
 }
 
-/// Fetch a session row and refuse closed ones, before any bridge call is made.
-async fn fetch_open_session(state: &StateHandle, session_id: &str) -> Result<SessionRecord> {
+/// Fetch a session row the client may drive, refusing a subagent session: it belongs
+/// to the agent that announced it.
+pub(super) async fn lookup_client_session(
+    state: &StateHandle,
+    session_id: &str,
+) -> Result<Option<SessionRecord>> {
     let lookup_session_id = session_id.to_owned();
-    let record = state
-        .read(move |store| store.get_session(&lookup_session_id))
+    let (record, subagent) = state
+        .read(move |store| {
+            Ok((
+                store.get_session(&lookup_session_id)?,
+                store.get_subagent(&lookup_session_id)?,
+            ))
+        })
+        .await?;
+    if subagent.is_some() {
+        return Err(StackError::SubagentSessionRestricted {
+            id: session_id.to_owned(),
+        });
+    }
+    Ok(record)
+}
+
+/// [`lookup_client_session`] that also refuses unknown and closed sessions, before any
+/// bridge call is made.
+pub(super) async fn fetch_open_session(
+    state: &StateHandle,
+    session_id: &str,
+) -> Result<SessionRecord> {
+    let record = lookup_client_session(state, session_id)
         .await?
         .ok_or_else(|| StackError::SessionNotFound {
             id: session_id.to_owned(),

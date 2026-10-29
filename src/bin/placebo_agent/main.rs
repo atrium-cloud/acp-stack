@@ -8,17 +8,18 @@ use agent_client_protocol::schema::v1::{
     AgentCapabilities, CancelNotification, ClientCapabilities, CloseSessionRequest,
     CloseSessionResponse, ConfigOptionUpdate, ContentBlock, ContentChunk, CreateTerminalRequest,
     DeleteSessionRequest, DeleteSessionResponse, ForkSessionRequest, ForkSessionResponse,
-    Implementation, InitializeRequest, InitializeResponse, KillTerminalRequest,
-    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
-    McpCapabilities, MessageId, NewSessionRequest, NewSessionResponse, PromptCapabilities,
-    PromptRequest, PromptResponse, ReadTextFileRequest, ReleaseTerminalRequest,
+    IdleStateUpdate, IdleStopReason, Implementation, InitializeRequest, InitializeResponse,
+    KillTerminalRequest, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
+    LoadSessionResponse, McpCapabilities, MessageId, NewSessionRequest, NewSessionResponse,
+    PromptCapabilities, PromptRequest, PromptResponse, ReadTextFileRequest, ReleaseTerminalRequest,
     RequestPermissionOutcome, RequestPermissionRequest, ResumeSessionRequest,
-    ResumeSessionResponse, SessionCapabilities, SessionCloseCapabilities, SessionConfigOption,
-    SessionConfigOptionCategory, SessionConfigOptionValue, SessionConfigSelectOption,
-    SessionDeleteCapabilities, SessionForkCapabilities, SessionId, SessionInfo,
-    SessionListCapabilities, SessionMode, SessionModeState, SessionNotification,
-    SessionResumeCapabilities, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse, StopReason,
+    ResumeSessionResponse, RunningStateUpdate, SessionCancelCapabilities, SessionCapabilities,
+    SessionCloseCapabilities, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigOptionValue, SessionConfigSelectOption, SessionDeleteCapabilities,
+    SessionForkCapabilities, SessionId, SessionInfo, SessionListCapabilities, SessionMode,
+    SessionModeState, SessionNotification, SessionResumeCapabilities, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
+    SetSessionModeResponse, StateUpdate, StopReason, SubagentSessionCapabilities, SubagentUpdate,
     TerminalId, TerminalOutputRequest, TextContent, ToolCall, ToolCallStatus, ToolCallUpdate,
     ToolCallUpdateFields, ToolKind, Usage, WaitForTerminalExitRequest, WriteTextFileRequest,
 };
@@ -67,6 +68,11 @@ const TOOL_CALL_TITLE: &str = "placebo shell command";
 /// before `--prompt-tool-call-then-exit` takes the process down.
 const TOOL_CALL_EXIT_DELAY: Duration = Duration::from_millis(200);
 const TOOL_CALL_EXIT_STATUS: i32 = 1;
+/// A subagent's id is its parent's id with this suffix, the shape codex-acp uses.
+const SUBAGENT_SESSION_SUFFIX: &str = ":subagent";
+const SUBAGENT_TITLE: &str = "placebo subagent";
+const SUBAGENT_CHUNK: &str = "subagent-chunk";
+const SUBAGENT_TOOL_CALL_ID: &str = "tool_subagent_permission";
 
 #[tokio::main]
 async fn main() {

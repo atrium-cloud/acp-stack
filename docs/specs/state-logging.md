@@ -252,6 +252,7 @@ The `reason` field in a decision payload (and in `permission_decisions.reason`) 
 | `native-config-import`                                     | A native agent config import cancelled pending ACP-source rows                            |
 | `session-cancelled` / `session-closed` / `session-deleted` | Session wind-down cancelled the session's pending ACP-source rows                         |
 | `acp-request-cancelled`                                    | The agent cancelled its own ACP permission request                                        |
+| `subagent-cancelled`                                       | The subagent session reported its work cancelled                                          |
 
 A command that reaches a terminal status while its permission request is still `pending` cancels that permission with one of the reasons above. A permission request always ends with its command.
 

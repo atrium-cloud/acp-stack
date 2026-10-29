@@ -1,6 +1,6 @@
 //! Prompt submission, cancellation, and the in-flight prompt registry.
 
-use super::sessions::SessionAttachKind;
+use super::sessions::{SessionAttachKind, fetch_open_session, lookup_client_session};
 use super::*;
 
 impl AgentSupervisor {
@@ -26,19 +26,9 @@ impl AgentSupervisor {
         let _dispatch_guard = self.dispatch_gate.read().await;
         let _session_guard = self.session_locks.lock(session_id).await;
         let bridge = self.bridge().await?;
-        let lookup_session_id = session_id.to_owned();
-        let session = state
-            .read(move |store| store.get_session(&lookup_session_id))
+        let agent_session_id = fetch_open_session(state, session_id)
             .await?
-            .ok_or_else(|| StackError::SessionNotFound {
-                id: session_id.to_owned(),
-            })?;
-        if session.status == SESSION_STATUS_CLOSED {
-            return Err(StackError::SessionClosed {
-                id: session_id.to_owned(),
-            });
-        }
-        let agent_session_id = session.agent_session_id;
+            .agent_session_id;
         // One ACP session drives one turn at a time: a second prompt would
         // race the live one on the same agent session, and its `session/cancel`
         // would be ambiguous. Reap first so a finished-but-unreaped task does
@@ -340,9 +330,7 @@ impl AgentSupervisor {
         let dispatch_guard = self.dispatch_gate.read().await;
         let session_guard = self.session_locks.lock(session_id).await;
         let bridge = self.bridge().await?;
-        let lookup_session_id = session_id.to_owned();
-        let agent_session_id = state
-            .read(move |store| store.get_session(&lookup_session_id))
+        let agent_session_id = lookup_client_session(state, session_id)
             .await?
             .ok_or_else(|| StackError::SessionNotFound {
                 id: session_id.to_owned(),
