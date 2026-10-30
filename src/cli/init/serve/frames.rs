@@ -181,10 +181,12 @@ pub(super) enum ServerFrame<'a> {
         message: &'a str,
     },
     /// Protocol-level rejection, deliberately without a `session_id`: it can
-    /// fire on a frame that never named a valid session.
+    /// fire on a frame that never named a valid session. `request_id` names the
+    /// refused input, so a client with several answers in flight can match it.
     ProtocolError {
         code: &'a str,
         message: &'a str,
+        request_id: Option<&'a str>,
     },
 }
 
@@ -231,10 +233,15 @@ impl ServerFrame<'_> {
                 code,
                 message,
             }),
-            ServerFrame::ProtocolError { code, message } => encode(&ProtocolErrorBody {
+            ServerFrame::ProtocolError {
+                code,
+                message,
+                request_id,
+            } => encode(&ProtocolErrorBody {
                 frame_type: "error",
                 code,
                 message,
+                request_id: *request_id,
             }),
         }
     }
@@ -329,4 +336,6 @@ struct ProtocolErrorBody<'a> {
     frame_type: &'static str,
     code: &'a str,
     message: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<&'a str>,
 }

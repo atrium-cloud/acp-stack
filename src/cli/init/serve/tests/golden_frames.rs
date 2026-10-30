@@ -297,7 +297,7 @@ fn golden_protocol_error_frame_bytes() {
     );
     assert_eq!(
         sent(r#"{"type":"input","request_id":"ireq_stale"}"#),
-        r#"{"type":"error","code":"init.input_rejected","message":"no input request is pending"}"#
+        r#"{"type":"error","code":"init.input_rejected","message":"no input request is pending","request_id":"ireq_stale"}"#
     );
     assert_eq!(
         sent(r#"{"type":"replay_result"}"#),
@@ -346,7 +346,10 @@ fn golden_discovery_refusal_frame_bytes() {
             r#"{{"type":"input","request_id":"{}","value":{{"value":"id_absent"}}}}"#,
             model.request_id
         )),
-        r#"{"type":"error","code":"init.revision_rejected","message":"invalid parameter `init`: selection `id_absent` does not match any option"}"#
+        format!(
+            r#"{{"type":"error","code":"init.revision_rejected","message":"invalid parameter `init`: selection `id_absent` does not match any option","request_id":"{}"}}"#,
+            model.request_id
+        )
     );
 
     session
@@ -358,7 +361,10 @@ fn golden_discovery_refusal_frame_bytes() {
             r#"{{"type":"input","request_id":"{}","value":1}}"#,
             model.request_id
         )),
-        r#"{"type":"error","code":"init.revision_rejected","message":"the discovery phase is closed; the recorded answer for `model` stands"}"#
+        format!(
+            r#"{{"type":"error","code":"init.revision_rejected","message":"the discovery phase is closed; the recorded answer for `model` stands","request_id":"{}"}}"#,
+            model.request_id
+        )
     );
 }
 

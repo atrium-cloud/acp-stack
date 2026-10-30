@@ -663,6 +663,7 @@ pub(super) fn ws_lagged_frame() -> String {
     frame_json(ServerFrame::ProtocolError {
         code: "init.ws_lagged",
         message: "websocket client lagged behind init event stream",
+        request_id: None,
     })
 }
 
@@ -694,15 +695,16 @@ pub(super) fn handle_client_frame(
                 value: frame.value.unwrap_or(Value::Null),
                 deferred: frame.deferred.unwrap_or(false),
             };
-            match session.submit_answer(&request_id, answer) {
-                Ok(()) => ClientFrameOutcome::None,
-                Err(AnswerRejected::Input(message)) => {
-                    protocol_error(INPUT_REJECTED_CODE, &message)
-                }
-                Err(AnswerRejected::Revision(message)) => {
-                    protocol_error(REVISION_REJECTED_CODE, &message)
-                }
-            }
+            let (code, message) = match session.submit_answer(&request_id, answer) {
+                Ok(()) => return ClientFrameOutcome::None,
+                Err(AnswerRejected::Input(message)) => (INPUT_REJECTED_CODE, message),
+                Err(AnswerRejected::Revision(message)) => (REVISION_REJECTED_CODE, message),
+            };
+            ClientFrameOutcome::Send(frame_json(ServerFrame::ProtocolError {
+                code,
+                message: &message,
+                request_id: Some(&request_id),
+            }))
         }
         // Success sends nothing: the seq-bearing `discovery` event already
         // reaches the socket through the broadcast stream. A close sent while
@@ -751,7 +753,11 @@ pub(super) fn handle_client_frame(
 }
 
 fn protocol_error(code: &str, message: &str) -> ClientFrameOutcome {
-    ClientFrameOutcome::Send(frame_json(ServerFrame::ProtocolError { code, message }))
+    ClientFrameOutcome::Send(frame_json(ServerFrame::ProtocolError {
+        code,
+        message,
+        request_id: None,
+    }))
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
