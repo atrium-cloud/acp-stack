@@ -21,6 +21,7 @@ const FORK_INHERITED_EVENT_KINDS: &[&str] = &[
     EVENT_KIND_PROMPT_ERRORED,
     // Held turns keep their token usage; no inherited row rebuilds it.
     EVENT_KIND_PROMPT_USAGE_REPORTED,
+    EVENT_KIND_PROMPT_SETTLED,
     EVENT_KIND_SESSION_CANCEL_REQUESTED,
     EVENT_KIND_TERMINAL_FINISHED,
     // The session-scoped decisions on a turn's ACP permission requests.

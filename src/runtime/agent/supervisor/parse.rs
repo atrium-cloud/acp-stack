@@ -50,14 +50,28 @@ impl TerminalOutcome {
             source: EVENT_SOURCE_SYSTEM,
             kind: EVENT_KIND_PROMPT_STALL_RESOLVED,
             message: "prompt stall resolved",
-            payload_json: json!({
-                "prompt_id": prompt_id,
-                "status": self.status.as_str(),
-                "stop_reason": self.stop_reason,
-                "error_code": self.error_code,
-            })
-            .to_string(),
+            payload_json: self.outcome_payload(prompt_id),
         }
+    }
+
+    /// The event closing the turn, written after every other event its settle writes.
+    pub(super) fn settled_event(&self, prompt_id: &str) -> TerminalSessionEvent {
+        TerminalSessionEvent {
+            level: "info",
+            source: EVENT_SOURCE_SYSTEM,
+            kind: EVENT_KIND_PROMPT_SETTLED,
+            message: PROMPT_SETTLED_EVENT_MESSAGE,
+            payload_json: self.outcome_payload(prompt_id),
+        }
+    }
+
+    fn outcome_payload(&self, prompt_id: &str) -> String {
+        prompt_outcome_payload(
+            prompt_id,
+            self.status,
+            self.stop_reason.as_deref(),
+            self.error_code.as_deref(),
+        )
     }
 }
 

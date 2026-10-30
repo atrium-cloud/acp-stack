@@ -1,7 +1,7 @@
 use acp_stack::state::{
-    EVENT_KIND_SESSION_AVAILABLE, EVENT_SOURCE_ACP, EVENT_SOURCE_SYSTEM, ListedSessionRecord,
-    NewPermissionRequest, NewPromptRecord, NewSessionRecord, PromptRecord, PromptStatus,
-    SESSION_ACTIVITY_ACTOR_AGENT, SESSION_ACTIVITY_ACTOR_USER, SESSION_STATUS_ACTIVE,
+    EVENT_KIND_PROMPT_SETTLED, EVENT_KIND_SESSION_AVAILABLE, EVENT_SOURCE_ACP, EVENT_SOURCE_SYSTEM,
+    ListedSessionRecord, NewPermissionRequest, NewPromptRecord, NewSessionRecord, PromptRecord,
+    PromptStatus, SESSION_ACTIVITY_ACTOR_AGENT, SESSION_ACTIVITY_ACTOR_USER, SESSION_STATUS_ACTIVE,
     SESSION_STATUS_AVAILABLE, SESSION_STATUS_CLOSED, SessionAvailableCommand, SessionEventCursor,
     StateStore,
 };
@@ -1264,6 +1264,37 @@ fn reconcile_orphaned_sessions_scopes_to_target() {
 }
 
 #[test]
+fn reconcile_orphaned_prompts_closes_each_orphaned_turn_with_a_settle_event() {
+    let (_tempdir, store) = fresh_state("state.sqlite");
+    insert_fork_session(&store, "sess_orphaned_turn");
+    let turn = seed_turn(&store, "sess_orphaned_turn", "interrupted by a crash");
+
+    assert_eq!(
+        store
+            .reconcile_orphaned_prompts("daemon restart")
+            .expect("reconcile"),
+        1
+    );
+
+    let settled = session_log(&store, "sess_orphaned_turn")
+        .pop()
+        .expect("the turn has events");
+    assert_eq!(settled.kind, EVENT_KIND_PROMPT_SETTLED);
+    assert_eq!(settled.source, EVENT_SOURCE_SYSTEM);
+    let payload: serde_json::Value =
+        serde_json::from_str(&settled.payload_json).expect("payload is json");
+    assert_eq!(
+        payload,
+        serde_json::json!({
+            "prompt_id": turn.prompt_id,
+            "status": "errored",
+            "stop_reason": null,
+            "error_code": "agent.daemon_restart",
+        })
+    );
+}
+
+#[test]
 fn mark_idle_sessions_skips_inflight_and_fresh_rows() {
     let (_tempdir, store) = fresh_state("state.sqlite");
     const OLD: &str = "2020-01-01T00:00:00.000000000Z";
@@ -1429,6 +1460,7 @@ const CONVERSATION_KINDS: &[&str] = &[
     "prompt.stall_resolved",
     "prompt.errored",
     "prompt.usage_reported",
+    "prompt.settled",
     "session.cancel_requested",
     "terminal.finished",
     "permission.approved",
@@ -1663,6 +1695,19 @@ fn seed_fork_parent(store: &StateStore) -> [SeededTurn; 3] {
     );
     complete_turn(store, &first);
     report_turn_usage(store, FORK_PARENT, &first);
+    let settled = serde_json::json!({
+        "prompt_id": first.prompt_id,
+        "status": "completed",
+        "stop_reason": "end_turn",
+        "error_code": null,
+    });
+    append_session_event(
+        store,
+        FORK_PARENT,
+        EVENT_KIND_PROMPT_SETTLED,
+        EVENT_SOURCE_SYSTEM,
+        &settled.to_string(),
+    );
     append_session_event(
         store,
         FORK_PARENT,
@@ -1729,12 +1774,13 @@ fn a_fork_child_carries_the_parent_conversation_before_the_first_prompt_it_does_
         child_log.iter().map(event_projection).collect::<Vec<_>>(),
         expected
     );
-    // The held turns' permission, terminal, failure, and usage rows all came along.
+    // The held turns' permission, terminal, failure, usage, and settle rows all came along.
     for kind in [
         "permission.approved",
         "terminal.finished",
         "prompt.inference_failed",
         "prompt.usage_reported",
+        "prompt.settled",
     ] {
         assert!(
             child_log.iter().any(|event| event.kind == kind),
@@ -2550,7 +2596,8 @@ fn permission_forks_prompt_sweeps_and_reinserts_move_the_change_feed() {
         .expect("child lookup")
         .expect("child exists");
     assert_eq!(child.change_seq, head(&store));
-    assert_eq!(child.event_seq, 1);
+    // The restart reconcile's `prompt.settled` row and the update.
+    assert_eq!(child.event_seq, 2);
 
     // A row inserted under a deleted id replaces its tombstone.
     store

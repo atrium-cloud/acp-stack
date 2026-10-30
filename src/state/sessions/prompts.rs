@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use super::events::insert_session_event_row;
 use super::*;
 
 // CONSTANTS
@@ -14,6 +15,9 @@ const SESSION_UPDATE_TOOL_CALL_UPDATE: &str = "tool_call_update";
 const TOOL_CALL_STATUS_PENDING: &str = "pending";
 /// The ACP tool-call statuses after which the call is no longer running.
 const TOOL_CALL_CLOSED_STATUSES: &[&str] = &["completed", "failed"];
+
+/// `error_code` of a prompt the startup reconcile settled after a restart orphaned it.
+const ORPHANED_PROMPT_ERROR_CODE: &str = "agent.daemon_restart";
 
 const STALE_THRESHOLD_FIELD: &str = "prompts.stale_threshold";
 const TOOL_CALL_STALE_THRESHOLD_FIELD: &str = "prompts.tool_call_stale_threshold";
@@ -512,8 +516,8 @@ impl StateStore {
     /// startup so prompts orphaned by a crash still settle for pollers.
     pub fn reconcile_orphaned_prompts(&self, reason: &str) -> Result<usize> {
         let now = current_timestamp();
-        // One transaction covers the UPDATE, the change-feed stamps, and the
-        // outbox enqueue, so the settled rows reach every reader together.
+        // One transaction covers the UPDATE, the `prompt.settled` rows, the change-feed
+        // stamps, and the outbox enqueue, so the settled rows reach every reader together.
         let tx = self.begin_immediate("prompts")?;
         let settled: Vec<(String, String)> = {
             let mut statement = tx.prepare(
@@ -521,26 +525,50 @@ impl StateStore {
                 UPDATE prompts
                 SET status = 'errored',
                     updated_at = ?1,
-                    error_code = 'agent.daemon_restart',
+                    error_code = ?3,
                     error_message = ?2,
                     failure_class = 'agent_process'
                 WHERE status IN ('pending', 'running')
                 RETURNING id, session_id
                 "#,
             )?;
-            let rows = statement.query_map(params![now, reason], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?;
+            let rows = statement
+                .query_map(params![now, reason, ORPHANED_PROMPT_ERROR_CODE], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
-        for (id, session_id) in &settled {
-            bump_session_change(&tx, session_id)?;
+        let mut events = Vec::with_capacity(settled.len());
+        for (id, session_id) in settled {
+            let mut event = Event {
+                id: next_event_id(),
+                created_at: now.clone(),
+                level: "info".to_owned(),
+                kind: EVENT_KIND_PROMPT_SETTLED.to_owned(),
+                message: PROMPT_SETTLED_EVENT_MESSAGE.to_owned(),
+                payload_json: prompt_outcome_payload(
+                    &id,
+                    PromptStatus::Errored,
+                    None,
+                    Some(ORPHANED_PROMPT_ERROR_CODE),
+                ),
+                source: EVENT_SOURCE_SYSTEM.to_owned(),
+                session_id: Some(session_id.clone()),
+                seq: None,
+            };
+            event.seq = Some(insert_session_event_row(&tx, &session_id, &event)?);
+            bump_session_change(&tx, &session_id)?;
             if self.external_logging_enabled() {
-                sink_outbox::enqueue(&tx, "prompts", id, &now)?;
+                sink_outbox::enqueue(&tx, "prompts", &id, &now)?;
+                sink_outbox::enqueue(&tx, "events", &event.id, &now)?;
             }
+            events.push((session_id, event));
         }
         tx.commit()?;
-        Ok(settled.len())
+        for (session_id, event) in &events {
+            self.publish_session_event(session_id, event);
+        }
+        Ok(events.len())
     }
 
     /// Mark every in-flight prompt past its stale threshold as `Stalled`,

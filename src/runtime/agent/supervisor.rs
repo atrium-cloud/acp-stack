@@ -93,13 +93,13 @@ use crate::runtime::mediation::permissions::PermissionService;
 use crate::secrets::SecretStore;
 use crate::state::{
     EVENT_KIND_MCP_SESSION_SKIPPED, EVENT_KIND_PROMPT_ERRORED, EVENT_KIND_PROMPT_INFERENCE_FAILED,
-    EVENT_KIND_PROMPT_STALL_RESOLVED, EVENT_KIND_PROMPT_USAGE_REPORTED,
+    EVENT_KIND_PROMPT_SETTLED, EVENT_KIND_PROMPT_STALL_RESOLVED, EVENT_KIND_PROMPT_USAGE_REPORTED,
     EVENT_KIND_SESSION_AVAILABLE, EVENT_KIND_SESSION_CANCEL_REQUESTED,
     EVENT_KIND_SESSION_CAPABILITY_IGNORED, EVENT_KIND_SESSION_UPDATE, EVENT_SOURCE_ACP,
     EVENT_SOURCE_SYSTEM, FailureClass, ListedSessionRecord, NewPromptRecord, NewSessionRecord,
-    PromptRecord, PromptSettle, PromptSettlement, PromptStatus, SESSION_STATUS_ACTIVE,
-    SESSION_STATUS_CLOSED, SessionRecord, StateHandle, StateStore, next_prompt_id,
-    next_prompt_message_id, next_session_id,
+    PROMPT_SETTLED_EVENT_MESSAGE, PromptRecord, PromptSettle, PromptSettlement, PromptStatus,
+    SESSION_STATUS_ACTIVE, SESSION_STATUS_CLOSED, SessionRecord, StateHandle, StateStore,
+    next_prompt_id, next_prompt_message_id, next_session_id, prompt_outcome_payload,
 };
 
 use self::bridge::*;
@@ -875,6 +875,21 @@ mod tests {
             payload["error_code"],
             StackError::AgentNotRunning.error_code()
         );
+    }
+
+    #[test]
+    fn a_turn_acps_cancels_itself_still_closes_on_prompt_settled() {
+        let terminal = build_terminal_outcome_with_prompt_id(Outcome::Cancelled, Some("prm_stop"));
+        assert!(terminal.session_event.is_none());
+
+        let event = terminal.settled_event("prm_stop");
+
+        assert_eq!(event.kind, EVENT_KIND_PROMPT_SETTLED);
+        let payload: serde_json::Value =
+            serde_json::from_str(&event.payload_json).expect("payload is json");
+        assert_eq!(payload["status"], "cancelled");
+        assert_eq!(payload["stop_reason"], "cancelled");
+        assert_eq!(payload["error_code"], serde_json::Value::Null);
     }
 
     #[test]

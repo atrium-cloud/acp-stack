@@ -920,10 +920,11 @@ fn row_projection(event: &Value) -> (Value, Value, Value, Value) {
     )
 }
 
+/// The conversation kinds a placebo turn writes: its chunks, then its settle row.
 fn conversation(events: &[Value]) -> Vec<(Value, Value, Value, Value)> {
     events
         .iter()
-        .filter(|event| event["kind"] == "session.update")
+        .filter(|event| event["kind"] == "session.update" || event["kind"] == "prompt.settled")
         .map(row_projection)
         .collect()
 }
@@ -1002,7 +1003,7 @@ async fn a_breakpoint_fork_carries_the_parent_conversation_strictly_before_the_n
 
     let cut = user_chunk_position(&parent_events, &second_prompt_id);
     let expected = conversation(&parent_events[..cut]);
-    assert_eq!(expected.len(), PLACEBO_CONVERSATION_ROWS_PER_TURN);
+    assert_eq!(expected.len(), PLACEBO_CONVERSATION_ROWS_PER_TURN + 1);
     let child_events = session_events(&harness, &child_id).await;
     assert_eq!(
         inherited_rows(&child_events),

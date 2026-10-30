@@ -863,11 +863,11 @@ async fn prompt_usage_leaves_the_agent_as_last_actor() {
 }
 
 #[tokio::test]
-async fn prompt_without_usage_records_no_usage_event() {
+async fn a_turn_without_usage_still_closes_on_prompt_settled() {
     let harness = Harness::spawn().await;
     let session_id = create_session(&harness).await;
 
-    let (_, status) = submit_and_settle(&harness, &session_id, "no usage here").await;
+    let (prompt_id, status) = submit_and_settle(&harness, &session_id, "no usage here").await;
     assert_eq!(status, "completed");
 
     let events = harness
@@ -881,6 +881,51 @@ async fn prompt_without_usage_records_no_usage_event() {
             .all(|event| event.kind != "prompt.usage_reported"),
         "events = {events:?}"
     );
+    let settled = events.last().expect("the turn wrote events");
+    assert_eq!(settled.kind, "prompt.settled", "events = {events:?}");
+    let payload: Value = serde_json::from_str(&settled.payload_json).expect("payload json");
+    assert_eq!(
+        payload,
+        json!({
+            "prompt_id": prompt_id,
+            "status": "completed",
+            "stop_reason": "end_turn",
+            "error_code": null,
+        })
+    );
+}
+
+/// The failure answers right behind the turn's chunks, so their rows can still be
+/// queued when it lands; the settle waits for them.
+#[tokio::test]
+async fn a_failed_turn_closes_on_prompt_settled_after_its_last_chunk() {
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.extend([
+            "--prompt-inference-error-after-update".into(),
+            "upstream returned 503 Service Unavailable".into(),
+        ]);
+    })
+    .await;
+    let session_id = create_session(&harness).await;
+
+    let (prompt_id, status) = submit_and_settle(&harness, &session_id, "fail mid-stream").await;
+    assert_eq!(status, "errored");
+
+    let events = harness
+        .state
+        .read(move |store| store.query_session_events(&session_id, None, 100))
+        .await
+        .expect("session events");
+    let agent_chunks = events
+        .iter()
+        .filter(|event| event.kind == "session.update" && event.source == "acp")
+        .count();
+    assert_eq!(agent_chunks, 2, "events = {events:?}");
+    let settled = events.last().expect("the turn wrote events");
+    assert_eq!(settled.kind, "prompt.settled", "events = {events:?}");
+    let payload: Value = serde_json::from_str(&settled.payload_json).expect("payload json");
+    assert_eq!(payload["prompt_id"], prompt_id);
+    assert_eq!(payload["error_code"], "agent.inference_5xx");
 }
 
 #[tokio::test]

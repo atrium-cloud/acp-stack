@@ -59,6 +59,9 @@ pub const EVENT_KIND_PROMPT_STALL_RESOLVED: &str = "prompt.stall_resolved";
 pub const EVENT_KIND_PROMPT_ERRORED: &str = "prompt.errored";
 /// The agent's `PromptResponse` for a settled turn carried token usage.
 pub const EVENT_KIND_PROMPT_USAGE_REPORTED: &str = "prompt.usage_reported";
+/// The prompt row took its terminal status; the last event of every settled turn.
+pub const EVENT_KIND_PROMPT_SETTLED: &str = "prompt.settled";
+pub const PROMPT_SETTLED_EVENT_MESSAGE: &str = "prompt settled";
 /// MCP servers were dropped because the agent does not advertise their transport.
 pub const EVENT_KIND_MCP_SESSION_SKIPPED: &str = "mcp.session_skipped";
 /// A configured mode or model was ignored because the agent lacks the capability.
@@ -291,6 +294,22 @@ pub struct PromptSettlement<'a> {
     pub error_message: Option<&'a str>,
     pub failure_class: Option<&'a str>,
     pub failure_detail_json: Option<&'a str>,
+}
+
+/// Payload naming how a prompt ended, shared by `prompt.settled` and `prompt.stall_resolved`.
+pub fn prompt_outcome_payload(
+    prompt_id: &str,
+    status: PromptStatus,
+    stop_reason: Option<&str>,
+    error_code: Option<&str>,
+) -> String {
+    serde_json::json!({
+        "prompt_id": prompt_id,
+        "status": status.as_str(),
+        "stop_reason": stop_reason,
+        "error_code": error_code,
+    })
+    .to_string()
 }
 
 /// What `settle_prompt` did with the row.

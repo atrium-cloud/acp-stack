@@ -7,7 +7,7 @@ use super::*;
 /// `query_session_status_window`'s statement, kept apart so its query plan is testable.
 /// ?1 window start, ?2 user actor, ?3 agent actor, ?4 ACP event source, ?5 target id or
 /// NULL, ?6 row limit, ?7 the demotion event kind, ?8 the parent whose subagents to read,
-/// or NULL for the sessions that are no subagent's.
+/// or NULL for the sessions that are no subagent's, ?9 the prompt settle event kind.
 pub(super) const SESSION_STATUS_WINDOW_SQL: &str = r#"
             WITH scoped_sessions AS (
                 SELECT id, updated_at
@@ -71,7 +71,8 @@ pub(super) const SESSION_STATUS_WINDOW_SQL: &str = r#"
                       -- A demotion is bookkeeping, not activity: without this
                       -- exclusion a bulk startup reconcile would stamp every
                       -- historical session into the window as user activity.
-                      AND latest.kind <> ?7
+                      -- A settle already counts through its prompt row.
+                      AND latest.kind NOT IN (?7, ?9)
                     ORDER BY latest.created_at DESC, latest.id DESC
                     LIMIT 1
                 )
@@ -494,6 +495,8 @@ impl StateStore {
                        3 AS priority
                 FROM events e
                 JOIN active_sessions s ON s.id = e.session_id
+                -- A settle already counts through its prompt row.
+                WHERE e.kind <> ?6
                 UNION ALL
                 SELECT p.session_id,
                        p.created_at AS activity_at,
@@ -550,6 +553,7 @@ impl StateStore {
                 SESSION_ACTIVITY_ACTOR_AGENT,
                 SESSION_ACTIVITY_ACTOR_USER,
                 i64::from(limit),
+                EVENT_KIND_PROMPT_SETTLED,
             ],
             |row| {
                 Ok(SessionActivityRecord {
@@ -590,6 +594,7 @@ impl StateStore {
                 i64::from(limit),
                 EVENT_KIND_SESSION_AVAILABLE,
                 parent_session_id,
+                EVENT_KIND_PROMPT_SETTLED,
             ],
             |row| {
                 let prompt_id: Option<String> = row.get(11)?;
@@ -1328,6 +1333,7 @@ mod tests {
                     10_i64,
                     EVENT_KIND_SESSION_AVAILABLE,
                     parent_session_id,
+                    EVENT_KIND_PROMPT_SETTLED,
                 ],
             );
             for step in &plan {

@@ -139,6 +139,9 @@ impl AgentSupervisor {
                 result = bridge_call => Outcome::Settled(result.map(Box::new)),
                 _ = cancel_inner.cancelled() => Outcome::Cancelled,
             };
+            // Trailing chunks can still sit behind the notification worker on any
+            // outcome; the anchor and the settle's events follow every accepted one.
+            bridge.drain_session_events().await;
             if let Outcome::Settled(Ok(response)) = &outcome {
                 // An adapter on the AIR dialect never sees the acpStack key and
                 // so can never echo it. Its fork point is translated from the
@@ -170,9 +173,6 @@ impl AgentSupervisor {
                         );
                     }
                 }
-                // Trailing chunks can still sit behind the notification worker
-                // when the response lands, and the anchor is the last of them.
-                bridge.drain_session_events().await;
                 if let Some(agent_message_id) = bridge
                     .take_last_agent_message_id(&agent_session_id_owned)
                     .await
@@ -232,7 +232,12 @@ impl AgentSupervisor {
                             return Ok(());
                         }
                     };
-                    for event in stall_resolved.iter().chain(terminal.session_event.as_ref()) {
+                    let settled = terminal.settled_event(&prompt_id_owned);
+                    for event in stall_resolved
+                        .iter()
+                        .chain(terminal.session_event.as_ref())
+                        .chain(std::iter::once(&settled))
+                    {
                         if let Err(err) = store.append_session_event_with_source(
                             &session_id_owned,
                             event.level,
