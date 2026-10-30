@@ -492,6 +492,7 @@ fn run_supabase_sql(args: SupabaseSqlArgs, output: OutputFormat) -> Result<()> {
 
 fn run_supabase_enable(args: SupabaseEnableArgs, output: OutputFormat) -> Result<()> {
     validate_secret_ref(&args.api_key_ref)?;
+    let _mutation = acquire_agent_config_mutation_file_lock(&config::default_config_path()?)?;
     let mut config = Config::load_from_default_path()?;
     let supabase = enabled_supabase_config(args.url, Some(args.schema), Some(args.api_key_ref));
     apply_supabase_config(&mut config, supabase.clone())?;
@@ -514,6 +515,7 @@ fn run_supabase_enable(args: SupabaseEnableArgs, output: OutputFormat) -> Result
 }
 
 fn run_supabase_disable(output: OutputFormat) -> Result<()> {
+    let _mutation = acquire_agent_config_mutation_file_lock(&config::default_config_path()?)?;
     let mut config = Config::load_from_default_path()?;
     let mut supabase = config
         .logging

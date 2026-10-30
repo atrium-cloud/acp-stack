@@ -8,7 +8,7 @@ use crate::config::{
     derive_data_source_name,
 };
 use crate::error::{Result, StackError};
-use crate::fs_util::{atomic_write_owner_only, home_dir};
+use crate::fs_util::{acquire_agent_config_mutation_file_lock, atomic_write_owner_only, home_dir};
 use crate::runtime::sandbox;
 use crate::runtime::workspace_sources::workspace_init::{
     MaterializeOutcome, MaterializeReport, materialize_workspace,
@@ -199,10 +199,14 @@ fn run_code_source(command: CodeSourceCommand, output: OutputFormat) -> Result<(
             print_code_sources(&config, output)
         }
         CodeSourceCommand::Add(args) => {
+            let mutation =
+                acquire_agent_config_mutation_file_lock(&config::default_config_path()?)?;
             let mut config = Config::load_from_default_path()?;
             let source = code_source_from_args(&args);
             let name = add_code_source_to_config(&mut config, source)?;
             write_default_config(&config)?;
+            // A sync can run for minutes; other config writers need not wait it out.
+            drop(mutation);
             run_optional_sync_after_add("code", &name, !args.no_sync, &config, output)
         }
     }
@@ -215,10 +219,13 @@ fn run_data_source(command: DataSourceCommand, output: OutputFormat) -> Result<(
             print_data_sources(&config, output)
         }
         DataSourceCommand::Add(args) => {
+            let mutation =
+                acquire_agent_config_mutation_file_lock(&config::default_config_path()?)?;
             let mut config = Config::load_from_default_path()?;
             let source = data_source_from_args(&args);
             let name = add_data_source_to_config(&mut config, source)?;
             write_default_config(&config)?;
+            drop(mutation);
             run_optional_sync_after_add("data", &name, !args.no_sync, &config, output)
         }
     }
@@ -237,6 +244,8 @@ fn run_sandbox(command: SandboxCommand, output: OutputFormat) -> Result<()> {
             print_sandbox_status(&config, output)
         }
         SandboxCommand::Set(args) => {
+            let _mutation =
+                acquire_agent_config_mutation_file_lock(&config::default_config_path()?)?;
             let mut config = Config::load_from_default_path()?;
             apply_sandbox_set(&mut config, &args)?;
             write_default_config(&config)?;

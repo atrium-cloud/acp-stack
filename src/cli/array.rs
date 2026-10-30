@@ -9,7 +9,7 @@ use crate::config::{
     DEFAULT_CUSTOM_MODEL_CONTEXT, DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS, LocalSessionAuth,
 };
 use crate::error::{Result, StackError};
-use crate::fs_util::{atomic_write_owner_only, home_dir};
+use crate::fs_util::{acquire_agent_config_mutation_file_lock, atomic_write_owner_only, home_dir};
 use crate::runtime::agent::acp_bridge::AgentSessionConfigCategory;
 use crate::runtime::agent::agent_headless_config::provision_agent_headless_config_transition;
 use crate::runtime::agent::config_io::WorkloadHome;
@@ -428,6 +428,7 @@ async fn query_daemon_array_status_async(
 
 fn run_array_toggle(enabled: bool, output: OutputFormat) -> Result<()> {
     let config_path = config::default_config_path()?;
+    let _mutation = acquire_agent_config_mutation_file_lock(&config_path)?;
     let mut config = Config::load_from_path(&config_path)?;
     config.array.enabled = enabled;
     write_config(&config_path, &config)?;
@@ -446,6 +447,7 @@ fn run_array_toggle(enabled: bool, output: OutputFormat) -> Result<()> {
 fn run_array_add(args: ArrayAddArgs, output: OutputFormat) -> Result<()> {
     let home = home_dir()?;
     let config_path = config::default_config_path()?;
+    let _mutation = acquire_agent_config_mutation_file_lock(&config_path)?;
     let mut config = Config::load_from_path(&config_path)?;
     if config
         .array
@@ -576,6 +578,7 @@ fn run_array_set(args: ArraySetArgs, output: OutputFormat) -> Result<()> {
     }
     let home = home_dir()?;
     let config_path = config::default_config_path()?;
+    let _mutation = acquire_agent_config_mutation_file_lock(&config_path)?;
     let mut config = Config::load_from_path(&config_path)?;
     let target_index = config
         .array

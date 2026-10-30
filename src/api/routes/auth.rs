@@ -60,6 +60,7 @@ pub(crate) async fn persist_local_session_auth(
     state: &AppState,
     session_auth: LocalSessionAuth,
 ) -> std::result::Result<(), StackError> {
+    let _mutation = state.lock_agent_config_mutation().await?;
     let mut config = crate::config::Config::load_from_path(&state.runtime_paths.config_path)?;
     config.local.session_auth = session_auth;
     let canonical = config.to_canonical_toml()?;

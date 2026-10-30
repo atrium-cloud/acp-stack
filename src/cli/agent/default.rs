@@ -1,6 +1,6 @@
 use crate::config::{self, Config};
 use crate::error::{Result, StackError};
-use crate::fs_util::atomic_write_owner_only;
+use crate::fs_util::{acquire_agent_config_mutation_file_lock, atomic_write_owner_only};
 
 use super::super::core::{OutputFormat, print_json};
 use super::{AgentDefaultArgs, AgentDefaultCommand};
@@ -13,6 +13,7 @@ pub(super) fn run_agent_default(args: AgentDefaultArgs, output: OutputFormat) ->
 
 fn run_agent_default_set(agent_id: String, output: OutputFormat) -> Result<()> {
     let config_path = config::default_config_path()?;
+    let _mutation = acquire_agent_config_mutation_file_lock(&config_path)?;
     let mut config = Config::load_from_path(&config_path)?;
     let agent = config
         .array

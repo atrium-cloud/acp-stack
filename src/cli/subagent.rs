@@ -5,7 +5,7 @@ use crate::config::{
     DEFAULT_CUSTOM_MODEL_CONTEXT, DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
 };
 use crate::error::{Result, StackError};
-use crate::fs_util::{atomic_write_owner_only, home_dir};
+use crate::fs_util::{acquire_agent_config_mutation_file_lock, atomic_write_owner_only, home_dir};
 use crate::runtime::agent::acp_bridge::AgentSessionConfigCategory;
 use crate::runtime::agent::agent_headless_config::{
     OPENCODE_AGENT_ID, OPENCODE_DISABLED_SMALL_MODEL, provision_agent_headless_config,
@@ -143,6 +143,7 @@ fn run_subagent_status() -> Result<()> {
 fn run_subagent_match() -> Result<()> {
     let home = home_dir()?;
     let config_path = config::default_config_path()?;
+    let _mutation = acquire_agent_config_mutation_file_lock(&config_path)?;
     let mut config = Config::load_from_path(&config_path)?;
     let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
     let entry =
@@ -186,6 +187,7 @@ fn run_subagent_match() -> Result<()> {
 fn run_subagent_disable() -> Result<()> {
     let home = home_dir()?;
     let config_path = config::default_config_path()?;
+    let _mutation = acquire_agent_config_mutation_file_lock(&config_path)?;
     let mut config = Config::load_from_path(&config_path)?;
     let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
     let entry =
@@ -218,6 +220,7 @@ fn run_subagent_disable() -> Result<()> {
 fn run_subagent_free() -> Result<()> {
     let home = home_dir()?;
     let config_path = config::default_config_path()?;
+    let _mutation = acquire_agent_config_mutation_file_lock(&config_path)?;
     let mut config = Config::load_from_path(&config_path)?;
     let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
     let entry =
@@ -297,6 +300,7 @@ fn run_subagent_free() -> Result<()> {
 fn run_subagent_set(args: SubagentSetArgs) -> Result<()> {
     let home = home_dir()?;
     let config_path = config::default_config_path()?;
+    let _mutation = acquire_agent_config_mutation_file_lock(&config_path)?;
     let mut config = Config::load_from_path(&config_path)?;
     let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
     let entry =

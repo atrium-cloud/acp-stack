@@ -5,8 +5,8 @@ use crate::cli::core::{OutputFormat, print_json};
 use crate::config::{Config, StackUpdatePolicy};
 use crate::error::{Result, StackError};
 use crate::fs_util::{
-    atomic_write_owner_only, create_dir_owner_only, home_dir, parent_dir, pre_create_owner_only,
-    set_owner_only_file,
+    acquire_agent_config_mutation_file_lock, atomic_write_owner_only, create_dir_owner_only,
+    home_dir, parent_dir, pre_create_owner_only, set_owner_only_file,
 };
 use crate::runtime::install::stack_updater::{
     StackUpdateOptions, StackUpdateTarget, check_stack_update, install_stack_update,
@@ -152,6 +152,7 @@ fn run_update_set(args: UpdateSetArgs) -> Result<()> {
         });
     }
     let config_path = crate::config::default_config_path()?;
+    let _mutation = acquire_agent_config_mutation_file_lock(&config_path)?;
     let mut config = Config::load_from_path(&config_path)?;
     if let Some(policy) = args.policy {
         config.updates.acp_stack.policy = match policy {

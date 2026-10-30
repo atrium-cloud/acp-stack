@@ -9,8 +9,8 @@ use crate::cli::core::{
 use crate::config::{AgentAutoUpdateConfig, Config, DEFAULT_AGENT_AUTO_UPDATE_FREQUENCY};
 use crate::error::{Result, StackError};
 use crate::fs_util::{
-    atomic_write_owner_only, create_dir_owner_only, home_dir, parent_dir, pre_create_owner_only,
-    set_owner_only_file,
+    acquire_agent_config_mutation_file_lock, atomic_write_owner_only, create_dir_owner_only,
+    home_dir, parent_dir, pre_create_owner_only, set_owner_only_file,
 };
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::runtime::install::agent_updater::{
@@ -47,6 +47,7 @@ fn run_agent_update_set(args: AgentUpdateSetArgs) -> Result<()> {
         });
     }
     let config_path = crate::config::default_config_path()?;
+    let _mutation = acquire_agent_config_mutation_file_lock(&config_path)?;
     let mut config = Config::load_from_path(&config_path)?;
     // An escape-hatch agent (`[agent.install]`, no registry entry) has nothing
     // to auto-update, so reject up front rather than writing an

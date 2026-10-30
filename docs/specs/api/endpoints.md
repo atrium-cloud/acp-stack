@@ -296,7 +296,7 @@ The API withholds secret values from every response. Auth keys live outside the 
     - `400 request.invalid_param` (field `If-Match`) is returned for a header outside that grammar, including a bare unquoted revision.
     - `409 config.revision_mismatch` is returned when no strong entity tag in `If-Match` names the on-disk config's revision, so an export, edit, and import never overwrites a config write that landed in between. A weak tag (`W/"..."`) never matches. The caller exports again and reapplies its edit. An on-disk config that fails to load returns that load error.
 - Notes:
-    - Validates and writes canonical TOML. The revision check and the write run under the config mutation lock, so a writer holding that lock cannot land between them.
+    - Validates and writes canonical TOML. The revision check and the write run under the cross-process config mutation lock that every config writer takes, the daemon's routes and the `acps` commands alike, so no config write lands between them.
     - Without `If-Match`, the import replaces the config unconditionally. `dry_run=true` ignores the header.
 
 ### `GET /v1/secrets`

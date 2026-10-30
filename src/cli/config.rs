@@ -1,7 +1,8 @@
 use crate::config::{self, Config, LocalSessionAuth};
 use crate::error::{Result, StackError};
 use crate::fs_util::{
-    atomic_write_owner_only, create_dir_owner_only, home_dir, parent_dir, write_new_file_owner_only,
+    acquire_agent_config_mutation_file_lock, atomic_write_owner_only, create_dir_owner_only,
+    home_dir, parent_dir, write_new_file_owner_only,
 };
 use crate::secrets::SecretStore;
 use base64::Engine;
@@ -198,12 +199,16 @@ fn run_config_import(args: ConfigImportArgs, output: OutputFormat) -> Result<()>
     let target_dir = parent_dir(&target)?;
     create_dir_owner_only(target_dir)?;
 
+    // Taken after the admin-key prompt, so an operator typing never holds it.
+    let mutation = acquire_agent_config_mutation_file_lock(&target)?;
     let replaced = target.exists();
     if replaced {
         if !output.is_json() {
             print_config_import_progress(true);
         }
         atomic_write_owner_only(&target, payload.canonical.as_bytes())?;
+        // The daemon's local-session-access write takes the same lock.
+        drop(mutation);
         let runtime_applied = apply_imported_local_session_auth_to_running_daemon(
             previous_config.as_ref(),
             &admin_key,
