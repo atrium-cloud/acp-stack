@@ -224,7 +224,7 @@ Cancelling a session settles its still-pending requests as `cancelled` and answe
 `[permissions].acp_prompt_action = "approve"` answers agent-raised requests as they arrive, for runtimes that operate unattended:
 
 - The request is recorded and decided approved in one step, with `policy` as the deciding principal and `auto-approved by policy` as the reason, so the durable trail separates it from an operator decision and from a timeout.
-- The agent is answered with an option it offered, chosen the way an unattended grant always is: the first `allow_once`, else the first `allow_always`. An agent that offered no such option leaves nothing to select, so that request waits for a decision like any other.
+- The agent is answered with an option it offered, chosen the way an unattended grant always is: the first `allow_once`, else the first `allow_always`. An agent that offered no such option leaves nothing to select, so that request is answered with the cancelled outcome at once and records no permission row.
 - Such a request is terminal before the call returns, so it carries no expiry and never appears in the pending queue.
 - Mediated command requests are unaffected: they wait for a decision under every value of this setting.
 - Requests are answered on arrival whether or not a cancel is in flight, so under `approve` the cancelled-outcome sweep above has nothing of its own to answer: the agent ends its turn on the `session/cancel` notification rather than on a permission answer.

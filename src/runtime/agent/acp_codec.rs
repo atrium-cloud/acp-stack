@@ -917,12 +917,16 @@ pub(crate) async fn resolve_acp_permission(
         .first()
         .map(|opt| opt.option_id.0.to_string());
 
-    // Policy answers the request as it arrives, but only when the agent offered
-    // an option that grants: with nothing to select, an approval has no id to
-    // name, so the request falls back to being asked.
-    if service.acp_prompt_action() == AcpPromptAction::Approve
-        && let Some(option) = allow_kind_option(&request)
-    {
+    // Policy answers the request as it arrives. An agent that offered no option
+    // that grants leaves an approval no id to name, so the request is cancelled at once.
+    if service.acp_prompt_action() == AcpPromptAction::Approve {
+        let Some(option) = allow_kind_option(&request) else {
+            tracing::info!(
+                session_id = %session_id,
+                "cancelled an agent permission request that offered no option to grant"
+            );
+            return Ok(RequestPermissionOutcome::Cancelled);
+        };
         let option_id = option.option_id.0.to_string();
         return match service
             .approve_by_policy(NewPermission {

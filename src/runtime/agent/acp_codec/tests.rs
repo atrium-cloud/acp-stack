@@ -669,30 +669,22 @@ async fn policy_approve_answers_the_request_on_arrival() {
 }
 
 /// An agent that offers no option granting the request has no id for an
-/// approval to name, so the request is asked like any other.
+/// approval to name, so the request is cancelled on arrival and never waits.
 #[tokio::test]
-async fn policy_approve_asks_when_no_option_grants() {
+async fn policy_approve_cancels_at_once_when_no_option_grants() {
     let (_dir, service) = fresh_service_with_action(AcpPromptAction::Approve).await;
     let request = request_with_options(vec![
         ("deny-once", PermissionOptionKind::RejectOnce),
         ("deny-always", PermissionOptionKind::RejectAlways),
     ]);
-    let service_for_task = service.clone();
     let sink: Arc<dyn SessionEventSink> = Arc::new(RecordingSink::default());
-    let outcome_task = tokio::spawn(async move {
-        resolve_acp_permission(&service_for_task, &sink, request, None).await
-    });
 
-    let permission_id = await_pending_permission(&service).await;
-    service
-        .deny(&permission_id, None, "session-key")
+    let outcome = resolve_acp_permission(&service, &sink, request, None)
         .await
-        .expect("deny");
-    let outcome = outcome_task
-        .await
-        .expect("task joins")
         .expect("permission response");
+
     assert_eq!(outcome, RequestPermissionOutcome::Cancelled);
+    assert!(service.pending(10).await.expect("pending").is_empty());
 }
 
 /// Only agent-raised requests are answered by the knob; a mediated command's
@@ -722,17 +714,6 @@ async fn policy_approve_leaves_command_requests_asking() {
     let pending = service.pending(10).await.expect("pending");
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].source, "command");
-}
-
-async fn await_pending_permission(service: &PermissionService) -> String {
-    for _ in 0..50 {
-        let pending = service.pending(10).await.expect("pending");
-        if let Some(first) = pending.first() {
-            return first.id.clone();
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    panic!("permission row must appear");
 }
 
 #[tokio::test]
