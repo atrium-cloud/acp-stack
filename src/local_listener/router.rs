@@ -3,7 +3,7 @@ use axum::body::Body;
 use axum::extract::Request;
 use axum::http::{Method, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use axum::routing::{get, post};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
@@ -53,9 +53,16 @@ use crate::api::routes::ws::{ws_connections_handler, ws_sessions_handler};
 use crate::api::{self, AppState};
 use crate::auth::KeyKind;
 use crate::config::LocalSessionAuth;
+use crate::envelope::ApiError;
+
+/// A mounted session-tier route refused while keyless local access is off, told apart from an
+/// unmatched route's `request.not_found`.
+const LOCAL_SESSION_ACCESS_DISABLED_CODE: &str = "auth.local_session_access_disabled";
+const LOCAL_SESSION_ACCESS_DISABLED_MESSAGE: &str =
+    "session-tier routes on the local socket require `[local].session_auth = \"keyless\"`";
 
 /// Build the Axum router the internal local socket serves. Low-risk
-/// observability routes are always keyless; session-tier routes 404 unless
+/// observability routes are always keyless; session-tier routes 403 unless
 /// `[local].session_auth = "keyless"`. Admin routes are NEVER mounted here.
 pub fn build_local_router(state: AppState) -> Router {
     let limit = state.max_request_bytes;
@@ -203,7 +210,11 @@ async fn enforce_local_session_access(
     {
         return next.run(req).await;
     }
-    StatusCode::NOT_FOUND.into_response()
+    ApiError::new(
+        LOCAL_SESSION_ACCESS_DISABLED_CODE,
+        LOCAL_SESSION_ACCESS_DISABLED_MESSAGE,
+    )
+    .into_response_with(StatusCode::FORBIDDEN)
 }
 
 fn is_always_keyless_local_route(method: &Method, path: &str) -> bool {
@@ -298,7 +309,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_router_rejects_mutating_and_secret_bearing_routes() {
+    async fn local_router_refuses_session_tier_routes_while_keyless_access_is_off() {
         let app = build_local_router(test_state());
         for (method, uri) in [
             (Method::GET, "/v1/config/export"),
@@ -319,13 +330,31 @@ mod tests {
             (Method::POST, "/v1/sessions"),
             (Method::POST, "/v1/sessions/session_1/prompt"),
             (Method::GET, "/v1/sessions/-/changes"),
+            (Method::POST, "/v1/permissions/perm_1/approve"),
+        ] {
+            let request = Request::builder()
+                .method(method.clone())
+                .uri(uri)
+                .body(Body::empty())
+                .expect("request");
+            let response = app.clone().oneshot(request).await.expect("response");
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {uri}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            let body: serde_json::Value = serde_json::from_slice(&body).expect("envelope");
+            assert_eq!(
+                body["error"]["code"], LOCAL_SESSION_ACCESS_DISABLED_CODE,
+                "{method} {uri}"
+            );
+        }
+        for (method, uri) in [
             (Method::POST, "/v1/auth/session-key/regenerate"),
             (Method::GET, "/v1/secrets"),
             (Method::POST, "/v1/config/import"),
             (Method::POST, "/v1/deps/apply"),
             (Method::POST, "/v1/ws/connections/disconnect"),
             (Method::POST, "/v1/agent/start"),
-            (Method::POST, "/v1/permissions/perm_1/approve"),
         ] {
             let status = status_for(app.clone(), method.clone(), uri).await;
             assert!(

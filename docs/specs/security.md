@@ -71,12 +71,13 @@ Every rejected authentication is recorded in the `auth_failures` table with a st
 
 Hardening errors use stable codes in the standard error envelope:
 
-| Status | Code                      | Trigger                                          |
-| ------ | ------------------------- | ------------------------------------------------ |
-| `401`  | `auth.wrong_kind`         | key valid but used on the wrong tier             |
-| `429`  | `auth.rate_limited`       | per-IP, per-key, or unauthenticated bucket empty |
-| `403`  | `auth.origin_not_allowed` | CORS / WebSocket Origin not in allowlist         |
-| `413`  | `request.too_large`       | request body exceeds the configured cap          |
+| Status | Code                                 | Trigger                                                          |
+| ------ | ------------------------------------ | ---------------------------------------------------------------- |
+| `401`  | `auth.wrong_kind`                    | key valid but used on the wrong tier                             |
+| `429`  | `auth.rate_limited`                  | per-IP, per-key, or unauthenticated bucket empty                 |
+| `403`  | `auth.origin_not_allowed`            | CORS / WebSocket Origin not in allowlist                         |
+| `403`  | `auth.local_session_access_disabled` | session-tier route on the local socket with keyless access off   |
+| `413`  | `request.too_large`                  | request body exceeds the configured cap                          |
 
 ## Permissions
 

@@ -24,7 +24,7 @@ The local Unix-socket router always serves selected low-risk daemon-backed route
 - WebSocket summaries
 - the security diagnostic
 
-Session-tier HTTP routes are also mounted on the local socket and serve only while `[local].session_auth = "keyless"` is active, returning 404 otherwise. The local socket omits admin-tier routes, auth rotation, config import, secret mutation, dependency apply, WebSocket disconnects, and WebSocket upgrades.
+Session-tier HTTP routes are also mounted on the local socket and serve only while `[local].session_auth = "keyless"` is active, returning `403 auth.local_session_access_disabled` otherwise. The local socket omits admin-tier routes, auth rotation, config import, secret mutation, dependency apply, WebSocket disconnects, and WebSocket upgrades.
 
 ## Bootstrap Init
 
