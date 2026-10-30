@@ -385,7 +385,10 @@ The API withholds secret values from every response. Auth keys live outside the 
 
 - Tier: `admin`
 - Request: query parameters `require_idle=true` and `auto=true`.
-- Response: `{ "stopped_at", "started_at", "prior_exit_status"?, "capabilities", "pid"? }` (the same handshake snapshot as `GET /v1/agent/capabilities`), or blockers when `require_idle=true` is set and restart is blocked.
+- Response: an object whose `outcome` names its shape.
+    - `restarted`: `{ "outcome", "stopped_at", "started_at", "prior_exit_status"?, "capabilities", "pid"? }`, with the same handshake snapshot as `GET /v1/agent/capabilities`.
+    - `blocked`: `{ "outcome", "restarted": false, "target_id", "blockers": [...] }` when `require_idle=true` is set and a blocker holds the restart. Blocker rows match `GET /v1/agent/restart-blockers`.
+    - `queued`: `{ "outcome", "queued": true, "already_queued", "target_id" }` for `auto=true`. `already_queued` is true when a queued restart for the target was already waiting.
 - Notes:
     - Restarts the supervised agent process. Start/restart uses the current `[agent]` config and the shared resolved environment, including selected provider credential bundles. Provider/model changes that require process reload are applied after restart.
     - `require_idle=true` returns blockers instead of restarting when active sessions have in-flight prompts or pending ACP permission requests.
@@ -688,8 +691,8 @@ All skill routes load config leniently, dropping individually invalid `[[skills.
 ### `POST /v1/array/targets/{target_id}/restart`
 
 - Tier: `admin`
-- Request: none.
-- Response: standard envelope.
+- Request: query parameters `require_idle=true` and `auto=true`.
+- Response: the `outcome`-tagged object of `POST /v1/agent/restart`.
 - Notes: restarts one target's process.
 
 #### Array Addressing Rules

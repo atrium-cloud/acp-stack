@@ -2566,20 +2566,48 @@
         ]
       },
       "AgentRestartResultResponse": {
-        "anyOf": [
+        "oneOf": [
           {
             "$ref": "#/$defs/response/AgentRestartResponse",
-            "title": "Restarted"
+            "type": "object",
+            "properties": {
+              "outcome": {
+                "type": "string",
+                "const": "restarted"
+              }
+            },
+            "required": [
+              "outcome"
+            ]
           },
           {
             "$ref": "#/$defs/response/AgentRestartBlockedResponse",
-            "title": "Blocked"
+            "type": "object",
+            "properties": {
+              "outcome": {
+                "type": "string",
+                "const": "blocked"
+              }
+            },
+            "required": [
+              "outcome"
+            ]
           },
           {
             "$ref": "#/$defs/response/AgentRestartQueuedResponse",
-            "title": "Queued"
+            "type": "object",
+            "properties": {
+              "outcome": {
+                "type": "string",
+                "const": "queued"
+              }
+            },
+            "required": [
+              "outcome"
+            ]
           }
-        ]
+        ],
+        "description": "`outcome` names which of the three shapes the result takes."
       },
       "AgentRestartResponse": {
         "type": "object",

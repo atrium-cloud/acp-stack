@@ -956,7 +956,7 @@ fn run_array_daemon_with_auto(
             let agent_id = result["agent_id"].as_str().unwrap_or("?");
             if result["status"].as_str() == Some("ok") {
                 let response = &result["response"];
-                if response["queued"].as_bool() == Some(true) {
+                if response["outcome"] == "queued" {
                     let suffix = if response["already_queued"].as_bool() == Some(true) {
                         " already_queued"
                     } else {

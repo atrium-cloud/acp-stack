@@ -68,7 +68,7 @@ fn print_agent_daemon_result(
         print_json(body.get("data").unwrap_or(body))?;
         return Ok(());
     }
-    if label == "restart" && body["data"]["queued"].as_bool() == Some(true) {
+    if label == "restart" && body["data"]["outcome"] == "queued" {
         let target_id = body["data"]["target_id"].as_str().unwrap_or("unknown");
         let already_queued = body["data"]["already_queued"].as_bool() == Some(true);
         println!("agent restart: queued");

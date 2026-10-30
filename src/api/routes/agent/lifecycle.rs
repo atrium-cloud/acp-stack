@@ -180,8 +180,9 @@ pub(crate) struct AgentRestartQuery {
     auto: bool,
 }
 
+/// `outcome` names which of the three shapes the result takes.
 #[derive(Serialize, schemars::JsonSchema)]
-#[serde(untagged)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
 pub(crate) enum AgentRestartResultResponse {
     // Boxed to keep the variants balanced for clippy's `large_enum_variant`.
     Restarted(Box<AgentRestartResponse>),
@@ -474,5 +475,29 @@ pub(crate) async fn cancel_pending_acp_permissions_for_target(
                 "failed to cancel pending ACP permission before agent stop",
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_queued_restart_names_its_outcome_beside_its_flags() {
+        let queued = AgentRestartResultResponse::Queued(AgentRestartQueuedResponse {
+            queued: true,
+            already_queued: false,
+            target_id: "primary".to_owned(),
+        });
+
+        assert_eq!(
+            serde_json::to_value(queued).expect("restart result serializes"),
+            serde_json::json!({
+                "outcome": "queued",
+                "queued": true,
+                "already_queued": false,
+                "target_id": "primary",
+            })
+        );
     }
 }

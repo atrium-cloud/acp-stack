@@ -19,6 +19,7 @@ async fn agent_restart_starts_when_not_running() {
     assert_eq!(status, StatusCode::OK, "body: {body_text}");
     let body: Value = serde_json::from_str(&body_text).expect("restart json");
     assert_eq!(body["ok"], true);
+    assert_eq!(body["data"]["outcome"], "restarted");
     assert!(body["data"]["started_at"].as_str().is_some());
     assert!(body["data"]["stopped_at"].as_str().is_some());
     assert!(body["data"]["capabilities"].is_object());
