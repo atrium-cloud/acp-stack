@@ -173,6 +173,9 @@ pub enum StackError {
     #[error("config already exists at {path}; pass --force to replace it")]
     ConfigExists { path: PathBuf },
 
+    #[error("config on disk changed since the `If-Match` revision was exported")]
+    ConfigRevisionMismatch,
+
     #[error("import data was not valid base64: {source}")]
     ImportBase64Decode {
         #[source]

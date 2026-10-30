@@ -203,10 +203,25 @@ admin_key_ref = "ACP_STACK_ADMIN_KEY"
     assert!(events.is_empty(), "dry-run must not audit config import");
 }
 
+/// The exported `revision` as the `If-Match` entity tag a standards client sends.
+async fn exported_entity_tag(harness: &ServerHarness) -> String {
+    let body: Value = reqwest::Client::new()
+        .get(format!("{}/v1/config/export", harness.base_url))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send")
+        .json()
+        .await
+        .expect("json");
+    let revision = body["data"]["revision"].as_str().expect("revision string");
+    format!("\"{revision}\"")
+}
+
 // The only test here that imports for real: `acp_trace` is a process-wide flag, so a second
 // importing test running in parallel would race this one's assertion on it.
 #[tokio::test]
-async fn config_import_applies_local_session_auth_and_acp_trace_to_runtime() {
+async fn config_import_applies_runtime_gates_without_and_with_a_matching_revision() {
     let harness = ServerHarness::spawn().await;
     assert_eq!(
         *harness.local_session_auth.read().await,
@@ -224,7 +239,7 @@ async fn config_import_applies_local_session_auth_and_acp_trace_to_runtime() {
     let response = reqwest::Client::new()
         .post(format!("{}/v1/config/import", harness.base_url))
         .header("Authorization", format!("Bearer {ADMIN_KEY}"))
-        .body(toml)
+        .body(toml.clone())
         .send()
         .await
         .expect("send");
@@ -236,8 +251,48 @@ async fn config_import_applies_local_session_auth_and_acp_trace_to_runtime() {
         *harness.local_session_auth.read().await,
         LocalSessionAuth::Keyless
     );
+
+    let entity_tag = exported_entity_tag(&harness).await;
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/config/import", harness.base_url))
+        .header("Authorization", format!("Bearer {ADMIN_KEY}"))
+        .header("If-Match", &entity_tag)
+        .body(toml)
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::OK);
     assert!(acp_stack::runtime::agent::acp_trace::enabled());
     acp_stack::runtime::agent::acp_trace::set_enabled(false);
+}
+
+/// An export, edit, and import must not overwrite a typed write that landed in between.
+#[tokio::test]
+async fn config_import_refuses_a_revision_the_config_moved_past() {
+    let harness = ServerHarness::spawn().await;
+    let entity_tag = exported_entity_tag(&harness).await;
+    let current = std::fs::read_to_string(&harness.config_path).expect("read config");
+    let concurrent = current.replace(
+        r#"public_url = "https://agent.example.com""#,
+        r#"public_url = "https://updated.example.com""#,
+    );
+    std::fs::write(&harness.config_path, &concurrent).expect("write concurrent change");
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/config/import", harness.base_url))
+        .header("Authorization", format!("Bearer {ADMIN_KEY}"))
+        .header("If-Match", &entity_tag)
+        .body(include_str!("fixtures/valid-placebo-stack.toml"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "config.revision_mismatch");
+    assert_eq!(
+        std::fs::read_to_string(&harness.config_path).expect("read config"),
+        concurrent
+    );
 }
 
 #[tokio::test]

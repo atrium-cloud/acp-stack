@@ -277,7 +277,7 @@ The API withholds secret values from every response. Auth keys live outside the 
 
 - Tier: `session`
 - Request: none.
-- Response: current canonical TOML with secret refs only.
+- Response: `{ "toml", "revision" }`. `toml` is the current canonical TOML with secret refs only; `revision` is its lowercase hex SHA-256, which `POST /v1/config/import` takes quoted as an `If-Match` entity tag.
 
 ### `POST /v1/config/validate`
 
@@ -289,10 +289,15 @@ The API withholds secret values from every response. Auth keys live outside the 
 ### `POST /v1/config/import`
 
 - Tier: `admin`
-- Request: canonical TOML; supports `dry_run=true`.
+- Request: canonical TOML; supports `dry_run=true`. An optional `If-Match` header follows RFC 9110: `*`, or a comma-separated list of one or more entity tags in which empty list elements are ignored. The `revision` from `GET /v1/config/export` is sent quoted, as in `If-Match: "<revision>"`.
 - Response: untyped import response (not covered by the JSON Schema).
-- Errors: unparseable TOML returns `400 config.invalid` with the same `details` as `POST /v1/config/validate`.
-- Notes: validates and writes canonical TOML.
+- Errors:
+    - Unparseable TOML returns `400 config.invalid` with the same `details` as `POST /v1/config/validate`.
+    - `400 request.invalid_param` (field `If-Match`) is returned for a header outside that grammar, including a bare unquoted revision.
+    - `409 config.revision_mismatch` is returned when no strong entity tag in `If-Match` names the on-disk config's revision, so an export, edit, and import never overwrites a config write that landed in between. A weak tag (`W/"..."`) never matches. The caller exports again and reapplies its edit. An on-disk config that fails to load returns that load error.
+- Notes:
+    - Validates and writes canonical TOML. The revision check and the write run under the config mutation lock, so a writer holding that lock cannot land between them.
+    - Without `If-Match`, the import replaces the config unconditionally. `dry_run=true` ignores the header.
 
 ### `GET /v1/secrets`
 

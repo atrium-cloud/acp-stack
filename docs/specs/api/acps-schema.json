@@ -3678,10 +3678,15 @@
         "properties": {
           "toml": {
             "type": "string"
+          },
+          "revision": {
+            "type": "string",
+            "description": "SHA-256 of `toml`; `POST /v1/config/import` takes it quoted as an `If-Match` entity tag."
           }
         },
         "required": [
-          "toml"
+          "toml",
+          "revision"
         ]
       },
       "ConfigValidateResponse": {

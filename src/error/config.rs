@@ -54,6 +54,7 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         ConfigWrite { .. } => "config.write_failed",
         ConfigInitialize { .. } => "config.initialize_failed",
         ConfigExists { .. } => "config.exists",
+        ConfigRevisionMismatch => "config.revision_mismatch",
         ConfigToml(_) | ConfigSerialize(_) => "config.invalid",
         ImportBase64Decode { .. } => "import.base64_invalid",
         ImportUtf8 { .. } => "import.utf8_invalid",
@@ -97,6 +98,10 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
         ConfigWrite { .. } => "failed to write config".to_owned(),
         ConfigInitialize { .. } => "failed to initialize config".to_owned(),
         ConfigExists { .. } => "config already exists".to_owned(),
+        ConfigRevisionMismatch => {
+            "config changed since this revision was exported; export it again and reapply the edit"
+                .to_owned()
+        }
         ConfigToml(_) => "config TOML is invalid".to_owned(),
         ConfigSerialize(_) => "failed to serialize config".to_owned(),
         ImportBase64Decode { .. } => "import data was not valid base64".to_owned(),
@@ -204,7 +209,7 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         | InvalidPermissionsMode
         | InvalidDurationField { .. }
         | InvalidEnvName { .. } => StatusCode::BAD_REQUEST,
-        ConfigExists { .. } => StatusCode::CONFLICT,
+        ConfigExists { .. } | ConfigRevisionMismatch => StatusCode::CONFLICT,
         HomeNotSet
         | HomeNotIsolated { .. }
         | FixtureEgressRefused { .. }
