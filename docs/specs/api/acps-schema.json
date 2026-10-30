@@ -3070,6 +3070,16 @@
               "null"
             ]
           },
+          "skip_code": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/response/AgentUpdateSkipCode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "steps": {
             "type": "array",
             "items": {
@@ -3083,6 +3093,21 @@
           "skipped",
           "steps"
         ]
+      },
+      "AgentUpdateSkipCode": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "agent_busy",
+            "description": "A turn or permission in flight, or a start, stop, or update underway."
+          },
+          {
+            "type": "string",
+            "const": "not_managed",
+            "description": "A non-registry agent, which has nothing for the updater to resolve."
+          }
+        ],
+        "description": "Why an update never ran, beside the prose `reason`."
       },
       "AgentUpdateStepReport": {
         "type": "object",

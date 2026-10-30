@@ -42,6 +42,9 @@ const HELP_PROBE_RETRY_DELAY: Duration = Duration::from_millis(200);
 pub const NON_REGISTRY_SKIP_REASON: &str =
     "agent is not a managed registry agent; auto-update is unavailable for escape-hatch installs";
 
+/// Skip reason recorded when the agent is busy and the update never ran.
+pub const AGENT_BUSY_SKIP_REASON: &str = "agent is running";
+
 /// Skip reason recorded for a shell-only `[agent.adapter_override]` adapter
 /// step. Shell recipes carry no comparable version; the operator opts into
 /// re-run updates with `[agent.adapter_override.update] shell_rerun = true`.
@@ -58,6 +61,25 @@ pub struct AgentUpdateOptions {
     pub agent_running: bool,
 }
 
+/// Why an update never ran, beside the prose `reason`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentUpdateSkipCode {
+    /// A turn or permission in flight, or a start, stop, or update underway.
+    AgentBusy,
+    /// A non-registry agent, which has nothing for the updater to resolve.
+    NotManaged,
+}
+
+impl AgentUpdateSkipCode {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::AgentBusy => AGENT_BUSY_SKIP_REASON,
+            Self::NotManaged => NON_REGISTRY_SKIP_REASON,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct AgentUpdateReport {
     pub agent_id: String,
@@ -65,18 +87,20 @@ pub struct AgentUpdateReport {
     pub skipped: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skip_code: Option<AgentUpdateSkipCode>,
     pub steps: Vec<AgentUpdateStepReport>,
 }
 
 impl AgentUpdateReport {
-    /// A no-op report for an update that never ran (agent busy, or a
-    /// non-registry agent with nothing to update).
-    pub fn skipped(agent_id: String, reason: impl Into<String>) -> Self {
+    /// A no-op report for an update that never ran.
+    pub fn skipped(agent_id: String, code: AgentUpdateSkipCode) -> Self {
         Self {
             agent_id,
             updated: false,
             skipped: true,
-            reason: Some(reason.into()),
+            reason: Some(code.reason().to_owned()),
+            skip_code: Some(code),
             steps: Vec::new(),
         }
     }
@@ -138,7 +162,7 @@ pub fn run_managed_agent_update(
         Err(StackError::AgentRegistryMissing { .. }) => {
             return Ok(AgentUpdateReport::skipped(
                 config.agent.id.clone(),
-                NON_REGISTRY_SKIP_REASON,
+                AgentUpdateSkipCode::NotManaged,
             ));
         }
         Err(error) => return Err(error),
@@ -169,7 +193,7 @@ pub fn update_agent_for_config(
     if options.agent_running {
         return Ok(AgentUpdateReport::skipped(
             config.agent.id.clone(),
-            "agent is running",
+            AgentUpdateSkipCode::AgentBusy,
         ));
     }
 
@@ -234,6 +258,7 @@ pub fn update_agent_for_config(
         updated,
         skipped: false,
         reason: None,
+        skip_code: None,
         steps,
     })
 }

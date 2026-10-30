@@ -232,6 +232,7 @@ async fn update_skips_non_registry_agent() {
     assert_eq!(body["data"]["skipped"], true);
     assert_eq!(body["data"]["updated"], false);
     assert_eq!(body["data"]["reason"], NON_REGISTRY_SKIP_REASON);
+    assert_eq!(body["data"]["skip_code"], "not_managed");
 }
 
 #[tokio::test]
@@ -462,6 +463,7 @@ async fn update_skips_when_a_turn_blocks_the_stop() {
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(body["data"]["skipped"], true);
     assert_eq!(body["data"]["reason"], "agent is running");
+    assert_eq!(body["data"]["skip_code"], "agent_busy");
 
     let status_body: Value = client
         .get(format!("{}/v1/agent/status", harness.base_url))
@@ -772,6 +774,7 @@ async fn update_skips_while_another_update_is_in_flight() {
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(body["data"]["skipped"], true, "body: {body}");
     assert_eq!(body["data"]["reason"], "agent is running");
+    assert_eq!(body["data"]["skip_code"], "agent_busy");
 
     released.store(true, std::sync::atomic::Ordering::SeqCst);
     let first_response = first.await.expect("first update task");

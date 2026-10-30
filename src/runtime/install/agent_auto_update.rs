@@ -7,7 +7,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::{Config, parse_duration_string};
 use crate::runtime::agent::supervisor::AgentSupervisor;
-use crate::runtime::install::agent_updater::{AgentUpdateOptions, run_managed_agent_update};
+use crate::runtime::install::agent_updater::{
+    AgentUpdateOptions, AgentUpdateSkipCode, run_managed_agent_update,
+};
 use crate::state::StateHandle;
 
 const DISABLED_POLL_INTERVAL: Duration = Duration::from_secs(60);
@@ -56,13 +58,15 @@ impl AgentAutoUpdater {
                 // The auto-updater only updates an already-stopped agent and
                 // never stops a running one; a live agent is skipped every cycle.
                 if !agent_supervisor.try_begin_update().await {
+                    let code = AgentUpdateSkipCode::AgentBusy;
                     if let Err(err) = append_update_lifecycle(
                         &state,
                         "agent.update.skipped",
                         "agent update skipped",
                         serde_json::json!({
                             "agent_id": config.agent.id,
-                            "reason": "agent is running",
+                            "reason": code.reason(),
+                            "skip_code": code,
                         }),
                     )
                     .await

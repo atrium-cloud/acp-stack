@@ -14,7 +14,7 @@ use crate::fs_util::{
 };
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::runtime::install::agent_updater::{
-    AgentUpdateOptions, AgentUpdateReport, NON_REGISTRY_SKIP_REASON, update_agent_for_config,
+    AgentUpdateOptions, AgentUpdateReport, AgentUpdateSkipCode, update_agent_for_config,
 };
 use crate::runtime::process_runner::HostExec;
 use crate::state::{StateStore, default_installer_log_base, default_state_path};
@@ -116,8 +116,10 @@ fn run_agent_update_execute(
     match registry.lookup_required(&config.agent.id) {
         Ok(_) => {}
         Err(StackError::AgentRegistryMissing { .. }) => {
-            let report =
-                AgentUpdateReport::skipped(config.agent.id.clone(), NON_REGISTRY_SKIP_REASON);
+            let report = AgentUpdateReport::skipped(
+                config.agent.id.clone(),
+                AgentUpdateSkipCode::NotManaged,
+            );
             return emit_update_report(&report, output);
         }
         Err(error) => return Err(error),

@@ -5,7 +5,8 @@ use super::*;
 
 use crate::config::DEFAULT_AGENT_AUTO_UPDATE_FREQUENCY;
 use crate::runtime::install::agent_updater::{
-    AgentUpdateOptions, AgentUpdateReport, NON_REGISTRY_SKIP_REASON, run_managed_agent_update,
+    AgentUpdateOptions, AgentUpdateReport, AgentUpdateSkipCode, NON_REGISTRY_SKIP_REASON,
+    run_managed_agent_update,
 };
 use crate::runtime::install::agent_version_check::{
     AgentVersionStatus, LiveLatestVersionResolver, build_agent_check_report,
@@ -83,18 +84,20 @@ pub(crate) async fn agent_update_handler(
 /// The busy skip: the agent stayed up because a turn or permission blocked the
 /// stop, or the supervisor was mid-transition (start, stop, another update).
 async fn busy_skip(state: &AppState, agent_id: String) -> ApiSuccess<AgentUpdateReport> {
+    let code = AgentUpdateSkipCode::AgentBusy;
     append_update_lifecycle(
         state,
         "agent.update.skipped",
         "agent update skipped",
         serde_json::json!({
             "agent_id": agent_id,
-            "reason": "agent is running",
+            "reason": code.reason(),
+            "skip_code": code,
             "trigger": UPDATE_TRIGGER_API,
         }),
     )
     .await;
-    ApiSuccess::new(AgentUpdateReport::skipped(agent_id, "agent is running"))
+    ApiSuccess::new(AgentUpdateReport::skipped(agent_id, code))
 }
 
 /// The post-lock update sequence: started event, blocking update, lock

@@ -352,7 +352,8 @@ The API withholds secret values from every response. Auth keys live outside the 
 
 - Tier: `admin`
 - Request: optional `{ "force": bool }` (default `false`). `force` reinstalls even when the resolved target version matches the installed one.
-- Response: the updater report `{ "agent_id", "updated", "skipped", "reason"?, "steps": [{ "step", "status", "method"?, "installed"?, "latest"?, "message"? }] }`.
+- Response: the updater report `{ "agent_id", "updated", "skipped", "reason"?, "skip_code"?, "steps": [{ "step", "status", "method"?, "installed"?, "latest"?, "message"? }] }`.
+    - A skipped report carries `skip_code` beside the prose `reason`: `agent_busy` when the agent stayed up, `not_managed` for a non-registry agent.
     - Step `status` is `updated`, `up_to_date`, `skipped`, or `failed`.
     - `installed` is the version before the update and `latest` the resolved target (github/npm only, because apt and native updates have no capturable version).
     - `up_to_date` is a first-class no-op success.
@@ -360,12 +361,12 @@ The API withholds secret values from every response. Auth keys live outside the 
 - Notes:
     - Runs the same managed update path as the auto-update timer, synchronously, for the configured agent (harness, plus adapter when the registry pairs one).
     - Works with `[agent.auto_update]` disabled or absent, which is the intended mode for platforms that own update scheduling themselves.
-    - A running agent is stopped for the update and started again once it settles, under the same safety rule as `POST /v1/agent/restart?require_idle=true`: a session with a turn or permission in flight blocks the stop, and the route returns `200` with `skipped: true` and reason `agent is running`. Config and secrets resolve before the stop, so a broken config fails the request with the agent still up. A stop that fails midway propagates as an error envelope with the agent already down, and the next session request starts it again.
-    - A starting, stopping, or already-updating agent is never touched: the route returns `200` with `skipped: true` and reason `agent is running`, including for a second update request arriving while one is in flight. Callers may retry safely.
+    - A running agent is stopped for the update and started again once it settles, under the same safety rule as `POST /v1/agent/restart?require_idle=true`: a session with a turn or permission in flight blocks the stop, and the route returns `200` with `skipped: true` and `skip_code: "agent_busy"`. Config and secrets resolve before the stop, so a broken config fails the request with the agent still up. A stop that fails midway propagates as an error envelope with the agent already down, and the next session request starts it again.
+    - A starting, stopping, or already-updating agent is never touched: the route returns `200` with `skipped: true` and `skip_code: "agent_busy"`, including for a second update request arriving while one is in flight. Callers may retry safely.
     - A failed post-update restart is logged and left to the next session request, which starts the agent on demand (a target with `restart = "never"` needs a manual start instead); the update report still stands.
-    - A non-registry (escape-hatch) agent likewise returns `200` with `skipped: true`. An agent CLI kept by `acps init --existing-agent use-existing` is left in place, `force` included: its step reports `skipped` with the kept version as `installed` and no `method`.
+    - A non-registry (escape-hatch) agent likewise returns `200` with `skipped: true` and `skip_code: "not_managed"`. An agent CLI kept by `acps init --existing-agent use-existing` is left in place, `force` included: its step reports `skipped` with the kept version as `installed` and no `method`.
     - A `harness_version` pin constrains the update target the same way it constrains install: the pin is used instead of the latest release (harness component, as the GitHub Release tag on the github lane, else as the npm version with one leading `v` dropped when a digit follows it). A pinned agent already at its pin reports `up_to_date`.
-    - Each run records `agent.update.started` plus a terminal `agent.update.finished`/`agent.update.skipped`/`agent.update.failed` lifecycle event, payload-tagged with `"trigger": "api"` to distinguish it from the timer's runs. These surface in `GET /v1/agent/status` `lifecycle_events`.
+    - Each run records `agent.update.started` plus a terminal `agent.update.finished`/`agent.update.skipped`/`agent.update.failed` lifecycle event, payload-tagged with `"trigger": "api"` to distinguish it from the timer's runs. An `agent.update.skipped` payload carries the report's `skip_code`. These surface in `GET /v1/agent/status` `lifecycle_events`.
 
 ### `POST /v1/agent/start`
 
