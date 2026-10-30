@@ -573,6 +573,9 @@ pub enum StackError {
     #[error("init step `{kind}` panicked: {message}")]
     InitStepPanicked { kind: String, message: String },
 
+    #[error("`{field}` applies only when creating a starter config")]
+    InitStarterConfigOnly { field: &'static str },
+
     #[error(
         "dependency apply produced failing actions: {summary}; inspect `acps installer history --agent deps_apply` (apply_run_id={apply_run_id})"
     )]

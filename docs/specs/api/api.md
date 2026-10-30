@@ -79,8 +79,9 @@ When the agent answers an ACP request with a JSON-RPC error, `agent.request_fail
 - `message` and `data` are each cut at 2048 bytes, followed by a ` [truncated N bytes]` marker. A string `data` is cut on its text. Any other `data` whose JSON text runs past 2048 bytes becomes a string holding that cut JSON text.
 - `details` is `{}` when acp-stack detected the failure itself, such as the agent exiting before it answered, and on `session/prompt` failures, which are classified as described in [Prompt-Path Error Codes](endpoints.md#prompt-path-error-codes).
 
-Two input errors also fill `details`:
+Three input errors also fill `details`:
 
+- `init.starter_config_only` carries `details.field`, the starter-only declaration sent while a config already exists. It names the request field, or the matching `acps init` flag where the field mirrors one.
 - `prompt.body_invalid` carries `details.reason`, the failed check: the content-block or `mcp_servers` parse error with string literals and rejected enum values replaced by `[redacted]`, redacted and cut at 1024 bytes, or the session `cwd` rule. A `cwd` rejection has the message `session cwd is invalid`.
 - `config.invalid` for unparseable TOML (for example on `POST /v1/config/validate` and `POST /v1/config/import`) carries `details.line` and `details.column` (1-based, present when the parser located the error) and `details.reason`, the parser message with string literals and rejected enum values replaced by `[redacted]`, redacted and cut at 1024 bytes. The offending TOML line is never echoed.
 

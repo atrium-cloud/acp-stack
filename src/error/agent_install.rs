@@ -2,6 +2,7 @@
 //! install-time half of `agent.*` plus `init.*`, `deps.*`, and `stack.*`.
 
 use http::StatusCode;
+use serde_json::{Map, Value};
 
 use super::StackError;
 
@@ -12,6 +13,17 @@ pub(super) fn stack_update_rollback_suffix(rollback_errors: &[String]) -> String
         return String::new();
     }
     format!("; rollback errors: {}", rollback_errors.join("; "))
+}
+
+/// The rejected declaration, so a client routes on the field rather than the message.
+pub(super) fn public_details(err: &StackError) -> Option<Map<String, Value>> {
+    let StackError::InitStarterConfigOnly { field } = err else {
+        return None;
+    };
+    Some(Map::from_iter([(
+        "field".to_owned(),
+        Value::String((*field).to_owned()),
+    )]))
 }
 
 pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
@@ -29,6 +41,7 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         AgentPlaceholderConfigured => "agent.placeholder_configured",
         InitRunCorrupted { .. } => "init.run_corrupted",
         InitStepPanicked { .. } => "init.step_panicked",
+        InitStarterConfigOnly { .. } => "init.starter_config_only",
         DepsApplyFailed { .. } => "deps.apply_failed",
         DepsApplyInFlight { .. } => "deps.apply_in_flight",
         DepsApplyRunNotFound { .. } => "deps.apply_run_not_found",
@@ -102,6 +115,9 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
         // The raw panic message can carry local diagnostics, so the public
         // surface names only the step.
         InitStepPanicked { kind, .. } => format!("init step `{kind}` failed unexpectedly"),
+        InitStarterConfigOnly { field } => {
+            format!("`{field}` applies only when creating a starter config")
+        }
         // Deliberately omits `summary`: it can carry operator shell text and
         // exit detail that should not leave the host over the API.
         DepsApplyFailed { apply_run_id, .. } => {
@@ -210,6 +226,7 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         AgentPlaceholderConfigured => StatusCode::BAD_REQUEST,
         AgentUnsupported { .. } => StatusCode::BAD_REQUEST,
         AgentVersionUnsupported { .. } => StatusCode::BAD_REQUEST,
+        InitStarterConfigOnly { .. } => StatusCode::BAD_REQUEST,
         AgentCheckStale => StatusCode::CONFLICT,
         SkillInstallInvalidSource { .. }
         | SkillInstallInvalidName { .. }

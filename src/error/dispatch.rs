@@ -86,6 +86,7 @@ impl StackError {
         agent_runtime::public_details(self)
             .or_else(|| session::public_details(self))
             .or_else(|| config::public_details(self))
+            .or_else(|| agent_install::public_details(self))
             .unwrap_or_default()
     }
 

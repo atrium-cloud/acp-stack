@@ -541,11 +541,8 @@ async fn start_route_rejects_starter_only_fields_against_existing_config() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
-    assert_eq!(body["error"]["code"], "request.invalid_param");
-    assert_eq!(
-        body["error"]["message"],
-        "invalid parameter `extensions`: extension declarations apply only when creating a starter config"
-    );
+    assert_eq!(body["error"]["code"], "init.starter_config_only");
+    assert_eq!(body["error"]["details"]["field"], "extensions");
     assert!(
         manager.session_current().is_none(),
         "a rejected start must not create a session"
@@ -621,14 +618,11 @@ async fn start_route_rejects_mcp_declarations_against_existing_config() {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {response}");
-        assert_eq!(response["error"]["code"], "request.invalid_param", "{body}");
         assert_eq!(
-            response["error"]["message"],
-            format!(
-                "invalid parameter `{field}`: MCP init declarations apply only when creating a starter config"
-            ),
+            response["error"]["code"], "init.starter_config_only",
             "{body}"
         );
+        assert_eq!(response["error"]["details"]["field"], field, "{body}");
         assert!(
             manager.session_current().is_none(),
             "{body}: a rejected start must not create a session"
@@ -656,11 +650,8 @@ async fn start_route_rejects_mcp_declarations_on_resume_against_existing_config(
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
-    assert_eq!(body["error"]["code"], "request.invalid_param");
-    assert_eq!(
-        body["error"]["message"],
-        "invalid parameter `--mcp-preset`: MCP init declarations apply only when creating a starter config"
-    );
+    assert_eq!(body["error"]["code"], "init.starter_config_only");
+    assert_eq!(body["error"]["details"]["field"], "--mcp-preset");
     assert!(manager.session_current().is_none());
 }
 

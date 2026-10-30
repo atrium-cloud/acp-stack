@@ -90,10 +90,7 @@ pub(crate) fn reject_sandbox_identity_args_for_existing_config(args: &InitArgs) 
     } else {
         return Ok(());
     };
-    Err(StackError::InvalidParam {
-        field,
-        reason: "sandbox declarations apply only when creating a starter config".to_owned(),
-    })
+    Err(StackError::InitStarterConfigOnly { field })
 }
 
 /// Data-source declarations seed a fresh starter config only; reject them when a
@@ -109,10 +106,7 @@ pub(crate) fn reject_data_source_args_for_existing_config(args: &InitArgs) -> Re
         None
     };
     if let Some(field) = field {
-        return Err(StackError::InvalidParam {
-            field,
-            reason: "data source declarations apply only when creating a starter config".to_owned(),
-        });
+        return Err(StackError::InitStarterConfigOnly { field });
     }
     Ok(())
 }
@@ -123,9 +117,8 @@ pub(crate) fn reject_extensions_args_for_existing_config(args: &InitArgs) -> Res
     if args.prompt_extensions.is_empty() {
         return Ok(());
     }
-    Err(StackError::InvalidParam {
+    Err(StackError::InitStarterConfigOnly {
         field: "extensions",
-        reason: "extension declarations apply only when creating a starter config".to_owned(),
     })
 }
 
@@ -135,10 +128,8 @@ pub(crate) fn reject_sandbox_mask_paths_args_for_existing_config(args: &InitArgs
     if args.prompt_sandbox_mask_paths.is_empty() {
         return Ok(());
     }
-    Err(StackError::InvalidParam {
+    Err(StackError::InitStarterConfigOnly {
         field: "sandbox_mask_paths",
-        reason: "sandbox mask path declarations apply only when creating a starter config"
-            .to_owned(),
     })
 }
 
@@ -148,10 +139,8 @@ pub(crate) fn reject_sandbox_mask_files_args_for_existing_config(args: &InitArgs
     if args.prompt_sandbox_mask_files.is_empty() {
         return Ok(());
     }
-    Err(StackError::InvalidParam {
+    Err(StackError::InitStarterConfigOnly {
         field: "sandbox_mask_files",
-        reason: "sandbox mask file declarations apply only when creating a starter config"
-            .to_owned(),
     })
 }
 
@@ -768,8 +757,5 @@ fn reject_starter_only_mcp_arg(field: &'static str, values: &[String]) -> Result
 }
 
 fn starter_only_mcp_error(field: &'static str) -> Result<()> {
-    Err(StackError::InvalidParam {
-        field,
-        reason: "MCP init declarations apply only when creating a starter config".to_owned(),
-    })
+    Err(StackError::InitStarterConfigOnly { field })
 }

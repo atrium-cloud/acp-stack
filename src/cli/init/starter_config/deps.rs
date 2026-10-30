@@ -487,11 +487,7 @@ pub(crate) fn push_args_deps_to_config(config: &mut Config, args: &InitArgs) -> 
 pub(crate) fn reject_deps_args_for_existing_config(args: &InitArgs) -> Result<()> {
     for (flag, values) in [("--dep", &args.dep), ("--dep-system", &args.dep_system)] {
         if !values.is_empty() {
-            return Err(StackError::InvalidParam {
-                field: flag,
-                reason: "dependency declarations apply only when creating a starter config"
-                    .to_owned(),
-            });
+            return Err(StackError::InitStarterConfigOnly { field: flag });
         }
     }
     // Hosted-request-only declarations (no CLI flag), same starter-only rule.
@@ -500,11 +496,7 @@ pub(crate) fn reject_deps_args_for_existing_config(args: &InitArgs) -> Result<()
         ("browser_use", args.browser_use_profile),
     ] {
         if set {
-            return Err(StackError::InvalidParam {
-                field,
-                reason: "dependency declarations apply only when creating a starter config"
-                    .to_owned(),
-            });
+            return Err(StackError::InitStarterConfigOnly { field });
         }
     }
     Ok(())
