@@ -292,7 +292,7 @@ On Unix, the validated CWD is rebound through a verified directory handle at spa
 ### Environment
 
 - Only environment variables in `[commands].env_allowlist` are forwarded from the request.
-- Secrets are not injected into command children unless another explicit runtime mechanism provides them.
+- A managed `secret-environment` namespace is the one mechanism that puts secret-store values into command children: each entry resolves from its ref at spawn, beneath the request env ([extensions.md](extensions.md#capability-secret-environment)).
 
 ## Prompts
 

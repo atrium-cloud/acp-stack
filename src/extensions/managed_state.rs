@@ -2,7 +2,7 @@
 //! `POST /v1/admin/extensions/{name}/apply`. Revision and ownership semantics live in
 //! [`SecretStore`] so no endpoint can bypass them.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -16,14 +16,17 @@ use crate::secrets::{CredentialSource, ManagedCredentialSelection, SecretStore};
 /// Request wire schema this seam enforces.
 pub const MANAGED_STATE_SCHEMA_VERSION: u16 = 1;
 
-/// The only `desired` kind today; also the required `capability` value on the
-/// extension declaration.
+/// Each `desired` kind is also the `capability` value an extension declares;
+/// a namespace accepts only the kind its declaration names.
 pub const KIND_PROVIDER_CREDENTIAL: &str = "provider-credential";
+pub const KIND_SECRET_ENVIRONMENT: &str = "secret-environment";
 
 const MAX_PROVIDER_ID_BYTES: usize = 128;
 const MAX_VALUE_COUNT: usize = 8;
 const MAX_ENV_NAME_BYTES: usize = 128;
 const MAX_VALUE_BYTES: usize = 16 * 1024;
+const MAX_ENVIRONMENT_ENTRY_COUNT: usize = 128;
+const ENVIRONMENT_FIELD: &str = "desired.entries";
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -35,8 +38,8 @@ pub struct ApplyRequest {
     pub desired: DesiredState,
 }
 
-/// The desired payload, discriminated by `kind`. A second kind later is an
-/// additive change; unknown kinds fail deserialization.
+/// The desired payload, discriminated by `kind`. Kinds are additive; unknown
+/// kinds fail deserialization.
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 #[schemars(transform = require_selection_key)]
@@ -47,6 +50,10 @@ pub enum DesiredState {
         #[serde(deserialize_with = "deserialize_required_selection")]
         selection: Option<CredentialSelection>,
     },
+    /// Workload env var names, each carrying the value of a secret-store ref.
+    /// Refs resolve at every workload spawn (the agent, its terminals, and
+    /// mediated commands); an empty map clears the namespace.
+    SecretEnvironment { entries: BTreeMap<String, String> },
 }
 
 /// Force `selection` into each variant's `required` list. `selection` is an
@@ -92,6 +99,11 @@ impl std::fmt::Debug for DesiredState {
             Self::ProviderCredential { selection } => f
                 .debug_struct("ProviderCredential")
                 .field("selection", selection)
+                .finish(),
+            // Env names and ref names are not secret.
+            Self::SecretEnvironment { entries } => f
+                .debug_struct("SecretEnvironment")
+                .field("entries", entries)
                 .finish(),
         }
     }
@@ -145,6 +157,16 @@ pub struct ApplyResponse {
     pub outcome: &'static str,
 }
 
+/// Fill the managed-state secret environment beneath a workload spawn's own env, so an
+/// explicit value for a name wins; the caller layers the network provider's declaration
+/// after this, which still wins over both.
+pub fn layer_environment(env: &mut HashMap<String, String>, home: &Path) -> Result<()> {
+    for (name, value) in crate::secrets::managed_environment_for_home(home)? {
+        env.entry(name).or_insert(value);
+    }
+    Ok(())
+}
+
 /// Validate the request and apply it to the store. The caller holds the
 /// agent-config mutation lock; the store persists the catalog swap and the
 /// namespace watermark atomically.
@@ -164,16 +186,30 @@ pub fn apply(
             ),
         });
     }
-    let DesiredState::ProviderCredential { selection } = request.desired;
-    let selection = selection
-        .map(|selection| resolve_selection(home, store, config, namespace, selection))
-        .transpose()?;
-    let outcome = store.apply_managed_state_credential(
-        namespace,
-        KIND_PROVIDER_CREDENTIAL,
-        request.revision,
-        selection,
-    )?;
+    let outcome = match request.desired {
+        DesiredState::ProviderCredential { selection } => {
+            require_declared_kind(config, namespace, KIND_PROVIDER_CREDENTIAL)?;
+            let selection = selection
+                .map(|selection| resolve_selection(home, store, config, namespace, selection))
+                .transpose()?;
+            store.apply_managed_state_credential(
+                namespace,
+                KIND_PROVIDER_CREDENTIAL,
+                request.revision,
+                selection,
+            )?
+        }
+        DesiredState::SecretEnvironment { entries } => {
+            require_declared_kind(config, namespace, KIND_SECRET_ENVIRONMENT)?;
+            validate_environment(store, config, namespace, &entries)?;
+            store.apply_managed_state_environment(
+                namespace,
+                KIND_SECRET_ENVIRONMENT,
+                request.revision,
+                entries,
+            )?
+        }
+    };
     Ok(ApplyResponse {
         applied_revision: request.revision,
         outcome: outcome.as_str(),
@@ -206,7 +242,13 @@ where
         });
     }
     let revision = request.revision;
-    let DesiredState::ProviderCredential { selection } = request.desired;
+    let DesiredState::ProviderCredential { selection } = request.desired else {
+        return Err(StackError::InvalidParam {
+            field: "desired.kind",
+            reason: format!("a credential deposit applies `{KIND_PROVIDER_CREDENTIAL}` only"),
+        });
+    };
+    require_declared_kind(config, namespace, KIND_PROVIDER_CREDENTIAL)?;
     let outcome = store.deposit_and_apply_managed_credential(
         secrets,
         namespace,
@@ -291,7 +333,7 @@ fn resolve_selection(
         }
         let value = store
             .get(ref_name)
-            .map_err(|error| source_ref_error(ref_name, error))?;
+            .map_err(|error| source_ref_error("desired.selection.source_refs", ref_name, error))?;
         values.insert(env_name.clone(), value.to_owned());
     }
     if crate::runtime::agent::provider_keys::env_var_for_provider_id(&selection.provider_id)
@@ -339,14 +381,79 @@ fn resolve_selection(
 }
 
 /// A missing ref is the caller's input error; any other store error propagates as itself.
-fn source_ref_error(ref_name: &str, error: StackError) -> StackError {
+fn source_ref_error(field: &'static str, ref_name: &str, error: StackError) -> StackError {
     match error {
         StackError::SecretNotFound { .. } => StackError::InvalidParam {
-            field: "desired.selection.source_refs",
+            field,
             reason: format!("secret ref `{ref_name}` is not in the secret store"),
         },
         other => other,
     }
+}
+
+/// The namespace must be declared with the capability matching the desired kind, so each
+/// namespace keeps one kind of record.
+fn require_declared_kind(config: &Config, namespace: &str, kind: &str) -> Result<()> {
+    let declared = config
+        .extensions
+        .get(namespace)
+        .and_then(|extension| extension.capability.as_deref());
+    if declared == Some(kind) {
+        return Ok(());
+    }
+    Err(StackError::InvalidParam {
+        field: "desired.kind",
+        reason: format!(
+            "extension `{namespace}` declares capability `{}`, not `{kind}`",
+            declared.unwrap_or_default()
+        ),
+    })
+}
+
+/// Bound-check the entries, require every ref in the store now (each spawn needs it too),
+/// and refuse a name the runtime or another namespace writes. A name another source also
+/// sets is left to the spawn precedence, so the apply never depends on agent config.
+fn validate_environment(
+    store: &SecretStore,
+    config: &Config,
+    namespace: &str,
+    entries: &BTreeMap<String, String>,
+) -> Result<()> {
+    let invalid = |reason: String| StackError::InvalidParam {
+        field: ENVIRONMENT_FIELD,
+        reason,
+    };
+    if entries.len() > MAX_ENVIRONMENT_ENTRY_COUNT {
+        return Err(invalid(format!(
+            "entry count exceeds the {MAX_ENVIRONMENT_ENTRY_COUNT}-entry limit"
+        )));
+    }
+    for (name, ref_name) in entries {
+        for value in [name, ref_name] {
+            validate_bounded(ENVIRONMENT_FIELD, value, MAX_ENV_NAME_BYTES)?;
+            if !crate::config::is_valid_secret_ref_name(value) {
+                return Err(invalid(format!(
+                    "`{value}` must match [A-Za-z_][A-Za-z0-9_]*"
+                )));
+            }
+        }
+        if let Some(reason) = crate::config::runtime_written_conflict(config, name) {
+            return Err(invalid(format!("`{name}` cannot be set: {reason}")));
+        }
+        if let Some((holder, _)) = store
+            .managed_state()
+            .iter()
+            .find(|(other, record)| *other != namespace && record.environment.contains_key(name))
+        {
+            return Err(invalid(format!(
+                "`{name}` cannot be set: managed-state namespace `{holder}` already sets it"
+            )));
+        }
+        store
+            .get(ref_name)
+            .map_err(|error| source_ref_error(ENVIRONMENT_FIELD, ref_name, error))?;
+    }
+    Ok(())
 }
 
 /// A provider endpoint override obeys the shared endpoint rule: https, or http to a
@@ -487,10 +594,132 @@ fn validate_bounded(field: &'static str, value: &str, max_bytes: usize) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{ExtensionConfig, ExtensionType, SandboxProviderStderr};
+
+    const NAMESPACE: &str = "connections";
+
+    fn extension(extension_type: ExtensionType, capability: Option<&str>) -> ExtensionConfig {
+        ExtensionConfig {
+            extension_type,
+            provider: Vec::new(),
+            provider_timeout: None,
+            provider_stderr: SandboxProviderStderr::default(),
+            workload_env: Default::default(),
+            capability: capability.map(str::to_owned),
+        }
+    }
+
+    /// A config declaring the environment namespace beside a network provider that sets the
+    /// proxy and CA names, as the orchestrator's declaration does.
+    fn config() -> Config {
+        let mut config = crate::config::load_config_from_str(include_str!(
+            "../../tests/fixtures/valid-opencode-stack.toml"
+        ))
+        .expect("fixture parses");
+        config.extensions.insert(
+            NAMESPACE.to_owned(),
+            extension(ExtensionType::ManagedState, Some(KIND_SECRET_ENVIRONMENT)),
+        );
+        let mut egress = extension(ExtensionType::NetworkProvider, None);
+        egress.workload_env.insert(
+            "SSL_CERT_FILE".to_owned(),
+            "/etc/ssl/certs/bundle.crt".to_owned(),
+        );
+        config.extensions.insert("egress".to_owned(), egress);
+        config
+    }
+
+    fn request(entries: &[(&str, &str)]) -> ApplyRequest {
+        ApplyRequest {
+            schema_version: MANAGED_STATE_SCHEMA_VERSION,
+            revision: 1,
+            desired: DesiredState::SecretEnvironment {
+                entries: entries
+                    .iter()
+                    .map(|(name, secret_ref)| ((*name).to_owned(), (*secret_ref).to_owned()))
+                    .collect(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_secret_environment_applies_when_every_ref_is_stored() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = SecretStore::open_or_create(home.path()).expect("store");
+        store
+            .set("SEARCH_REF", "atc1.key.payload")
+            .expect("deposit");
+        // A provider credential variable is left to the spawn precedence: the
+        // selected provider's value wins in the agent process.
+        let response = apply(
+            home.path(),
+            &mut store,
+            &config(),
+            NAMESPACE,
+            request(&[("SEARCH_API_KEY", "SEARCH_REF"), ("HF_TOKEN", "SEARCH_REF")]),
+        )
+        .expect("apply");
+        assert_eq!(response.outcome, "applied");
+    }
+
+    #[test]
+    fn a_secret_environment_refuses_names_other_sources_set_and_missing_refs() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = SecretStore::open_or_create(home.path()).expect("store");
+        store
+            .set("SEARCH_REF", "atc1.key.payload")
+            .expect("deposit");
+        for (entries, reason) in [
+            (
+                &[("SSL_CERT_FILE", "SEARCH_REF")][..],
+                "network-provider extension `egress`",
+            ),
+            (&[("HOME", "SEARCH_REF")][..], "the runtime sets it"),
+            (
+                &[("SEARCH_API_KEY", "MISSING_REF")][..],
+                "not in the secret store",
+            ),
+            (&[("search-key", "SEARCH_REF")][..], "must match"),
+        ] {
+            let error = apply(
+                home.path(),
+                &mut store,
+                &config(),
+                NAMESPACE,
+                request(entries),
+            )
+            .expect_err("refused");
+            assert_eq!(error.error_code(), "request.invalid_param", "{entries:?}");
+            assert!(
+                error.public_message().contains(reason),
+                "{entries:?}: {error}"
+            );
+        }
+        assert!(store.managed_state_record(NAMESPACE).is_none());
+    }
+
+    #[test]
+    fn a_namespace_takes_only_the_kind_it_declares() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = SecretStore::open_or_create(home.path()).expect("store");
+        let mut config = config();
+        config.extensions.insert(
+            NAMESPACE.to_owned(),
+            extension(ExtensionType::ManagedState, Some(KIND_PROVIDER_CREDENTIAL)),
+        );
+        let error = apply(home.path(), &mut store, &config, NAMESPACE, request(&[]))
+            .expect_err("kind mismatch");
+        assert!(
+            error
+                .public_message()
+                .contains("declares capability `provider-credential`")
+        );
+    }
 
     #[test]
     fn source_ref_error_maps_not_found_to_invalid_param() {
         let error = source_ref_error(
+            "desired.selection.source_refs",
             "OPENAI_KEY",
             StackError::SecretNotFound {
                 name: "OPENAI_KEY".to_owned(),
@@ -507,6 +736,7 @@ mod tests {
     #[test]
     fn source_ref_error_passes_store_errors_through() {
         let error = source_ref_error(
+            "desired.selection.source_refs",
             "OPENAI_KEY",
             StackError::SecretStoreRead {
                 path: std::path::PathBuf::from("/state/secrets.age"),

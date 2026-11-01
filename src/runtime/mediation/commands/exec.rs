@@ -49,6 +49,10 @@ pub(crate) fn spawn_child(
     network: Option<&crate::extensions::NetworkProviderExtension>,
     home: &Path,
 ) -> std::io::Result<(Child, Option<WorkloadCgroup>)> {
+    // Resolved before any spawn setup, so an unresolvable entry leaves nothing to undo.
+    let mut workload_env = env.cloned().unwrap_or_default();
+    crate::extensions::managed_state::layer_environment(&mut workload_env, home)
+        .map_err(std::io::Error::other)?;
     let mut cmd = Command::new(program);
     cmd.args(args);
     let cgroup = crate::runtime::sandbox::prepare_workload_spawn(sandbox, &mut cmd)?;
@@ -79,7 +83,6 @@ pub(crate) fn spawn_child(
     cmd.env_clear();
     // The network provider's declaration must land after the caller's env so
     // it wins on conflict.
-    let mut workload_env = env.cloned().unwrap_or_default();
     sandbox.layer_workload_env(&mut workload_env);
     crate::extensions::apply_workload_env(&mut workload_env, network);
     // A spawn without its own PATH takes the managed one under the declared entries, since a
@@ -197,6 +200,54 @@ mod tests {
     async fn caller_env_survives_when_no_provider_is_declared() {
         let caller = HashMap::from([("GREETING".to_owned(), "hi".to_owned())]);
         assert_eq!(run_echo("GREETING", Some(&caller), None).await, "hi");
+    }
+
+    #[tokio::test]
+    async fn a_managed_secret_environment_fills_beneath_the_caller_and_the_provider() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = crate::secrets::SecretStore::open_or_create(home.path()).expect("store");
+        store
+            .set("SEARCH_REF", "atc1.key.payload")
+            .expect("deposit");
+        store
+            .apply_managed_state_environment(
+                "connections",
+                "secret-environment",
+                1,
+                BTreeMap::from([
+                    ("SEARCH_API_KEY".to_owned(), "SEARCH_REF".to_owned()),
+                    ("SHADOWED".to_owned(), "SEARCH_REF".to_owned()),
+                    ("HTTPS_PROXY".to_owned(), "SEARCH_REF".to_owned()),
+                ]),
+            )
+            .expect("apply");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let cwd = super::super::policy::resolve_cwd_under_workspace(workspace.path(), ".")
+            .expect("workspace cwd");
+        let caller = HashMap::from([("SHADOWED".to_owned(), "caller".to_owned())]);
+        let child = spawn_child(
+            Path::new("/bin/sh"),
+            &[
+                "-c".to_owned(),
+                "printf '%s %s %s' \"$SEARCH_API_KEY\" \"$SHADOWED\" \"$HTTPS_PROXY\"".to_owned(),
+                "workload".to_owned(),
+            ],
+            &cwd,
+            Some(&caller),
+            &crate::runtime::sandbox::SandboxProfile::default(),
+            Some(&network_provider(&[(
+                "HTTPS_PROXY",
+                "http://127.0.0.1:3128",
+            )])),
+            home.path(),
+        )
+        .expect("spawn workload")
+        .0;
+        let output = child.wait_with_output().await.expect("workload output");
+        assert_eq!(
+            String::from_utf8(output.stdout).expect("utf8 stdout"),
+            "atc1.key.payload caller http://127.0.0.1:3128"
+        );
     }
 }
 

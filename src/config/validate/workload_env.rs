@@ -67,34 +67,41 @@ fn refuse_runtime_managed(config: &Config, name: &str) -> Result<()> {
             "must not declare `PATH`; list directories in workload_path_prepend".to_owned(),
         ));
     }
-    if name == "HOME"
+    let conflict = runtime_written_conflict(config, name).or_else(|| {
+        config
+            .array
+            .targets
+            .iter()
+            .find(|target| agent_env_declares(&target.agent.env, name))
+            .map(|target| format!("[agent].env of target `{}` already supplies it", target.id))
+    });
+    match conflict {
+        Some(reason) => Err(invalid_env(format!("must not declare `{name}`; {reason}"))),
+        None => Ok(()),
+    }
+}
+
+/// Why `name` cannot be declared for workload spawns: the runtime or a network-provider
+/// declaration writes it at every spawn, over any other source.
+pub(crate) fn runtime_written_conflict(config: &Config, name: &str) -> Option<String> {
+    if name == "PATH"
+        || name == "HOME"
         || name.starts_with(RUNTIME_ENV_PREFIX)
         || name.starts_with(KIMI_MANAGED_ENV_PREFIX)
         || RUNTIME_MANAGED_LAUNCH_ENV.contains(&name)
     {
-        return Err(invalid_env(format!(
-            "must not declare `{name}`; the runtime sets it for workload spawns"
-        )));
-    }
-    for target in &config.array.targets {
-        if agent_env_declares(&target.agent.env, name) {
-            return Err(invalid_env(format!(
-                "must not declare `{name}`; [agent].env of target `{}` already supplies it",
-                target.id
-            )));
-        }
+        return Some("the runtime sets it for workload spawns".to_owned());
     }
     for (extension_name, extension) in &config.extensions {
         if extension.extension_type == ExtensionType::NetworkProvider
             && extension.workload_env.contains_key(name)
         {
-            return Err(invalid_env(format!(
-                "must not declare `{name}`; network-provider extension `{extension_name}` \
-                 workload_env already supplies it"
-            )));
+            return Some(format!(
+                "network-provider extension `{extension_name}` workload_env already supplies it"
+            ));
         }
     }
-    Ok(())
+    None
 }
 
 fn validate_path_prepend(entries: &[String]) -> Result<()> {

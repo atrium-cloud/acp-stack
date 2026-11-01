@@ -119,9 +119,30 @@
               }
             },
             "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "description": "Workload env var names, each carrying the value of a secret-store ref.\nRefs resolve at every workload spawn (the agent, its terminals, and\nmediated commands); an empty map clears the namespace.",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "const": "secret-environment"
+              },
+              "entries": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "kind",
+              "entries"
+            ],
+            "additionalProperties": false
           }
         ],
-        "description": "The desired payload, discriminated by `kind`. A second kind later is an\nadditive change; unknown kinds fail deserialization."
+        "description": "The desired payload, discriminated by `kind`. Kinds are additive; unknown\nkinds fail deserialization."
       },
       "CredentialSelection": {
         "type": "object",
@@ -1878,7 +1899,7 @@
               "string",
               "null"
             ],
-            "description": "`managed-state` only. The state contract the namespace applies;\n`provider-credential` is the only capability today."
+            "description": "`managed-state` only. The state contract the namespace applies:\n`provider-credential` (one provider credential selection) or\n`secret-environment` (workload env vars carrying secret-store refs)."
           }
         },
         "required": [
@@ -4435,7 +4456,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Advertised capability names, currently `network-provider-workload-env`,\n`agent-test-json`, `managed-credential-base-url`, `sandbox-mask-files`,\n`managed-node-runtime`, `sandbox-workload-user`, `sandbox-capability-drop`,\n`sandbox-workload-termination`, `workload-io-identity`,\n`host-exec-trusted-inputs`, `install-workload-reachability`,\n`sandbox-require-network-provider`, `sandbox-off-identity`,\n`workload-io-follow-links`, `sandbox-workload-env`,\n`provider-http-proxy`, and `init-provider-check`. The list grows over\ntime; an absent or empty list means none are present."
+            "description": "Advertised capability names, currently `network-provider-workload-env`,\n`agent-test-json`, `managed-credential-base-url`, `sandbox-mask-files`,\n`managed-node-runtime`, `sandbox-workload-user`, `sandbox-capability-drop`,\n`sandbox-workload-termination`, `workload-io-identity`,\n`host-exec-trusted-inputs`, `install-workload-reachability`,\n`sandbox-require-network-provider`, `sandbox-off-identity`,\n`workload-io-follow-links`, `sandbox-workload-env`,\n`provider-http-proxy`, `init-provider-check`, and\n`managed-secret-environment`. The list grows over\ntime; an absent or empty list means none are present."
           }
         },
         "required": [
@@ -9779,7 +9800,7 @@
               "string",
               "null"
             ],
-            "description": "`managed-state` only. The state contract the namespace applies;\n`provider-credential` is the only capability today."
+            "description": "`managed-state` only. The state contract the namespace applies:\n`provider-credential` (one provider credential selection) or\n`secret-environment` (workload env vars carrying secret-store refs)."
           }
         },
         "required": [

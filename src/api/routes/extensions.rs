@@ -8,7 +8,9 @@ use axum::extract::{Path, State};
 use super::super::core::AppState;
 use crate::envelope::ApiSuccess;
 use crate::error::StackError;
-use crate::extensions::managed_state::{ApplyRequest, ApplyResponse};
+use crate::extensions::managed_state::{
+    ApplyRequest, ApplyResponse, DesiredState, KIND_PROVIDER_CREDENTIAL, KIND_SECRET_ENVIRONMENT,
+};
 
 pub(crate) async fn extension_managed_state_apply_handler(
     Path(name): Path<String>,
@@ -27,6 +29,10 @@ pub(crate) async fn extension_managed_state_apply_handler(
     let home = state.runtime_paths.home.clone();
     let mut store = crate::secrets::SecretStore::open(&home)?;
     let revision = body.revision;
+    let kind = match body.desired {
+        DesiredState::ProviderCredential { .. } => KIND_PROVIDER_CREDENTIAL,
+        DesiredState::SecretEnvironment { .. } => KIND_SECRET_ENVIRONMENT,
+    };
     // Captured before the apply so the model-catalog cache can be invalidated for
     // both the outgoing and the incoming provider.
     let previous_provider_id = store
@@ -37,6 +43,11 @@ pub(crate) async fn extension_managed_state_apply_handler(
     let new_provider_id = store
         .managed_state_record(&name)
         .and_then(|record| record.provider_id.clone());
+    if kind == KIND_SECRET_ENVIRONMENT {
+        // Workload spawns read the entries from the store, so nothing is provisioned here.
+        record_apply_event(&state, &name, kind, &response, revision, &store).await;
+        return Ok(ApiSuccess::new(response));
+    }
     if response.outcome == "applied" || response.outcome == "cleared" {
         for provider_id in [previous_provider_id, new_provider_id]
             .into_iter()
@@ -66,16 +77,31 @@ pub(crate) async fn extension_managed_state_apply_handler(
         &home,
     )?;
 
+    record_apply_event(&state, &name, kind, &response, revision, &store).await;
+    Ok(ApiSuccess::new(response))
+}
+
+/// Audit failure is non-fatal: the store mutation is already durable, so failing here
+/// would make the orchestrator retry a revision that was in fact applied.
+async fn record_apply_event(
+    state: &AppState,
+    namespace: &str,
+    kind: &str,
+    response: &ApplyResponse,
+    revision: i64,
+    store: &crate::secrets::SecretStore,
+) {
+    let record = store.managed_state_record(namespace);
     let payload = serde_json::json!({
-        "namespace": name,
+        "namespace": namespace,
+        "kind": kind,
         "outcome": response.outcome,
         "revision": revision,
-        "provider_id": store
-            .managed_state_record(&name)
-            .and_then(|record| record.provider_id.as_deref()),
+        "provider_id": record.and_then(|record| record.provider_id.as_deref()),
+        "environment_names": record
+            .map(|record| record.environment.keys().collect::<Vec<_>>())
+            .unwrap_or_default(),
     });
-    // Audit failure is non-fatal: the store mutation is already durable, so failing
-    // here would make the orchestrator retry a revision that was in fact applied.
     match serde_json::to_string(&payload) {
         Ok(payload_text) => {
             let recorded = state
@@ -102,6 +128,4 @@ pub(crate) async fn extension_managed_state_apply_handler(
             tracing::warn!(error = %err, "failed to serialize managed-state audit payload");
         }
     }
-
-    Ok(ApiSuccess::new(response))
 }

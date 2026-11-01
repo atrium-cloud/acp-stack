@@ -314,7 +314,7 @@ acps extensions status
 ### Output
 
 - For a network-provider instance: the type and provider settings.
-- For a managed-state instance: the capability, applied revision, and provider id (never values).
+- For a managed-state instance: the capability, applied revision, and the provider id or the environment variable names (never values).
 - Managed-state namespaces are written only by their external orchestrator through the admin apply endpoint. See [extensions.md](../extensions.md).
 
 ## `acps secrets`

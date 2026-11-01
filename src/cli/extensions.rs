@@ -86,10 +86,24 @@ fn run_status(output: OutputFormat) -> Result<()> {
                 {
                     Some(record) => {
                         println!("  applied_revision: {}", record.revision);
-                        println!(
-                            "  provider: {}",
-                            record.provider_id.as_deref().unwrap_or("none")
-                        );
+                        if extension.capability.as_deref()
+                            == Some(crate::extensions::managed_state::KIND_SECRET_ENVIRONMENT)
+                        {
+                            let names = record.environment.keys().cloned().collect::<Vec<_>>();
+                            println!(
+                                "  environment: {}",
+                                if names.is_empty() {
+                                    "none".to_owned()
+                                } else {
+                                    names.join(", ")
+                                }
+                            );
+                        } else {
+                            println!(
+                                "  provider: {}",
+                                record.provider_id.as_deref().unwrap_or("none")
+                            );
+                        }
                     }
                     None => println!("  applied_revision: none"),
                 }
@@ -121,6 +135,9 @@ fn extension_json(
                 "capability": extension.capability,
                 "applied_revision": record.map(|record| record.revision),
                 "provider_id": record.and_then(|record| record.provider_id.clone()),
+                "environment_names": record
+                    .map(|record| record.environment.keys().collect::<Vec<_>>())
+                    .unwrap_or_default(),
             })
         }
     }

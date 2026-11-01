@@ -255,7 +255,7 @@ The client also folds `current_step` from the `step_started`/`step_finished` str
 - Request: `{ "secrets": [{ "name", "value" }], "namespace", "apply": { "schema_version", "revision", "desired" } }`. Unknown fields are rejected.
     - `secrets`: flat-store secrets written before the managed apply resolves, so a `source_refs` entry in `desired` may reference a name this same body deposits. At most 16 entries, each value at most 16 KiB.
     - `namespace`: the managed-state extension namespace the apply targets. It must resolve to a declared `type = "managed-state"` instance in the runtime config, so the platform declares that extension through the `extensions` field of the session request.
-    - `apply`: the admin-tier managed-state apply body verbatim, as accepted by `POST /v1/admin/extensions/{name}/apply`; the `selection` key semantics carry over unchanged.
+    - `apply`: the admin-tier managed-state apply body verbatim, as accepted by `POST /v1/admin/extensions/{name}/apply`; the `selection` key semantics carry over unchanged. Only `kind: "provider-credential"` is accepted here; any other kind is `400 request.invalid_param`.
 - Response: `{ "secrets_written", "applied_revision", "outcome" }` in the standard success envelope. `outcome` is `applied`, `cleared`, or `noop`.
 - Errors:
     - `409 init.config_not_ready`: no runtime config exists yet; retry once the session has staged one.
@@ -317,7 +317,7 @@ The API withholds secret values from every response. Auth keys live outside the 
 - Tier: `admin`
 - Request: none.
 - Response: standard envelope.
-- Notes: deletes a secret.
+- Notes: deletes a secret. A secret a `secret-environment` managed-state entry still names answers `409` `secrets.referenced`.
 
 ### `POST /v1/auth/session-key/regenerate`
 
@@ -342,7 +342,7 @@ The API withholds secret values from every response. Auth keys live outside the 
     - `404 extensions.not_found` is returned when `{name}` does not resolve to a declared `type = "managed-state"` instance.
     - `409 extensions.revision_conflict` reports a revision-ordering conflict.
     - `400 extensions.state_ownership` reports a provenance refusal.
-    - `400 request.invalid_param` is returned for a provider id that is neither mapped nor configured as a custom provider.
+    - `400 request.invalid_param` is returned for a provider id that is neither mapped nor configured as a custom provider, a `desired.kind` other than the namespace's declared capability, and a `secret-environment` entry whose name another source sets or whose ref is not stored.
 - Notes: the managed-state extension seam. Applies one managed-state registry revision to the named extension namespace. Full contract in [extensions.md](../extensions.md).
 
 ## Agent And Providers
@@ -1210,7 +1210,7 @@ A `running` row is reconciled to `failed` with `error.code = "deps.apply_abandon
 ```json
 {
   "version": "0.1.9",
-  "features": ["network-provider-workload-env", "agent-test-json", "managed-credential-base-url", "sandbox-mask-files", "managed-node-runtime", "sandbox-workload-user", "sandbox-capability-drop", "sandbox-workload-termination", "workload-io-identity", "host-exec-trusted-inputs", "install-workload-reachability", "sandbox-require-network-provider", "sandbox-off-identity", "workload-io-follow-links", "sandbox-workload-env", "provider-http-proxy", "init-provider-check"]
+  "features": ["network-provider-workload-env", "agent-test-json", "managed-credential-base-url", "sandbox-mask-files", "managed-node-runtime", "sandbox-workload-user", "sandbox-capability-drop", "sandbox-workload-termination", "workload-io-identity", "host-exec-trusted-inputs", "install-workload-reachability", "sandbox-require-network-provider", "sandbox-off-identity", "workload-io-follow-links", "sandbox-workload-env", "provider-http-proxy", "init-provider-check", "managed-secret-environment"]
 }
 ```
 
@@ -1234,6 +1234,7 @@ A `running` row is reconciled to `failed` with `error.code = "deps.apply_abandon
     - `sandbox-workload-env` covers `[workspace.sandbox].workload_env` and `workload_path_prepend` reaching the agent, ACP terminals, and mediated commands (see [security.md](../security.md#workload-environment))
     - `provider-http-proxy` covers `ACPS_PROVIDER_HTTP_PROXY` carrying provider-keyed requests through an HTTP proxy, loopback destinations excepted (see [runtime.md](../runtime.md#provider-request-proxy))
     - `init-provider-check` covers `provider_check` on the init create body, the discovery-close park it adds, and the `provider_check` signal (see [init.md](../init.md#provider-check))
+    - `managed-secret-environment` covers the `secret-environment` managed-state capability and its entries reaching the agent, ACP terminals, and mediated commands (see [extensions.md](../extensions.md#capability-secret-environment))
 
 ### `GET /v1/status/agent`
 

@@ -278,6 +278,97 @@ fn operator_entries_serialize_without_source_field() {
     );
 }
 
+fn environment(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
+    entries
+        .iter()
+        .map(|(name, secret_ref)| ((*name).to_owned(), (*secret_ref).to_owned()))
+        .collect()
+}
+
+#[test]
+fn a_secret_environment_resolves_its_refs_at_read_time() {
+    let home = fresh_home();
+    let mut store = SecretStore::open_or_create(home.path()).expect("open or create");
+    store.set("SEARCH_REF", "atc1.key.first").expect("deposit");
+    let entries = environment(&[("SEARCH_API_KEY", "SEARCH_REF")]);
+    let outcome = store
+        .apply_managed_state_environment("connections", "secret-environment", 3, entries.clone())
+        .expect("apply");
+    assert_eq!(outcome, ManagedApplyOutcome::Applied);
+    assert_eq!(
+        managed_environment_for_home(home.path()).expect("resolve")["SEARCH_API_KEY"],
+        "atc1.key.first"
+    );
+    // A redeposit under the same ref needs no new revision: the replay compares refs.
+    store
+        .set("SEARCH_REF", "atc1.key.rotated")
+        .expect("redeposit");
+    assert_eq!(
+        store
+            .apply_managed_state_environment("connections", "secret-environment", 3, entries)
+            .expect("replay"),
+        ManagedApplyOutcome::Noop
+    );
+    assert_eq!(
+        managed_environment_for_home(home.path()).expect("resolve")["SEARCH_API_KEY"],
+        "atc1.key.rotated"
+    );
+    let conflict = store
+        .apply_managed_state_environment(
+            "connections",
+            "secret-environment",
+            3,
+            environment(&[("OTHER_KEY", "SEARCH_REF")]),
+        )
+        .expect_err("different entries at the applied revision");
+    assert_eq!(conflict.error_code(), "extensions.revision_conflict");
+    assert_eq!(
+        store
+            .apply_managed_state_environment(
+                "connections",
+                "secret-environment",
+                4,
+                BTreeMap::new()
+            )
+            .expect("clear"),
+        ManagedApplyOutcome::Cleared
+    );
+    assert!(
+        managed_environment_for_home(home.path())
+            .expect("resolve")
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_referenced_secret_is_kept_until_the_namespace_drops_it() {
+    let home = fresh_home();
+    let mut store = SecretStore::open_or_create(home.path()).expect("open or create");
+    store.set("SEARCH_REF", "atc1.key.first").expect("deposit");
+    store
+        .apply_managed_state_environment(
+            "connections",
+            "secret-environment",
+            1,
+            environment(&[("SEARCH_API_KEY", "SEARCH_REF")]),
+        )
+        .expect("apply");
+    let error = store.delete("SEARCH_REF").expect_err("still referenced");
+    assert_eq!(error.error_code(), "secrets.referenced");
+    let message = error.public_message();
+    assert!(message.contains("SEARCH_API_KEY") && message.contains("connections"));
+    assert_eq!(
+        managed_environment_for_home(home.path()).expect("resolve")["SEARCH_API_KEY"],
+        "atc1.key.first"
+    );
+    store
+        .apply_managed_state_environment("connections", "secret-environment", 2, BTreeMap::new())
+        .expect("clear");
+    store
+        .delete("SEARCH_REF")
+        .expect("delete once unreferenced");
+}
+
 #[test]
 fn managed_apply_persists_credential_and_watermark_atomically() {
     let home = fresh_home();

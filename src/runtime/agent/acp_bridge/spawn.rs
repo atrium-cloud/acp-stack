@@ -101,6 +101,8 @@ impl AcpBridge {
             sink: sink.clone(),
         });
         let mut env = build_agent_process_env(agent, home, env)?;
+        // Resolved here rather than in the start request, so a crash restart reads current refs.
+        crate::extensions::managed_state::layer_environment(&mut env, home)?;
         sandbox.layer_workload_env(&mut env);
         // Last write wins, so the namespace owner's declaration overrides both
         // `[agent].env` and the runtime-managed rewrites above it.

@@ -158,6 +158,15 @@ pub enum StackError {
         reason: String,
     },
 
+    #[error(
+        "managed-state namespace `{namespace}` sets `{name}` from secret `{secret_ref}`, which is not in the secret store"
+    )]
+    ExtensionEnvironmentUnresolved {
+        namespace: String,
+        name: String,
+        secret_ref: String,
+    },
+
     #[error("failed to set owner-only permissions on {path}: {source}")]
     PermissionSet {
         path: PathBuf,
@@ -298,6 +307,15 @@ pub enum StackError {
 
     #[error("secret `{name}` was not found in the secret store")]
     SecretNotFound { name: String },
+
+    #[error(
+        "secret `{name}` sets `{variable}` in managed-state namespace `{namespace}`; apply the namespace without that entry before deleting it"
+    )]
+    SecretReferenced {
+        name: String,
+        namespace: String,
+        variable: String,
+    },
 
     #[error(
         "provider secret `{env_ref}` is missing and the declared managed credential push cannot deliver it for provider `{provider_id}`: the push writes only the env vars the agent reads for this provider. Store it with `acps secrets set {env_ref}` before init, or reference the provider's push-delivered api-key variable."

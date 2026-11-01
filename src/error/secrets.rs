@@ -17,6 +17,7 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         | SecretStorePlaintextInvalid { .. }
         | SecretStorePlaintextNotUtf8 { .. } => "secrets.plaintext_invalid",
         SecretNotFound { .. } => "secrets.not_found",
+        SecretReferenced { .. } => "secrets.referenced",
         ProviderCredentialRollbackFailed { .. } => "secrets.rollback_failed",
         ProviderSecretNotPushDeliverable { .. } => "secrets.provider_secret_not_push_deliverable",
         InvalidSecretRefName { .. }
@@ -42,6 +43,13 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
         | SecretStorePlaintextInvalid { .. }
         | SecretStorePlaintextNotUtf8 { .. } => "secret store plaintext is invalid".to_owned(),
         SecretNotFound { .. } => "secret was not found".to_owned(),
+        SecretReferenced {
+            name,
+            namespace,
+            variable,
+        } => format!(
+            "secret `{name}` sets `{variable}` in managed-state namespace `{namespace}`; apply the namespace without that entry before deleting it"
+        ),
         ProviderCredentialRollbackFailed { .. } => {
             "provider credential change failed and could not be rolled back".to_owned()
         }
@@ -73,6 +81,7 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
     use StackError::*;
     Some(match err {
         SecretNotFound { .. } => StatusCode::NOT_FOUND,
+        SecretReferenced { .. } => StatusCode::CONFLICT,
         AgeKeyRead { .. }
         | AgeKeyWrite { .. }
         | AgeKeyParse { .. }

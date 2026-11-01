@@ -124,8 +124,9 @@ pub struct ExtensionConfig {
     /// `BTreeMap` for deterministic ordering across serialization round-trips.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub workload_env: BTreeMap<String, String>,
-    /// `managed-state` only. The state contract the namespace applies;
-    /// `provider-credential` is the only capability today.
+    /// `managed-state` only. The state contract the namespace applies:
+    /// `provider-credential` (one provider credential selection) or
+    /// `secret-environment` (workload env vars carrying secret-store refs).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capability: Option<String>,
 }

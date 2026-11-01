@@ -247,7 +247,7 @@ Provider and model fields are documented in [agents/config.md](agents/config.md)
 - `mode`, `deny`, and `review` govern mediated commands, and `acp_prompt_action` governs agent-raised requests. The two surfaces are disjoint: a `deny` pattern does not screen work an agent performs through its own tooling, under either value of `acp_prompt_action`.
 - Command `deny` and `review` patterns are checked against raw and shell-word-normalized forms of the full submitted command and each simple command segment found through shell control operators, command substitution, or process substitution.
 - Shell word construction in the command word requires review when no policy pattern matches.
-- `[commands].env_allowlist` is the only non-secret environment forwarded into mediated shell commands. Secret refs are injected only through explicit agent or MCP configuration.
+- `[commands].env_allowlist` is the only non-secret environment forwarded into mediated shell commands. Secret refs are injected only through explicit agent or MCP configuration, or a managed `secret-environment` namespace.
 
 ## Logging
 
@@ -361,7 +361,7 @@ trusted = false
 `[extensions.<name>]` declares typed integration seam instances:
 
 - `type = "network-provider"` declares per-spawn network isolation with an external provider executable. Unshare backend only, at most one instance.
-- `type = "managed-state"` with `capability = "provider-credential"` declares a state namespace owned by an external orchestrator through the admin apply endpoint.
+- `type = "managed-state"` with `capability = "provider-credential"` or `capability = "secret-environment"` declares a state namespace owned by an external orchestrator through the admin apply endpoint.
 
 ### Fields
 

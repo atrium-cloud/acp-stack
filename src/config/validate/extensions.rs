@@ -17,8 +17,9 @@ use crate::error::{Result, StackError};
 /// conservative charset and length so they never need escaping anywhere.
 const MAX_EXTENSION_NAME_BYTES: usize = 64;
 
-/// `provider-credential` is the only managed-state capability today.
+/// The managed-state capabilities, each matching the `desired.kind` its namespace applies.
 pub const MANAGED_STATE_CAPABILITY_PROVIDER_CREDENTIAL: &str = "provider-credential";
+pub const MANAGED_STATE_CAPABILITY_SECRET_ENVIRONMENT: &str = "secret-environment";
 
 pub(crate) fn validate_extensions(config: &Config) -> Result<()> {
     let mut network_provider_names: Vec<&str> = Vec::new();
@@ -228,19 +229,24 @@ fn validate_managed_state_fields(name: &str, extension: &ExtensionConfig) -> Res
         }
     }
     match extension.capability.as_deref() {
-        Some(MANAGED_STATE_CAPABILITY_PROVIDER_CREDENTIAL) => Ok(()),
+        Some(
+            MANAGED_STATE_CAPABILITY_PROVIDER_CREDENTIAL
+            | MANAGED_STATE_CAPABILITY_SECRET_ENVIRONMENT,
+        ) => Ok(()),
         Some(other) => Err(StackError::InvalidParam {
             field: "extensions",
             reason: format!(
-                "extension `{name}`: unknown managed-state capability `{other}`; the only \
-                 capability is \"{MANAGED_STATE_CAPABILITY_PROVIDER_CREDENTIAL}\""
+                "extension `{name}`: unknown managed-state capability `{other}`; expected \
+                 \"{MANAGED_STATE_CAPABILITY_PROVIDER_CREDENTIAL}\" or \
+                 \"{MANAGED_STATE_CAPABILITY_SECRET_ENVIRONMENT}\""
             ),
         }),
         None => Err(StackError::InvalidParam {
             field: "extensions",
             reason: format!(
-                "extension `{name}`: type = \"managed-state\" requires \
-                 `capability = \"{MANAGED_STATE_CAPABILITY_PROVIDER_CREDENTIAL}\"`"
+                "extension `{name}`: type = \"managed-state\" requires `capability`, \
+                 \"{MANAGED_STATE_CAPABILITY_PROVIDER_CREDENTIAL}\" or \
+                 \"{MANAGED_STATE_CAPABILITY_SECRET_ENVIRONMENT}\""
             ),
         }),
     }

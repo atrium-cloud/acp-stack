@@ -47,6 +47,7 @@ pub(crate) use self::validate::primitives::{
 pub use self::validate::primitives::{is_valid_secret_ref_name, parse_duration_string};
 pub(crate) use self::validate::skills::{is_valid_github_owner, is_valid_github_repo};
 pub(crate) use self::validate::sources::{derive_code_source_name, derive_data_source_name};
+pub(crate) use self::validate::workload_env::runtime_written_conflict;
 pub(crate) use self::validate::{STACK_UPDATE_FREQUENCY_LIMITS, validate_supabase_identifiers};
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]

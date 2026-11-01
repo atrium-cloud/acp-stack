@@ -104,7 +104,7 @@ Pending requests expire according to config. Approval and denial decisions are d
 - Every terminal is recorded as an `acp`-origin row in the durable command log with its output and exit status.
 - Terminal children inherit the same `[workspace.sandbox]` profile as the agent harness.
 - Their working directory is confined to the session workspace.
-- They receive a clean session environment: managed `PATH` and `HOME` plus the agent-supplied vars.
+- They receive a clean session environment: managed `PATH` and `HOME`, the agent-supplied vars, and a managed `secret-environment` namespace's entries ([extensions.md](extensions.md#capability-secret-environment)).
 - The `[agent].env` provider secrets go only to the agent process itself.
 
 ## Workspace Boundary
@@ -241,8 +241,9 @@ Precedence, lowest first:
 
 1. The environment the spawn otherwise starts with: the managed `PATH` and `HOME` for the agent and terminals, nothing for mediated commands.
 2. `workload_env`.
-3. Per-request env: `[agent].env` and runtime-managed launch variables for the agent, the agent's terminal `env`, and `env` on `POST /v1/commands`.
-4. A network-provider `workload_env`.
+3. A managed `secret-environment` namespace's entries, each resolved from its secret-store ref at spawn.
+4. Per-request env: `[agent].env` and runtime-managed launch variables for the agent, the agent's terminal `env`, and `env` on `POST /v1/commands`.
+5. A network-provider `workload_env`.
 
 `workload_path_prepend` goes ahead of the `PATH` the spawn otherwise gets, in declared order:
 

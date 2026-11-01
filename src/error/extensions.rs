@@ -10,6 +10,7 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         ExtensionNamespaceUnknown { .. } => "extensions.not_found",
         ExtensionRevisionConflict { .. } => "extensions.revision_conflict",
         ExtensionStateOwnership { .. } => "extensions.state_ownership",
+        ExtensionEnvironmentUnresolved { .. } => "extensions.environment_unresolved",
         _ => return None,
     })
 }
@@ -30,6 +31,13 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
         } => format!(
             "managed-state namespace `{namespace}` cannot take ownership of provider `{provider_id}`: {reason}"
         ),
+        ExtensionEnvironmentUnresolved {
+            namespace,
+            name,
+            secret_ref,
+        } => format!(
+            "managed-state namespace `{namespace}` sets `{name}` from secret `{secret_ref}`, which is not in the secret store"
+        ),
         _ => return None,
     })
 }
@@ -42,6 +50,8 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         // retries with fresh state, not a payload defect, so never 400.
         ExtensionRevisionConflict { .. } => StatusCode::CONFLICT,
         ExtensionStateOwnership { .. } => StatusCode::BAD_REQUEST,
+        // The orchestrator removed a secret its entry still names; it repairs the state.
+        ExtensionEnvironmentUnresolved { .. } => StatusCode::CONFLICT,
         _ => return None,
     })
 }

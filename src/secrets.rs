@@ -49,6 +49,15 @@ pub fn managed_provider_endpoint_override_for_home(
     SecretStore::open_read_only(home)?.managed_provider_endpoint_override()
 }
 
+/// The managed-state workload environment for `home`, resolved for one spawn; a store that
+/// does not exist yet has none.
+pub fn managed_environment_for_home(home: &Path) -> Result<BTreeMap<String, String>> {
+    if !age_key_path(home).exists() || !secret_store_path(home).exists() {
+        return Ok(BTreeMap::new());
+    }
+    SecretStore::open_read_only(home)?.managed_environment()
+}
+
 /// The one writer-visible handle a long-running process shares across threads.
 /// The store rewrites its whole ciphertext on every mutation, so a second
 /// decrypted snapshot's later persist would silently clobber the first
@@ -255,6 +264,9 @@ pub struct ManagedStateRecord {
     pub provider_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// A `secret-environment` record's workload env names, each mapped to its secret ref.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub environment: BTreeMap<String, String>,
 }
 
 /// The managed-state selection the store applies: env-keyed values plus optional secret refs for one provider.
@@ -600,20 +612,123 @@ impl SecretStore {
                 managed_state,
                 outcome,
             } => {
-                let plaintext = StorePlaintext {
-                    secrets: self.secrets.clone(),
-                    provider_credentials: provider_credentials.clone(),
-                    managed_state: managed_state.clone(),
-                };
-                plaintext.validate()?;
-                let ciphertext = encrypt_plaintext(&self.identity.to_public(), &plaintext)?;
-                atomic_write_owner_only(&self.store_path, &ciphertext)?;
-                self.provider_credentials = provider_credentials;
-                self.managed_state = managed_state;
-                self.register_known_values();
+                self.commit_managed_state(provider_credentials, managed_state)?;
                 Ok(outcome)
             }
         }
+    }
+
+    /// Apply one `secret-environment` revision for `namespace`. The record keeps refs, not
+    /// values, so a ref's value may rotate under the same revision and the next spawn reads
+    /// it; replay identity compares the refs alone.
+    pub fn apply_managed_state_environment(
+        &mut self,
+        namespace: &str,
+        kind: &str,
+        revision: i64,
+        environment: BTreeMap<String, String>,
+    ) -> Result<ManagedApplyOutcome> {
+        let record = self.managed_state.get(namespace);
+        if let Some(record) = self.replayed_record(namespace, revision)? {
+            if record.kind.as_deref() != Some(kind) || record.environment != environment {
+                return Err(StackError::ExtensionRevisionConflict {
+                    namespace: namespace.to_owned(),
+                    reason: format!(
+                        "revision {revision} is already applied with different content"
+                    ),
+                });
+            }
+            return Ok(ManagedApplyOutcome::Noop);
+        }
+        let mut catalog = self.provider_credentials.clone();
+        if let Some(previous_provider) = record.and_then(|record| record.provider_id.as_deref()) {
+            catalog.remove(previous_provider);
+        }
+        let outcome = if environment.is_empty() {
+            ManagedApplyOutcome::Cleared
+        } else {
+            ManagedApplyOutcome::Applied
+        };
+        let mut managed_state = self.managed_state.clone();
+        managed_state.insert(
+            namespace.to_owned(),
+            ManagedStateRecord {
+                revision,
+                provider_id: None,
+                kind: Some(kind.to_owned()),
+                environment,
+            },
+        );
+        self.commit_managed_state(catalog, managed_state)?;
+        Ok(outcome)
+    }
+
+    /// Every managed-state environment entry with its ref resolved, for one workload spawn.
+    pub fn managed_environment(&self) -> Result<BTreeMap<String, String>> {
+        let mut environment = BTreeMap::new();
+        for (namespace, record) in &self.managed_state {
+            for (name, secret_ref) in &record.environment {
+                let value = self.get(secret_ref).map_err(|error| match error {
+                    StackError::SecretNotFound { .. } => {
+                        StackError::ExtensionEnvironmentUnresolved {
+                            namespace: namespace.clone(),
+                            name: name.clone(),
+                            secret_ref: secret_ref.clone(),
+                        }
+                    }
+                    other => other,
+                })?;
+                environment.insert(name.clone(), value.to_owned());
+            }
+        }
+        Ok(environment)
+    }
+
+    /// The revision rule every managed-state kind shares: positive and never below the
+    /// applied one. `Some` is a replay at the applied revision, whose content must match.
+    fn replayed_record(
+        &self,
+        namespace: &str,
+        revision: i64,
+    ) -> Result<Option<&ManagedStateRecord>> {
+        if revision <= 0 {
+            return Err(StackError::InvalidParam {
+                field: "revision",
+                reason: "revision must be a positive integer".to_owned(),
+            });
+        }
+        match self.managed_state.get(namespace) {
+            Some(record) if revision == record.revision => Ok(Some(record)),
+            Some(record) if revision < record.revision => {
+                Err(StackError::ExtensionRevisionConflict {
+                    namespace: namespace.to_owned(),
+                    reason: format!(
+                        "revision {revision} is stale; revision {} is already applied",
+                        record.revision
+                    ),
+                })
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn commit_managed_state(
+        &mut self,
+        provider_credentials: BTreeMap<String, ProviderCredentialSet>,
+        managed_state: BTreeMap<String, ManagedStateRecord>,
+    ) -> Result<()> {
+        let plaintext = StorePlaintext {
+            secrets: self.secrets.clone(),
+            provider_credentials: provider_credentials.clone(),
+            managed_state: managed_state.clone(),
+        };
+        plaintext.validate()?;
+        let ciphertext = encrypt_plaintext(&self.identity.to_public(), &plaintext)?;
+        atomic_write_owner_only(&self.store_path, &ciphertext)?;
+        self.provider_credentials = provider_credentials;
+        self.managed_state = managed_state;
+        self.register_known_values();
+        Ok(())
     }
 
     /// Deposit flat secrets and apply a managed-state credential selection as ONE transaction. The
@@ -711,29 +826,11 @@ impl SecretStore {
         revision: i64,
         selection: Option<ManagedCredentialSelection>,
     ) -> Result<StagedManagedCredential> {
-        if revision <= 0 {
-            return Err(StackError::InvalidParam {
-                field: "revision",
-                reason: "revision must be a positive integer".to_owned(),
-            });
+        if let Some(record) = self.replayed_record(namespace, revision)? {
+            self.ensure_identical_replay(namespace, kind, record, selection.as_ref())?;
+            return Ok(StagedManagedCredential::Noop);
         }
         let record = self.managed_state.get(namespace);
-        match record {
-            Some(record) if revision == record.revision => {
-                self.ensure_identical_replay(namespace, kind, record, selection.as_ref())?;
-                return Ok(StagedManagedCredential::Noop);
-            }
-            Some(record) if revision < record.revision => {
-                return Err(StackError::ExtensionRevisionConflict {
-                    namespace: namespace.to_owned(),
-                    reason: format!(
-                        "revision {revision} is stale; revision {} is already applied",
-                        record.revision
-                    ),
-                });
-            }
-            _ => {}
-        }
 
         let mut catalog = self.provider_credentials.clone();
         if let Some(previous_provider) = record.and_then(|record| record.provider_id.as_deref()) {
@@ -745,6 +842,7 @@ impl SecretStore {
                     revision,
                     provider_id: None,
                     kind: Some(kind.to_owned()),
+                    environment: BTreeMap::new(),
                 },
                 ManagedApplyOutcome::Cleared,
             ),
@@ -780,6 +878,7 @@ impl SecretStore {
                         revision,
                         provider_id: Some(selection.provider_id),
                         kind: Some(kind.to_owned()),
+                        environment: BTreeMap::new(),
                     },
                     ManagedApplyOutcome::Applied,
                 )
@@ -860,7 +959,22 @@ impl SecretStore {
         self.persist()
     }
 
+    /// A secret a managed environment entry still names is refused, so every spawn
+    /// keeps resolving each ref the namespace holds.
     pub fn delete(&mut self, name: &str) -> Result<()> {
+        for (namespace, record) in &self.managed_state {
+            if let Some((variable, _)) = record
+                .environment
+                .iter()
+                .find(|(_, secret_ref)| secret_ref.as_str() == name)
+            {
+                return Err(StackError::SecretReferenced {
+                    name: name.to_owned(),
+                    namespace: namespace.clone(),
+                    variable: variable.clone(),
+                });
+            }
+        }
         if self.secrets.remove(name).is_none() {
             return Err(StackError::SecretNotFound {
                 name: name.to_owned(),

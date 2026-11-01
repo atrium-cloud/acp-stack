@@ -38,7 +38,7 @@ A namespace whose policy routes traffic through a proxy or a private CA is usabl
 - They are injected into the workload side only. The provider starts from a cleared environment carrying only the `ACPS_SANDBOX_NETWORK_*` contract variables.
 - Values are passed outside argv, keeping them out of process listings.
 
-The declaration is applied last, after `[agent].env`, after any runtime-managed launch variables, and after `[workspace.sandbox].workload_env`, so it wins on conflict. A name declared both here and in `[workspace.sandbox].workload_env` fails config load.
+The declaration is applied last, after `[agent].env`, after any runtime-managed launch variables, after a managed [secret environment](#capability-secret-environment), and after `[workspace.sandbox].workload_env`, so it wins on conflict. A name declared both here and in `[workspace.sandbox].workload_env` fails config load.
 
 ### `workload_env` Validation
 
@@ -51,7 +51,10 @@ The provider wire contract is specified in [security.md](security.md#network-iso
 
 ## Type `managed-state`
 
-A `managed-state` instance grants an external orchestrator ownership of one named state namespace. The only capability today is `provider-credential`. The namespace holds at most one provider credential selection. It is stored in the encrypted secret store's provider credential catalog, exactly like an operator-managed credential. The namespace is recorded as its provenance source.
+A `managed-state` instance grants an external orchestrator ownership of one named state namespace. Its `capability` names the one `desired.kind` the namespace accepts; a body of another kind is rejected with `request.invalid_param`.
+
+- `provider-credential`: the namespace holds at most one provider credential selection. It is stored in the encrypted secret store's provider credential catalog, exactly like an operator-managed credential. The namespace is recorded as its provenance source.
+- `secret-environment`: the namespace holds workload env vars whose values come from secret-store refs. See [Capability `secret-environment`](#capability-secret-environment).
 
 The seam is one fixed admin route, parameterized by the declared instance name:
 
@@ -140,12 +143,34 @@ Provider model-catalog fetches follow the override. When an override names the c
 
 Only providers that declare a `models_url` are ever fetched. With the override cleared, the declared URL is used unchanged.
 
+### Capability `secret-environment`
+
+Request body:
+
+```json
+{
+  "schema_version": 1,
+  "revision": 7,
+  "desired": {
+    "kind": "secret-environment",
+    "entries": { "SEARCH_API_KEY": "SEARCH_API_KEY_REF" }
+  }
+}
+```
+
+- `entries` maps each workload env var name to the flat secret-store ref whose value it carries. It is a required key; an empty map clears the namespace.
+- At most 128 entries. Names and refs match `[A-Za-z_][A-Za-z0-9_]*` and are at most 128 bytes.
+- Every ref must be in the secret store at apply time.
+- A name is rejected when a source that writes it at every spawn already sets it: the runtime (`PATH`, `HOME`, `ACPS_*`, and the runtime-managed launch variables), a network-provider `workload_env`, or another `secret-environment` namespace. Every other source meets the namespace in the spawn precedence below, so an apply never depends on agent config or the selected provider.
+
+The namespace stores the refs, never their values. Every workload spawn (the agent process, ACP terminals, and mediated commands) reads the current value of each ref, so a secret rotated under the same ref reaches the next spawn without a new revision; the running agent process keeps the value it started with until the orchestrator restarts it. The values fill beneath the spawn's own env and above `[workspace.sandbox].workload_env`, and the network-provider declaration still lands last. In the agent process, an `[agent].env` entry or the selected provider's credential variable of the same name therefore wins; terminals and mediated commands carry the namespace's value. Deleting a secret an entry still names is refused with `409` `secrets.referenced`, so the namespace drops the entry before its secret goes. A ref that is missing anyway fails the spawn, naming the namespace, the variable, and the ref: the agent start answers `409` `extensions.environment_unresolved`, and a terminal or mediated command records the same reason on its failed spawn.
+
 ### Revision semantics and ownership
 
 Revision semantics are enforced in the store and persisted atomically with the credential catalog swap under the agent-config mutation lock:
 
-- `revision` greater than the applied watermark: applied (or cleared for a `null` selection; the watermark survives a clear).
-- `revision` equal to the watermark with identical content: idempotent no-op.
+- `revision` greater than the applied watermark: applied (or cleared for a `null` selection or empty `entries`; the watermark survives a clear).
+- `revision` equal to the watermark with identical content: idempotent no-op. A `secret-environment` replay compares the entries' refs, not their values.
 - `revision` equal to the watermark with different content, or lower: rejected with `409` `extensions.revision_conflict`.
 
 Ownership is store-level provenance, distinct from endpoint behavior. A namespace may only create catalog entries or replace its own.
@@ -156,7 +181,7 @@ Ownership is store-level provenance, distinct from endpoint behavior. A namespac
 
 The declared namespace set is resolved from the config the daemon started with, like the rest of runtime config. A config import that adds a `managed-state` instance answers `404` until the next daemon start.
 
-Responses use the standard envelope: `{"ok": true, "data": {"applied_revision": 7, "outcome": "applied"}}` with `outcome` one of `applied`, `cleared`, `noop`. Every apply records a `server.extension_managed_state_applied` audit event carrying the namespace, outcome, revision, and provider id only.
+Responses use the standard envelope: `{"ok": true, "data": {"applied_revision": 7, "outcome": "applied"}}` with `outcome` one of `applied`, `cleared`, `noop`. Every apply records a `server.extension_managed_state_applied` audit event carrying the namespace, kind, outcome, revision, provider id, and environment variable names only.
 
 ## Versioning
 
