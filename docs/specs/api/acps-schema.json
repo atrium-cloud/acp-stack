@@ -2,12 +2,25 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/atrium-cloud/acp-stack/releases/latest/download/acps-schema.json",
   "title": "acp-stack /v1 API and configuration contract",
-  "description": "Generated from the Rust wire types of acp-stack; do not edit by hand. Regenerate with `cargo run --features dev-tools --bin generate-api-schema`. This root is a container of definitions, not a validatable body: validate a payload against `#/$defs/<namespace>/<TypeName>`. `$defs` splits into three namespaces because serde's `default` and `skip_serializing_if` attributes place a field in `required` under one direction but not the other. `request` is the deserialize contract (what a client sends), `response` is the serialize contract (what the server emits), and `config` is the deserialize contract for `acps-config.toml`. A type used on both sides appears once per namespace. `$defs/AuthTier` sits outside the namespaces as a sibling: it is the shared auth-tier vocabulary (`init`, `session`, `admin`, `local`), described per tier by the root `x-auth-tiers` annotation. Conventions: timestamp fields are RFC 3339 strings; an optional response field is omitted when absent rather than emitted as null, so its nullable type means absent and null are equivalent. Not covered, by design: the `/v1/ws` `LiveEvent` frames and the `acps init serve` streaming frames and state signals (hand-built and byte-pinned by golden tests), the envelope-bypassing binary download handler and the `health/ready` handler (whose readiness body is hand-built, not a typed DTO), and the untyped `config` import response. Cross-field rules (mutually-required or mutually-exclusive fields, exactly-one-of constraints, blank-as-absent) are mostly inexpressible in JSON Schema and stay enforced in code; `ApiError.code` is likewise an open dotted-namespace string rather than a closed enum. See docs/specs/api/api.md for both.",
+  "description": "Generated from the Rust wire types of acp-stack; do not edit by hand. Regenerate with `cargo run --features dev-tools --bin generate-api-schema`. This root is a container of definitions, not a validatable body: validate a payload against `#/$defs/<namespace>/<TypeName>`. `$defs` splits into three namespaces because serde's `default` and `skip_serializing_if` attributes place a field in `required` under one direction but not the other. `request` is the deserialize contract (what a client sends), `response` is the serialize contract (what the server emits), and `config` is the deserialize contract for `acps-config.toml`. A type used on both sides appears once per namespace. `$defs/AuthTier` sits outside the namespaces as a sibling: it is the shared auth-tier vocabulary (`init`, `session`, `admin`, `local`), described per tier by the root `x-auth-tiers` annotation. The root `x-reserved-environment` annotation lists the `names` and `prefixes` of the environment variables the runtime writes at every workload spawn, so no other source may declare them; a network-provider `workload_env` adds config-specific names outside this list. Conventions: timestamp fields are RFC 3339 strings; an optional response field is omitted when absent rather than emitted as null, so its nullable type means absent and null are equivalent. Not covered, by design: the `/v1/ws` `LiveEvent` frames and the `acps init serve` streaming frames and state signals (hand-built and byte-pinned by golden tests), the envelope-bypassing binary download handler and the `health/ready` handler (whose readiness body is hand-built, not a typed DTO), and the untyped `config` import response. Cross-field rules (mutually-required or mutually-exclusive fields, exactly-one-of constraints, blank-as-absent) are mostly inexpressible in JSON Schema and stay enforced in code; `ApiError.code` is likewise an open dotted-namespace string rather than a closed enum. See docs/specs/api/api.md for both.",
   "x-auth-tiers": {
     "init": "one-off bearer token for `acps init serve`, valid only while hosted setup runs before session/admin keys exist; supplied via process input",
     "session": "everyday key for sessions, workspace files, mediated commands, logs, status, and pending permissions",
     "admin": "instance-control key for secrets, config import, agent process control, and security-sensitive operations",
     "local": "keyless same-user access over the internal Unix socket for local `acps` routes; never accepted on the TCP router"
+  },
+  "x-reserved-environment": {
+    "names": [
+      "GOOGLE_GEMINI_BASE_URL",
+      "HOME",
+      "PATH",
+      "PI_ACP_ORIGIN_OVERRIDES",
+      "PI_ACP_PI_BIN"
+    ],
+    "prefixes": [
+      "ACPS_",
+      "KIMI_MODEL_"
+    ]
   },
   "$defs": {
     "request": {

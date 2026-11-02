@@ -49,7 +49,10 @@ const SCHEMA_DESCRIPTION: &str = concat!(
     "deserialize contract for `acps-config.toml`. A type used on both sides appears once per ",
     "namespace. `$defs/AuthTier` sits outside the namespaces as a sibling: it is the shared ",
     "auth-tier vocabulary (`init`, `session`, `admin`, `local`), described per tier by the root ",
-    "`x-auth-tiers` annotation. Conventions: timestamp fields are RFC 3339 strings; an optional ",
+    "`x-auth-tiers` annotation. The root `x-reserved-environment` annotation lists the `names` ",
+    "and `prefixes` of the environment variables the runtime writes at every workload spawn, so ",
+    "no other source may declare them; a network-provider `workload_env` adds config-specific ",
+    "names outside this list. Conventions: timestamp fields are RFC 3339 strings; an optional ",
     "response field is omitted when absent rather than emitted as null, so its nullable type means ",
     "absent and null are equivalent. Not covered, by design: the `/v1/ws` `LiveEvent` frames and the ",
     "`acps init serve` streaming frames and state signals (hand-built and byte-pinned by golden ",
@@ -160,8 +163,9 @@ fn merge_pass<T: schemars::JsonSchema>(
 
 /// The full published schema document: one draft-2020-12 root whose `$defs`
 /// carries the `request`, `response`, and `config` namespaces plus the shared
-/// vocabulary defs (e.g. `AuthTier`), and whose `x-auth-tiers` annotation
-/// describes each auth tier.
+/// vocabulary defs (e.g. `AuthTier`), whose `x-auth-tiers` annotation describes
+/// each auth tier, and whose `x-reserved-environment` annotation lists what the
+/// runtime writes at every workload spawn.
 pub fn acps_schema() -> Value {
     let mut request = Map::new();
     merge_pass::<requests::AcpsRequestTypes>(Contract::Deserialize, "request", &mut request);
@@ -196,8 +200,19 @@ pub fn acps_schema() -> Value {
         "title": SCHEMA_TITLE,
         "description": SCHEMA_DESCRIPTION,
         "x-auth-tiers": Value::Object(auth_tiers),
+        "x-reserved-environment": reserved_environment(),
         "$defs": Value::Object(defs),
     })
+}
+
+/// Built from what the workload env validator reads, so the annotation cannot
+/// drift from what it refuses. Sorted for stable bytes.
+fn reserved_environment() -> Value {
+    let mut names: Vec<&str> = crate::config::runtime_written_env_names().collect();
+    names.sort_unstable();
+    let mut prefixes = crate::config::RUNTIME_WRITTEN_ENV_PREFIXES;
+    prefixes.sort_unstable();
+    json!({ "names": names, "prefixes": prefixes })
 }
 
 /// Version + per-namespace definition counts sidecar. `version` is the
@@ -316,6 +331,18 @@ mod tests {
             .map(|value| value.as_str().expect("string enum value"))
             .collect();
         assert_eq!(values, declared, "$defs/AuthTier must list every AuthTier");
+    }
+
+    #[test]
+    fn reserved_environment_is_declared_at_the_root() {
+        let mut names: Vec<&str> = crate::config::runtime_written_env_names().collect();
+        names.sort_unstable();
+        let mut prefixes = crate::config::RUNTIME_WRITTEN_ENV_PREFIXES;
+        prefixes.sort_unstable();
+        assert_eq!(
+            acps_schema().get("x-reserved-environment"),
+            Some(&json!({ "names": names, "prefixes": prefixes })),
+        );
     }
 
     #[test]

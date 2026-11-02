@@ -19,6 +19,11 @@ const WORKLOAD_ENV_FIELD: &str = "workspace.sandbox.workload_env";
 const WORKLOAD_PATH_PREPEND_FIELD: &str = "workspace.sandbox.workload_path_prepend";
 /// The runtime's own env namespace, which carries its sandbox protocol.
 const RUNTIME_ENV_PREFIX: &str = "ACPS_";
+/// Names the runtime writes at every workload spawn, whichever agent runs.
+pub(super) const RUNTIME_WRITTEN_ENV_NAMES: [&str; 2] = ["PATH", "HOME"];
+/// Namespaces the runtime writes whole.
+pub(crate) const RUNTIME_WRITTEN_ENV_PREFIXES: [&str; 2] =
+    [RUNTIME_ENV_PREFIX, KIMI_MANAGED_ENV_PREFIX];
 
 pub(crate) fn validate_workload_env(config: &Config) -> Result<()> {
     let sandbox = &config.workspace.sandbox;
@@ -81,14 +86,21 @@ fn refuse_runtime_managed(config: &Config, name: &str) -> Result<()> {
     }
 }
 
+/// Every exact name the runtime writes whatever the config. The published schema's
+/// `x-reserved-environment` reads this and [`RUNTIME_WRITTEN_ENV_PREFIXES`].
+pub(crate) fn runtime_written_env_names() -> impl Iterator<Item = &'static str> {
+    RUNTIME_WRITTEN_ENV_NAMES
+        .into_iter()
+        .chain(RUNTIME_MANAGED_LAUNCH_ENV)
+}
+
 /// Why `name` cannot be declared for workload spawns: the runtime or a network-provider
 /// declaration writes it at every spawn, over any other source.
 pub(crate) fn runtime_written_conflict(config: &Config, name: &str) -> Option<String> {
-    if name == "PATH"
-        || name == "HOME"
-        || name.starts_with(RUNTIME_ENV_PREFIX)
-        || name.starts_with(KIMI_MANAGED_ENV_PREFIX)
-        || RUNTIME_MANAGED_LAUNCH_ENV.contains(&name)
+    if runtime_written_env_names().any(|written| written == name)
+        || RUNTIME_WRITTEN_ENV_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
     {
         return Some("the runtime sets it for workload spawns".to_owned());
     }

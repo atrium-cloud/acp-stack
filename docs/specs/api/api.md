@@ -113,6 +113,8 @@ The document splits `$defs` into three namespaces because serde's `#[serde(defau
 
 A type used on both sides appears once per namespace.
 
+The root `x-reserved-environment` annotation lists the `names` and `prefixes` of the environment variables the runtime writes at every workload spawn, so no other source may declare them. A network-provider `workload_env` adds config-specific names outside this list.
+
 Cross-field rules (mutually-required/exclusive fields, exactly-one-of headers, blank-as-absent) live in code; JSON Schema carries few of them. They are documented in these specs and in the field descriptions of the highest-traffic request bodies rather than duplicated as schema logic.
 
 The few that map cleanly to a structural keyword are emitted (e.g. the config file's at-least-one-of `agent`/`array` sections as an `anyOf`), with the finer per-field checks still in the loader.

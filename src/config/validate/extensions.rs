@@ -186,7 +186,7 @@ fn validate_workload_env(name: &str, workload_env: &BTreeMap<String, String>) ->
         }
         // PATH and HOME are runtime-managed at both spawn seams, which would
         // silently drop the declared value. Fail loudly at load instead.
-        if matches!(env_name.as_str(), "PATH" | "HOME") {
+        if super::workload_env::RUNTIME_WRITTEN_ENV_NAMES.contains(&env_name.as_str()) {
             return Err(StackError::InvalidParam {
                 field: "extensions",
                 reason: format!(
