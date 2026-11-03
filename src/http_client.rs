@@ -13,7 +13,7 @@ const EMPTY_ERROR_BODY: &str = "(empty body)";
 /// acp-stack's own proxy for the requests it sends with a provider credential. Nothing else reads
 /// it: installs, release fetches, data sources, logging, and child processes keep their routing.
 pub const PROVIDER_HTTP_PROXY_ENV: &str = "ACPS_PROVIDER_HTTP_PROXY";
-/// Loopback destinations bypass the provider proxy, so a local endpoint override keeps working.
+/// Loopback destinations bypass the provider proxy.
 const PROVIDER_PROXY_LOOPBACK_BYPASS: &str = "localhost,127.0.0.0/8,::1";
 
 /// The body of a non-2xx response, redacted and bounded for an error. A failed read is noted in

@@ -253,10 +253,10 @@ Precedence, lowest first:
 Config load refuses, under `workspace.sandbox.workload_env`:
 
 - More than 16 entries, names outside `[A-Za-z_][A-Za-z0-9_]*` or over 128 bytes, and values that are empty, over 16 KiB, or contain NUL.
-- `PATH` (use `workload_path_prepend`), `HOME`, any `ACPS_*` name, and the runtime-managed launch variables `KIMI_MODEL_*`, `PI_ACP_PI_BIN`, `PI_ACP_ORIGIN_OVERRIDES`, and `GOOGLE_GEMINI_BASE_URL`.
+- `PATH` (use `workload_path_prepend`), `HOME`, any `ACPS_*` name, and the runtime-managed launch variables `KIMI_MODEL_*` and `PI_ACP_PI_BIN`.
 - A name any target's `[agent].env` lists, or a network-provider `workload_env` declares.
 
-The Hermes Agent base-URL variable depends on the selected provider and is settled at spawn: when the runtime sets it for an endpoint override, the runtime value replaces a declared one.
+The Hermes Agent base-URL variable depends on the selected provider and is settled at spawn: when the runtime sets it to reach a provider's host, the runtime value replaces a declared one.
 
 Config load refuses, under `workspace.sandbox.workload_path_prepend`, more than 16 entries and any entry that is relative, over 16 KiB, or contains `:` or NUL.
 

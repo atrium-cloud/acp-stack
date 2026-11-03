@@ -1,13 +1,11 @@
 use super::*;
 
-use crate::runtime::agent::agent_headless_config::{endpoint_origin, reroute_base_url};
 use crate::runtime::agent::provider_keys::{
     HERMES_AGENT_ID, KIMI_MODEL_API_KEY_ENV, KIMI_MODEL_BASE_URL_ENV, KIMI_MODEL_DISPLAY_NAME_ENV,
     KIMI_MODEL_MAX_CONTEXT_SIZE_ENV, KIMI_MODEL_MAX_OUTPUT_SIZE_ENV, KIMI_MODEL_NAME_ENV,
-    KIMI_MODEL_PROVIDER_TYPE_ENV, KIMI_NATIVE_PROVIDER_TYPE, agent_provider_id_for_provider_id,
-    env_var_for_agent_provider_id, hermes_base_url_env_for_native_provider_id,
+    KIMI_MODEL_PROVIDER_TYPE_ENV, KIMI_NATIVE_PROVIDER_TYPE, env_var_for_agent_provider_id,
     hermes_launch_base_url, kimi_profile_for_provider_id, providers_for_agent,
-    resolve_base_url_template, vendor_base_url_for_agent_provider_id,
+    vendor_base_url_for_agent_provider_id,
 };
 
 pub(crate) const KIMI_CODE_AGENT_ID: &str = "kimi";
@@ -44,23 +42,11 @@ pub(crate) const PI_AGENT_ID: &str = "pi";
 pub(crate) const PI_HARNESS_COMMAND: &str = "pi";
 /// The pi-acp bundle ships without Pi; it runs the `pi` this names.
 pub(crate) const PI_ACP_PI_BIN_ENV: &str = "PI_ACP_PI_BIN";
-/// pi-acp's per-request origin rewrite, comma-separated `<authority>=<origin>` entries. Pi
-/// applies a provider `baseUrl` to every model whatever its wire, so an override routes by host.
-pub(crate) const PI_ACP_ORIGIN_OVERRIDES_ENV: &str = "PI_ACP_ORIGIN_OVERRIDES";
-
-pub(crate) const ANTIGRAVITY_AGENT_ID: &str = "antigravity";
-/// The Antigravity CLI's Gemini endpoint setting: a service root, so an override origin is the
-/// whole value.
-pub(crate) const ANTIGRAVITY_BASE_URL_ENV: &str = "GOOGLE_GEMINI_BASE_URL";
 
 /// Kimi Code's launch namespace, which the runtime writes whole.
 pub(crate) const KIMI_MANAGED_ENV_PREFIX: &str = "KIMI_MODEL_";
 /// Launch vars the runtime owns for their agent; neither `[agent].env` nor workload env may declare them.
-pub(crate) const RUNTIME_MANAGED_LAUNCH_ENV: [&str; 3] = [
-    PI_ACP_PI_BIN_ENV,
-    PI_ACP_ORIGIN_OVERRIDES_ENV,
-    ANTIGRAVITY_BASE_URL_ENV,
-];
+pub(crate) const RUNTIME_MANAGED_LAUNCH_ENV: [&str; 1] = [PI_ACP_PI_BIN_ENV];
 
 pub(super) fn build_agent_process_env(
     agent: &AgentConfig,
@@ -68,54 +54,28 @@ pub(super) fn build_agent_process_env(
     env: HashMap<String, String>,
 ) -> Result<HashMap<String, String>> {
     match agent.id.as_str() {
-        KIMI_CODE_AGENT_ID => {
-            let endpoint = crate::secrets::managed_provider_endpoint_override_for_home(home)?;
-            build_kimi_process_env(agent, env, endpoint.as_ref())
-        }
-        PI_AGENT_ID => {
-            let endpoint = crate::secrets::managed_provider_endpoint_override_for_home(home)?;
-            build_pi_process_env(agent, home, env, endpoint.as_ref())
-        }
-        ANTIGRAVITY_AGENT_ID => {
-            let endpoint = crate::secrets::managed_provider_endpoint_override_for_home(home)?;
-            build_antigravity_process_env(env, endpoint.as_ref())
-        }
-        HERMES_AGENT_ID => {
-            let endpoint = crate::secrets::managed_provider_endpoint_override_for_home(home)?;
-            build_hermes_process_env(agent, env, endpoint.as_ref())
-        }
+        KIMI_CODE_AGENT_ID => build_kimi_process_env(agent, env),
+        PI_AGENT_ID => build_pi_process_env(home, env),
+        HERMES_AGENT_ID => build_hermes_process_env(agent, env),
         _ => Ok(env),
     }
 }
 
-/// A mapped Hermes provider whose native overlay declares a base-URL env var carries its endpoint
-/// override there, so `config.yaml` keeps the native provider id. Nothing is persisted: the value
-/// is derived from the stored override at every launch, so clearing the override stops exporting
-/// it and the overlay falls back to its vendor default.
+/// A row can point Hermes at the host a sealed credential redeems at, through the base-URL env var
+/// Hermes reads. Nothing is persisted: the value is derived at every launch.
 fn build_hermes_process_env(
     agent: &AgentConfig,
     mut env: HashMap<String, String>,
-    endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
 ) -> Result<HashMap<String, String>> {
-    // A custom provider carries its endpoint on the managed named entry in config.yaml.
-    let Some(provider) = agent
+    let Some((base_url_env, base_url)) = agent
         .provider
         .as_ref()
         .filter(|provider| provider.custom.is_none())
+        .and_then(|provider| hermes_launch_base_url(&provider.id))
     else {
         return Ok(env);
     };
-    let endpoint = endpoint.filter(|endpoint| endpoint.provider_id == provider.id);
-    // A row can point Hermes at the host a sealed credential redeems at.
-    let declared_base = hermes_launch_base_url(&provider.id);
-    let Some(base_url_env) = declared_base.map(|(name, _)| name).or_else(|| {
-        agent_provider_id_for_provider_id(HERMES_AGENT_ID, &provider.id)
-            .and_then(hermes_base_url_env_for_native_provider_id)
-    }) else {
-        return Ok(env);
-    };
-    // Guarded even without an override: an operator-declared value would otherwise silently
-    // displace the vendor endpoint acp-stack provisioned the lane for.
+    // An operator-declared value would silently displace the host the credential redeems at.
     if env.contains_key(base_url_env) {
         return Err(StackError::AgentInitializeFailed {
             reason: format!(
@@ -123,76 +83,18 @@ fn build_hermes_process_env(
             ),
         });
     }
-    let Some(endpoint) = endpoint else {
-        if let Some((_, base_url)) = declared_base {
-            env.insert(base_url_env.to_owned(), base_url.to_owned());
-        }
-        return Ok(env);
-    };
-    let Some(vendor_base_url) =
-        vendor_base_url_for_agent_provider_id(HERMES_AGENT_ID, &provider.id)
-    else {
-        return Err(StackError::AgentInitializeFailed {
-            reason: format!(
-                "Hermes Agent provider `{}` declares no vendor base URL, so its endpoint override cannot be composed",
-                provider.id
-            ),
-        });
-    };
-    let vendor_base_url = resolve_base_url_template(vendor_base_url, &endpoint.companion_values)?;
-    env.insert(
-        base_url_env.to_owned(),
-        reroute_base_url(&endpoint.base_url, &vendor_base_url)?,
-    );
-    Ok(env)
-}
-
-/// Antigravity has no provider selection; the override names the provider its credential is
-/// stored under, and the rerouted base is the bare origin.
-fn build_antigravity_process_env(
-    mut env: HashMap<String, String>,
-    endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
-) -> Result<HashMap<String, String>> {
-    if env.contains_key(ANTIGRAVITY_BASE_URL_ENV) {
-        return Err(StackError::AgentInitializeFailed {
-            reason: format!(
-                "Antigravity launch env `{ANTIGRAVITY_BASE_URL_ENV}` is runtime-managed; remove it from [agent].env"
-            ),
-        });
-    }
-    let Some(endpoint) = endpoint else {
-        return Ok(env);
-    };
-    let Some(vendor_base_url) =
-        vendor_base_url_for_agent_provider_id(ANTIGRAVITY_AGENT_ID, &endpoint.provider_id)
-    else {
-        return Err(StackError::AgentInitializeFailed {
-            reason: format!(
-                "Antigravity cannot route provider `{}` through a custom endpoint",
-                endpoint.provider_id
-            ),
-        });
-    };
-    env.insert(
-        ANTIGRAVITY_BASE_URL_ENV.to_owned(),
-        reroute_base_url(&endpoint.base_url, vendor_base_url)?,
-    );
+    env.insert(base_url_env.to_owned(), base_url.to_owned());
     Ok(env)
 }
 
 fn build_pi_process_env(
-    agent: &AgentConfig,
     home: &Path,
     mut env: HashMap<String, String>,
-    endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
 ) -> Result<HashMap<String, String>> {
-    if let Some(name) = [PI_ACP_PI_BIN_ENV, PI_ACP_ORIGIN_OVERRIDES_ENV]
-        .into_iter()
-        .find(|name| env.contains_key(*name))
-    {
+    if env.contains_key(PI_ACP_PI_BIN_ENV) {
         return Err(StackError::AgentInitializeFailed {
             reason: format!(
-                "Pi Agent launch env `{name}` is runtime-managed; remove it from [agent].env"
+                "Pi Agent launch env `{PI_ACP_PI_BIN_ENV}` is runtime-managed; remove it from [agent].env"
             ),
         });
     }
@@ -208,70 +110,12 @@ fn build_pi_process_env(
         PI_ACP_PI_BIN_ENV.to_owned(),
         pi_path.to_string_lossy().into_owned(),
     );
-    if let Some(origin_override) = pi_origin_override(agent, endpoint)? {
-        env.insert(PI_ACP_ORIGIN_OVERRIDES_ENV.to_owned(), origin_override);
-    }
     Ok(env)
-}
-
-/// The `<authority>=<origin>` entry routing the configured provider's vendor host to the
-/// override origin, or `None` when no override names that provider.
-fn pi_origin_override(
-    agent: &AgentConfig,
-    endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
-) -> Result<Option<String>> {
-    let Some(provider) = agent.provider.as_ref() else {
-        return Ok(None);
-    };
-    let Some(endpoint) = endpoint.filter(|endpoint| endpoint.provider_id == provider.id) else {
-        return Ok(None);
-    };
-    let vendor_base_url = match provider.custom.as_ref() {
-        Some(custom) => custom.base_url.clone(),
-        None => {
-            let Some(template) = vendor_base_url_for_agent_provider_id(PI_AGENT_ID, &provider.id)
-            else {
-                return Err(StackError::AgentInitializeFailed {
-                    reason: format!(
-                        "Pi Agent provider `{}` declares no vendor base URL, so its endpoint override cannot be routed",
-                        provider.id
-                    ),
-                });
-            };
-            resolve_base_url_template(template, &endpoint.companion_values)?
-        }
-    };
-    Ok(Some(format!(
-        "{}={}",
-        https_authority(&vendor_base_url)?,
-        endpoint_origin(&endpoint.base_url)?
-    )))
-}
-
-/// `host[:port]` of an https URL, the port only when it is not 443. pi-acp rewrites `https:`
-/// requests alone, so any other scheme is refused rather than left silently unrouted.
-fn https_authority(base_url: &str) -> Result<String> {
-    let not_https = || StackError::AgentInitializeFailed {
-        reason: format!(
-            "Pi Agent routes an endpoint override by https host, and provider base URL `{base_url}` is not an https URL with a host"
-        ),
-    };
-    let url = reqwest::Url::parse(base_url).map_err(|_| not_https())?;
-    let host = url
-        .host_str()
-        .filter(|_| url.scheme() == "https")
-        .ok_or_else(not_https)?;
-    let port = url
-        .port()
-        .map(|port| format!(":{port}"))
-        .unwrap_or_default();
-    Ok(format!("{host}{port}"))
 }
 
 fn build_kimi_process_env(
     agent: &AgentConfig,
     mut env: HashMap<String, String>,
-    endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
 ) -> Result<HashMap<String, String>> {
     let provider = agent.provider.as_ref();
     let custom = provider.and_then(|provider| provider.custom.as_ref());
@@ -360,22 +204,9 @@ fn build_kimi_process_env(
         });
     }
 
-    // The lane's vendor base keeps its path behind the override origin. The override may be
-    // stored under any alias of the active lane (a provider-less config runs the Kimi For
-    // Coding lane), so lanes are compared by their base rather than by id.
-    let override_targets_active_lane =
-        |endpoint: &&crate::secrets::ProviderEndpointOverride| match provider {
-            Some(provider) if provider.id == endpoint.provider_id => true,
-            _ => kimi_lane_for_provider_id(Some(&endpoint.provider_id))
-                .is_some_and(|lane| lane.base_url == base_url),
-        };
-    let base_url = match endpoint.filter(override_targets_active_lane) {
-        Some(endpoint) => reroute_base_url(&endpoint.base_url, base_url)?,
-        None => base_url.to_owned(),
-    };
     env.insert(KIMI_MODEL_API_KEY_ENV.to_owned(), api_key);
     env.insert(KIMI_MODEL_NAME_ENV.to_owned(), model.to_owned());
-    env.insert(KIMI_MODEL_BASE_URL_ENV.to_owned(), base_url);
+    env.insert(KIMI_MODEL_BASE_URL_ENV.to_owned(), base_url.to_owned());
     if let Some(provider_type) =
         mapped_provider_type.filter(|kind| *kind != KIMI_NATIVE_PROVIDER_TYPE)
     {
@@ -477,114 +308,14 @@ mod tests {
     }
 
     #[test]
-    fn pi_process_env_rejects_declared_runtime_managed_vars() {
+    fn pi_process_env_rejects_a_declared_pi_bin() {
         let home = home_with_managed_pi();
-        for name in [PI_ACP_PI_BIN_ENV, PI_ACP_ORIGIN_OVERRIDES_ENV] {
-            let env = HashMap::from([(name.to_owned(), "declared".to_owned())]);
+        let env = HashMap::from([(PI_ACP_PI_BIN_ENV.to_owned(), "declared".to_owned())]);
 
-            let error = super::build_agent_process_env(&pi_agent(), home.path(), env)
-                .expect_err("declared runtime-managed var must fail");
+        let error = super::build_agent_process_env(&pi_agent(), home.path(), env)
+            .expect_err("declared runtime-managed var must fail");
 
-            assert!(error.to_string().contains(name), "{error}");
-        }
-    }
-
-    fn pi_agent_on(provider_id: &str) -> AgentConfig {
-        let mut agent = pi_agent();
-        agent.provider = Some(crate::config::AgentProviderConfig {
-            id: provider_id.to_owned(),
-            model: None,
-            api_key_ref: None,
-            custom: None,
-        });
-        agent
-    }
-
-    fn pi_custom_agent(base_url: &str) -> AgentConfig {
-        let mut agent =
-            kimi_agent_with_custom_provider(crate::config::CustomProviderApi::default());
-        agent.id = PI_AGENT_ID.to_owned();
-        agent
-            .provider
-            .as_mut()
-            .and_then(|provider| provider.custom.as_mut())
-            .expect("custom provider")
-            .base_url = base_url.to_owned();
-        agent
-    }
-
-    #[test]
-    fn pi_process_env_routes_the_overridden_provider_host_to_the_origin() {
-        let home = home_with_managed_pi();
-        for (provider_id, expected) in [
-            ("opencode-go", "opencode.ai=http://127.0.0.1:3129"),
-            ("anthropic", "api.anthropic.com=http://127.0.0.1:3129"),
-        ] {
-            let prepared = build_pi_process_env(
-                &pi_agent_on(provider_id),
-                home.path(),
-                HashMap::new(),
-                Some(&override_for(provider_id)),
-            )
-            .expect("pi env");
-
-            assert_eq!(
-                prepared
-                    .get(PI_ACP_ORIGIN_OVERRIDES_ENV)
-                    .map(String::as_str),
-                Some(expected)
-            );
-        }
-    }
-
-    #[test]
-    fn pi_process_env_routes_a_custom_provider_by_its_declared_host() {
-        let home = home_with_managed_pi();
-
-        let prepared = build_pi_process_env(
-            &pi_custom_agent("https://api.myprovider.example:8443/v1"),
-            home.path(),
-            HashMap::new(),
-            Some(&override_for("myprovider")),
-        )
-        .expect("pi env");
-
-        assert_eq!(
-            prepared
-                .get(PI_ACP_ORIGIN_OVERRIDES_ENV)
-                .map(String::as_str),
-            Some("api.myprovider.example:8443=http://127.0.0.1:3129")
-        );
-    }
-
-    #[test]
-    fn pi_process_env_refuses_to_route_a_plain_http_custom_provider() {
-        let home = home_with_managed_pi();
-
-        let error = build_pi_process_env(
-            &pi_custom_agent("http://llm.internal.example/v1"),
-            home.path(),
-            HashMap::new(),
-            Some(&override_for("myprovider")),
-        )
-        .expect_err("non-https base must fail");
-
-        assert!(error.to_string().contains("https"), "{error}");
-    }
-
-    #[test]
-    fn pi_process_env_ignores_an_override_for_another_provider() {
-        let home = home_with_managed_pi();
-
-        let prepared = build_pi_process_env(
-            &pi_agent_on("opencode-go"),
-            home.path(),
-            HashMap::new(),
-            Some(&override_for("anthropic")),
-        )
-        .expect("pi env");
-
-        assert!(!prepared.contains_key(PI_ACP_ORIGIN_OVERRIDES_ENV));
+        assert!(error.to_string().contains(PI_ACP_PI_BIN_ENV), "{error}");
     }
 
     #[test]
@@ -960,241 +691,16 @@ mod tests {
         assert_eq!(kimi_lane_for_provider_id(Some("mistral")), None);
     }
 
-    fn override_for(provider_id: &str) -> crate::secrets::ProviderEndpointOverride {
-        crate::secrets::ProviderEndpointOverride {
-            provider_id: provider_id.to_owned(),
-            base_url: "http://127.0.0.1:3129".to_owned(),
-            companion_values: std::collections::BTreeMap::new(),
-        }
-    }
-
-    #[test]
-    fn kimi_process_env_endpoint_override_keeps_the_lane_path_behind_the_origin() {
-        let env = HashMap::from([("MOONSHOT_API_KEY".to_owned(), "secret".to_owned())]);
-        let agent = kimi_agent_with_provider("moonshotai", None);
-
-        let prepared =
-            super::build_kimi_process_env(&agent, env, Some(&override_for("moonshotai")))
-                .expect("Kimi env with override");
-
-        assert_eq!(
-            prepared.get(KIMI_MODEL_BASE_URL_ENV).map(String::as_str),
-            Some("http://127.0.0.1:3129/v1")
-        );
-    }
-
-    #[test]
-    fn kimi_process_env_endpoint_override_reroutes_the_provider_less_default_lane() {
-        for provider_id in KIMI_SUBSCRIPTION_PROVIDER_IDS {
-            let env = HashMap::from([(KIMI_API_KEY_ENV.to_owned(), "secret".to_owned())]);
-
-            let prepared = super::build_kimi_process_env(
-                &kimi_agent(None),
-                env,
-                Some(&override_for(provider_id)),
-            )
-            .expect("Kimi env with override");
-
-            assert_eq!(
-                prepared.get(KIMI_MODEL_BASE_URL_ENV).map(String::as_str),
-                Some("http://127.0.0.1:3129/coding/v1"),
-                "override under `{provider_id}` must reroute the default lane"
-            );
-        }
-    }
-
-    #[test]
-    fn kimi_process_env_provider_less_config_ignores_an_override_for_another_lane() {
-        // The global-region row is another lane: it shares the key but not the host.
-        for provider_id in ["moonshotai", "kimi-coding-global"] {
-            let env = HashMap::from([(KIMI_API_KEY_ENV.to_owned(), "secret".to_owned())]);
-
-            let prepared = super::build_kimi_process_env(
-                &kimi_agent(None),
-                env,
-                Some(&override_for(provider_id)),
-            )
-            .expect("Kimi env");
-
-            assert_eq!(
-                prepared.get(KIMI_MODEL_BASE_URL_ENV).map(String::as_str),
-                Some(KIMI_CODE_BASE_URL),
-                "override under `{provider_id}` must leave the default lane alone"
-            );
-        }
-    }
-
-    #[test]
-    fn kimi_process_env_endpoint_override_under_a_lane_alias_reroutes_the_configured_lane() {
-        let env = HashMap::from([(KIMI_API_KEY_ENV.to_owned(), "secret".to_owned())]);
-        let agent = kimi_agent_with_provider("kimi-code", None);
-
-        let prepared = super::build_kimi_process_env(&agent, env, Some(&override_for("kimi")))
-            .expect("Kimi env");
-
-        assert_eq!(
-            prepared.get(KIMI_MODEL_BASE_URL_ENV).map(String::as_str),
-            Some("http://127.0.0.1:3129/coding/v1")
-        );
-    }
-
-    #[test]
-    fn kimi_process_env_endpoint_override_for_another_provider_is_ignored() {
-        let env = HashMap::from([("MOONSHOT_API_KEY".to_owned(), "secret".to_owned())]);
-        let agent = kimi_agent_with_provider("moonshotai", None);
-
-        let prepared = super::build_kimi_process_env(&agent, env, Some(&override_for("kimi-code")))
-            .expect("Kimi env");
-
-        assert_eq!(
-            prepared.get(KIMI_MODEL_BASE_URL_ENV).map(String::as_str),
-            Some(KIMI_MOONSHOT_BASE_URL)
-        );
-    }
-
-    #[test]
-    fn kimi_process_env_custom_provider_override_keeps_the_declared_path() {
-        let env = HashMap::from([("CUSTOM_API_KEY".to_owned(), "secret".to_owned())]);
-        let agent = kimi_agent_with_custom_provider(crate::config::CustomProviderApi::default());
-
-        let prepared =
-            super::build_kimi_process_env(&agent, env, Some(&override_for("myprovider")))
-                .expect("Kimi custom env");
-
-        assert_eq!(
-            prepared.get(KIMI_MODEL_BASE_URL_ENV).map(String::as_str),
-            Some("http://127.0.0.1:3129/v1")
-        );
-    }
-
-    #[test]
-    fn antigravity_process_env_endpoint_override_is_the_bare_origin() {
-        let env = HashMap::from([("GEMINI_API_KEY".to_owned(), "secret".to_owned())]);
-
-        let prepared = build_antigravity_process_env(env, Some(&override_for("google")))
-            .expect("Antigravity env");
-
-        assert_eq!(
-            prepared.get(ANTIGRAVITY_BASE_URL_ENV).map(String::as_str),
-            Some("http://127.0.0.1:3129")
-        );
-        assert_eq!(
-            prepared.get("GEMINI_API_KEY").map(String::as_str),
-            Some("secret")
-        );
-    }
-
-    #[test]
-    fn antigravity_process_env_without_an_override_is_unchanged() {
-        let env = HashMap::from([("GEMINI_API_KEY".to_owned(), "secret".to_owned())]);
-
-        assert_eq!(
-            build_antigravity_process_env(env.clone(), None).expect("Antigravity env"),
-            env
-        );
-    }
-
-    #[test]
-    fn antigravity_process_env_rejects_a_declared_base_url() {
-        let env = HashMap::from([(ANTIGRAVITY_BASE_URL_ENV.to_owned(), "x".to_owned())]);
-
-        let error = build_antigravity_process_env(env, None).expect_err("managed env must fail");
-
-        assert!(
-            error.to_string().contains(ANTIGRAVITY_BASE_URL_ENV),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn antigravity_process_env_refuses_an_unmapped_provider() {
-        let error = build_antigravity_process_env(HashMap::new(), Some(&override_for("openai")))
-            .expect_err("unmapped provider must fail");
-
-        assert!(error.to_string().contains("openai"), "{error}");
-    }
-
     fn hermes_agent(provider_id: &str, api_key_ref: &str) -> AgentConfig {
         let mut agent = kimi_agent(None);
         agent.id = HERMES_AGENT_ID.to_owned();
-        agent.name = "Hermes Agent".to_owned();
-        agent.command = "hermes-agent-acp".to_owned();
-        agent.args = Vec::new();
-        agent.model = None;
-        agent.env = vec![api_key_ref.to_owned()];
         agent.provider = Some(crate::config::AgentProviderConfig {
             id: provider_id.to_owned(),
-            model: Some("deepseek/deepseek-v4-flash".to_owned()),
+            model: None,
             api_key_ref: Some(api_key_ref.to_owned()),
             custom: None,
         });
         agent
-    }
-
-    #[test]
-    fn hermes_process_env_carries_the_override_in_the_native_base_url_var() {
-        let env = HashMap::from([("OPENROUTER_API_KEY".to_owned(), "secret".to_owned())]);
-        let agent = hermes_agent("openrouter", "OPENROUTER_API_KEY");
-
-        let prepared = build_hermes_process_env(&agent, env, Some(&override_for("openrouter")))
-            .expect("Hermes env");
-
-        assert_eq!(
-            prepared.get("OPENROUTER_BASE_URL").map(String::as_str),
-            Some("http://127.0.0.1:3129/api/v1")
-        );
-        assert_eq!(
-            prepared.get("OPENROUTER_API_KEY").map(String::as_str),
-            Some("secret")
-        );
-    }
-
-    #[test]
-    fn hermes_process_env_without_an_override_exports_no_base_url() {
-        let env = HashMap::from([("OPENROUTER_API_KEY".to_owned(), "secret".to_owned())]);
-        let agent = hermes_agent("openrouter", "OPENROUTER_API_KEY");
-
-        assert_eq!(
-            build_hermes_process_env(&agent, env.clone(), None).expect("Hermes env"),
-            env
-        );
-    }
-
-    #[test]
-    fn hermes_process_env_ignores_an_override_for_another_provider() {
-        let env = HashMap::from([("OPENROUTER_API_KEY".to_owned(), "secret".to_owned())]);
-        let agent = hermes_agent("openrouter", "OPENROUTER_API_KEY");
-
-        let prepared = build_hermes_process_env(&agent, env, Some(&override_for("anthropic")))
-            .expect("Hermes env");
-
-        assert!(!prepared.contains_key("OPENROUTER_BASE_URL"));
-    }
-
-    #[test]
-    fn hermes_process_env_leaves_a_managed_lane_provider_alone() {
-        let env = HashMap::from([("ANTHROPIC_API_KEY".to_owned(), "secret".to_owned())]);
-        let agent = hermes_agent("anthropic", "ANTHROPIC_API_KEY");
-
-        assert_eq!(
-            build_hermes_process_env(&agent, env.clone(), Some(&override_for("anthropic")))
-                .expect("Hermes env"),
-            env
-        );
-    }
-
-    #[test]
-    fn hermes_process_env_leaves_a_custom_provider_alone() {
-        let env = HashMap::from([("CUSTOM_API_KEY".to_owned(), "secret".to_owned())]);
-        let mut agent =
-            kimi_agent_with_custom_provider(crate::config::CustomProviderApi::default());
-        agent.id = HERMES_AGENT_ID.to_owned();
-
-        assert_eq!(
-            build_hermes_process_env(&agent, env.clone(), Some(&override_for("myprovider")))
-                .expect("Hermes env"),
-            env
-        );
     }
 
     /// Hermes' default hosts for these providers are not the ones a sealed credential redeems at.
@@ -1216,8 +722,7 @@ mod tests {
         ] {
             let agent = hermes_agent(provider_id, api_key_ref);
 
-            let prepared =
-                build_hermes_process_env(&agent, HashMap::new(), None).expect("Hermes env");
+            let prepared = build_agent_process_env(&agent, HashMap::new()).expect("Hermes env");
 
             assert_eq!(
                 prepared.get(base_url_env).map(String::as_str),
@@ -1227,13 +732,24 @@ mod tests {
     }
 
     #[test]
-    fn hermes_process_env_rejects_a_declared_base_url() {
-        let env = HashMap::from([("OPENROUTER_BASE_URL".to_owned(), "https://x".to_owned())]);
+    fn hermes_process_env_leaves_other_providers_on_their_default_host() {
+        let env = HashMap::from([("OPENROUTER_API_KEY".to_owned(), "secret".to_owned())]);
         let agent = hermes_agent("openrouter", "OPENROUTER_API_KEY");
 
-        let error = build_hermes_process_env(&agent, env, None).expect_err("managed env must fail");
+        assert_eq!(
+            build_agent_process_env(&agent, env.clone()).expect("Hermes env"),
+            env
+        );
+    }
 
-        assert!(error.to_string().contains("OPENROUTER_BASE_URL"), "{error}");
+    #[test]
+    fn hermes_process_env_rejects_a_declared_base_url() {
+        let env = HashMap::from([("KIMI_BASE_URL".to_owned(), "https://x".to_owned())]);
+        let agent = hermes_agent("kimi-coding", "KIMI_API_KEY");
+
+        let error = build_agent_process_env(&agent, env).expect_err("managed env must fail");
+
+        assert!(error.to_string().contains("KIMI_BASE_URL"), "{error}");
     }
 
     #[test]

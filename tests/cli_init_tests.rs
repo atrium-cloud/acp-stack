@@ -14,8 +14,6 @@ mod custom_agent;
 mod deps_apply_async;
 #[path = "cli_init_tests/deps_updates.rs"]
 mod deps_updates;
-#[path = "cli_init_tests/endpoint_override.rs"]
-mod endpoint_override;
 #[path = "cli_init_tests/existing_agent.rs"]
 mod existing_agent;
 #[path = "cli_init_tests/mcp_validation.rs"]

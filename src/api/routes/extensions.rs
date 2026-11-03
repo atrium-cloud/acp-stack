@@ -39,7 +39,7 @@ pub(crate) async fn extension_managed_state_apply_handler(
         .managed_state_record(&name)
         .and_then(|record| record.provider_id.clone());
     let response =
-        crate::extensions::managed_state::apply(&home, &mut store, &runtime_config, &name, body)?;
+        crate::extensions::managed_state::apply(&mut store, &runtime_config, &name, body)?;
     let new_provider_id = store
         .managed_state_record(&name)
         .and_then(|record| record.provider_id.clone());
@@ -69,9 +69,9 @@ pub(crate) async fn extension_managed_state_apply_handler(
         }
     }
 
-    // The agent reads its native config at process start, so the endpoint must be
-    // on disk before the orchestrator's post-push restart. This runs on `noop` too,
-    // or a retry after failed provisioning would leave it permanently unapplied.
+    // The agent reads its native config at process start, so it must be settled
+    // before the orchestrator's post-push restart. This runs on `noop` too, or a
+    // retry after failed provisioning would leave it permanently unsettled.
     crate::runtime::agent::agent_headless_config::provision_agent_headless_config(
         &runtime_config,
         &home,

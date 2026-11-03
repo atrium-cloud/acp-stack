@@ -562,40 +562,9 @@ async fn apply_replay_conflict_stale_and_clear_lifecycle() {
     }
 }
 
-fn openai_selection_with_base_url(value: &str, base_url: &str) -> Value {
-    json!({
-        "provider_id": "openai",
-        "values": { "OPENAI_API_KEY": value },
-        "base_url": base_url,
-    })
-}
-
-/// An endpoint override is only accepted for an agent whose registry entry
-/// declares `set_provider_base_url`, so these tests repoint the placebo.
-fn use_endpoint_capable_agent(harness: &ServerHarness) {
-    let mut config = test_config();
-    config.agent.id = "opencode".to_owned();
-    harness.rewrite_runtime_config(&config);
-}
-
-/// Codex declares `set_provider_base_url`, so it exercises the per-provider
-/// check rather than the agent-level one.
-fn use_codex_agent(harness: &ServerHarness) {
-    let mut config = test_config();
-    config.agent.id = "codex".to_owned();
-    harness.rewrite_runtime_config(&config);
-}
-
-fn openrouter_selection_with_base_url(value: &str, base_url: &str) -> Value {
-    json!({
-        "provider_id": "openrouter",
-        "values": { "OPENROUTER_API_KEY": value },
-        "base_url": base_url,
-    })
-}
-
+/// A sender still pointing the Agent at a relay is refused, so the mismatch surfaces.
 #[tokio::test]
-async fn rejects_a_base_url_for_an_agent_without_an_endpoint_field() {
+async fn rejects_a_selection_carrying_a_base_url() {
     let harness = ServerHarness::spawn().await;
     let response = harness
         .post_apply(
@@ -603,279 +572,18 @@ async fn rejects_a_base_url_for_an_agent_without_an_endpoint_field() {
             ADMIN_KEY,
             apply_body(
                 1,
-                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3129"),
+                json!({
+                    "provider_id": "openai",
+                    "values": { "OPENAI_API_KEY": "sk-a" },
+                    "base_url": "http://127.0.0.1:3129",
+                }),
             ),
         )
         .await;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body: Value = response.json().await.expect("error envelope");
-    assert!(
-        body["error"].to_string().contains("custom endpoint"),
-        "{body}"
-    );
+    assert!(response.status().is_client_error(), "{}", response.status());
     let store = harness.reopen_store();
     assert!(store.managed_state_record(NAMESPACE).is_none());
     assert!(store.provider_credential_set("openai").is_none());
-}
-
-#[tokio::test]
-async fn rejects_a_base_url_for_codex_built_in_openai() {
-    let harness = ServerHarness::spawn().await;
-    use_codex_agent(&harness);
-    let response = harness
-        .post_apply(
-            NAMESPACE,
-            ADMIN_KEY,
-            apply_body(
-                1,
-                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3129"),
-            ),
-        )
-        .await;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body: Value = response.json().await.expect("error envelope");
-    assert_eq!(body["error"]["code"], "request.invalid_param");
-    assert!(
-        body["error"]
-            .to_string()
-            .contains("invalid parameter `desired.selection.base_url`"),
-        "{body}"
-    );
-    assert!(body["error"].to_string().contains("openrouter"), "{body}");
-    let store = harness.reopen_store();
-    assert!(store.managed_state_record(NAMESPACE).is_none());
-    assert!(store.provider_credential_set("openai").is_none());
-}
-
-/// The endpoint refusal is scoped to routing, not to the key: a raw key for
-/// Codex's built-in openai provider is an ordinary managed credential.
-#[tokio::test]
-async fn codex_accepts_a_keyed_openai_selection_without_a_base_url() {
-    let harness = ServerHarness::spawn().await;
-    use_codex_agent(&harness);
-    let response = harness
-        .post_apply(
-            NAMESPACE,
-            ADMIN_KEY,
-            apply_body(1, openai_selection("sk-a")),
-        )
-        .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let store = harness.reopen_store();
-    let credential = store
-        .provider_credential_set("openai")
-        .and_then(|set| set.sole.as_ref())
-        .expect("openai credential");
-    assert!(credential.base_url.is_none());
-}
-
-#[tokio::test]
-async fn a_rejected_endpoint_revision_stays_reusable() {
-    let harness = ServerHarness::spawn().await;
-    use_codex_agent(&harness);
-    let response = harness
-        .post_apply(
-            NAMESPACE,
-            ADMIN_KEY,
-            apply_body(
-                5,
-                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3129"),
-            ),
-        )
-        .await;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-
-    // Nothing persisted, so the orchestrator can retry the same revision.
-    let response = harness
-        .post_apply(
-            NAMESPACE,
-            ADMIN_KEY,
-            apply_body(5, openai_selection("sk-a")),
-        )
-        .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let body: Value = response.json().await.expect("envelope");
-    assert_eq!(body["data"]["outcome"], "applied");
-    assert_eq!(body["data"]["applied_revision"], 5);
-    let store = harness.reopen_store();
-    assert!(store.provider_credential_set("openai").is_some());
-    assert_eq!(
-        store
-            .managed_state_record(NAMESPACE)
-            .expect("watermark")
-            .revision,
-        5
-    );
-}
-
-#[tokio::test]
-async fn codex_accepts_a_base_url_for_openrouter() {
-    let harness = ServerHarness::spawn().await;
-    use_codex_agent(&harness);
-    let base_url = "http://127.0.0.1:3129";
-    let response = harness
-        .post_apply(
-            NAMESPACE,
-            ADMIN_KEY,
-            apply_body(1, openrouter_selection_with_base_url("sk-a", base_url)),
-        )
-        .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let store = harness.reopen_store();
-    let credential = store
-        .provider_credential_set("openrouter")
-        .and_then(|set| set.sole.as_ref())
-        .expect("stored credential");
-    assert_eq!(credential.base_url.as_deref(), Some(base_url));
-}
-
-#[tokio::test]
-async fn accepts_https_and_loopback_base_urls() {
-    for base_url in [
-        "https://relay.example",
-        "http://127.0.0.1:3129",
-        "http://localhost:3129",
-        "http://[::1]:3129",
-    ] {
-        let harness = ServerHarness::spawn().await;
-        use_endpoint_capable_agent(&harness);
-        let response = harness
-            .post_apply(
-                NAMESPACE,
-                ADMIN_KEY,
-                apply_body(1, openai_selection_with_base_url("sk-a", base_url)),
-            )
-            .await;
-        assert_eq!(response.status(), StatusCode::OK, "base_url {base_url}");
-        let store = harness.reopen_store();
-        let credential = store
-            .provider_credential_set("openai")
-            .and_then(|set| set.sole.as_ref())
-            .expect("stored credential");
-        // Stored as given: each agent module composes its vendor path behind this origin.
-        assert_eq!(credential.base_url.as_deref(), Some(base_url));
-    }
-}
-
-#[tokio::test]
-async fn rejects_malformed_base_urls() {
-    for (base_url, expected) in [
-        ("http://relay.example/anthropic", "loopback"),
-        ("ftp://relay.example/anthropic", "loopback"),
-        ("not-a-url", "not a valid URL"),
-        ("https://user:pw@relay.example/v1", "credentials"),
-        ("https://relay.example/v1?key=leak", "query string"),
-        ("https://relay.example/v1#frag", "query string"),
-        ("https://relay.example/anthropic", "no path"),
-        ("http://127.0.0.1:3129/openai", "no path"),
-    ] {
-        let harness = ServerHarness::spawn().await;
-        use_endpoint_capable_agent(&harness);
-        let response = harness
-            .post_apply(
-                NAMESPACE,
-                ADMIN_KEY,
-                apply_body(1, openai_selection_with_base_url("sk-a", base_url)),
-            )
-            .await;
-        assert_eq!(
-            response.status(),
-            StatusCode::BAD_REQUEST,
-            "base_url {base_url}"
-        );
-        let body: Value = response.json().await.expect("error envelope");
-        let message = body["error"].to_string();
-        assert!(
-            message.contains(expected),
-            "base_url {base_url} got: {message}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn replay_at_the_same_revision_with_a_changed_base_url_conflicts() {
-    let harness = ServerHarness::spawn().await;
-    use_endpoint_capable_agent(&harness);
-    let response = harness
-        .post_apply(
-            NAMESPACE,
-            ADMIN_KEY,
-            apply_body(
-                4,
-                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3129"),
-            ),
-        )
-        .await;
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let response = harness
-        .post_apply(
-            NAMESPACE,
-            ADMIN_KEY,
-            apply_body(
-                4,
-                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3129"),
-            ),
-        )
-        .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let body: Value = response.json().await.expect("envelope");
-    assert_eq!(body["data"]["outcome"], "noop");
-
-    // Same values, different endpoint: routing changed, so the revision must
-    // advance rather than silently no-op.
-    let response = harness
-        .post_apply(
-            NAMESPACE,
-            ADMIN_KEY,
-            apply_body(
-                4,
-                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3130"),
-            ),
-        )
-        .await;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let body: Value = response.json().await.expect("envelope");
-    assert_eq!(body["error"]["code"], "extensions.revision_conflict");
-
-    let response = harness
-        .post_apply(
-            NAMESPACE,
-            ADMIN_KEY,
-            apply_body(4, openai_selection("sk-a")),
-        )
-        .await;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-}
-
-#[tokio::test]
-async fn clearing_the_selection_drops_the_stored_base_url() {
-    let harness = ServerHarness::spawn().await;
-    use_endpoint_capable_agent(&harness);
-    let response = harness
-        .post_apply(
-            NAMESPACE,
-            ADMIN_KEY,
-            apply_body(
-                2,
-                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3129"),
-            ),
-        )
-        .await;
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let response = harness
-        .post_apply(NAMESPACE, ADMIN_KEY, apply_body(3, Value::Null))
-        .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let store = harness.reopen_store();
-    assert!(store.provider_credential_set("openai").is_none());
-    assert!(
-        store
-            .managed_provider_endpoint_override()
-            .expect("override lookup")
-            .is_none()
-    );
 }
 
 #[tokio::test]
@@ -1024,155 +732,11 @@ async fn audit_event_records_outcome_without_values() {
     );
 }
 
-/// At most one provider may be rerouted at a time: a second namespace's
-/// `base_url` for a different provider is rejected until the first clears.
+/// An applied credential changes what the provider's listing answers, so the cached listing
+/// for that provider must be dropped.
 #[tokio::test]
-async fn a_second_provider_endpoint_override_is_rejected_until_the_first_is_cleared() {
+async fn applying_a_credential_invalidates_the_provider_model_cache() {
     let harness = ServerHarness::spawn().await;
-    use_endpoint_capable_agent(&harness);
-    let response = harness
-        .post_apply(
-            NAMESPACE,
-            ADMIN_KEY,
-            apply_body(
-                1,
-                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3129"),
-            ),
-        )
-        .await;
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let response = harness
-        .post_apply(
-            PEER_NAMESPACE,
-            ADMIN_KEY,
-            apply_body(
-                1,
-                openrouter_selection_with_base_url("sk-b", "http://127.0.0.1:3129"),
-            ),
-        )
-        .await;
-    let status = response.status();
-    let body: Value = response.json().await.expect("error envelope");
-    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
-    assert_eq!(body["error"]["code"], "request.invalid_param");
-    assert!(
-        body["error"]
-            .to_string()
-            .contains("only one provider may be rerouted at a time"),
-        "{body}"
-    );
-    assert!(
-        harness
-            .reopen_store()
-            .managed_state_record(PEER_NAMESPACE)
-            .is_none(),
-        "rejected before the watermark persists, so the revision stays reusable"
-    );
-
-    let response = harness
-        .post_apply(NAMESPACE, ADMIN_KEY, apply_body(2, Value::Null))
-        .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let response = harness
-        .post_apply(
-            PEER_NAMESPACE,
-            ADMIN_KEY,
-            apply_body(
-                1,
-                openrouter_selection_with_base_url("sk-b", "http://127.0.0.1:3129"),
-            ),
-        )
-        .await;
-    let status = response.status();
-    let body: Value = response.json().await.expect("envelope");
-    assert_eq!(status, StatusCode::OK, "body: {body}");
-    assert_eq!(body["data"]["outcome"], "applied");
-    assert_eq!(body["data"]["applied_revision"], 1);
-}
-
-/// The singleton rule is scoped to distinct providers: advancing the same
-/// provider's endpoint under one namespace is an ordinary rotation.
-#[tokio::test]
-async fn re_applying_an_endpoint_for_the_same_provider_is_allowed() {
-    let harness = ServerHarness::spawn().await;
-    use_endpoint_capable_agent(&harness);
-    let response = harness
-        .post_apply(
-            NAMESPACE,
-            ADMIN_KEY,
-            apply_body(
-                1,
-                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3129"),
-            ),
-        )
-        .await;
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let response = harness
-        .post_apply(
-            NAMESPACE,
-            ADMIN_KEY,
-            apply_body(
-                2,
-                openai_selection_with_base_url("sk-b", "http://127.0.0.1:3130"),
-            ),
-        )
-        .await;
-    let status = response.status();
-    let body: Value = response.json().await.expect("envelope");
-    assert_eq!(status, StatusCode::OK, "body: {body}");
-    assert_eq!(body["data"]["outcome"], "applied");
-}
-
-/// The singleton rule counts only overrides held by other namespaces: an
-/// orchestrator switching its own namespace from one rerouted provider to
-/// another still leaves exactly one override standing, because staging drops
-/// the namespace's previous provider first.
-#[tokio::test]
-async fn switching_a_namespace_between_rerouted_providers_is_allowed() {
-    let harness = ServerHarness::spawn().await;
-    use_endpoint_capable_agent(&harness);
-    let base_url = "http://127.0.0.1:3129";
-    let response = harness
-        .post_apply(
-            NAMESPACE,
-            ADMIN_KEY,
-            apply_body(1, openai_selection_with_base_url("sk-a", base_url)),
-        )
-        .await;
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let response = harness
-        .post_apply(
-            NAMESPACE,
-            ADMIN_KEY,
-            apply_body(2, openrouter_selection_with_base_url("sk-b", base_url)),
-        )
-        .await;
-    let status = response.status();
-    let body: Value = response.json().await.expect("envelope");
-    assert_eq!(status, StatusCode::OK, "body: {body}");
-    assert_eq!(body["data"]["outcome"], "applied");
-
-    let store = harness.reopen_store();
-    assert!(
-        store.provider_credential_set("openai").is_none(),
-        "the replaced provider must leave the catalog"
-    );
-    let credential = store
-        .provider_credential_set("openrouter")
-        .and_then(|set| set.sole.as_ref())
-        .expect("openrouter credential");
-    assert_eq!(credential.base_url.as_deref(), Some(base_url));
-}
-
-/// An applied override changes where the provider's catalog is fetched from,
-/// so the cached listing for that provider must be dropped.
-#[tokio::test]
-async fn applying_an_override_invalidates_the_provider_model_cache() {
-    let harness = ServerHarness::spawn().await;
-    use_endpoint_capable_agent(&harness);
     let cache_path = acp_stack::runtime::agent::provider_model_catalog::cache_path(&harness.home);
     std::fs::create_dir_all(cache_path.parent().expect("parent")).expect("mkdir");
     std::fs::write(
@@ -1189,16 +753,13 @@ async fn applying_an_override_invalidates_the_provider_model_cache() {
         .post_apply(
             NAMESPACE,
             ADMIN_KEY,
-            apply_body(
-                1,
-                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3129"),
-            ),
+            apply_body(1, openai_selection("sk-a")),
         )
         .await;
     assert_eq!(response.status(), StatusCode::OK);
     assert!(
         acp_stack::runtime::agent::provider_model_catalog::cached_models(&harness.home, "openai")
             .is_none(),
-        "an applied override must invalidate the provider's cached catalog"
+        "an applied credential must invalidate the provider's cached catalog"
     );
 }

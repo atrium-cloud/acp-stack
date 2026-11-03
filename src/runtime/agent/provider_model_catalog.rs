@@ -161,8 +161,7 @@ pub async fn refresh_provider_models(
     if let Some(reason) = recent_failure_reason(home, &provider.id) {
         return Err(catalog_error(&provider.id, reason));
     }
-    let endpoint = crate::secrets::managed_provider_endpoint_override_for_home(home)?;
-    let models_url = resolve_models_url(&provider.id, declared_url, endpoint.as_ref())?;
+    let models_url = resolve_models_url(&provider.id, declared_url);
 
     match fetch_provider_models(home, config, &provider.id, &models_url).await {
         Ok(models) => {
@@ -189,8 +188,8 @@ pub async fn refresh_provider_models(
     }
 }
 
-/// Drop one provider's cache entry so the next read refetches; an endpoint override apply or clear
-/// changes where the listing comes from, and a stale entry would serve the old endpoint's catalog.
+/// Drop one provider's cache entry so the next read refetches; a credential apply or clear changes
+/// what the listing answers, and a stale entry would serve the old key's catalog.
 pub fn invalidate_provider_models(home: &Path, provider_id: &str) -> Result<()> {
     let path = cache_path(home);
     let Some(mut file) = read_cache_file(&path) else {
@@ -278,24 +277,12 @@ fn catalog_error(provider_id: &str, reason: String) -> StackError {
     }
 }
 
-/// A managed endpoint override outranks the `ACP_STACK_PROVIDER_MODELS_BASE` dev gate, which in
-/// turn outranks the declared `models_url`. The override is an origin, so the declared listing
-/// URL keeps its path behind it.
-fn resolve_models_url(
-    provider_id: &str,
-    declared: &str,
-    endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
-) -> Result<String> {
-    if let Some(endpoint) = endpoint.filter(|endpoint| endpoint.provider_id == provider_id) {
-        return crate::runtime::agent::agent_headless_config::reroute_base_url(
-            &endpoint.base_url,
-            declared,
-        );
-    }
-    Ok(match fixture_string(PROVIDER_MODELS_BASE_ENV) {
+/// The `ACP_STACK_PROVIDER_MODELS_BASE` dev gate outranks the declared `models_url`.
+fn resolve_models_url(provider_id: &str, declared: &str) -> String {
+    match fixture_string(PROVIDER_MODELS_BASE_ENV) {
         Some(base) => format!("{}/{provider_id}/models", base.trim_end_matches('/')),
         None => declared.to_owned(),
-    })
+    }
 }
 
 fn resolve_provider_api_key(home: &Path, config: &Config, provider_id: &str) -> Result<String> {
@@ -815,47 +802,6 @@ mod tests {
         let path = cache_path(home.path());
         std::fs::write(&path, b"not json").expect("write");
         invalidate_provider_models(home.path(), "openrouter").expect("corrupt cache is fine");
-    }
-
-    fn override_for(provider_id: &str, base_url: &str) -> crate::secrets::ProviderEndpointOverride {
-        crate::secrets::ProviderEndpointOverride {
-            provider_id: provider_id.to_owned(),
-            base_url: base_url.to_owned(),
-            companion_values: std::collections::BTreeMap::new(),
-        }
-    }
-
-    #[test]
-    fn endpoint_override_reroutes_the_declared_models_url_behind_its_origin() {
-        let endpoint = override_for("openrouter", "http://127.0.0.1:3129");
-        assert_eq!(
-            resolve_models_url(
-                "openrouter",
-                "https://openrouter.ai/api/v1/models",
-                Some(&endpoint)
-            )
-            .expect("rerouted"),
-            "http://127.0.0.1:3129/api/v1/models"
-        );
-    }
-
-    #[test]
-    fn endpoint_override_for_another_provider_leaves_the_declared_url() {
-        let endpoint = override_for("moonshotai", "http://127.0.0.1:3129");
-        assert_eq!(
-            resolve_models_url(
-                "openrouter",
-                "https://openrouter.ai/api/v1/models",
-                Some(&endpoint)
-            )
-            .expect("declared"),
-            "https://openrouter.ai/api/v1/models"
-        );
-        assert_eq!(
-            resolve_models_url("openrouter", "https://openrouter.ai/api/v1/models", None)
-                .expect("declared"),
-            "https://openrouter.ai/api/v1/models"
-        );
     }
 
     #[tokio::test]

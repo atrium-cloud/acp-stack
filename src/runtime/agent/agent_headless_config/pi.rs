@@ -1,6 +1,5 @@
 use super::*;
 
-/// An endpoint override reaches Pi through the launch env (see `acp_bridge::process_env`), so
 /// `models.json` carries only a custom provider's own entry.
 pub(super) fn provision_pi_config(
     config: &Config,
@@ -193,27 +192,6 @@ mod tests {
     use super::*;
     use serde_json::Value;
 
-    /// Stores an endpoint override for `provider_id` the way a managed-state apply does.
-    fn stage_endpoint_override(home: &Path, provider_id: &str, api_key_ref: &str) {
-        let mut store = crate::secrets::SecretStore::open_or_create(home).expect("store");
-        store
-            .apply_managed_state_credential(
-                "managed-state",
-                "provider-credential",
-                1,
-                Some(crate::secrets::ManagedCredentialSelection {
-                    provider_id: provider_id.to_owned(),
-                    values: std::collections::BTreeMap::from([(
-                        api_key_ref.to_owned(),
-                        "sk-test".to_owned(),
-                    )]),
-                    source_refs: std::collections::BTreeMap::new(),
-                    base_url: Some("http://127.0.0.1:3129".to_owned()),
-                }),
-            )
-            .expect("stage endpoint override");
-    }
-
     fn seed_pi_models(home: &Path, text: &str) {
         let path = home.join(".pi").join("agent").join("models.json");
         std::fs::create_dir_all(path.parent().expect("path has parent")).expect("create parent");
@@ -239,9 +217,8 @@ mod tests {
     }
 
     #[test]
-    fn pi_mapped_provider_endpoint_writes_no_models_entry() {
+    fn pi_mapped_provider_writes_no_models_entry() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        stage_endpoint_override(tempdir.path(), "opencode-go", "OPENCODE_API_KEY");
         let mut config = config_with_agent("pi", &["OPENCODE_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "opencode-go".to_owned(),
@@ -258,7 +235,6 @@ mod tests {
     #[test]
     fn pi_reprovision_removes_the_legacy_endpoint_entry() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        stage_endpoint_override(tempdir.path(), "anthropic", "ANTHROPIC_API_KEY");
         seed_pi_models(
             tempdir.path(),
             r#"{"providers":{"anthropic":{"baseUrl":"http://127.0.0.1:3129"}}}"#,
@@ -272,7 +248,6 @@ mod tests {
     #[test]
     fn pi_leaves_an_operator_authored_provider_entry_alone() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        stage_endpoint_override(tempdir.path(), "anthropic", "ANTHROPIC_API_KEY");
         seed_pi_models(
             tempdir.path(),
             r#"{"providers":{"anthropic":{"baseUrl":"https://operator.example","headers":{"X":"1"}}}}"#,
@@ -288,9 +263,8 @@ mod tests {
     }
 
     #[test]
-    fn pi_custom_provider_endpoint_keeps_the_declared_base_url() {
+    fn pi_custom_provider_keeps_the_declared_base_url() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        stage_endpoint_override(tempdir.path(), "myprovider", "CUSTOM_API_KEY");
         let config =
             custom_provider_config("pi", crate::config::CustomProviderApi::ChatCompletions);
 

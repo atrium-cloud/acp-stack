@@ -71,11 +71,6 @@ The operator-facing sequence, in order:
         - Re-confirming the same agent preserves it.
         - An agent change, `--custom-agent-*`, `acps agent switch`, and `--adapter-override-clear` clear it.
         - Array targets never inherit it; a non-registry agent id is rejected.
-    - While a managed-state endpoint override is stored, an agent apply is rejected when the target cannot carry the override:
-        - A registry agent without `set_provider_base_url`.
-        - Any custom agent.
-        - A re-confirmed agent whose kept provider is the overridden one on a pair that refuses overrides (codex + `openai`, goose + a provider without a host setting, a provider row without a vendor `base_url` for the agent).
-        - Clear the namespace's credential endpoint first; see [extensions.md](extensions.md#type-managed-state).
 4. Environment configuration (new config only).
     a. Standard setup
         - Install essential dependencies including `python` 3.14 and `git` (yes/no); Node.js comes from the [managed runtime](runtime.md#managed-node-runtime)

@@ -42,7 +42,6 @@ pub(crate) struct StatusResponse {
 /// list means none of these capabilities are present.
 pub const FEATURE_NETWORK_PROVIDER_WORKLOAD_ENV: &str = "network-provider-workload-env";
 pub const FEATURE_AGENT_TEST_JSON: &str = "agent-test-json";
-pub const FEATURE_MANAGED_CREDENTIAL_BASE_URL: &str = "managed-credential-base-url";
 pub const FEATURE_SANDBOX_MASK_FILES: &str = "sandbox-mask-files";
 pub const FEATURE_MANAGED_NODE_RUNTIME: &str = "managed-node-runtime";
 pub const FEATURE_SANDBOX_WORKLOAD_USER: &str = "sandbox-workload-user";
@@ -62,7 +61,6 @@ pub const FEATURE_MANAGED_SECRET_ENVIRONMENT: &str = "managed-secret-environment
 const SERVER_FEATURES: &[&str] = &[
     FEATURE_NETWORK_PROVIDER_WORKLOAD_ENV,
     FEATURE_AGENT_TEST_JSON,
-    FEATURE_MANAGED_CREDENTIAL_BASE_URL,
     FEATURE_SANDBOX_MASK_FILES,
     FEATURE_MANAGED_NODE_RUNTIME,
     FEATURE_SANDBOX_WORKLOAD_USER,
@@ -87,7 +85,7 @@ pub(crate) struct ServerInfo {
     /// a feature report the same version. Test `features` membership instead.
     version: &'static str,
     /// Advertised capability names, currently `network-provider-workload-env`,
-    /// `agent-test-json`, `managed-credential-base-url`, `sandbox-mask-files`,
+    /// `agent-test-json`, `sandbox-mask-files`,
     /// `managed-node-runtime`, `sandbox-workload-user`, `sandbox-capability-drop`,
     /// `sandbox-workload-termination`, `workload-io-identity`,
     /// `host-exec-trusted-inputs`, `install-workload-reachability`,
@@ -424,7 +422,6 @@ mod tests {
             serde_json::json!([
                 "network-provider-workload-env",
                 "agent-test-json",
-                "managed-credential-base-url",
                 "sandbox-mask-files",
                 "managed-node-runtime",
                 "sandbox-workload-user",

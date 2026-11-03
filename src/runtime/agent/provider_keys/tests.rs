@@ -208,9 +208,6 @@ fn azure_provider_refs_include_base_url_and_documented_options() {
         Some("AZURE_OPENAI_BASE_URL")
     );
     assert_eq!(base_url_env_for_provider_id("openai"), None);
-    assert!(!agent_provider_accepts_endpoint_override(
-        "opencode", "azure"
-    ));
     assert!(provider_id_supports_agent("azure", "pi"));
     assert!(provider_id_supports_agent("azure", "opencode"));
 }
@@ -479,18 +476,12 @@ fn claude_code_provider_refs_use_agent_specific_profiles() {
         "claude",
         "microsoft-foundry"
     ));
-    // Codex's built-in openai lane is key-driven, yet still refused an endpoint
-    // override, which is a separate capability.
+    // Codex's built-in openai lane is key-driven.
     assert!(!provider_uses_agent_native_auth("codex", "openai"));
     assert_eq!(
         env_var_for_agent_provider_id("codex", "openai"),
         Some("OPENAI_API_KEY")
     );
-    assert!(!agent_provider_accepts_endpoint_override("codex", "openai"));
-    assert!(agent_provider_accepts_endpoint_override(
-        "codex",
-        "openrouter"
-    ));
 
     let summaries = providers_for_agent("claude");
     let bedrock = summaries
@@ -927,159 +918,27 @@ agent_native_auth = true
 }
 
 #[test]
-fn hermes_api_modes_are_data_driven() {
-    for provider_id in ["anthropic", "kimi", "kimi-coding", "minimax", "minimax-cn"] {
-        assert_eq!(
-            hermes_api_mode_for_provider_id(provider_id),
-            Some("anthropic_messages"),
-            "{provider_id}"
-        );
-    }
-    for provider_id in ["openai", "xai", "meta", "meta-ai", "actual"] {
-        assert_eq!(
-            hermes_api_mode_for_provider_id(provider_id),
-            Some("codex_responses"),
-            "{provider_id}"
-        );
-    }
-    for provider_id in ["openrouter", "google", "zai", "opencode", "opencode-go"] {
-        assert_eq!(
-            hermes_api_mode_for_provider_id(provider_id),
-            Some("chat_completions"),
-            "{provider_id}"
-        );
-    }
-    assert_eq!(hermes_api_mode_for_provider_id("not-a-provider"), None);
-}
-
-/// The native base-URL env lane replaces the managed named entry, so every listed pair must be a
-/// hermes provider acps can actually route: reachable through the mapping under the same id
-/// hermes' overlay uses, and carrying a vendor base to reroute.
-#[test]
-fn hermes_base_url_env_lane_covers_only_routable_hermes_providers() {
-    for (native_provider_id, base_url_env) in HERMES_PROVIDER_BASE_URL_ENV {
-        let provider_id =
-            canonical_provider_id_for_agent_native_id(HERMES_AGENT_ID, native_provider_id)
-                .unwrap_or_else(|| panic!("`{native_provider_id}` is not a hermes provider"));
-        assert!(
-            agent_provider_accepts_endpoint_override(HERMES_AGENT_ID, provider_id),
-            "`{provider_id}` carries `{base_url_env}` but is refused an endpoint override"
-        );
-        assert!(
-            vendor_base_url_for_agent_provider_id(HERMES_AGENT_ID, provider_id).is_some(),
-            "`{provider_id}` has no vendor base URL to reroute"
-        );
-        assert_eq!(
-            agent_provider_id_for_provider_id(HERMES_AGENT_ID, provider_id),
-            Some(native_provider_id),
-            "acps must write `{native_provider_id}` as the native id for `{provider_id}`"
-        );
-    }
-    // Hermes' anthropic overlay declares no base-URL variable, so it stays on the managed entry.
+fn vendor_base_urls_prefer_the_agent_entry() {
     assert_eq!(
-        hermes_base_url_env_for_native_provider_id("anthropic"),
+        vendor_base_url_for_agent_provider_id("opencode", "anthropic"),
+        Some("https://api.anthropic.com/v1")
+    );
+    assert_eq!(
+        vendor_base_url_for_agent_provider_id("kimi", "anthropic"),
+        Some("https://api.anthropic.com")
+    );
+    assert_eq!(
+        vendor_base_url_for_agent_provider_id("kimi", "mistral"),
         None
     );
     assert_eq!(
-        hermes_base_url_env_for_native_provider_id("not-a-provider"),
+        vendor_base_url_for_agent_provider_id("kimi", "minimax"),
+        Some("https://api.minimax.io/anthropic")
+    );
+    assert_eq!(
+        vendor_base_url_for_agent_provider_id("opencode", "deepinfra"),
         None
     );
-}
-
-#[test]
-fn endpoint_override_pairs_are_data_driven() {
-    assert!(agent_provider_accepts_endpoint_override(
-        "hermes",
-        "openrouter"
-    ));
-    // Unknown ids are configured custom providers.
-    assert!(agent_provider_accepts_endpoint_override(
-        "hermes",
-        "myprovider"
-    ));
-    assert!(!agent_provider_accepts_endpoint_override("codex", "openai"));
-    assert!(agent_provider_accepts_endpoint_override(
-        "codex",
-        "openrouter"
-    ));
-    // Goose needs a host setting for the native provider.
-    assert!(agent_provider_accepts_endpoint_override(
-        "goose",
-        "openrouter"
-    ));
-    assert!(!agent_provider_accepts_endpoint_override(
-        "goose", "cerebras"
-    ));
-    // Kimi lanes are data-driven from the provider rows; a provider without a row has no lane.
-    assert!(agent_provider_accepts_endpoint_override(
-        "kimi",
-        "moonshotai"
-    ));
-    assert!(agent_provider_accepts_endpoint_override(
-        "kimi",
-        "kimi-code"
-    ));
-    // Keyed Claude Code lanes reroute; native-auth lanes ignore ANTHROPIC_BASE_URL.
-    assert!(agent_provider_accepts_endpoint_override(
-        "claude",
-        "moonshotai"
-    ));
-    assert!(agent_provider_accepts_endpoint_override(
-        "claude",
-        "anthropic"
-    ));
-    // A mapped provider the agent does not run has no native slot to write into.
-    assert!(!agent_provider_accepts_endpoint_override("kimi", "mistral"));
-    assert!(agent_provider_accepts_endpoint_override(
-        "kimi",
-        "openrouter"
-    ));
-    assert!(!agent_provider_accepts_endpoint_override(
-        "antigravity",
-        "openai"
-    ));
-    assert!(agent_provider_accepts_endpoint_override(
-        "antigravity",
-        "google"
-    ));
-    assert!(agent_provider_accepts_endpoint_override("kilo", "kilo"));
-    assert!(agent_provider_accepts_endpoint_override(
-        "kilo",
-        "openrouter"
-    ));
-    // A mapped provider without a vendor base cannot be composed.
-    assert!(!agent_provider_accepts_endpoint_override(
-        "opencode",
-        "deepinfra"
-    ));
-    assert!(agent_provider_accepts_endpoint_override(
-        "opencode",
-        "cloudflare-ai-gateway"
-    ));
-    assert!(agent_provider_accepts_endpoint_override(
-        "opencode", "jiekou"
-    ));
-    assert!(agent_provider_accepts_endpoint_override(
-        "hermes", "kilocode"
-    ));
-    // An unmapped id is a configured custom provider carrying its own base, except for the
-    // agents that have no custom-provider path at all.
-    assert!(agent_provider_accepts_endpoint_override(
-        "opencode",
-        "myprovider"
-    ));
-    assert!(!agent_provider_accepts_endpoint_override(
-        "kilo",
-        "myprovider"
-    ));
-    assert!(!agent_provider_accepts_endpoint_override(
-        "antigravity",
-        "myprovider"
-    ));
-    assert!(agent_provider_accepts_endpoint_override(
-        "opencode",
-        "opencode-go"
-    ));
 }
 
 #[test]
@@ -1110,8 +969,6 @@ agents = ["hermes"]
 companion_env_vars = ["SOLO_HOST"]
 hermes_base_url_env = "SOLO_BASE_URL"
 
-[providers.hermes]
-
 {base_urls}"#
         ))
         .expect_err("the env var needs a literal base");
@@ -1120,70 +977,22 @@ hermes_base_url_env = "SOLO_BASE_URL"
     }
 }
 
+/// `opencode.rs` writes only a row's own entry, leaving every other provider on its default.
 #[test]
-fn vendor_base_urls_prefer_the_agent_entry() {
+fn agent_base_urls_leave_out_the_row_default() {
     assert_eq!(
-        vendor_base_url_for_agent_provider_id("opencode", "anthropic"),
-        Some("https://api.anthropic.com/v1")
+        agent_base_url_for_provider_id("opencode", "togetherai"),
+        Some("https://api.together.ai/v1")
     );
     assert_eq!(
-        vendor_base_url_for_agent_provider_id("pi", "anthropic"),
-        Some("https://api.anthropic.com")
-    );
-    assert_eq!(
-        vendor_base_url_for_agent_provider_id("antigravity", "google"),
-        Some("https://generativelanguage.googleapis.com")
-    );
-    // The hermes managed entry pins the chat_completions transport, so its
-    // Google base is the OpenAI-compatible surface.
-    assert_eq!(
-        vendor_base_url_for_agent_provider_id("hermes", "google"),
-        Some("https://generativelanguage.googleapis.com/v1beta/openai")
-    );
-    assert_eq!(
-        vendor_base_url_for_agent_provider_id("pi", "google"),
-        Some("https://generativelanguage.googleapis.com/v1beta")
-    );
-    // pi drives the Vercel gateway over its Anthropic-compatible surface.
-    assert_eq!(
-        vendor_base_url_for_agent_provider_id("pi", "vercel-ai-gateway"),
-        Some("https://ai-gateway.vercel.sh")
-    );
-    assert_eq!(
-        vendor_base_url_for_agent_provider_id("hermes", "vercel-ai-gateway"),
-        Some("https://ai-gateway.vercel.sh/v1")
-    );
-    assert_eq!(
-        vendor_base_url_for_agent_provider_id("hermes", "commandcode"),
-        Some("https://api.commandcode.ai/provider/v1")
-    );
-    assert_eq!(
-        vendor_base_url_for_agent_provider_id("opencode", "jiekou"),
-        Some("https://api.jiekou.ai/openai")
-    );
-    assert_eq!(
-        vendor_base_url_for_agent_provider_id("kimi", "mistral"),
+        agent_base_url_for_provider_id("opencode", "anthropic"),
         None
     );
-    assert_eq!(
-        vendor_base_url_for_agent_provider_id("kimi", "minimax"),
-        Some("https://api.minimax.io/anthropic")
-    );
-    // Per-account segments stay as placeholders until the stored companions fill them.
-    assert_eq!(
-        vendor_base_url_for_agent_provider_id("opencode", "cloudflare-ai-gateway"),
-        Some(
-            "https://gateway.ai.cloudflare.com/v1/{CLOUDFLARE_ACCOUNT_ID}/{CLOUDFLARE_GATEWAY_ID}/compat"
-        )
-    );
-    assert_eq!(
-        vendor_base_url_for_agent_provider_id("opencode", "deepinfra"),
-        None
-    );
+    assert_eq!(agent_base_url_for_provider_id("opencode", "unknown"), None);
 }
 
 #[test]
-fn templated_vendor_base_urls_resolve_from_stored_companions() {
+fn vendor_base_url_templates_name_their_placeholders() {
     assert_eq!(
         base_url_template_placeholders(
             "https://gateway.ai.cloudflare.com/v1/{CLOUDFLARE_ACCOUNT_ID}/{CLOUDFLARE_GATEWAY_ID}/compat"
@@ -1191,29 +1000,6 @@ fn templated_vendor_base_urls_resolve_from_stored_companions() {
         ["CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_GATEWAY_ID"]
     );
     assert!(base_url_template_placeholders("https://api.openai.com/v1").is_empty());
-
-    let values = BTreeMap::from([
-        ("CLOUDFLARE_ACCOUNT_ID".to_owned(), "acct".to_owned()),
-        ("CLOUDFLARE_GATEWAY_ID".to_owned(), "gw".to_owned()),
-    ]);
-    assert_eq!(
-        resolve_base_url_template(
-            "https://gateway.ai.cloudflare.com/v1/{CLOUDFLARE_ACCOUNT_ID}/{CLOUDFLARE_GATEWAY_ID}/compat",
-            &values
-        )
-        .expect("resolves"),
-        "https://gateway.ai.cloudflare.com/v1/acct/gw/compat"
-    );
-    assert_eq!(
-        resolve_base_url_template("https://api.openai.com/v1", &BTreeMap::new()).expect("literal"),
-        "https://api.openai.com/v1"
-    );
-    let error = resolve_base_url_template(
-        "https://{DATABRICKS_HOST}/ai-gateway/mlflow/v1",
-        &BTreeMap::new(),
-    )
-    .expect_err("missing companion");
-    assert!(error.to_string().contains("DATABRICKS_HOST"), "{error}");
 }
 
 #[test]
@@ -1277,16 +1063,8 @@ fn kimi_profiles_are_data_driven() {
             default_model,
             "{provider_id}"
         );
-        assert!(
-            agent_provider_accepts_endpoint_override(KIMI_AGENT_ID, provider_id),
-            "{provider_id}"
-        );
     }
     assert_eq!(kimi_profile_for_provider_id("mistral"), None);
-    assert!(!agent_provider_accepts_endpoint_override(
-        KIMI_AGENT_ID,
-        "mistral"
-    ));
 }
 
 /// The Anthropic wire takes the origin, so those rows carry a kimi base without `/v1`.
@@ -1331,10 +1109,10 @@ fn provider_id_for_agent_vendor_base_url_matches_rows_by_base() {
         provider_id_for_agent_vendor_base_url("kimi", "https://api.anthropic.com"),
         Some("anthropic")
     );
-    // The row base is per agent: pi's Anthropic base is the origin, hermes' kimi base drops /v1.
+    // The row base is per agent: Kimi's Anthropic base is the origin, OpenCode's keeps /v1.
     assert_eq!(
-        provider_id_for_agent_vendor_base_url("pi", "https://api.anthropic.com"),
-        Some("anthropic")
+        provider_id_for_agent_vendor_base_url("opencode", "https://api.anthropic.com"),
+        None
     );
     assert_eq!(
         provider_id_for_agent_vendor_base_url("kimi", "https://api.mistral.ai/v1"),
@@ -1440,75 +1218,4 @@ provider_type = "openai"
     .expect_err("kimi row with a templated base fails");
 
     assert!(err.to_string().contains("must be literal"), "{err}");
-}
-
-#[test]
-fn invalid_mapping_rejects_hermes_provider_without_profile() {
-    let err = ProviderKeyMapping::from_toml(
-        r#"
-[[providers]]
-id = ["solo"]
-name = "Solo"
-agents = ["hermes"]
-"#,
-    )
-    .expect_err("hermes-enabled provider without profile fails");
-
-    assert!(
-        err.to_string()
-            .contains("declares no [providers.hermes] profile")
-    );
-}
-
-#[test]
-fn invalid_mapping_rejects_unknown_hermes_api_mode() {
-    let err = ProviderKeyMapping::from_toml(
-        r#"
-[[providers]]
-id = ["solo"]
-name = "Solo"
-agents = ["hermes"]
-
-[providers.hermes]
-api_mode = "bogus"
-"#,
-    )
-    .expect_err("unknown hermes api_mode fails");
-
-    assert!(err.to_string().contains("hermes.api_mode must be one of"));
-}
-
-#[test]
-fn invalid_mapping_rejects_hermes_profile_without_agent_support() {
-    let err = ProviderKeyMapping::from_toml(
-        r#"
-[[providers]]
-id = ["solo"]
-name = "Solo"
-agents = ["pi"]
-
-[providers.hermes]
-api_mode = "chat_completions"
-"#,
-    )
-    .expect_err("hermes profile without hermes support fails");
-
-    assert!(err.to_string().contains("does not support `hermes`"));
-}
-
-#[test]
-fn hermes_profile_may_omit_api_mode_to_refuse_overrides() {
-    // A profile without api_mode marks an unknown wire transport, so the pair
-    // refuses endpoint overrides instead of guessing one.
-    ProviderKeyMapping::from_toml(
-        r#"
-[[providers]]
-id = ["solo"]
-name = "Solo"
-agents = ["hermes"]
-
-[providers.hermes]
-"#,
-    )
-    .expect("hermes profile without api_mode validates");
 }

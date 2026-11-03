@@ -376,9 +376,8 @@ async fn bootstrap_models_handler(Query(query): Query<ModelsParams>) -> Response
 
 /// `POST /v1/init/credential`: write flat secrets and apply a managed
 /// credential selection under one store lock, so fresh-from-disk readers
-/// (model discovery) observe the capsule env ref and the managed endpoint
-/// override together. Revision, identical-replay, and ownership semantics are
-/// the store's, identical to the admin-tier apply route; the bootstrap token
+/// (model discovery) observe the capsule env ref and the managed credential
+/// together. Revision, identical-replay, and ownership semantics are the store's, identical to the admin-tier apply route; the bootstrap token
 /// is the only authorization difference.
 async fn deposit_credential_handler(
     State(state): State<BootstrapState>,
@@ -431,7 +430,6 @@ async fn deposit_credential_handler(
             // validation failure (stale revision, ownership, invalid selection) cannot leave the
             // deposited secrets orphaned. `source_refs` still see the just-deposited secrets.
             crate::extensions::managed_state::deposit_and_apply(
-                &home,
                 &mut guard,
                 &runtime_config,
                 &request.namespace,

@@ -18,10 +18,9 @@ const CODEX_REASONING_SUMMARIES_KEY: &str = "model_supports_reasoning_summaries"
 pub(super) fn provision_codex_config(
     config: &Config,
     workload: &WorkloadHome,
-    endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
 ) -> Result<Vec<PathBuf>> {
     let mut written = Vec::new();
-    if let Some(path) = provision_codex_main_config(config, workload, endpoint)? {
+    if let Some(path) = provision_codex_main_config(config, workload)? {
         written.push(path);
     }
     Ok(written)
@@ -104,21 +103,11 @@ fn codex_provider_config_key(config: &Config) -> Option<String> {
 fn provision_codex_main_config(
     config: &Config,
     workload: &WorkloadHome,
-    endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
 ) -> Result<Option<PathBuf>> {
     let path = workload.home().join(".codex").join("config.toml");
     let Some(provider) = config.agent.provider.as_ref() else {
         return Ok(None);
     };
-    let base_url_override = match provider.custom.as_ref() {
-        Some(custom) => super::rerouted_base_url_for(endpoint, &provider.id, &custom.base_url)?,
-        None => super::rerouted_base_url_for(
-            endpoint,
-            &provider.id,
-            CODEX_OPENROUTER_RESPONSES_BASE_URL,
-        )?,
-    };
-    let base_url_override = base_url_override.as_deref();
     if let Some(custom) = provider.custom.as_ref() {
         if custom.api != CustomProviderApi::Responses {
             return Err(StackError::AgentConfigProvision {
@@ -139,23 +128,11 @@ fn provision_codex_main_config(
             custom,
             api_key_ref,
             &path,
-            base_url_override,
         )?;
         write_toml_table(workload, &path, root)?;
         return Ok(Some(path));
     }
     if provider.id == CODEX_OPENAI_PROVIDER_ID {
-        // Codex reserves `openai` for its built-in definition, whose required
-        // shape is version-dependent; a synthesized table would fail at request
-        // time instead of here.
-        if base_url_override.is_some() {
-            return Err(StackError::AgentConfigProvision {
-                path,
-                reason: "codex cannot route the built-in `openai` provider through a custom \
-                         endpoint; select `openrouter` or a custom provider instead"
-                    .to_owned(),
-            });
-        }
         return provision_codex_openai_config(config, workload, &path);
     }
     if provider.id != CODEX_OPENROUTER_PROVIDER_ID {
@@ -235,11 +212,7 @@ fn provision_codex_main_config(
     );
     openrouter.insert(
         "base_url".to_owned(),
-        TomlValue::String(
-            base_url_override
-                .unwrap_or(CODEX_OPENROUTER_RESPONSES_BASE_URL)
-                .to_owned(),
-        ),
+        TomlValue::String(CODEX_OPENROUTER_RESPONSES_BASE_URL.to_owned()),
     );
     // Command-based auth, not env_key: a plain env_key authenticates but skips
     // Codex's model-catalog refresh, leaving fallback metadata behind.
@@ -299,7 +272,6 @@ fn write_codex_custom_provider_selection(
     custom: &AgentCustomProviderConfig,
     api_key_ref: &str,
     path: &Path,
-    base_url_override: Option<&str>,
 ) -> Result<()> {
     root.insert("model".to_owned(), TomlValue::String(model.to_owned()));
     root.insert(
@@ -311,7 +283,7 @@ fn write_codex_custom_provider_selection(
     custom_provider.insert("name".to_owned(), TomlValue::String(custom.name.clone()));
     custom_provider.insert(
         "base_url".to_owned(),
-        TomlValue::String(base_url_override.unwrap_or(&custom.base_url).to_owned()),
+        TomlValue::String(custom.base_url.clone()),
     );
     custom_provider.insert(
         "env_key".to_owned(),
@@ -424,14 +396,6 @@ fn codex_backup_file_name(provider_id: &str, index: usize) -> String {
 mod tests {
     use super::*;
 
-    fn codex_endpoint(provider_id: &str) -> crate::secrets::ProviderEndpointOverride {
-        crate::secrets::ProviderEndpointOverride {
-            provider_id: provider_id.to_owned(),
-            base_url: "http://127.0.0.1:3129".to_owned(),
-            companion_values: std::collections::BTreeMap::new(),
-        }
-    }
-
     fn codex_config_value(home: &Path) -> toml::Value {
         let path = home.join(".codex").join("config.toml");
         toml::from_str(&std::fs::read_to_string(path).expect("codex config should be readable"))
@@ -450,39 +414,13 @@ mod tests {
     }
 
     #[test]
-    fn codex_openrouter_endpoint_keeps_the_responses_path_behind_the_override_origin() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
-        let config = codex_openrouter_config();
-
-        provision_codex_config(&config, &workload, Some(&codex_endpoint("openrouter")))
-            .expect("provision with override");
-        let value = codex_config_value(tempdir.path());
-        assert_eq!(
-            value["model_providers"]["openrouter"]["base_url"].as_str(),
-            Some("http://127.0.0.1:3129/api/v1")
-        );
-        assert_eq!(
-            value["model_providers"]["openrouter"]["wire_api"].as_str(),
-            Some("responses")
-        );
-
-        provision_codex_config(&config, &workload, None).expect("provision without");
-        let value = codex_config_value(tempdir.path());
-        assert_eq!(
-            value["model_providers"]["openrouter"]["base_url"].as_str(),
-            Some("https://openrouter.ai/api/v1")
-        );
-    }
-
-    #[test]
     fn codex_openrouter_effort_is_pinned_and_cleared_with_the_config_value() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let mut config = codex_openrouter_config();
         config.agent.effort = Some("high".to_owned());
 
-        provision_codex_config(&config, &workload, None).expect("provision with effort");
+        provision_codex_config(&config, &workload).expect("provision with effort");
         let value = codex_config_value(tempdir.path());
         assert_eq!(value["model_reasoning_effort"].as_str(), Some("high"));
         assert_eq!(
@@ -491,7 +429,7 @@ mod tests {
         );
 
         config.agent.effort = None;
-        provision_codex_config(&config, &workload, None).expect("provision without effort");
+        provision_codex_config(&config, &workload).expect("provision without effort");
         let value = codex_config_value(tempdir.path());
         assert!(value.get("model_reasoning_effort").is_none(), "{value}");
         assert!(
@@ -521,14 +459,14 @@ mod tests {
         let mut config = codex_openrouter_config();
         config.agent.effort = Some("high".to_owned());
 
-        provision_codex_config(&config, &workload, None).expect("provision deepseek");
+        provision_codex_config(&config, &workload).expect("provision deepseek");
         let value = codex_config_value(tempdir.path());
         assert_eq!(value["model_reasoning_effort"].as_str(), Some("high"));
 
         // `agent provider use --model` re-provisions with the effort still in config.
         config.agent.provider.as_mut().expect("provider").model =
             Some("meta-llama/llama-3.1-8b-instruct".to_owned());
-        provision_codex_config(&config, &workload, None).expect("provision llama");
+        provision_codex_config(&config, &workload).expect("provision llama");
         let value = codex_config_value(tempdir.path());
         assert!(value.get("model_reasoning_effort").is_none(), "{value}");
         assert!(
@@ -539,7 +477,7 @@ mod tests {
         // A model the catalog does not know keeps the validated value.
         config.agent.provider.as_mut().expect("provider").model =
             Some("vendor/unlisted-model".to_owned());
-        provision_codex_config(&config, &workload, None).expect("provision unlisted");
+        provision_codex_config(&config, &workload).expect("provision unlisted");
         let value = codex_config_value(tempdir.path());
         assert_eq!(value["model_reasoning_effort"].as_str(), Some("high"));
     }
@@ -550,7 +488,7 @@ mod tests {
         let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let mut config = codex_openrouter_config();
         config.agent.effort = Some("high".to_owned());
-        provision_codex_config(&config, &workload, None).expect("provision openrouter");
+        provision_codex_config(&config, &workload).expect("provision openrouter");
 
         let mut config = config_with_agent("codex", &["OPENAI_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
@@ -561,7 +499,7 @@ mod tests {
         });
         // Effort on the openai lane is applied over ACP, so the disk pin must go.
         config.agent.effort = Some("high".to_owned());
-        provision_codex_config(&config, &workload, None).expect("provision openai");
+        provision_codex_config(&config, &workload).expect("provision openai");
         let value = codex_config_value(tempdir.path());
         assert_eq!(value["model_provider"].as_str(), Some("openai"));
         assert!(value.get("model_reasoning_effort").is_none(), "{value}");
@@ -577,7 +515,7 @@ mod tests {
         let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let mut config = codex_openrouter_config();
         config.agent.effort = Some("high".to_owned());
-        provision_codex_config(&config, &workload, None).expect("provision");
+        provision_codex_config(&config, &workload).expect("provision");
 
         let cleaned = cleanup_codex_config(&config, &workload).expect("cleanup");
         assert_eq!(cleaned.len(), 1);
@@ -590,42 +528,11 @@ mod tests {
     #[test]
     fn codex_openrouter_constant_matches_the_provider_row() {
         assert_eq!(
-            vendor_base_url_for_agent_provider_id("codex", "openrouter"),
+            crate::runtime::agent::provider_keys::vendor_base_url_for_agent_provider_id(
+                "codex",
+                "openrouter"
+            ),
             Some(CODEX_OPENROUTER_RESPONSES_BASE_URL)
-        );
-    }
-
-    #[test]
-    fn codex_refuses_an_endpoint_for_the_built_in_openai_provider() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
-        let mut config = config_with_agent("codex", &["OPENAI_API_KEY"]);
-        config.agent.provider = Some(crate::config::AgentProviderConfig {
-            id: "openai".to_owned(),
-            model: Some("gpt-5.5".to_owned()),
-            api_key_ref: Some("OPENAI_API_KEY".to_owned()),
-            custom: None,
-        });
-
-        let error = provision_codex_config(&config, &workload, Some(&codex_endpoint("openai")))
-            .expect_err("built-in openai endpoint must be refused");
-
-        assert!(error.to_string().contains("openrouter"), "{error}");
-    }
-
-    #[test]
-    fn codex_custom_provider_endpoint_overrides_the_declared_base_url() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
-        let config = custom_provider_config("codex", crate::config::CustomProviderApi::Responses);
-
-        provision_codex_config(&config, &workload, Some(&codex_endpoint("myprovider")))
-            .expect("provision");
-
-        let value = codex_config_value(tempdir.path());
-        assert_eq!(
-            value["model_providers"]["myprovider"]["base_url"].as_str(),
-            Some("http://127.0.0.1:3129/v1")
         );
     }
 

@@ -16,13 +16,10 @@ use crate::runtime::agent::config_io::{
     read_json_object, read_toml_table, read_yaml_mapping, write_json_object, write_toml_table,
     write_yaml_mapping,
 };
-use crate::runtime::agent::model_wire::{ModelWire, model_wire};
 use crate::runtime::agent::provider_keys::{
     CLAUDE_CODE_AGENT_ID, CODEX_OPENAI_PROVIDER_ID, ClaudeCodeProviderProfile,
     agent_provider_id_for_provider_id, claude_code_profile_for_provider_id,
-    effective_active_provider_ids, env_var_for_agent_provider_id, hermes_api_mode_for_provider_id,
-    hermes_base_url_env_for_native_provider_id, provider_name_for_provider_id,
-    vendor_base_url_for_agent_provider_id,
+    effective_active_provider_ids, env_var_for_agent_provider_id, provider_name_for_provider_id,
 };
 
 mod antigravity;
@@ -30,7 +27,6 @@ mod claude_code;
 mod codex;
 mod goose;
 mod hermes;
-mod kilo;
 mod opencode;
 mod pi;
 
@@ -39,7 +35,6 @@ use self::claude_code::*;
 use self::codex::*;
 use self::goose::*;
 use self::hermes::*;
-use self::kilo::*;
 use self::opencode::*;
 use self::pi::*;
 
@@ -50,7 +45,7 @@ pub(crate) use self::hermes::{
     HERMES_MODEL_PROVIDER_KEY, HERMES_PROVIDERS_KEY,
 };
 pub(crate) use self::opencode::{OPENCODE_AGENT_ID, OPENCODE_DISABLED_SMALL_MODEL};
-pub(crate) use crate::runtime::agent::provider_keys::{HERMES_AGENT_ID, KILO_AGENT_ID};
+pub(crate) use crate::runtime::agent::provider_keys::HERMES_AGENT_ID;
 
 pub(crate) const CLAUDE_CODE_MANAGED_ENV_KEYS: &[&str] = &[
     "ANTHROPIC_BASE_URL",
@@ -277,123 +272,13 @@ pub fn provision_agent_headless_config_transition(
     provision_agent_headless_config_with_previous_pi_model(config, &workload, previous_pi_model)
 }
 
-/// The provider endpoint override in force for `home`, resolved from the secret store here so
-/// every re-provisioning path observes the same one without carrying it.
-fn resolved_endpoint_override(
-    home: &Path,
-) -> Result<Option<crate::secrets::ProviderEndpointOverride>> {
-    crate::secrets::managed_provider_endpoint_override_for_home(home)
-}
-
-/// The override origin that applies to `provider_id`, or `None` when a different
-/// provider is the rerouted one.
-pub(super) fn endpoint_origin_for<'a>(
-    endpoint: Option<&'a crate::secrets::ProviderEndpointOverride>,
-    provider_id: &str,
-) -> Option<&'a str> {
-    endpoint
-        .filter(|endpoint| endpoint.provider_id == provider_id)
-        .map(|endpoint| endpoint.base_url.as_str())
-}
-
-/// `vendor_base_url` with its scheme, host, and port replaced by `origin`'s. The vendor path
-/// stays verbatim (a trailing slash is significant to some agents); a bare vendor root yields
-/// the bare origin.
-pub(crate) fn reroute_base_url(origin: &str, vendor_base_url: &str) -> Result<String> {
-    let origin = endpoint_origin(origin)?;
-    let vendor_url =
-        reqwest::Url::parse(vendor_base_url).map_err(|_| StackError::InvalidParam {
-            field: "base_url",
-            reason: format!("vendor base URL `{vendor_base_url}` is not a valid URL"),
-        })?;
-    let path = match vendor_url.path() {
-        "/" => "",
-        path => path,
-    };
-    Ok(format!("{origin}{path}"))
-}
-
-/// The stored override as `scheme://host[:port]`, refusing any value that carries a path.
-pub(crate) fn endpoint_origin(origin: &str) -> Result<String> {
-    let origin_url = reqwest::Url::parse(origin).map_err(|_| StackError::InvalidParam {
-        field: "base_url",
-        reason: format!("endpoint override `{origin}` is not a valid URL"),
-    })?;
-    let Some(host) = origin_url.host_str() else {
-        return Err(StackError::InvalidParam {
-            field: "base_url",
-            reason: format!("endpoint override `{origin}` has no host"),
-        });
-    };
-    // A stored value from before the origin-only contract would otherwise be silently
-    // truncated to its origin and provision a different URL than it did before.
-    if origin_url.path() != "/" {
-        return Err(StackError::InvalidParam {
-            field: "base_url",
-            reason: format!(
-                "endpoint override `{origin}` carries a path; the override must be an origin"
-            ),
-        });
-    }
-    let port = origin_url
-        .port()
-        .map(|port| format!(":{port}"))
-        .unwrap_or_default();
-    Ok(format!("{}://{host}{port}", origin_url.scheme()))
-}
-
-/// The rerouted base for `provider_id` when the override names it: `vendor_base_url` behind the
-/// override origin.
-pub(super) fn rerouted_base_url_for(
-    endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
-    provider_id: &str,
-    vendor_base_url: &str,
-) -> Result<Option<String>> {
-    endpoint_origin_for(endpoint, provider_id)
-        .map(|origin| reroute_base_url(origin, vendor_base_url))
-        .transpose()
-}
-
-/// The vendor base a mapped provider uses under `agent_id`, required once an override names it.
-fn require_vendor_base_url(agent_id: &str, provider_id: &str, path: &Path) -> Result<&'static str> {
-    vendor_base_url_for_agent_provider_id(agent_id, provider_id).ok_or_else(|| {
-        StackError::AgentConfigProvision {
-            path: path.to_path_buf(),
-            reason: format!(
-                "{agent_id} provider `{provider_id}` declares no vendor base URL in the provider \
-                 mapping, so its endpoint override cannot be composed"
-            ),
-        }
-    })
-}
-
-/// The rerouted base for a mapped provider under `agent_id`, or `None` without an override.
-fn rerouted_mapped_base_url_for(
-    endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
-    agent_id: &str,
-    provider_id: &str,
-    path: &Path,
-) -> Result<Option<String>> {
-    let Some(endpoint) = endpoint.filter(|endpoint| endpoint.provider_id == provider_id) else {
-        return Ok(None);
-    };
-    let vendor_base_url = require_vendor_base_url(agent_id, provider_id, path)?;
-    let vendor_base_url = crate::runtime::agent::provider_keys::resolve_base_url_template(
-        vendor_base_url,
-        &endpoint.companion_values,
-    )?;
-    reroute_base_url(&endpoint.base_url, &vendor_base_url).map(Some)
-}
-
 fn provision_agent_headless_config_with_previous_pi_model(
     config: &Config,
     workload: &WorkloadHome,
     previous_pi_model: Option<&str>,
 ) -> Result<Vec<ProvisionedAgentConfig>> {
-    let endpoint = resolved_endpoint_override(workload.runtime_home())?;
-    let endpoint = endpoint.as_ref();
     match config.agent.id.as_str() {
-        "goose" => provision_goose_config(config, workload, endpoint).map(|paths| {
+        "goose" => provision_goose_config(config, workload).map(|paths| {
             paths
                 .into_iter()
                 .map(|path| ProvisionedAgentConfig {
@@ -402,16 +287,7 @@ fn provision_agent_headless_config_with_previous_pi_model(
                 })
                 .collect()
         }),
-        KILO_AGENT_ID => provision_kilo_config(workload, endpoint).map(|paths| {
-            paths
-                .into_iter()
-                .map(|path| ProvisionedAgentConfig {
-                    label: "Kilo config",
-                    path,
-                })
-                .collect()
-        }),
-        OPENCODE_AGENT_ID => provision_opencode_config(config, workload, endpoint).map(|path| {
+        OPENCODE_AGENT_ID => provision_opencode_config(config, workload).map(|path| {
             path.into_iter()
                 .map(|path| ProvisionedAgentConfig {
                     label: "OpenCode config",
@@ -419,7 +295,7 @@ fn provision_agent_headless_config_with_previous_pi_model(
                 })
                 .collect()
         }),
-        "codex" => provision_codex_config(config, workload, endpoint).map(|paths| {
+        "codex" => provision_codex_config(config, workload).map(|paths| {
             paths
                 .into_iter()
                 .map(|path| ProvisionedAgentConfig {
@@ -428,17 +304,15 @@ fn provision_agent_headless_config_with_previous_pi_model(
                 })
                 .collect()
         }),
-        CLAUDE_CODE_AGENT_ID => {
-            provision_claude_code_config(config, workload, endpoint).map(|paths| {
-                paths
-                    .into_iter()
-                    .map(|path| ProvisionedAgentConfig {
-                        label: "Claude Code config",
-                        path,
-                    })
-                    .collect()
-            })
-        }
+        CLAUDE_CODE_AGENT_ID => provision_claude_code_config(config, workload).map(|paths| {
+            paths
+                .into_iter()
+                .map(|path| ProvisionedAgentConfig {
+                    label: "Claude Code config",
+                    path,
+                })
+                .collect()
+        }),
         "pi" => provision_pi_config(config, workload, previous_pi_model).map(|path| {
             path.into_iter()
                 .map(|path| ProvisionedAgentConfig {
@@ -447,7 +321,7 @@ fn provision_agent_headless_config_with_previous_pi_model(
                 })
                 .collect()
         }),
-        HERMES_AGENT_ID => provision_hermes_config(config, workload, endpoint).map(|paths| {
+        HERMES_AGENT_ID => provision_hermes_config(config, workload).map(|paths| {
             paths
                 .into_iter()
                 .map(|path| ProvisionedAgentConfig {
@@ -474,14 +348,11 @@ pub fn cleanup_agent_headless_config(
     home: &Path,
 ) -> Result<Vec<CleanedAgentConfig>> {
     let workload = &WorkloadHome::resolve(config, home)?;
-    let endpoint = resolved_endpoint_override(home)?;
-    let endpoint = endpoint.as_ref();
     match config.agent.id.as_str() {
         "goose" => cleanup_goose_config(config, workload),
-        KILO_AGENT_ID => cleanup_kilo_config(workload),
         OPENCODE_AGENT_ID => cleanup_opencode_config(config, workload),
         "codex" => cleanup_codex_config(config, workload),
-        CLAUDE_CODE_AGENT_ID => cleanup_claude_code_config(config, workload, endpoint),
+        CLAUDE_CODE_AGENT_ID => cleanup_claude_code_config(config, workload),
         "pi" => cleanup_pi_config(config, workload),
         HERMES_AGENT_ID => cleanup_hermes_config(config, workload),
         ANTIGRAVITY_AGENT_ID => cleanup_antigravity_config(config, workload),
@@ -718,47 +589,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reroute_keeps_the_vendor_path_and_swaps_the_origin() {
-        assert_eq!(
-            reroute_base_url("http://127.0.0.1:3129", "https://api.moonshot.ai/anthropic")
-                .expect("rerouted"),
-            "http://127.0.0.1:3129/anthropic"
-        );
-        // A trailing slash is significant to Claude Code's kimi lane.
-        assert_eq!(
-            reroute_base_url("http://127.0.0.1:3129", "https://api.kimi.com/coding/")
-                .expect("rerouted"),
-            "http://127.0.0.1:3129/coding/"
-        );
-        // A bare vendor root yields the bare origin.
-        assert_eq!(
-            reroute_base_url("https://relay.example", "https://api.anthropic.com")
-                .expect("rerouted"),
-            "https://relay.example"
-        );
-        assert_eq!(
-            reroute_base_url("http://[::1]:3129", "https://openrouter.ai/api/v1")
-                .expect("rerouted"),
-            "http://[::1]:3129/api/v1"
-        );
-        assert_eq!(
-            reroute_base_url("http://localhost:3129/", "https://api.openai.com/v1")
-                .expect("rerouted"),
-            "http://localhost:3129/v1"
-        );
-    }
-
-    #[test]
-    fn reroute_rejects_an_origin_with_a_path() {
-        let error = reroute_base_url(
-            "http://127.0.0.1:3129/anthropic",
-            "https://api.anthropic.com",
-        )
-        .expect_err("path must be refused");
-        assert!(error.to_string().contains("carries a path"), "{error}");
-    }
-
-    #[test]
     fn unsupported_agent_has_no_generated_config() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let config = config_with_agent("amp", &["AMP_API_KEY"]);
@@ -788,24 +618,6 @@ mod tests {
     fn runtime_inputs_come_from_the_runtime_home_and_files_land_in_the_workload_home() {
         let runtime_home = tempfile::tempdir().expect("runtime home");
         let workload_home = tempfile::tempdir().expect("workload home");
-        let mut store =
-            crate::secrets::SecretStore::open_or_create(runtime_home.path()).expect("store");
-        store
-            .apply_managed_state_credential(
-                "platform-state",
-                "provider-credential",
-                1,
-                Some(crate::secrets::ManagedCredentialSelection {
-                    provider_id: "openrouter".to_owned(),
-                    values: std::collections::BTreeMap::from([(
-                        "OPENROUTER_API_KEY".to_owned(),
-                        "sk-test".to_owned(),
-                    )]),
-                    source_refs: std::collections::BTreeMap::new(),
-                    base_url: Some("http://127.0.0.1:3129".to_owned()),
-                }),
-            )
-            .expect("stage endpoint override");
         // Only the runtime home's catalog says the model takes no `high` effort; reading the
         // workload home instead would find no catalog and keep the pin.
         let cache_path =
@@ -836,10 +648,6 @@ mod tests {
                 .expect("workload codex config"),
         )
         .expect("codex config toml parses");
-        assert_eq!(
-            value["model_providers"]["openrouter"]["base_url"].as_str(),
-            Some("http://127.0.0.1:3129/api/v1")
-        );
         assert!(value.get("model_reasoning_effort").is_none(), "{value}");
         assert!(!runtime_home.path().join(".codex").exists());
     }

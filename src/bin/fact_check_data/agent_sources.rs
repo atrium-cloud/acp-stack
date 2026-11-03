@@ -6,7 +6,6 @@ use std::error::Error;
 use acp_stack::runtime::agent::provider_keys::{
     CODEX_AGENT_ID, CODEX_OPENAI_PROVIDER_ID, GOOSE_AGENT_ID, HERMES_AGENT_ID, KILO_AGENT_ID,
     KIMI_MODEL_ENV_VARS, KIMI_PROVIDER_TYPES, ProviderEnvMapping, ProviderKeyMapping,
-    goose_host_env_for_native_provider_id, hermes_base_url_env_for_native_provider_id,
 };
 use serde::Deserialize;
 
@@ -20,14 +19,9 @@ const HERMES_REGISTRY_ROWS_ANCHOR: &str = "\n_REGISTRY_ROWS";
 const HERMES_REGISTRY_END_ANCHOR: &str = "\nPROVIDER_REGISTRY";
 const HERMES_PROVIDER_CONFIG_CALL: &str = "ProviderConfig";
 const HERMES_KEY_ENV_VARS_ARGUMENT: &str = "api_key_env_vars";
-const HERMES_BASE_URL_ENV_ARGUMENT: &str = "base_url_env_var";
 const HERMES_PLUGIN_NAME_ARGUMENT: &str = "name";
 const HERMES_PLUGIN_ENV_VARS_ARGUMENT: &str = "env_vars";
-// Hermes keeps OpenRouter out of its registry and resolves it on a dedicated rung, which reads
-// the base-URL env itself.
-const HERMES_OWN_RUNG_PROVIDER: &str = "openrouter";
-const HERMES_RUNTIME_PROVIDER_PATH: &str = "hermes_cli/runtime_provider.py";
-// Hermes splits a plugin's `env_vars` the same way: URL-suffixed names override the endpoint.
+// A plugin's `env_vars` mixes key vars with URL-suffixed names that override the endpoint.
 const BASE_URL_ENV_SUFFIX: &str = "_URL";
 
 const GOOSE_REPO: &str = "aaif-goose/goose";
@@ -100,7 +94,6 @@ struct GithubContent {
 #[derive(Debug, Default, PartialEq, Eq)]
 struct HermesProvider {
     key_env_vars: Vec<String>,
-    base_url_env_var: Option<String>,
 }
 
 /// A goose provider's declared names and the config keys it reads; goose resolves each key from
@@ -167,34 +160,19 @@ pub(super) fn check_hermes_sources(
             }
         }
     }
-    let own_rung_literals = if agent_native_ids(mapping, HERMES_AGENT_ID)
-        .any(|native_id| native_id == HERMES_OWN_RUNG_PROVIDER)
-    {
-        strings(&tokens(
-            &http.github_raw_text(HERMES_REPO, HERMES_RUNTIME_PROVIDER_PATH)?,
-            Syntax::Python,
-        ))
-        .into_iter()
-        .collect()
-    } else {
-        BTreeSet::new()
-    };
     let upstream = HermesUpstream {
         providers,
         plugin_dirs,
-        own_rung_literals,
     };
     evaluate_hermes(mapping, &upstream, verified, report);
     Ok(())
 }
 
 /// What the Hermes check compares against: registry rows plus the plugin profiles mirrored in for
-/// shipped ids the rows lack, every plugin directory, and the string literals of the OpenRouter
-/// rung.
+/// shipped ids the rows lack, and every plugin directory.
 struct HermesUpstream {
     providers: BTreeMap<String, HermesProvider>,
     plugin_dirs: BTreeSet<String>,
-    own_rung_literals: BTreeSet<String>,
 }
 
 fn evaluate_hermes(
@@ -204,7 +182,6 @@ fn evaluate_hermes(
     report: &mut Report,
 ) {
     let mut shipped = BTreeSet::new();
-    let mut managed_lane_candidates = Vec::new();
     for provider in agent_providers(mapping, HERMES_AGENT_ID) {
         let Some(native_id) = native_provider_id(provider, HERMES_AGENT_ID) else {
             continue;
@@ -230,28 +207,6 @@ fn evaluate_hermes(
             ));
             continue;
         }
-        let expected_base_url_env = hermes_base_url_env_for_native_provider_id(native_id);
-        let upstream_base_url_env = if native_id == HERMES_OWN_RUNG_PROVIDER {
-            expected_base_url_env
-                .filter(|env_var| upstream.own_rung_literals.contains(*env_var))
-                .map(str::to_owned)
-        } else {
-            upstream_provider.base_url_env_var.clone()
-        };
-        match (expected_base_url_env, upstream_base_url_env.as_deref()) {
-            (Some(expected), Some(actual)) if expected == actual => {}
-            (Some(expected), actual) => {
-                report.fail(format!(
-                    "Hermes provider `{native_id}` reads base URL env {}, acp-stack exports `{expected}`",
-                    actual.map_or("(none)".to_owned(), |actual| format!("`{actual}`"))
-                ));
-                continue;
-            }
-            (None, Some(actual)) => {
-                managed_lane_candidates.push(format!("{native_id} ({actual})"));
-            }
-            (None, None) => {}
-        }
         verified.extend(provider.ids().iter().cloned());
         report.ok(format!(
             "Hermes registry verifies `{native_id}` reads `{env_var}`"
@@ -269,12 +224,6 @@ fn evaluate_hermes(
         report.info(format!(
             "Hermes providers acp-stack does not ship: {}",
             unshipped.into_iter().collect::<Vec<_>>().join(", ")
-        ));
-    }
-    if !managed_lane_candidates.is_empty() {
-        report.info(format!(
-            "Hermes providers with a base-URL env that acp-stack overrides through the managed entry instead: {}",
-            managed_lane_candidates.join(", ")
         ));
     }
 }
@@ -372,14 +321,6 @@ fn evaluate_goose(
             report.fail(format!(
                 "Goose provider `{native_id}` reads {}, shipped data has `{env_var}`",
                 list_or_none(&upstream.config_keys)
-            ));
-            continue;
-        }
-        if let Some(host_env) = goose_host_env_for_native_provider_id(native_id)
-            && !upstream.config_keys.contains(host_env)
-        {
-            report.fail(format!(
-                "Goose provider `{native_id}` has no `{host_env}` setting, which acp-stack writes for endpoint overrides"
             ));
             continue;
         }
@@ -652,7 +593,7 @@ fn list_or_none<'a>(values: impl IntoIterator<Item = &'a String>) -> String {
 }
 
 /// Reads `_REGISTRY_ROWS`: `_api_key_provider` argument tuples
-/// `(id, name, base_url, (key env vars...), base_url_env_var?, auth_type?)` and `ProviderConfig(...)` rows.
+/// `(id, name, base_url, (key env vars...), ...)` and `ProviderConfig(...)` rows.
 fn hermes_registry_providers(source: &str) -> BTreeMap<String, HermesProvider> {
     let Some(start) = source.find(HERMES_REGISTRY_ROWS_ANCHOR) else {
         return BTreeMap::new();
@@ -701,17 +642,7 @@ fn hermes_registry_providers(source: &str) -> BTreeMap<String, HermesProvider> {
 fn hermes_tuple_row(arguments: &[&[Token]]) -> Option<(String, HermesProvider)> {
     let id = single_string(arguments.first()?)?;
     let key_env_vars = arguments.get(3).map_or_else(Vec::new, |keys| strings(keys));
-    let base_url_env_var = arguments
-        .get(4)
-        .and_then(|argument| single_string(argument))
-        .filter(|env_var| !env_var.is_empty());
-    Some((
-        id,
-        HermesProvider {
-            key_env_vars,
-            base_url_env_var,
-        },
-    ))
+    Some((id, HermesProvider { key_env_vars }))
 }
 
 fn hermes_provider_config_row(arguments: &[&[Token]]) -> Option<(String, HermesProvider)> {
@@ -726,9 +657,6 @@ fn hermes_provider_config_row(arguments: &[&[Token]]) -> Option<(String, HermesP
         id,
         HermesProvider {
             key_env_vars: keyword(HERMES_KEY_ENV_VARS_ARGUMENT).map_or_else(Vec::new, strings),
-            base_url_env_var: keyword(HERMES_BASE_URL_ENV_ARGUMENT)
-                .and_then(single_string)
-                .filter(|env_var| !env_var.is_empty()),
         },
     ))
 }
@@ -744,14 +672,11 @@ fn hermes_plugin_providers(source: &str) -> BTreeMap<String, HermesProvider> {
     )
     .into_iter()
     .map(|(name, env_vars)| {
-        let (base_url_env_vars, key_env_vars): (Vec<_>, Vec<_>) = env_vars
+        let key_env_vars = env_vars
             .into_iter()
-            .partition(|env_var| env_var.ends_with(BASE_URL_ENV_SUFFIX));
-        let provider = HermesProvider {
-            key_env_vars,
-            base_url_env_var: base_url_env_vars.into_iter().next(),
-        };
-        (name, provider)
+            .filter(|env_var| !env_var.ends_with(BASE_URL_ENV_SUFFIX))
+            .collect();
+        (name, HermesProvider { key_env_vars })
     })
     .collect()
 }
@@ -1151,10 +1076,9 @@ fn single_string(tokens: &[Token]) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn provider(keys: &[&str], base_url_env_var: Option<&str>) -> HermesProvider {
+    fn provider(keys: &[&str]) -> HermesProvider {
         HermesProvider {
             key_env_vars: keys.iter().map(|key| (*key).to_owned()).collect(),
-            base_url_env_var: base_url_env_var.map(str::to_owned),
         }
     }
 
@@ -1277,35 +1201,17 @@ PROVIDER_REGISTRY: dict[str, ProviderConfig] = {
                 "vertex"
             ]
         );
-        assert_eq!(
-            providers["openai-api"],
-            provider(&["OPENAI_API_KEY"], Some("OPENAI_BASE_URL"))
-        );
+        assert_eq!(providers["openai-api"], provider(&["OPENAI_API_KEY"]));
         assert_eq!(
             providers["gemini"],
-            provider(
-                &["GOOGLE_API_KEY", "GEMINI_API_KEY"],
-                Some("GEMINI_BASE_URL")
-            )
+            provider(&["GOOGLE_API_KEY", "GEMINI_API_KEY"])
         );
-        assert_eq!(
-            providers["kimi-coding-cn"],
-            provider(&["KIMI_CN_API_KEY"], None)
-        );
-        assert_eq!(
-            providers["actual"],
-            provider(&["ACTUAL_API_KEY"], Some("ACTUAL_BASE_URL"))
-        );
-        assert_eq!(
-            providers["bedrock"],
-            provider(&[], Some("BEDROCK_BASE_URL"))
-        );
-        assert_eq!(providers["vertex"], provider(&[], None));
-        assert_eq!(providers["nous"], provider(&[], None));
-        assert_eq!(
-            providers["copilot-acp"],
-            provider(&[], Some("COPILOT_ACP_BASE_URL"))
-        );
+        assert_eq!(providers["kimi-coding-cn"], provider(&["KIMI_CN_API_KEY"]));
+        assert_eq!(providers["actual"], provider(&["ACTUAL_API_KEY"]));
+        assert_eq!(providers["bedrock"], provider(&[]));
+        assert_eq!(providers["vertex"], provider(&[]));
+        assert_eq!(providers["nous"], provider(&[]));
+        assert_eq!(providers["copilot-acp"], provider(&[]));
     }
 
     #[test]
@@ -1314,7 +1220,7 @@ PROVIDER_REGISTRY: dict[str, ProviderConfig] = {
     }
 
     #[test]
-    fn hermes_plugins_split_base_url_env_from_keys() {
+    fn hermes_plugins_leave_base_url_env_out_of_keys() {
         let source = r#"
 """Command Code provider profile."""
 from providers import register_provider
@@ -1332,13 +1238,10 @@ register_provider(commandcode)
 
         let providers = hermes_plugin_providers(source);
 
-        assert_eq!(
-            providers["commandcode"],
-            provider(&["COMMANDCODE_API_KEY"], Some("COMMANDCODE_BASE_URL"))
-        );
+        assert_eq!(providers["commandcode"], provider(&["COMMANDCODE_API_KEY"]));
         assert_eq!(
             providers["commandcode-anthropic"],
-            provider(&["COMMANDCODE_API_KEY"], None)
+            provider(&["COMMANDCODE_API_KEY"])
         );
         assert_eq!(providers.len(), 2);
     }
@@ -1628,45 +1531,28 @@ const get = Effect.fn("ModelsDev.get")(function* () {
     }
 
     #[test]
-    fn hermes_evaluation_fails_unknown_ids_key_and_base_url_mismatches() {
+    fn hermes_evaluation_fails_unknown_ids_and_key_mismatches() {
         let mapping = single_agent_mapping(
             HERMES_AGENT_ID,
             &[
                 ("deepseek", "DEEPSEEK_API_KEY"),
                 ("anthropic", "ANTHROPIC_API_KEY"),
-                ("xai", "XAI_API_KEY"),
                 ("gemini", "GEMINI_API_KEY"),
-                ("openrouter", "OPENROUTER_API_KEY"),
                 ("gone", "GONE_API_KEY"),
             ],
-            "[providers.hermes]\n",
+            "",
         );
-        let mut upstream = HermesUpstream {
+        let upstream = HermesUpstream {
             providers: BTreeMap::from([
-                (
-                    "deepseek".to_owned(),
-                    provider(&["DEEPSEEK_API_KEY"], Some("DEEPSEEK_BASE_URL")),
-                ),
-                ("anthropic".to_owned(), provider(&["ANTHROPIC_TOKEN"], None)),
-                (
-                    "xai".to_owned(),
-                    provider(&["XAI_API_KEY"], Some("XAI_API_BASE")),
-                ),
+                ("deepseek".to_owned(), provider(&["DEEPSEEK_API_KEY"])),
+                ("anthropic".to_owned(), provider(&["ANTHROPIC_TOKEN"])),
                 (
                     "gemini".to_owned(),
-                    provider(
-                        &["GOOGLE_API_KEY", "GEMINI_API_KEY"],
-                        Some("GEMINI_BASE_URL"),
-                    ),
+                    provider(&["GOOGLE_API_KEY", "GEMINI_API_KEY"]),
                 ),
-                (
-                    "openrouter".to_owned(),
-                    provider(&["OPENROUTER_API_KEY"], None),
-                ),
-                ("nous".to_owned(), provider(&[], None)),
+                ("nous".to_owned(), provider(&[])),
             ]),
-            plugin_dirs: owned(&["commandcode", "openrouter"]),
-            own_rung_literals: owned(&["OPENROUTER_BASE_URL"]),
+            plugin_dirs: owned(&["commandcode"]),
         };
         let mut verified = BTreeSet::new();
         let mut report = Report::default();
@@ -1675,46 +1561,25 @@ const get = Effect.fn("ModelsDev.get")(function* () {
 
         failures_mentioning(
             &report,
-            &[
-                "no provider `gone`",
-                "`anthropic` reads ANTHROPIC_TOKEN",
-                "`xai` reads base URL env `XAI_API_BASE`",
-            ],
+            &["no provider `gone`", "`anthropic` reads ANTHROPIC_TOKEN"],
         );
-        assert_eq!(verified, owned(&["deepseek", "gemini", "openrouter"]));
+        assert_eq!(verified, owned(&["deepseek", "gemini"]));
         assert!(
             report
                 .info
                 .iter()
                 .any(|line| line.ends_with(": commandcode, nous"))
         );
-        assert!(
-            report
-                .info
-                .iter()
-                .any(|line| line.contains("gemini (GEMINI_BASE_URL)"))
-        );
-
-        upstream.own_rung_literals.clear();
-        let mut report = Report::default();
-        evaluate_hermes(&mapping, &upstream, &mut BTreeSet::new(), &mut report);
-        assert!(
-            report
-                .failures
-                .iter()
-                .any(|failure| failure.contains("`openrouter` reads base URL env (none)"))
-        );
     }
 
     #[test]
-    fn goose_evaluation_fails_missing_providers_names_keys_and_host_settings() {
+    fn goose_evaluation_fails_missing_providers_names_and_keys() {
         let mapping = single_agent_mapping(
             GOOSE_AGENT_ID,
             &[
                 ("openai", "OPENAI_API_KEY"),
                 ("mistral", "MISTRAL_API_KEY"),
                 ("groq", "GROQ_API_KEY"),
-                ("xai", "XAI_API_KEY"),
                 ("cerebras", "CEREBRAS_API_KEY"),
                 ("together", "TOGETHER_API_KEY"),
             ],
@@ -1725,15 +1590,11 @@ const get = Effect.fn("ModelsDev.get")(function* () {
             config_keys: owned(config_keys),
         };
         let providers = BTreeMap::from([
-            (
-                "openai".to_owned(),
-                goose(&["openai"], &["OPENAI_API_KEY", "OPENAI_HOST"]),
-            ),
+            ("openai".to_owned(), goose(&["openai"], &["OPENAI_API_KEY"])),
             (
                 "mistral".to_owned(),
                 goose(&["mistral"], &["MISTRAL_API_KEY"]),
             ),
-            ("xai".to_owned(), goose(&["xai"], &["XAI_API_KEY"])),
             (
                 "cerebras".to_owned(),
                 goose(&["cerebras_ai"], &["CEREBRAS_API_KEY"]),
@@ -1758,7 +1619,6 @@ const get = Effect.fn("ModelsDev.get")(function* () {
             &report,
             &[
                 "no provider `groq`",
-                "no `XAI_HOST` setting",
                 "`cerebras` declares provider name cerebras_ai",
                 "`together` reads TOGETHER_KEY",
             ],

@@ -194,7 +194,7 @@ Agent-owned config files are written before canonical config changes are committ
 
 `ACPS_PROVIDER_HTTP_PROXY` sends every request acp-stack itself makes with a provider credential through that HTTP proxy. The provider model-catalog fetch is the one such request.
 
-- Loopback destinations (`localhost`, `127.0.0.0/8`, `::1`) bypass the proxy, so a local endpoint override keeps working.
+- Loopback destinations (`localhost`, `127.0.0.0/8`, `::1`) bypass the proxy.
 - A proxy refusal is the result. The request never falls back to a direct connection, and a value that does not parse as a proxy URL fails the request.
 - Only these requests read the variable. Installs, release fetches, workspace sources, logging delivery, and the agent with its child processes keep their own routing.
 - Unset or blank leaves routing unchanged.

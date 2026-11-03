@@ -55,7 +55,7 @@ The API key stays in the encrypted secret store. At launch, `acp-stack`:
 
 - passes its value as `KIMI_MODEL_API_KEY`
 - selects the model through `KIMI_MODEL_NAME`
-- sets `KIMI_MODEL_BASE_URL` to the selected row's base (the `kimi` entry under `[providers.base_urls]` when present, else `base_url`); a managed-state endpoint override replaces its origin and keeps the row's path (`/v1` on the Moonshot platform, `/coding/v1` on the subscription lanes), see [Endpoint overrides](../specs/extensions.md#endpoint-overrides)
+- sets `KIMI_MODEL_BASE_URL` to the selected row's base (the `kimi` entry under `[providers.base_urls]` when present, else `base_url`)
 - sets `KIMI_MODEL_PROVIDER_TYPE` to the row's `provider_type` on the `anthropic`, `openai`, and `openai_responses` wires; the `kimi` wire is Kimi Code's default and is left unset
 
 Reserve `[agent].env` for the credential ref; `acp-stack` owns the `KIMI_MODEL_*` launch vars.

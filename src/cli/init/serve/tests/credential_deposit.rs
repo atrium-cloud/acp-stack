@@ -135,7 +135,6 @@ fn openrouter_deposit(revision: i64) -> Value {
         json!({
             "provider_id": "openrouter",
             "source_refs": { "OPENROUTER_API_KEY": "PROVIDER_CAPSULE" },
-            "base_url": "http://127.0.0.1:8787",
         }),
     )
 }
@@ -162,10 +161,6 @@ async fn deposit_writes_secrets_and_applies_selection_atomically() {
             .and_then(|set| set.sole.as_ref())
             .expect("managed credential");
         assert_eq!(
-            credential.base_url.as_deref(),
-            Some("http://127.0.0.1:8787")
-        );
-        assert_eq!(
             credential
                 .source_refs
                 .get("OPENROUTER_API_KEY")
@@ -183,13 +178,7 @@ async fn deposit_writes_secrets_and_applies_selection_atomically() {
         );
     }
 
-    // Fresh-from-disk readers (model discovery) see the capsule ref and the
-    // managed endpoint override the deposit published.
-    let override_ = crate::secrets::managed_provider_endpoint_override_for_home(&harness.home)
-        .expect("endpoint override read")
-        .expect("endpoint override present");
-    assert_eq!(override_.provider_id, "openrouter");
-    assert_eq!(override_.base_url, "http://127.0.0.1:8787");
+    // Fresh-from-disk readers (model discovery) see the capsule ref the deposit published.
     let reopened = SecretStore::open_read_only(&harness.home).expect("reopen store");
     assert_eq!(
         reopened.get("PROVIDER_CAPSULE").expect("durable secret"),
@@ -308,7 +297,7 @@ async fn wizard_mutation_after_a_deposit_clobbers_nothing() {
         reopened
             .provider_credential_set("openrouter")
             .and_then(|set| set.sole.as_ref())
-            .is_some_and(|credential| credential.base_url.is_some())
+            .is_some()
     );
 }
 

@@ -3,13 +3,10 @@ use super::*;
 use crate::runtime::agent::provider_model_catalog::cached_models;
 
 const CLAUDE_CODE_API_KEY_HELPER_PREFIX: &str = "printenv ";
-/// Claude Code's own default; the base an unprofiled Anthropic lane reroutes from.
-const ANTHROPIC_DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
 pub(super) fn provision_claude_code_config(
     config: &Config,
     workload: &WorkloadHome,
-    endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
 ) -> Result<Vec<PathBuf>> {
     let home = workload.home();
     let mut written = Vec::new();
@@ -39,7 +36,7 @@ pub(super) fn provision_claude_code_config(
     let remove_env = {
         let env = ensure_object_field(&mut settings, "env", &settings_path)?;
         remove_claude_managed_env(env);
-        write_claude_provider_env(config, provider, env, &settings_path, endpoint)?;
+        write_claude_provider_env(config, provider, env, &settings_path)?;
         env.is_empty()
     };
     if remove_env {
@@ -60,16 +57,13 @@ pub(super) fn provision_claude_code_config(
 pub(super) fn cleanup_claude_code_config(
     config: &Config,
     workload: &WorkloadHome,
-    endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
 ) -> Result<Vec<CleanedAgentConfig>> {
     let mut cleaned = Vec::new();
     let Some(provider) = config.agent.provider.as_ref() else {
         return Ok(cleaned);
     };
     let settings_path = workload.home().join(".claude").join("settings.json");
-    // The expected env MUST be rendered with the same override that wrote it, or the endpoint key
-    // fails the value match and survives cleanup.
-    let expected_env = claude_provider_env_for_config(config, provider, &settings_path, endpoint)?;
+    let expected_env = claude_provider_env_for_config(config, provider, &settings_path)?;
     let expected_helper = claude_api_key_helper_for_provider(config, provider, &settings_path)?;
     if workload.exists(&settings_path)? {
         let mut settings = read_json_object(workload, &settings_path)?;
@@ -104,35 +98,13 @@ fn claude_provider_env_for_config(
     config: &Config,
     provider: &AgentProviderConfig,
     path: &Path,
-    endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
 ) -> Result<Map<String, serde_json::Value>> {
     let mut env = Map::new();
-    write_claude_provider_env(config, provider, &mut env, path, endpoint)?;
+    write_claude_provider_env(config, provider, &mut env, path)?;
     Ok(env)
 }
 
 fn write_claude_provider_env(
-    config: &Config,
-    provider: &AgentProviderConfig,
-    env: &mut Map<String, serde_json::Value>,
-    path: &Path,
-    endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
-) -> Result<()> {
-    write_claude_provider_env_inner(config, provider, env, path)?;
-    // Last write wins over both the custom provider's base URL and the profile default: the
-    // override origin fronts whichever vendor base the lane would otherwise use.
-    if let Some(origin) = super::endpoint_origin_for(endpoint, &provider.id) {
-        let vendor_base_url = env
-            .get("ANTHROPIC_BASE_URL")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or(ANTHROPIC_DEFAULT_BASE_URL);
-        let rerouted = super::reroute_base_url(origin, vendor_base_url)?;
-        env.insert("ANTHROPIC_BASE_URL".to_owned(), json!(rerouted));
-    }
-    Ok(())
-}
-
-fn write_claude_provider_env_inner(
     config: &Config,
     provider: &AgentProviderConfig,
     env: &mut Map<String, serde_json::Value>,
@@ -393,21 +365,18 @@ mod tests {
     use super::*;
     use serde_json::Value;
 
-    fn claude_endpoint(provider_id: &str) -> crate::secrets::ProviderEndpointOverride {
-        crate::secrets::ProviderEndpointOverride {
-            provider_id: provider_id.to_owned(),
-            base_url: "http://127.0.0.1:3129".to_owned(),
-            companion_values: std::collections::BTreeMap::new(),
-        }
-    }
-
-    fn claude_settings_value(home: &Path) -> Value {
-        let path = home.join(".claude").join("settings.json");
-        serde_json::from_str(&std::fs::read_to_string(path).expect("settings should be readable"))
-            .expect("settings json parses")
-    }
-
-    fn claude_moonshot_config() -> Config {
+    /// A re-provision replaces the base an earlier release wrote with the profile's own.
+    #[test]
+    fn claude_code_replaces_a_base_left_in_native_config() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
+        let path = tempdir.path().join(".claude").join("settings.json");
+        std::fs::create_dir_all(path.parent().expect("path has parent")).expect("create parent");
+        std::fs::write(
+            &path,
+            r#"{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:3129/anthropic"}}"#,
+        )
+        .expect("write settings");
         let mut config = config_with_agent("claude", &["MOONSHOT_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "moonshotai".to_owned(),
@@ -415,114 +384,15 @@ mod tests {
             api_key_ref: Some("MOONSHOT_API_KEY".to_owned()),
             custom: None,
         });
-        config
-    }
 
-    #[test]
-    fn claude_code_endpoint_keeps_the_profile_path_behind_the_override_origin_and_restores_it() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
-        let config = claude_moonshot_config();
+        provision_claude_code_config(&config, &workload).expect("provision");
 
-        provision_claude_code_config(&config, &workload, Some(&claude_endpoint("moonshotai")))
-            .expect("provision with override");
+        let settings: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("settings readable"))
+                .expect("settings json parses");
         assert_eq!(
-            claude_settings_value(tempdir.path())["env"]["ANTHROPIC_BASE_URL"],
-            "http://127.0.0.1:3129/anthropic"
-        );
-
-        provision_claude_code_config(&config, &workload, None).expect("provision without");
-        assert_eq!(
-            claude_settings_value(tempdir.path())["env"]["ANTHROPIC_BASE_URL"],
+            settings["env"]["ANTHROPIC_BASE_URL"],
             "https://api.moonshot.ai/anthropic"
-        );
-    }
-
-    #[test]
-    fn claude_code_endpoint_keeps_a_trailing_slash_profile_path() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
-        let mut config = config_with_agent("claude", &["KIMI_API_KEY"]);
-        config.agent.provider = Some(crate::config::AgentProviderConfig {
-            id: "kimi-coding-plan".to_owned(),
-            model: None,
-            api_key_ref: Some("KIMI_API_KEY".to_owned()),
-            custom: None,
-        });
-
-        provision_claude_code_config(
-            &config,
-            &workload,
-            Some(&claude_endpoint("kimi-coding-plan")),
-        )
-        .expect("provision with override");
-
-        assert_eq!(
-            claude_settings_value(tempdir.path())["env"]["ANTHROPIC_BASE_URL"],
-            "http://127.0.0.1:3129/coding/"
-        );
-    }
-
-    #[test]
-    fn claude_code_endpoint_for_the_anthropic_lane_is_the_bare_origin() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
-        let mut config = config_with_agent("claude", &["ANTHROPIC_API_KEY"]);
-        config.agent.provider = Some(crate::config::AgentProviderConfig {
-            id: "anthropic".to_owned(),
-            model: None,
-            api_key_ref: Some("ANTHROPIC_API_KEY".to_owned()),
-            custom: None,
-        });
-
-        provision_claude_code_config(&config, &workload, Some(&claude_endpoint("anthropic")))
-            .expect("provision with override");
-
-        assert_eq!(
-            claude_settings_value(tempdir.path())["env"]["ANTHROPIC_BASE_URL"],
-            "http://127.0.0.1:3129"
-        );
-    }
-
-    #[test]
-    fn claude_code_endpoint_for_another_provider_is_ignored() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
-
-        provision_claude_code_config(
-            &claude_moonshot_config(),
-            &workload,
-            Some(&claude_endpoint("anthropic")),
-        )
-        .expect("provision");
-
-        assert_eq!(
-            claude_settings_value(tempdir.path())["env"]["ANTHROPIC_BASE_URL"],
-            "https://api.moonshot.ai/anthropic"
-        );
-    }
-
-    #[test]
-    fn claude_code_cleanup_removes_the_overridden_endpoint() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
-        let config = claude_moonshot_config();
-        let endpoint = claude_endpoint("moonshotai");
-        provision_claude_code_config(&config, &workload, Some(&endpoint))
-            .expect("provision with override");
-
-        cleanup_claude_code_config(&config, &workload, Some(&endpoint)).expect("cleanup");
-
-        // The managed env was the file's only content, so cleanup removes the file outright.
-        let settings_path = tempdir.path().join(".claude").join("settings.json");
-        let settings: Option<Value> = std::fs::read_to_string(&settings_path)
-            .ok()
-            .map(|text| serde_json::from_str(&text).expect("settings json parses"));
-        assert!(
-            settings
-                .as_ref()
-                .is_none_or(|settings| settings["env"]["ANTHROPIC_BASE_URL"].is_null()),
-            "{settings:?}"
         );
     }
 
@@ -780,7 +650,7 @@ mod tests {
         });
         provision_agent_headless_config(&config, tempdir.path()).expect("provision");
 
-        cleanup_claude_code_config(&config, &workload, None).expect("cleanup");
+        cleanup_claude_code_config(&config, &workload).expect("cleanup");
 
         let settings_path = tempdir.path().join(".claude").join("settings.json");
         if settings_path.exists() {

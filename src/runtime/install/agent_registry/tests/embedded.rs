@@ -17,24 +17,6 @@ fn kimi_declares_yolo_as_the_unattended_default_mode() {
     assert_eq!(kimi.default_mode.as_deref(), Some("yolo"));
 }
 
-/// The flag gates whether a managed credential may carry a `base_url`. Every agent that talks
-/// plain HTTP to its provider has an endpoint field acp-stack writes; amp reaches its own
-/// backend over a websocket and is the sole exception.
-#[test]
-fn every_http_agent_declares_set_provider_base_url() {
-    let catalog = RegistryCatalog::load_embedded().expect("registry");
-    for entry in catalog.entries() {
-        let expected = entry.id != "amp";
-        assert_eq!(
-            catalog.supports_provider_base_url(&entry.id),
-            expected,
-            "`{}` set_provider_base_url must be {expected}",
-            entry.id
-        );
-    }
-    assert!(!catalog.supports_provider_base_url("not-a-registered-agent"));
-}
-
 #[test]
 fn opencode_keeps_an_npm_fallback_behind_its_github_backed_shell_installer() {
     // The shell recipe resolves its release through the GitHub API and fails on

@@ -37,9 +37,7 @@ The adapter and the harness install from separate sources.
 
 The adapter bundle carries no Pi, so the bridge names the managed `pi` through the process-only `PI_ACP_PI_BIN` before launching `pi-acp`.
 
-A managed-state endpoint override reaches the adapter as `PI_ACP_ORIGIN_OVERRIDES`, `<authority>=<origin>`; the adapter sends requests for that authority to the origin and keeps each request's path. This routing needs pi-acp 0.1.7 or later; an earlier adapter sends requests to the vendor host. See [Endpoint overrides](../specs/extensions.md#endpoint-overrides).
-
-Declaring either variable in `[agent].env` is rejected.
+Declaring it in `[agent].env` is rejected.
 
 ## Cloudflare Providers
 

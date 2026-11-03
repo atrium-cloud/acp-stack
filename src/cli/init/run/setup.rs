@@ -126,22 +126,11 @@ pub(super) fn prepare_init_base(
     } else {
         let starter_config = starter_config(args)?;
         let mut new_config = config::load_config_from_str(&starter_config)?;
-        // The secret store can predate this init, so even a fresh config must prove an existing
-        // endpoint override survives the agent being written.
         if let Some(spec) = &custom_agent_spec {
-            crate::runtime::agent::switch::ensure_endpoint_override_survives_target(
-                &home, &spec.id, false, None,
-            )?;
             apply_custom_agent_to_config(&mut new_config, spec);
         } else if let Some(agent_id) = args.agent.as_deref() {
             let entry = registry.lookup_required(agent_id)?;
             entry.ensure_supported()?;
-            crate::runtime::agent::switch::ensure_endpoint_override_survives_target(
-                &home,
-                &entry.id,
-                entry.set_provider_base_url,
-                None,
-            )?;
             apply_registry_entry_to_config(&mut new_config, entry);
             // MUST follow the registry apply: applied earlier, the agent-change clear wipes it.
             apply_adapter_override_action(&mut new_config, &resolve_adapter_override_action(args)?);

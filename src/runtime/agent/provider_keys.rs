@@ -29,49 +29,10 @@ pub const GOOSE_AGENT_ID: &str = "goose";
 pub const KIMI_AGENT_ID: &str = "kimi";
 pub const ANTIGRAVITY_AGENT_ID: &str = "antigravity";
 
-/// Goose's host-only endpoint setting per native provider id; providers absent here have no
-/// endpoint field in goose and cannot carry an override.
-const GOOSE_PROVIDER_HOST_ENV: [(&str, &str); 4] = [
-    ("openai", "OPENAI_HOST"),
-    ("anthropic", "ANTHROPIC_HOST"),
-    ("openrouter", "OPENROUTER_HOST"),
-    ("xai", "XAI_HOST"),
-];
-/// Hermes' per-provider base-URL env override, keyed by the hermes-native provider id. Hermes
-/// resolves a registry provider's endpoint as the explicit config value, then this variable, then
-/// the row default, so exporting it reroutes the provider without displacing its identity.
-///
-/// fact-check-data verifies each pair against the provider's row in Hermes' registry. The
-/// remaining hermes-enabled providers stay on the managed named-entry lane, including those whose
-/// registry row declares a base-URL env too (fact-check-data lists them): several of those names
-/// (`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`) are generic ones other Hermes code paths also read,
-/// so moving a provider here waits on a real prompt test.
-const HERMES_PROVIDER_BASE_URL_ENV: [(&str, &str); 18] = [
-    ("actual", "ACTUAL_BASE_URL"),
-    ("alibaba", "DASHSCOPE_BASE_URL"),
-    ("alibaba-coding-plan", "ALIBABA_CODING_PLAN_BASE_URL"),
-    ("arcee", "ARCEE_BASE_URL"),
-    ("deepseek", "DEEPSEEK_BASE_URL"),
-    ("huggingface", "HF_BASE_URL"),
-    ("minimax", "MINIMAX_BASE_URL"),
-    ("minimax-cn", "MINIMAX_CN_BASE_URL"),
-    ("nvidia", "NVIDIA_BASE_URL"),
-    ("ollama-cloud", "OLLAMA_BASE_URL"),
-    ("opencode-go", "OPENCODE_GO_BASE_URL"),
-    ("opencode-zen", "OPENCODE_ZEN_BASE_URL"),
-    ("openrouter", "OPENROUTER_BASE_URL"),
-    ("stepfun", "STEPFUN_BASE_URL"),
-    ("tencent-tokenhub", "TOKENHUB_BASE_URL"),
-    ("xai", "XAI_BASE_URL"),
-    ("xiaomi", "XIAOMI_BASE_URL"),
-    ("zai", "GLM_BASE_URL"),
-];
 /// Codex reserves `openai` for its own built-in provider definition, whose replacement table
-/// shape is version-dependent, so this pair cannot carry an endpoint override.
+/// shape is version-dependent.
 pub const CODEX_OPENAI_PROVIDER_ID: &str = "openai";
 
-/// Wire transports Hermes accepts on a named `providers:` entry.
-const HERMES_API_MODES: [&str; 3] = ["chat_completions", "anthropic_messages", "codex_responses"];
 /// `KIMI_MODEL_PROVIDER_TYPE` values; `kimi` is Kimi Code's own wire and is never exported.
 pub const KIMI_PROVIDER_TYPES: [&str; 4] = ["kimi", "anthropic", "openai", "openai_responses"];
 pub const KIMI_NATIVE_PROVIDER_TYPE: &str = "kimi";
@@ -132,12 +93,11 @@ pub struct ProviderEnvMapping {
     /// OpenAI-compatible `GET /models` endpoint for live model-catalog fetches.
     #[serde(default)]
     pub models_url: Option<String>,
-    /// The vendor endpoint base most agents send this provider's traffic to. An endpoint override
-    /// keeps this path and swaps the origin, so a provider without one cannot be rerouted.
+    /// The vendor endpoint base most agents send this provider's traffic to.
     #[serde(default)]
     pub base_url: Option<String>,
-    /// Per-agent vendor bases for agents whose native client expects a different path than
-    /// `base_url` (pi's Anthropic client appends `/v1/messages` itself, for example).
+    /// Per-agent vendor bases: what Kimi's launch env exports where its wire takes another path,
+    /// and what OpenCode is pointed at where its default host is not the one a credential seals.
     #[serde(default)]
     pub base_urls: BTreeMap<String, String>,
     /// The companion env var carrying the endpoint of a provider with no fixed vendor base (one
@@ -150,8 +110,6 @@ pub struct ProviderEnvMapping {
     pub hermes_base_url_env: Option<String>,
     #[serde(default)]
     pub claude_code: Option<ClaudeCodeProviderProfile>,
-    #[serde(default)]
-    pub hermes: Option<HermesProviderProfile>,
     #[serde(default)]
     pub kimi: Option<KimiProviderProfile>,
 }
@@ -180,14 +138,6 @@ pub struct ClaudeCodeProviderProfile {
     pub companion_env_vars: Option<Vec<String>>,
     #[serde(default)]
     pub optional_env_vars: Option<Vec<String>>,
-}
-
-/// Hermes-specific headless provisioning metadata for one provider; a `None` `api_mode` marks
-/// the pair as unable to carry an endpoint override.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct HermesProviderProfile {
-    #[serde(default)]
-    pub api_mode: Option<String>,
 }
 
 /// Kimi Code launch metadata for one provider: the wire Kimi speaks to the row's base and the
@@ -530,13 +480,6 @@ impl ProviderKeyMapping {
             if let Some(profile) = &mapping.claude_code {
                 self.validate_claude_code_profile(mapping, profile)?;
             }
-            if let Some(profile) = &mapping.hermes {
-                self.validate_hermes_profile(mapping, profile)?;
-            } else if mapping.agents.iter().any(|agent| agent == HERMES_AGENT_ID) {
-                return provider_mapping_error(format!(
-                    "provider `{primary_id}` supports `{HERMES_AGENT_ID}` but declares no [providers.hermes] profile"
-                ));
-            }
             if let Some(profile) = &mapping.kimi {
                 Self::validate_kimi_profile(mapping, profile)?;
             } else if mapping.agents.iter().any(|agent| agent == KIMI_AGENT_ID) {
@@ -649,29 +592,6 @@ impl ProviderKeyMapping {
                         "provider `{primary_id}` uses Claude Code native auth but has an API-key mapping"
                     ));
                 }
-            }
-        }
-        Ok(())
-    }
-
-    fn validate_hermes_profile(
-        &self,
-        mapping: &ProviderEnvMapping,
-        profile: &HermesProviderProfile,
-    ) -> Result<()> {
-        let primary_id = mapping.primary_id();
-        if !mapping.agents.iter().any(|agent| agent == HERMES_AGENT_ID) {
-            return provider_mapping_error(format!(
-                "provider `{primary_id}` declares a Hermes profile but does not support `{HERMES_AGENT_ID}`"
-            ));
-        }
-        if let Some(api_mode) = profile.api_mode.as_deref() {
-            validate_token(&format!("providers.{primary_id}.hermes.api_mode"), api_mode)?;
-            if !HERMES_API_MODES.contains(&api_mode) {
-                return provider_mapping_error(format!(
-                    "provider `{primary_id}` hermes.api_mode must be one of {}, got `{api_mode}`",
-                    HERMES_API_MODES.join(", ")
-                ));
             }
         }
         Ok(())
@@ -826,14 +746,6 @@ pub fn is_claude_code_profiled_provider(provider_id: &str) -> bool {
     claude_code_profile_for_provider_id(provider_id).is_some()
 }
 
-/// The wire transport the managed Hermes named-provider entry declares for this provider.
-pub fn hermes_api_mode_for_provider_id(provider_id: &str) -> Option<&'static str> {
-    ProviderKeyMapping::load_embedded()
-        .provider_mapping(provider_id)
-        .and_then(|provider| provider.hermes.as_ref())
-        .and_then(|profile| profile.api_mode.as_deref())
-}
-
 pub fn kimi_profile_for_provider_id(provider_id: &str) -> Option<&'static KimiProviderProfile> {
     ProviderKeyMapping::load_embedded()
         .provider_mapping(provider_id)
@@ -867,8 +779,7 @@ pub fn provider_uses_agent_native_auth(agent_id: &str, provider_id: &str) -> boo
             .is_some_and(|profile| profile.agent_native_auth)
 }
 
-/// The vendor endpoint base `agent_id` sends `provider_id`'s traffic to by default; an endpoint
-/// override keeps its path and replaces its origin.
+/// The vendor endpoint base `agent_id` sends `provider_id`'s traffic to by default.
 pub fn vendor_base_url_for_agent_provider_id(
     agent_id: &str,
     provider_id: &str,
@@ -902,66 +813,6 @@ pub fn base_url_env_for_provider_id(provider_id: &str) -> Option<&'static str> {
     ProviderKeyMapping::load_embedded()
         .provider_mapping(provider_id)
         .and_then(|provider| provider.base_url_env.as_deref())
-}
-
-/// Goose reads a host-only endpoint per native provider from `config.yaml`, appending its own
-/// request path, so an override carries the origin alone.
-pub fn goose_host_env_for_native_provider_id(native_provider_id: &str) -> Option<&'static str> {
-    GOOSE_PROVIDER_HOST_ENV
-        .iter()
-        .find(|(native, _)| *native == native_provider_id)
-        .map(|(_, host_env)| *host_env)
-}
-
-/// Hermes' native overlay for `native_provider_id` reads its endpoint from this env var, letting
-/// a mapped provider carry an override while keeping its native id in `config.yaml`. A provider
-/// absent here has to ride the managed named-provider entry instead.
-pub fn hermes_base_url_env_for_native_provider_id(
-    native_provider_id: &str,
-) -> Option<&'static str> {
-    HERMES_PROVIDER_BASE_URL_ENV
-        .iter()
-        .find(|(native, _)| *native == native_provider_id)
-        .map(|(_, base_url_env)| *base_url_env)
-}
-
-/// Whether an (agent, provider) pair can carry an operator-supplied endpoint: the agent must have
-/// somewhere to write it and acp-stack must know the vendor path to keep. A provider outside the
-/// mapping is a configured custom provider, which carries its own vendor base.
-pub fn agent_provider_accepts_endpoint_override(agent_id: &str, provider_id: &str) -> bool {
-    if agent_id == CODEX_AGENT_ID && provider_id == CODEX_OPENAI_PROVIDER_ID {
-        return false;
-    }
-    let mapping = ProviderKeyMapping::load_embedded();
-    let Some(provider) = mapping.provider_mapping(provider_id) else {
-        // Kilo and Antigravity have no custom-provider path that could carry the override.
-        return !matches!(agent_id, KILO_AGENT_ID | ANTIGRAVITY_AGENT_ID);
-    };
-    // A mapped provider the agent does not run has no native slot to write into.
-    if !provider.agents.iter().any(|agent| agent == agent_id) {
-        return false;
-    }
-    match agent_id {
-        // Every provider in HERMES_PROVIDER_BASE_URL_ENV also declares an api_mode, so the
-        // native base-URL-env lane is a strict subset of what this already admits.
-        HERMES_AGENT_ID => {
-            provider
-                .hermes
-                .as_ref()
-                .is_some_and(|profile| profile.api_mode.is_some())
-                && provider.vendor_base_url(agent_id).is_some()
-        }
-        // Every keyed Claude Code lane speaks Anthropic Messages at the profile base or the
-        // vendor default; a native-auth lane (Bedrock, Vertex, Foundry) ignores ANTHROPIC_BASE_URL.
-        CLAUDE_CODE_AGENT_ID => !provider_uses_agent_native_auth(agent_id, provider_id),
-        GOOSE_AGENT_ID => provider
-            .agent_native_provider_id(agent_id)
-            .and_then(goose_host_env_for_native_provider_id)
-            .is_some(),
-        // Kimi exports the row base in its launch environment, so any profiled row reroutes.
-        KIMI_AGENT_ID => provider.kimi.is_some() && provider.vendor_base_url(agent_id).is_some(),
-        _ => provider.vendor_base_url(agent_id).is_some(),
-    }
 }
 
 pub fn models_url_for_provider_id(provider_id: &str) -> Option<&'static str> {
@@ -1364,27 +1215,6 @@ pub fn base_url_template_placeholders(template: &str) -> Vec<&str> {
         rest = &after[end + 1..];
     }
     placeholders
-}
-
-/// `template` with every `{ENV_VAR}` placeholder filled from the credential's stored values.
-pub fn resolve_base_url_template(
-    template: &str,
-    values: &BTreeMap<String, String>,
-) -> Result<String> {
-    let mut resolved = template.to_owned();
-    for name in base_url_template_placeholders(template) {
-        let Some(value) = values.get(name) else {
-            return Err(StackError::InvalidParam {
-                field: "base_url",
-                reason: format!(
-                    "vendor base URL `{template}` needs the stored `{name}` value to compose an \
-                     endpoint override"
-                ),
-            });
-        };
-        resolved = resolved.replace(&format!("{{{name}}}"), value);
-    }
-    Ok(resolved)
 }
 
 fn is_supported_agent_id(agent_id: &str) -> bool {

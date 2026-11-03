@@ -236,8 +236,23 @@ fn selection(provider_id: &str, env_name: &str, value: &str) -> ManagedCredentia
         provider_id: provider_id.to_owned(),
         values: BTreeMap::from([(env_name.to_owned(), value.to_owned())]),
         source_refs: BTreeMap::new(),
-        base_url: None,
     }
+}
+
+/// A store written while credentials carried an endpoint still opens, and the next write drops it.
+#[test]
+fn a_stored_credential_with_the_retired_base_url_loads_and_drops_it() {
+    let credential: ProviderCredential = toml::from_str(
+        r#"
+revision = "managed:platform-state:1"
+values = { OPENROUTER_API_KEY = "atc1.key.payload" }
+base_url = "http://127.0.0.1:3129"
+"#,
+    )
+    .expect("parses");
+
+    let rewritten = toml::to_string(&credential).expect("serializes");
+    assert!(!rewritten.contains("base_url"), "{rewritten}");
 }
 
 #[test]
@@ -401,43 +416,6 @@ fn managed_apply_persists_credential_and_watermark_atomically() {
     );
     let debug = format!("{credential:?}");
     assert!(!debug.contains("sk-managed"));
-}
-
-#[test]
-fn managed_endpoint_override_carries_companion_values_without_the_key() {
-    let home = fresh_home();
-    let mut store = SecretStore::open_or_create(home.path()).expect("open or create");
-    store
-        .apply_managed_state_credential(
-            "platform-state",
-            "provider-credential",
-            1,
-            Some(ManagedCredentialSelection {
-                provider_id: "cloudflare-ai-gateway".to_owned(),
-                values: BTreeMap::from([
-                    ("CLOUDFLARE_API_TOKEN".to_owned(), "cf-secret".to_owned()),
-                    ("CLOUDFLARE_ACCOUNT_ID".to_owned(), "acct".to_owned()),
-                    ("CLOUDFLARE_GATEWAY_ID".to_owned(), "gw".to_owned()),
-                ]),
-                source_refs: BTreeMap::new(),
-                base_url: Some("http://127.0.0.1:3129".to_owned()),
-            }),
-        )
-        .expect("apply");
-
-    let endpoint = store
-        .managed_provider_endpoint_override()
-        .expect("read override")
-        .expect("override present");
-    assert_eq!(endpoint.provider_id, "cloudflare-ai-gateway");
-    assert_eq!(endpoint.base_url, "http://127.0.0.1:3129");
-    assert_eq!(
-        endpoint.companion_values,
-        BTreeMap::from([
-            ("CLOUDFLARE_ACCOUNT_ID".to_owned(), "acct".to_owned()),
-            ("CLOUDFLARE_GATEWAY_ID".to_owned(), "gw".to_owned()),
-        ])
-    );
 }
 
 #[test]

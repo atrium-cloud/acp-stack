@@ -109,13 +109,6 @@ impl RegistryCatalog {
         &self.agents
     }
 
-    /// Whether the agent's native config has a per-provider endpoint field
-    /// acp-stack can write; an agent absent from the catalog answers false.
-    pub fn supports_provider_base_url(&self, id: &str) -> bool {
-        self.lookup(id)
-            .is_some_and(|entry| entry.set_provider_base_url)
-    }
-
     /// Full-entry replacement by id; new ids are appended. Deliberately coarse:
     /// a partial-field merge would let an upstream rename silently keep an
     /// operator's stale harness.
@@ -280,9 +273,6 @@ pub struct RegistryEntry {
     pub set_model: bool,
     #[serde(default)]
     pub allow_custom_provider: bool,
-    /// The agent's native config has a per-provider endpoint field acp-stack can write.
-    #[serde(default)]
-    pub set_provider_base_url: bool,
     #[serde(default)]
     pub allow_custom_model: bool,
     #[serde(default)]
@@ -452,7 +442,6 @@ fn development_placebo_entry(placebo_path: &str, install: InstallSet) -> Registr
         multiple_active_providers: false,
         set_model: false,
         allow_custom_provider: false,
-        set_provider_base_url: false,
         allow_custom_model: false,
         set_mode: false,
         set_effort: false,

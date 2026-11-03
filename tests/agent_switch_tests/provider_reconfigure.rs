@@ -44,7 +44,6 @@ fn apply_managed_provider_credential(
                 provider_id: provider_id.to_owned(),
                 values: std::collections::BTreeMap::from([(env_name.to_owned(), value.to_owned())]),
                 source_refs: std::collections::BTreeMap::new(),
-                base_url: None,
             }),
         )
         .expect("apply managed credential");

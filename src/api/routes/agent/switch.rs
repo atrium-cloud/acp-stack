@@ -195,7 +195,6 @@ pub(crate) async fn agent_switch_handler(
         .await;
     }
     let plan = plan_agent_switch(
-        &home,
         &fresh_config,
         &registry,
         PlannedAgentSwitchRequest {
@@ -408,17 +407,6 @@ async fn switch_to_existing_array_target(
     candidate_config.agent = target_agent;
     let canonical = candidate_config.to_canonical_toml()?;
     let candidate_config = reload_candidate_config(&canonical, target_entry)?;
-    // Selecting an existing target repoints the native config the override lives in, so it faces the same survival check as a planned switch.
-    crate::runtime::agent::switch::ensure_endpoint_override_survives_target(
-        &state.runtime_paths.home,
-        &target_entry.id,
-        target_entry.set_provider_base_url,
-        candidate_config
-            .agent
-            .provider
-            .as_ref()
-            .map(|provider| provider.id.as_str()),
-    )?;
     let _env = open_agent_env(state, &candidate_config)?;
     let required_env_refs = candidate_config.agent.env.clone();
 
@@ -546,13 +534,6 @@ async fn reconfigure_primary_target(
                     field: "agent.provider",
                 })?
                 .model = kept_model;
-            // MUST run after provider resolution so the pair-level refusal sees the provider the target would actually run.
-            crate::runtime::agent::switch::ensure_endpoint_override_survives_target(
-                home,
-                &target_entry.id,
-                target_entry.set_provider_base_url,
-                Some(provider_id),
-            )?;
             ("set", required_env_refs)
         }
         None if body.api_key_ref.is_some() => {

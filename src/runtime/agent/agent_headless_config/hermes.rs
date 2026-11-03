@@ -24,7 +24,7 @@ fn hermes_native_model<'a>(provider_id: &str, model: &'a str) -> &'a str {
 }
 
 /// Writes the single managed `providers:` entry, preserving user-owned entries.
-/// Every endpoint-carrying configuration rides this entry because Hermes' bare `custom` lane cannot carry a credential on a loopback endpoint (key resolution falls through to `no-key-required`) and derives its api_mode from URL detection.
+/// A custom provider rides this entry because Hermes' bare `custom` lane resolves its key and derives its api_mode from URL heuristics.
 fn write_managed_provider_entry(
     root: &mut serde_norway::Mapping,
     name: &str,
@@ -78,43 +78,9 @@ fn remove_managed_provider_entry(root: &mut serde_norway::Mapping) -> bool {
     removed
 }
 
-/// The wire transport the managed entry declares. OpenCode Zen/Go route different models over different wires and their `/v1/models` listings carry no wire metadata, so the per-model table in data/endpoints.toml breaks the tie before the provider-level default.
-fn hermes_managed_transport(
-    path: &Path,
-    provider_id: &str,
-    configured_model: Option<&str>,
-) -> Result<&'static str> {
-    if let Some(model) = configured_model
-        && let Some(wire) = model_wire(provider_id, model)
-    {
-        return match wire {
-            ModelWire::ChatCompletions => Ok("chat_completions"),
-            ModelWire::AnthropicMessages => Ok("anthropic_messages"),
-            ModelWire::Responses => Ok("codex_responses"),
-            // Hermes' custom-provider lane has no Google-native transport, so
-            // a Zen/Go Gemini model cannot ride a managed endpoint.
-            ModelWire::Google => Err(StackError::AgentConfigProvision {
-                path: path.to_path_buf(),
-                reason: format!(
-                    "hermes model `{model}` on provider `{provider_id}` speaks the Google-native wire, which the managed endpoint lane cannot carry; select a different model or clear the endpoint override"
-                ),
-            }),
-        };
-    }
-    hermes_api_mode_for_provider_id(provider_id).ok_or_else(|| {
-        StackError::AgentConfigProvision {
-            path: path.to_path_buf(),
-            reason: format!(
-                "hermes provider `{provider_id}` declares no hermes api_mode in provider/env mapping, so it cannot carry an endpoint override"
-            ),
-        }
-    })
-}
-
 pub(super) fn provision_hermes_config(
     config: &Config,
     workload: &WorkloadHome,
-    endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
 ) -> Result<Vec<PathBuf>> {
     let path = hermes_config_path(workload.home());
     let mut written = Vec::new();
@@ -122,13 +88,6 @@ pub(super) fn provision_hermes_config(
         return Ok(written);
     };
     let provider_id = provider.id.as_str();
-    let base_url_override = match provider.custom.as_ref() {
-        Some(custom) => super::rerouted_base_url_for(endpoint, provider_id, &custom.base_url)?,
-        None => {
-            super::rerouted_mapped_base_url_for(endpoint, &config.agent.id, provider_id, &path)?
-        }
-    };
-    let base_url_override = base_url_override.as_deref();
     let api_key_ref = require_agent_env_for_provider(config, provider_id, &path)?;
 
     let mut root = read_yaml_mapping(workload, &path)?;
@@ -140,8 +99,7 @@ pub(super) fn provision_hermes_config(
 
     // `model.base_url` is never written and always removed: upstream honors it unevenly across
     // native lanes (the anthropic lane silently falls back to api.anthropic.com for endpoints
-    // outside its allowlist), and a leftover value would shadow a base-url env var. Override
-    // endpoints ride the managed named entry or the launch environment instead.
+    // outside its allowlist). A custom endpoint rides the managed named entry instead.
     model.remove(YamlValue::String(HERMES_MODEL_BASE_URL_KEY.to_owned()));
 
     if let Some(custom) = provider.custom.as_ref() {
@@ -162,11 +120,10 @@ pub(super) fn provision_hermes_config(
                 model.remove(YamlValue::String(HERMES_MODEL_DEFAULT_KEY.to_owned()));
             }
         }
-        // The override wins over the custom provider's own base URL.
         write_managed_provider_entry(
             &mut root,
             &custom.name,
-            base_url_override.unwrap_or(&custom.base_url),
+            &custom.base_url,
             api_key_ref,
             custom.api.as_hermes_api_mode(),
         );
@@ -205,40 +162,11 @@ pub(super) fn provision_hermes_config(
         });
     }
 
-    let native_base_url_env = hermes_base_url_env_for_native_provider_id(agent_provider_id);
-    let written_provider_id = match base_url_override {
-        // The native overlay reads the endpoint from its own base-URL env var, which the launch
-        // environment carries, so the provider keeps its identity and its advertised
-        // `<native>/<model>` option ids instead of collapsing onto the managed entry.
-        Some(_) if native_base_url_env.is_some() => {
-            // A managed entry written before the provider gained an env lane would shadow the
-            // native one.
-            remove_managed_provider_entry(&mut root);
-            agent_provider_id
-        }
-        Some(base_url) => {
-            let configured_model = configured_provider_model(config)
-                .map(|configured| hermes_native_model(agent_provider_id, configured));
-            let transport = hermes_managed_transport(&path, provider_id, configured_model)?;
-            let name = provider_name_for_provider_id(provider_id).unwrap_or(provider_id);
-            write_managed_provider_entry(
-                &mut root,
-                &format!("{name} (managed endpoint)"),
-                base_url,
-                native_ref,
-                transport,
-            );
-            HERMES_MANAGED_PROVIDER_REF
-        }
-        None => {
-            // Drop a managed entry left by a cleared override so its endpoint cannot shadow the native one.
-            remove_managed_provider_entry(&mut root);
-            agent_provider_id
-        }
-    };
+    // Drop a managed entry left by a custom provider so its endpoint cannot shadow the native one.
+    remove_managed_provider_entry(&mut root);
     model.insert(
         YamlValue::String(HERMES_MODEL_PROVIDER_KEY.to_owned()),
-        YamlValue::String(written_provider_id.to_owned()),
+        YamlValue::String(agent_provider_id.to_owned()),
     );
     // Drop a stale `model.default` so the launched Hermes process cannot keep using it under the new provider.
     match configured_provider_model(config) {
@@ -506,14 +434,6 @@ mod tests {
         assert_eq!(value["skills_dir"], "keep");
     }
 
-    fn endpoint(provider_id: &str) -> crate::secrets::ProviderEndpointOverride {
-        crate::secrets::ProviderEndpointOverride {
-            provider_id: provider_id.to_owned(),
-            base_url: "http://127.0.0.1:3129".to_owned(),
-            companion_values: std::collections::BTreeMap::new(),
-        }
-    }
-
     fn hermes_openrouter_config() -> Config {
         let mut config = config_with_agent("hermes", &["OPENROUTER_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
@@ -533,35 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn hermes_mapped_provider_endpoint_keeps_the_native_provider_lane() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
-        let config = hermes_openrouter_config();
-
-        provision_hermes_config(&config, &workload, Some(&endpoint("openrouter")))
-            .expect("provision with override");
-        let value = hermes_config_value(tempdir.path());
-        assert_eq!(value["model"]["provider"], "openrouter");
-        assert!(
-            value["model"]
-                .as_mapping()
-                .is_some_and(|map| !map.contains_key(YamlValue::String("base_url".to_owned()))),
-            "{value:?}"
-        );
-        assert_eq!(value["model"]["default"], "deepseek/deepseek-v4-flash");
-        assert!(value["providers"].is_null(), "{value:?}");
-
-        // Clearing the override leaves the same native lane; the endpoint only ever lived in the
-        // launch environment.
-        provision_hermes_config(&config, &workload, None).expect("provision without");
-        let value = hermes_config_value(tempdir.path());
-        assert_eq!(value["model"]["provider"], "openrouter");
-        assert_eq!(value["model"]["default"], "deepseek/deepseek-v4-flash");
-        assert!(value["providers"].is_null(), "{value:?}");
-    }
-
-    #[test]
-    fn hermes_native_env_lane_drops_a_previously_written_managed_entry() {
+    fn hermes_mapped_provider_drops_a_previously_written_managed_entry() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let path = hermes_config_path(tempdir.path());
@@ -572,157 +464,11 @@ mod tests {
         )
         .expect("write existing config");
 
-        provision_hermes_config(
-            &hermes_openrouter_config(),
-            &workload,
-            Some(&endpoint("openrouter")),
-        )
-        .expect("provision with override");
+        provision_hermes_config(&hermes_openrouter_config(), &workload).expect("provision");
 
         let value = hermes_config_value(tempdir.path());
         assert_eq!(value["model"]["provider"], "openrouter");
         assert!(value["providers"].is_null(), "{value:?}");
-    }
-
-    #[test]
-    fn hermes_provider_without_a_base_url_env_rides_the_managed_named_lane_and_is_restored() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
-        let mut config = config_with_agent("hermes", &["ANTHROPIC_API_KEY"]);
-        config.agent.provider = Some(crate::config::AgentProviderConfig {
-            id: "anthropic".to_owned(),
-            model: Some("claude-fable-5".to_owned()),
-            api_key_ref: Some("ANTHROPIC_API_KEY".to_owned()),
-            custom: None,
-        });
-
-        provision_hermes_config(&config, &workload, Some(&endpoint("anthropic")))
-            .expect("provision with override");
-        let value = hermes_config_value(tempdir.path());
-        assert_eq!(value["model"]["provider"], "custom:acps-managed");
-        assert_eq!(value["model"]["default"], "claude-fable-5");
-        let entry = &value["providers"]["acps-managed"];
-        assert_eq!(entry["name"], "Anthropic (managed endpoint)");
-        assert_eq!(entry["base_url"], "http://127.0.0.1:3129");
-        assert_eq!(entry["key_env"], "ANTHROPIC_API_KEY");
-        assert_eq!(entry["transport"], "anthropic_messages");
-
-        // Clearing the override restores the mapped lane and drops the emptied providers map.
-        provision_hermes_config(&config, &workload, None).expect("provision without");
-        let value = hermes_config_value(tempdir.path());
-        assert_eq!(value["model"]["provider"], "anthropic");
-        assert!(value["providers"].is_null(), "{value:?}");
-    }
-
-    #[test]
-    fn hermes_override_provisions_codex_responses_transport() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
-        let mut config = config_with_agent("hermes", &["OPENAI_API_KEY"]);
-        config.agent.provider = Some(crate::config::AgentProviderConfig {
-            id: "openai".to_owned(),
-            model: Some("gpt-5.3".to_owned()),
-            api_key_ref: Some("OPENAI_API_KEY".to_owned()),
-            custom: None,
-        });
-
-        provision_hermes_config(&config, &workload, Some(&endpoint("openai")))
-            .expect("provision with override");
-
-        let value = hermes_config_value(tempdir.path());
-        assert_eq!(value["model"]["provider"], "custom:acps-managed");
-        let entry = &value["providers"]["acps-managed"];
-        assert_eq!(entry["name"], "OpenAI (managed endpoint)");
-        assert_eq!(entry["key_env"], "OPENAI_API_KEY");
-        assert_eq!(entry["transport"], "codex_responses");
-    }
-
-    fn hermes_opencode_config(model: Option<&str>) -> Config {
-        let mut config = config_with_agent("hermes", &["OPENCODE_ZEN_API_KEY"]);
-        config.agent.provider = Some(crate::config::AgentProviderConfig {
-            id: "opencode".to_owned(),
-            model: model.map(str::to_owned),
-            api_key_ref: Some("OPENCODE_ZEN_API_KEY".to_owned()),
-            custom: None,
-        });
-        config
-    }
-
-    // The managed transport is exercised directly: every provider whose per-model wire table
-    // exists in data/endpoints.toml now reaches Hermes over its native base-URL env var, so
-    // provisioning no longer routes them through `hermes_managed_transport`.
-    #[test]
-    fn hermes_managed_transport_breaks_the_tie_on_the_per_model_wire() {
-        let path = Path::new("/nonexistent/.hermes/config.yaml");
-        for (model, transport) in [
-            ("claude-opus-5", "anthropic_messages"),
-            ("gpt-5.5", "codex_responses"),
-        ] {
-            assert_eq!(
-                hermes_managed_transport(path, "opencode", Some(model)).expect("transport"),
-                transport,
-            );
-        }
-    }
-
-    #[test]
-    fn hermes_managed_transport_rejects_a_google_wire_model() {
-        let path = Path::new("/nonexistent/.hermes/config.yaml");
-
-        let err = hermes_managed_transport(path, "opencode", Some("gemini-3-flash"))
-            .expect_err("Google-wire model cannot ride a managed endpoint");
-
-        assert!(
-            matches!(err, StackError::AgentConfigProvision { .. }),
-            "expected AgentConfigProvision, got {err:?}"
-        );
-        assert!(err.to_string().contains("Google-native wire"), "{err}");
-    }
-
-    #[test]
-    fn hermes_managed_transport_falls_back_to_the_provider_default() {
-        let path = Path::new("/nonexistent/.hermes/config.yaml");
-        for model in [None, Some("glm-5.2"), Some("brand-new-model")] {
-            assert_eq!(
-                hermes_managed_transport(path, "opencode", model).expect("transport"),
-                "chat_completions",
-                "model `{model:?}` should fall back to the provider default",
-            );
-        }
-    }
-
-    #[test]
-    fn hermes_override_without_configured_model_drops_the_stale_default() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
-        let config = hermes_opencode_config(None);
-
-        provision_hermes_config(&config, &workload, Some(&endpoint("opencode")))
-            .expect("provision with override");
-
-        let value = hermes_config_value(tempdir.path());
-        assert_eq!(value["model"]["provider"], "opencode-zen");
-        assert!(value["providers"].is_null(), "{value:?}");
-        assert!(
-            value["model"]
-                .as_mapping()
-                .is_some_and(|map| !map.contains_key(YamlValue::String("default".to_owned()))),
-            "{value:?}"
-        );
-    }
-
-    #[test]
-    fn hermes_override_google_wire_model_rides_the_native_lane() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
-        let config = hermes_opencode_config(Some("gemini-3-flash"));
-
-        provision_hermes_config(&config, &workload, Some(&endpoint("opencode")))
-            .expect("the native lane leaves transport selection to hermes");
-
-        let value = hermes_config_value(tempdir.path());
-        assert_eq!(value["model"]["provider"], "opencode-zen");
-        assert_eq!(value["model"]["default"], "gemini-3-flash");
     }
 
     #[test]
@@ -741,7 +487,7 @@ mod tests {
             let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
             let config = custom_provider_config("hermes", api);
 
-            provision_hermes_config(&config, &workload, None).expect("provision");
+            provision_hermes_config(&config, &workload).expect("provision");
 
             let value = hermes_config_value(tempdir.path());
             assert_eq!(
@@ -752,24 +498,22 @@ mod tests {
     }
 
     #[test]
-    fn hermes_override_reprovision_is_byte_identical() {
+    fn hermes_reprovision_is_byte_identical() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let config = hermes_openrouter_config();
         let path = hermes_config_path(tempdir.path());
 
-        provision_hermes_config(&config, &workload, Some(&endpoint("openrouter")))
-            .expect("first provision");
+        provision_hermes_config(&config, &workload).expect("first provision");
         let first = std::fs::read(&path).expect("first config readable");
-        provision_hermes_config(&config, &workload, Some(&endpoint("openrouter")))
-            .expect("second provision");
+        provision_hermes_config(&config, &workload).expect("second provision");
         let second = std::fs::read(&path).expect("second config readable");
 
         assert_eq!(first, second, "re-provision must be a fixed point");
     }
 
     #[test]
-    fn hermes_override_preserves_user_providers_and_model_keys() {
+    fn hermes_preserves_user_providers_and_model_keys() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
         let path = hermes_config_path(tempdir.path());
@@ -781,8 +525,7 @@ mod tests {
         .expect("write existing config");
         let config = hermes_openrouter_config();
 
-        provision_hermes_config(&config, &workload, Some(&endpoint("openrouter")))
-            .expect("provision with override");
+        provision_hermes_config(&config, &workload).expect("provision");
 
         let value = hermes_config_value(tempdir.path());
         assert_eq!(value["model"]["provider"], "openrouter");
@@ -794,72 +537,6 @@ mod tests {
             "https://api.other.example/v1"
         );
         assert!(value["providers"]["acps-managed"].is_null(), "{value:?}");
-    }
-
-    #[test]
-    fn hermes_override_strips_the_advertised_prefix_with_the_mapped_provider_id() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
-        let mut config = hermes_openrouter_config();
-        config
-            .agent
-            .provider
-            .as_mut()
-            .expect("provider")
-            .model
-            .replace("openrouter:deepseek/deepseek-v4-flash".to_owned());
-
-        provision_hermes_config(&config, &workload, Some(&endpoint("openrouter")))
-            .expect("provision with override");
-
-        let value = hermes_config_value(tempdir.path());
-        assert_eq!(value["model"]["provider"], "openrouter");
-        assert_eq!(value["model"]["default"], "deepseek/deepseek-v4-flash");
-    }
-
-    #[test]
-    fn hermes_endpoint_for_another_provider_is_ignored() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
-        let config = hermes_openrouter_config();
-
-        provision_hermes_config(&config, &workload, Some(&endpoint("anthropic")))
-            .expect("provision");
-
-        let value = hermes_config_value(tempdir.path());
-        assert_eq!(value["model"]["provider"], "openrouter");
-        assert!(
-            value["model"]
-                .as_mapping()
-                .is_some_and(|map| !map.contains_key(YamlValue::String("base_url".to_owned()))),
-            "{value:?}"
-        );
-        assert!(value["providers"].is_null(), "{value:?}");
-    }
-
-    #[test]
-    fn hermes_custom_provider_endpoint_overrides_the_declared_base_url() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
-        let config =
-            custom_provider_config("hermes", crate::config::CustomProviderApi::ChatCompletions);
-        let provider_id = config
-            .agent
-            .provider
-            .as_ref()
-            .expect("custom provider")
-            .id
-            .clone();
-
-        provision_hermes_config(&config, &workload, Some(&endpoint(&provider_id)))
-            .expect("provision");
-
-        let value = hermes_config_value(tempdir.path());
-        assert_eq!(value["model"]["provider"], "custom:acps-managed");
-        assert_eq!(
-            value["providers"]["acps-managed"]["base_url"],
-            "http://127.0.0.1:3129/v1"
-        );
     }
 
     #[test]

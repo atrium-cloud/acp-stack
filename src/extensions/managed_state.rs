@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::error::{Result, StackError};
-use crate::secrets::{CredentialSource, ManagedCredentialSelection, SecretStore};
+use crate::secrets::{ManagedCredentialSelection, SecretStore};
 
 // CONSTANTS
 
@@ -129,23 +129,15 @@ pub struct CredentialSelection {
     /// at apply time and the ref name is retained alongside the value.
     #[serde(default)]
     pub source_refs: BTreeMap<String, String>,
-    /// Origin (scheme, host, port; no path) the agent must send this provider's
-    /// traffic to instead of the vendor host. The agent keeps the provider's own
-    /// path behind it. Written into the agent's native config or launch
-    /// environment, so the configured agent must declare
-    /// `set_provider_base_url` in the registry.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base_url: Option<String>,
 }
 
 impl std::fmt::Debug for CredentialSelection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Never leak values via Debug; env names, ref names, and the base URL are not secret.
+        // Never leak values via Debug; env names and ref names are not secret.
         f.debug_struct("CredentialSelection")
             .field("provider_id", &self.provider_id)
             .field("env_names", &self.values.keys().collect::<Vec<_>>())
             .field("source_refs", &self.source_refs)
-            .field("base_url", &self.base_url)
             .finish()
     }
 }
@@ -171,7 +163,6 @@ pub fn layer_environment(env: &mut HashMap<String, String>, home: &Path) -> Resu
 /// agent-config mutation lock; the store persists the catalog swap and the
 /// namespace watermark atomically.
 pub fn apply(
-    home: &Path,
     store: &mut SecretStore,
     config: &Config,
     namespace: &str,
@@ -190,7 +181,7 @@ pub fn apply(
         DesiredState::ProviderCredential { selection } => {
             require_declared_kind(config, namespace, KIND_PROVIDER_CREDENTIAL)?;
             let selection = selection
-                .map(|selection| resolve_selection(home, store, config, namespace, selection))
+                .map(|selection| resolve_selection(store, config, selection))
                 .transpose()?;
             store.apply_managed_state_credential(
                 namespace,
@@ -222,7 +213,6 @@ pub fn apply(
 /// orphaning the secrets a bare `set_many` would already have written. `source_refs` still resolve
 /// against the flat store, so a selection may reference a secret this same body deposits.
 pub fn deposit_and_apply<'a, I>(
-    home: &Path,
     store: &mut SecretStore,
     config: &Config,
     namespace: &str,
@@ -256,7 +246,7 @@ where
         revision,
         |store| {
             selection
-                .map(|selection| resolve_selection(home, store, config, namespace, selection))
+                .map(|selection| resolve_selection(store, config, selection))
                 .transpose()
         },
     )?;
@@ -279,10 +269,8 @@ where
 /// credential really did change, so the orchestrator must advance the
 /// revision.
 fn resolve_selection(
-    home: &Path,
     store: &SecretStore,
     config: &Config,
-    namespace: &str,
     selection: CredentialSelection,
 ) -> Result<ManagedCredentialSelection> {
     validate_bounded(
@@ -366,17 +354,10 @@ fn resolve_selection(
             ),
         });
     }
-    if let Some(base_url) = selection.base_url.as_deref() {
-        validate_base_url(base_url)?;
-        require_agent_supports_base_url(home, config)?;
-        require_provider_accepts_base_url(config, &selection.provider_id)?;
-        require_single_endpoint_override(store, namespace, &selection.provider_id)?;
-    }
     Ok(ManagedCredentialSelection {
         provider_id: selection.provider_id,
         values,
         source_refs: selection.source_refs,
-        base_url: selection.base_url,
     })
 }
 
@@ -452,125 +433,6 @@ fn validate_environment(
         store
             .get(ref_name)
             .map_err(|error| source_ref_error(ENVIRONMENT_FIELD, ref_name, error))?;
-    }
-    Ok(())
-}
-
-/// A provider endpoint override obeys the shared endpoint rule: https, or http to a
-/// loopback host (an in-guest relay listener), no credentials, no query or
-/// fragment, bounded. It is an origin only: the agent×provider profile keeps its
-/// own vendor path, so a path here would be composed twice or shadow it.
-fn validate_base_url(base_url: &str) -> Result<()> {
-    use crate::config::{EndpointUrlProblem, MAX_ENDPOINT_URL_BYTES, check_endpoint_url};
-
-    check_endpoint_url(base_url, false).map_err(|problem| StackError::InvalidParam {
-        field: "desired.selection.base_url",
-        reason: match problem {
-            EndpointUrlProblem::Unparseable => "base_url is not a valid URL".to_owned(),
-            EndpointUrlProblem::NotHttpsOrLoopback => {
-                "base_url must be an https:// URL with a host, or http:// to a loopback host"
-                    .to_owned()
-            }
-            EndpointUrlProblem::ContainsCredentials => {
-                "base_url must not include credentials".to_owned()
-            }
-            EndpointUrlProblem::ContainsQueryOrFragment => {
-                "base_url must not carry a query string or fragment".to_owned()
-            }
-            EndpointUrlProblem::TooLong => {
-                format!("base_url exceeds the {MAX_ENDPOINT_URL_BYTES}-byte limit")
-            }
-        },
-    })?;
-    let parsed = reqwest::Url::parse(base_url).map_err(|_| StackError::InvalidParam {
-        field: "desired.selection.base_url",
-        reason: "base_url is not a valid URL".to_owned(),
-    })?;
-    if parsed.path() != "/" {
-        return Err(StackError::InvalidParam {
-            field: "desired.selection.base_url",
-            reason: format!(
-                "base_url must be an origin with no path (the agent keeps the provider's own \
-                 path); remove `{}`",
-                parsed.path()
-            ),
-        });
-    }
-    Ok(())
-}
-
-/// Reject the endpoint override before any watermark or catalog persist when
-/// the configured agent has no native config surface to write it into.
-/// Otherwise the revision applies and the endpoint silently never takes effect.
-fn require_agent_supports_base_url(home: &Path, config: &Config) -> Result<()> {
-    if crate::runtime::install::agent_supports_provider_base_url(home, &config.agent.id)? {
-        return Ok(());
-    }
-    Err(StackError::InvalidParam {
-        field: "desired.selection.base_url",
-        reason: format!(
-            "agent `{}` cannot route a provider through a custom endpoint; \
-             remove base_url or switch to an agent that supports it",
-            config.agent.id
-        ),
-    })
-}
-
-/// The registry endpoint capability is agent-level, but a few agent/provider
-/// pairs still have nowhere to write the override. Rejecting here, before any
-/// watermark or catalog persist, keeps the revision reusable. Otherwise
-/// provisioning fails once the store is already durable and every retry at the
-/// same revision replays the same failure.
-fn require_provider_accepts_base_url(config: &Config, provider_id: &str) -> Result<()> {
-    if crate::runtime::agent::provider_keys::agent_provider_accepts_endpoint_override(
-        &config.agent.id,
-        provider_id,
-    ) {
-        return Ok(());
-    }
-    Err(StackError::InvalidParam {
-        field: "desired.selection.base_url",
-        reason: format!(
-            "agent `{}` cannot route provider `{provider_id}` through a custom endpoint; \
-             select `openrouter` or a configured custom provider, or remove base_url",
-            config.agent.id
-        ),
-    })
-}
-
-/// At most one provider may be rerouted at a time: the agent's native config
-/// carries exactly one endpoint override, and two namespaces each rerouting a
-/// different provider would have provisioning arbitrarily pick a winner.
-/// Rejecting here, before any watermark or catalog persist, keeps the
-/// revision reusable once the first namespace's endpoint is cleared.
-///
-/// The applying namespace's own rerouted credentials do not count against it:
-/// staging drops the namespace's previous provider before inserting the new
-/// one, so a namespace switching itself from one rerouted provider to another
-/// still leaves exactly one override standing.
-fn require_single_endpoint_override(
-    store: &SecretStore,
-    namespace: &str,
-    provider_id: &str,
-) -> Result<()> {
-    for (existing_id, set) in store.provider_credentials() {
-        if existing_id == provider_id {
-            continue;
-        }
-        let carries_override = set.sole.as_ref().is_some_and(|credential| {
-            credential.base_url.is_some()
-                && matches!(&credential.source, CredentialSource::External(holder) if holder != namespace)
-        });
-        if carries_override {
-            return Err(StackError::InvalidParam {
-                field: "desired.selection.base_url",
-                reason: format!(
-                    "provider `{existing_id}` is already routed through a custom endpoint; only \
-                     one provider may be rerouted at a time; clear that namespace's credential \
-                     endpoint first"
-                ),
-            });
-        }
     }
     Ok(())
 }
@@ -652,7 +514,6 @@ mod tests {
         // A provider credential variable is left to the spawn precedence: the
         // selected provider's value wins in the agent process.
         let response = apply(
-            home.path(),
             &mut store,
             &config(),
             NAMESPACE,
@@ -681,14 +542,8 @@ mod tests {
             ),
             (&[("search-key", "SEARCH_REF")][..], "must match"),
         ] {
-            let error = apply(
-                home.path(),
-                &mut store,
-                &config(),
-                NAMESPACE,
-                request(entries),
-            )
-            .expect_err("refused");
+            let error =
+                apply(&mut store, &config(), NAMESPACE, request(entries)).expect_err("refused");
             assert_eq!(error.error_code(), "request.invalid_param", "{entries:?}");
             assert!(
                 error.public_message().contains(reason),
@@ -707,8 +562,7 @@ mod tests {
             NAMESPACE.to_owned(),
             extension(ExtensionType::ManagedState, Some(KIND_PROVIDER_CREDENTIAL)),
         );
-        let error = apply(home.path(), &mut store, &config, NAMESPACE, request(&[]))
-            .expect_err("kind mismatch");
+        let error = apply(&mut store, &config, NAMESPACE, request(&[])).expect_err("kind mismatch");
         assert!(
             error
                 .public_message()

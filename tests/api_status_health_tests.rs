@@ -33,7 +33,6 @@ async fn status_returns_200_with_session_key() {
     for feature in [
         "network-provider-workload-env",
         "agent-test-json",
-        "managed-credential-base-url",
         "sandbox-mask-files",
         "managed-node-runtime",
         "sandbox-workload-user",

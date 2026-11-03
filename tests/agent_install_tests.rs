@@ -226,7 +226,6 @@ fn adapter_kind_entry() -> RegistryEntry {
         multiple_active_providers: false,
         set_model: false,
         allow_custom_provider: false,
-        set_provider_base_url: false,
         allow_custom_model: false,
         set_mode: false,
         set_effort: false,

@@ -449,7 +449,7 @@ A body naming the target that is already primary and carrying `provider`, `model
 - With `model`, a provider change provisions the model-free candidate, probes it, resolves the model, and provisions again. A body keeping the provider id and ref, or naming only `model`, probes the committed agent-owned config first and provisions once.
 - A body naming `provider` always re-provisions the agent-owned config from the store and restarts the agent, including a repeat of the committed selection, so a stored credential whose value changed reaches the agent.
 - With no intervening config change, a model-only body repeating the committed model is a side-effect-free `no_op`: the canonical candidate, including the resolved model, is compared against the on-disk canonical config and an identical result commits nothing. On an agent that resolves models through discovery, that `no_op` costs one probe.
-- A missing credential for the new provider, a provider the agent does not support, and a stranded endpoint override are all rejected before anything is written.
+- A missing credential for the new provider and a provider the agent does not support are rejected before anything is written.
 
 #### Switch Journal And Retry Semantics
 
@@ -1210,7 +1210,7 @@ A `running` row is reconciled to `failed` with `error.code = "deps.apply_abandon
 ```json
 {
   "version": "0.1.9",
-  "features": ["network-provider-workload-env", "agent-test-json", "managed-credential-base-url", "sandbox-mask-files", "managed-node-runtime", "sandbox-workload-user", "sandbox-capability-drop", "sandbox-workload-termination", "workload-io-identity", "host-exec-trusted-inputs", "install-workload-reachability", "sandbox-require-network-provider", "sandbox-off-identity", "workload-io-follow-links", "sandbox-workload-env", "provider-http-proxy", "init-provider-check", "managed-secret-environment"]
+  "features": ["network-provider-workload-env", "agent-test-json", "sandbox-mask-files", "managed-node-runtime", "sandbox-workload-user", "sandbox-capability-drop", "sandbox-workload-termination", "workload-io-identity", "host-exec-trusted-inputs", "install-workload-reachability", "sandbox-require-network-provider", "sandbox-off-identity", "workload-io-follow-links", "sandbox-workload-env", "provider-http-proxy", "init-provider-check", "managed-secret-environment"]
 }
 ```
 
@@ -1219,7 +1219,6 @@ A `running` row is reconciled to `failed` with `error.code = "deps.apply_abandon
 - The names are a stable contract:
     - `network-provider-workload-env` covers `[extensions.<name>.workload_env]`
     - `agent-test-json` covers `acps agent test --format json`
-    - `managed-credential-base-url` covers `base_url` on a managed-state credential selection
     - `sandbox-mask-files` covers `sandbox_mask_files` on the init create body and `[workspace.sandbox].mask_files` masking
     - `managed-node-runtime` covers the runtime-installed Node.js 26 that agents, installers, and dependency install actions run on (see [runtime.md](../runtime.md#managed-node-runtime))
     - `sandbox-workload-user` covers `[workspace.sandbox].workload_user`, its separate workload home, and `sandbox_workload_user` on the init create body (see [security.md](../security.md#workload-identity))
