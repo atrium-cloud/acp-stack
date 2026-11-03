@@ -1083,6 +1083,44 @@ fn endpoint_override_pairs_are_data_driven() {
 }
 
 #[test]
+fn hermes_launch_bases_come_from_the_row() {
+    assert_eq!(
+        hermes_launch_base_url("kimi-code"),
+        Some(("KIMI_BASE_URL", "https://api.kimi.com/coding"))
+    );
+    assert_eq!(
+        hermes_launch_base_url("stepfun"),
+        Some(("STEPFUN_BASE_URL", "https://api.stepfun.com/v1"))
+    );
+    assert_eq!(hermes_launch_base_url("openrouter"), None);
+}
+
+#[test]
+fn invalid_mapping_rejects_hermes_base_url_env_without_a_literal_base() {
+    for base_urls in [
+        "",
+        "[providers.base_urls]\nhermes = \"https://{SOLO_HOST}/v1\"\n",
+    ] {
+        let err = ProviderKeyMapping::from_toml(&format!(
+            r#"
+[[providers]]
+id = ["solo"]
+name = "Solo"
+agents = ["hermes"]
+companion_env_vars = ["SOLO_HOST"]
+hermes_base_url_env = "SOLO_BASE_URL"
+
+[providers.hermes]
+
+{base_urls}"#
+        ))
+        .expect_err("the env var needs a literal base");
+
+        assert!(err.to_string().contains("hermes_base_url_env"), "{err}");
+    }
+}
+
+#[test]
 fn vendor_base_urls_prefer_the_agent_entry() {
     assert_eq!(
         vendor_base_url_for_agent_provider_id("opencode", "anthropic"),

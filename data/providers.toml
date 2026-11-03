@@ -37,7 +37,11 @@
 # one cannot be rerouted. `[providers.base_urls]` overrides it per agent id
 # where an agent's client expects a different path (pi and hermes Anthropic
 # clients append `/v1/messages` themselves). Claude Code lanes use the
-# `[providers.claude_code]` base_url.
+# `[providers.claude_code]` base_url. An `opencode` entry is also written as
+# `options.baseURL`, for a provider whose OpenCode default host differs from
+# the one a sealed credential redeems at. `hermes_base_url_env` names the env
+# var Hermes reads a provider's endpoint from; the launch env exports the row's
+# `hermes` entry there, for the same reason.
 #
 # `base_url_env` names the companion env var that carries the endpoint of a
 # provider with no fixed vendor base. Agents that read it natively get it in
@@ -345,17 +349,23 @@ api_mode = "chat_completions"
 id = ["together", "togetherai"]
 name = "Together AI"
 agents = ["pi", "opencode"]
-base_url = "https://api.together.xyz/v1"
+base_url = "https://api.together.ai/v1"
 
 [providers.provider_ids]
 together = "pi"
 togetherai = "opencode"
+
+# @ai-sdk/togetherai defaults to api.together.xyz, and models.dev names no `api`.
+[providers.base_urls]
+opencode = "https://api.together.ai/v1"
 
 [[providers]]
 id = ["kimi-coding", "kimi-code-plan-cn", "kimi-coding-plan", "kimi", "kimi-code"]
 name = "Kimi For Coding"
 agents = ["pi", "opencode", "claude", "hermes", "kimi"]
 base_url = "https://api.kimi.com/coding/v1"
+# Hermes defaults to api.moonshot.ai and redirects only `sk-kimi-` keys here.
+hermes_base_url_env = "KIMI_BASE_URL"
 # No models_url: probed 2026-08-20 with a real subscription key. The coding
 # surface has no model-list route (/coding/* variants all 404) and the platform
 # /v1/models rejects coding-plan keys with 401.
@@ -444,8 +454,10 @@ api_mode = "anthropic_messages"
 [providers.kimi]
 provider_type = "anthropic"
 
+# models.dev points OpenCode at api.minimax.cn; every other agent dials api.minimaxi.com.
 [providers.base_urls]
 kimi = "https://api.minimaxi.com/anthropic"
+opencode = "https://api.minimaxi.com/anthropic/v1"
 
 [[providers]]
 id = ["qwen-token-plan"]
@@ -955,7 +967,8 @@ base_url = "https://api.getlilac.com/v1"
 id = ["llama"]
 name = "Llama"
 agents = ["opencode"]
-base_url = "https://api.llama.com/compat/v1"
+# The same vendor API as `meta`. Platform seals this host; models.dev lists no `llama`.
+base_url = "https://api.meta.ai/v1"
 
 [[providers]]
 id = ["llmgateway"]
@@ -1019,6 +1032,10 @@ base_url = "https://api.minimaxi.com/anthropic/v1"
 base_url = "https://api.minimaxi.com/anthropic"
 default_model = "MiniMax-M3[1m]"
 env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1000000" }
+
+# models.dev points OpenCode at api.minimax.cn; Claude Code dials api.minimaxi.com.
+[providers.base_urls]
+opencode = "https://api.minimaxi.com/anthropic/v1"
 
 [[providers]]
 id = ["minimax-coding-plan"]
@@ -1287,6 +1304,11 @@ id = ["stepfun"]
 name = "StepFun"
 agents = ["opencode", "hermes"]
 base_url = "https://api.stepfun.com/v1"
+# Hermes defaults to its Step Plan row, api.stepfun.ai/step_plan/v1.
+hermes_base_url_env = "STEPFUN_BASE_URL"
+
+[providers.base_urls]
+hermes = "https://api.stepfun.com/v1"
 
 [providers.hermes]
 api_mode = "chat_completions"

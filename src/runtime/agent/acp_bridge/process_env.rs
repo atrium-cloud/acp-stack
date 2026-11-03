@@ -6,8 +6,8 @@ use crate::runtime::agent::provider_keys::{
     KIMI_MODEL_MAX_CONTEXT_SIZE_ENV, KIMI_MODEL_MAX_OUTPUT_SIZE_ENV, KIMI_MODEL_NAME_ENV,
     KIMI_MODEL_PROVIDER_TYPE_ENV, KIMI_NATIVE_PROVIDER_TYPE, agent_provider_id_for_provider_id,
     env_var_for_agent_provider_id, hermes_base_url_env_for_native_provider_id,
-    kimi_profile_for_provider_id, providers_for_agent, resolve_base_url_template,
-    vendor_base_url_for_agent_provider_id,
+    hermes_launch_base_url, kimi_profile_for_provider_id, providers_for_agent,
+    resolve_base_url_template, vendor_base_url_for_agent_provider_id,
 };
 
 pub(crate) const KIMI_CODE_AGENT_ID: &str = "kimi";
@@ -105,9 +105,13 @@ fn build_hermes_process_env(
     else {
         return Ok(env);
     };
-    let Some(base_url_env) = agent_provider_id_for_provider_id(HERMES_AGENT_ID, &provider.id)
-        .and_then(hermes_base_url_env_for_native_provider_id)
-    else {
+    let endpoint = endpoint.filter(|endpoint| endpoint.provider_id == provider.id);
+    // A row can point Hermes at the host a sealed credential redeems at.
+    let declared_base = hermes_launch_base_url(&provider.id);
+    let Some(base_url_env) = declared_base.map(|(name, _)| name).or_else(|| {
+        agent_provider_id_for_provider_id(HERMES_AGENT_ID, &provider.id)
+            .and_then(hermes_base_url_env_for_native_provider_id)
+    }) else {
         return Ok(env);
     };
     // Guarded even without an override: an operator-declared value would otherwise silently
@@ -119,7 +123,10 @@ fn build_hermes_process_env(
             ),
         });
     }
-    let Some(endpoint) = endpoint.filter(|endpoint| endpoint.provider_id == provider.id) else {
+    let Some(endpoint) = endpoint else {
+        if let Some((_, base_url)) = declared_base {
+            env.insert(base_url_env.to_owned(), base_url.to_owned());
+        }
         return Ok(env);
     };
     let Some(vendor_base_url) =
@@ -1188,6 +1195,35 @@ mod tests {
                 .expect("Hermes env"),
             env
         );
+    }
+
+    /// Hermes' default hosts for these providers are not the ones a sealed credential redeems at.
+    #[test]
+    fn hermes_process_env_points_a_provider_at_its_sealed_host() {
+        for (provider_id, api_key_ref, base_url_env, base_url) in [
+            (
+                "kimi-coding",
+                "KIMI_API_KEY",
+                "KIMI_BASE_URL",
+                "https://api.kimi.com/coding",
+            ),
+            (
+                "stepfun",
+                "STEPFUN_API_KEY",
+                "STEPFUN_BASE_URL",
+                "https://api.stepfun.com/v1",
+            ),
+        ] {
+            let agent = hermes_agent(provider_id, api_key_ref);
+
+            let prepared =
+                build_hermes_process_env(&agent, HashMap::new(), None).expect("Hermes env");
+
+            assert_eq!(
+                prepared.get(base_url_env).map(String::as_str),
+                Some(base_url)
+            );
+        }
     }
 
     #[test]

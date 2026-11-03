@@ -1,5 +1,7 @@
 use super::*;
-use crate::runtime::agent::provider_keys::base_url_env_for_provider_id;
+use crate::runtime::agent::provider_keys::{
+    agent_base_url_for_provider_id, base_url_env_for_provider_id,
+};
 
 pub(crate) const OPENCODE_AGENT_ID: &str = "opencode";
 // OpenCode treats an empty `small_model` as unset and still falls back to its
@@ -188,21 +190,20 @@ fn write_opencode_provider_config(
     // acps owns `options.baseURL` for a mapped provider: removing it on a
     // re-provision without an override is what restores the vendor endpoint.
     // A provider with no fixed vendor base reads its endpoint from the
-    // companion env instead.
-    match (
-        base_url_override,
-        base_url_env_for_provider_id(&provider.id),
-    ) {
-        (Some(base_url), _) => {
+    // companion env instead, and a row can declare OpenCode's own base.
+    let base_url = base_url_override
+        .or_else(|| {
+            base_url_env_for_provider_id(&provider.id)
+                .map(|base_url_env| format!("{{env:{base_url_env}}}"))
+        })
+        .or_else(|| {
+            agent_base_url_for_provider_id(&config.agent.id, &provider.id).map(str::to_owned)
+        });
+    match base_url {
+        Some(base_url) => {
             options.insert("baseURL".to_owned(), json!(base_url));
         }
-        (None, Some(base_url_env)) => {
-            options.insert(
-                "baseURL".to_owned(),
-                json!(format!("{{env:{base_url_env}}}")),
-            );
-        }
-        (None, None) => {
+        None => {
             options.remove("baseURL");
         }
     }
@@ -479,6 +480,46 @@ mod tests {
         let options = &opencode_config_value(tempdir.path())["provider"]["azure"]["options"];
         assert_eq!(options["apiKey"], "{env:AZURE_OPENAI_API_KEY}");
         assert_eq!(options["baseURL"], "{env:AZURE_OPENAI_BASE_URL}");
+    }
+
+    /// These providers' OpenCode default host differs from the one their credential redeems at.
+    #[test]
+    fn opencode_provider_with_a_declared_base_is_pointed_at_it() {
+        for (provider_id, native_id, api_key_ref, base_url) in [
+            (
+                "together",
+                "togetherai",
+                "TOGETHER_API_KEY",
+                "https://api.together.ai/v1",
+            ),
+            (
+                "minimax-cn",
+                "minimax-cn",
+                "MINIMAX_API_KEY",
+                "https://api.minimaxi.com/anthropic/v1",
+            ),
+            (
+                "minimax-cn-coding-plan",
+                "minimax-cn-coding-plan",
+                "MINIMAX_API_KEY",
+                "https://api.minimaxi.com/anthropic/v1",
+            ),
+        ] {
+            let tempdir = tempfile::tempdir().expect("tempdir");
+            let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
+            let mut config = config_with_agent("opencode", &[api_key_ref]);
+            config.agent.provider = Some(crate::config::AgentProviderConfig {
+                id: provider_id.to_owned(),
+                model: None,
+                api_key_ref: Some(api_key_ref.to_owned()),
+                custom: None,
+            });
+
+            provision_opencode_config(&config, &workload, None).expect("provision");
+
+            let value = opencode_config_value(tempdir.path());
+            assert_eq!(value["provider"][native_id]["options"]["baseURL"], base_url);
+        }
     }
 
     #[test]

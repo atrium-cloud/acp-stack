@@ -144,6 +144,10 @@ pub struct ProviderEnvMapping {
     /// Azure resource per operator); agents configured by file get an env reference to it.
     #[serde(default)]
     pub base_url_env: Option<String>,
+    /// The env var Hermes reads this provider's endpoint from, which carries the row's `hermes`
+    /// base: set where Hermes' default host is not the one a sealed credential redeems at.
+    #[serde(default)]
+    pub hermes_base_url_env: Option<String>,
     #[serde(default)]
     pub claude_code: Option<ClaudeCodeProviderProfile>,
     #[serde(default)]
@@ -481,6 +485,22 @@ impl ProviderKeyMapping {
                     base_url,
                     &placeholder_env_vars,
                 )?;
+            }
+            if let Some(base_url_env) = mapping.hermes_base_url_env.as_deref() {
+                validate_token(
+                    &format!("providers.{primary_id}.hermes_base_url_env"),
+                    base_url_env,
+                )?;
+                // The launch env exports the base verbatim, so it must be declared and literal.
+                let literal_base = mapping
+                    .base_urls
+                    .get(HERMES_AGENT_ID)
+                    .is_some_and(|base| base_url_template_placeholders(base).is_empty());
+                if !literal_base {
+                    return provider_mapping_error(format!(
+                        "provider `{primary_id}` hermes_base_url_env `{base_url_env}` needs a literal `hermes` entry under base_urls"
+                    ));
+                }
             }
             for provider_id in &mapping.id {
                 if !provider_overrides.insert(provider_id.as_str()) {
@@ -856,6 +876,24 @@ pub fn vendor_base_url_for_agent_provider_id(
     ProviderKeyMapping::load_embedded()
         .provider_mapping(provider_id)
         .and_then(|provider| provider.vendor_base_url(agent_id))
+}
+
+/// The base a row declares for `agent_id` alone, leaving out the row-wide default.
+pub fn agent_base_url_for_provider_id(agent_id: &str, provider_id: &str) -> Option<&'static str> {
+    ProviderKeyMapping::load_embedded()
+        .provider_mapping(provider_id)
+        .and_then(|provider| provider.base_urls.get(agent_id))
+        .map(String::as_str)
+}
+
+/// The launch env var and base that point Hermes at `provider_id`'s sealed host, for a row whose
+/// Hermes default host differs from it.
+pub fn hermes_launch_base_url(provider_id: &str) -> Option<(&'static str, &'static str)> {
+    let provider = ProviderKeyMapping::load_embedded().provider_mapping(provider_id)?;
+    Some((
+        provider.hermes_base_url_env.as_deref()?,
+        provider.base_urls.get(HERMES_AGENT_ID)?.as_str(),
+    ))
 }
 
 /// The companion env var holding `provider_id`'s endpoint when the provider has no fixed vendor

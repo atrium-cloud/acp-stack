@@ -22,6 +22,10 @@ The `[agent]` config block is generated from the `hermes` entry in `data/agents.
 - `model.default` carries the bare provider-native model id. The adapter composes its `provider/model` ACP config-option ids itself.
 - The rest of the file is user-owned and preserved.
 
+### Provider hosts
+
+Where Hermes' default host is not the one a sealed credential redeems at, the provider row names the env var that moves it (`hermes_base_url_env`) and the launch environment exports the row's `hermes` base there: `KIMI_BASE_URL` for `kimi-coding`, which otherwise dials `api.moonshot.ai`, and `STEPFUN_BASE_URL` for `stepfun`, which otherwise dials `api.stepfun.ai/step_plan/v1`. Declaring the variable in `[agent].env` is refused, because it is runtime-managed.
+
 ### Endpoint overrides: the native base-URL env lane
 
 A mapped provider listed in the base-URL env table in `src/runtime/agent/provider_keys.rs` (`openrouter` → `OPENROUTER_BASE_URL`, `zai` → `GLM_BASE_URL`, and the rest) keeps its native identity: `model.provider` stays the provider-native id, and `acp-stack` exports the rerouted endpoint into the agent launch environment under that variable. Hermes resolves an api-key provider's base URL as the explicit config value, then this variable, then the overlay default, so only the endpoint changes and the adapter keeps advertising `<native>/<model>` option ids.
