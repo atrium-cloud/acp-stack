@@ -260,8 +260,9 @@ agent_ids = ["kilo"]
 companion_env_vars = []
 optional_env_vars = []
 
-# MODEL_API_KEY (Hermes' `meta-ai` key) stays out of this list: it is
-# declared as the hermes override in providers.toml, following the zai pattern.
+# MODEL_API_KEY (Hermes' `meta-ai` key) and META_API_KEY (Pi's `meta` key) stay
+# out of this list: they are agent overrides in providers.toml, following the
+# zai pattern.
 [[api_keys]]
 env_var = "META_MODEL_API_KEY"
 provider_ids = ["meta"]
@@ -289,6 +290,12 @@ optional_env_vars = []
 [[api_keys]]
 env_var = "NVIDIA_API_KEY"
 provider_ids = ["nvidia"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "COPILOT_GITHUB_TOKEN"
+provider_ids = ["github-copilot"]
 companion_env_vars = []
 optional_env_vars = []
 

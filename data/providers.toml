@@ -13,7 +13,7 @@
 # [Codex built-in model providers](https://github.com/openai/codex/blob/main/codex-rs/model-provider-info/src/lib.rs)
 # [Kimi Code provider definitions](https://github.com/MoonshotAI/kimi-code/blob/main/packages/agent-core-v2/src/llm-adapter/provider/provider-definition.ts)
 # [Kilo provider overlay](https://github.com/Kilo-Org/kilocode/blob/main/packages/opencode/src/provider/models.ts)
-# Last updated on 2026-10-12
+# Last updated on 2026-11-06
 #
 # A `[providers.claude_code]` sub-table carries Claude Code-specific headless
 # provisioning metadata (endpoint, model defaults, env). When the sub-table
@@ -218,7 +218,7 @@ agents = ["pi"]
 
 [[providers]]
 id = ["opencode", "opencode-zen"]
-name = "OpenCode Zen"
+name = "OpenCode Models"
 # does not appear to have a status page
 agents = ["pi", "opencode", "hermes", "kimi"]
 base_url = "https://opencode.ai/inference/v1"
@@ -232,7 +232,7 @@ opencode-zen = "hermes"
 [providers.api_key_env_vars]
 hermes = "OPENCODE_ZEN_API_KEY"
 
-# OpenCode Zen/Go route some models over Anthropic's wire; per-model wire
+# OpenCode Models/Go route some models over Anthropic's wire; per-model wire
 # negotiation on those is between Hermes and the provider, so the managed
 # lane declares the baseline transport.
 [providers.kimi]
@@ -711,12 +711,6 @@ agents = ["opencode"]
 base_url = "https://api.cortecs.ai/v1"
 
 [[providers]]
-id = ["crof"]
-name = "CrofAI"
-agents = ["opencode"]
-base_url = "https://crof.ai/v1"
-
-[[providers]]
 id = ["databricks"]
 name = "Databricks"
 agents = ["opencode"]
@@ -773,7 +767,7 @@ base_url = "https://app.frogbot.ai/api/v1"
 [[providers]]
 id = ["github-copilot"]
 name = "GitHub Copilot"
-agents = ["opencode"]
+agents = ["pi"]
 base_url = "https://api.githubcopilot.com"
 
 [[providers]]
@@ -810,12 +804,6 @@ id = ["hpc-ai"]
 name = "HPC-AI"
 agents = ["opencode"]
 base_url = "https://api.hpc-ai.com/inference/v1"
-
-[[providers]]
-id = ["iflowcn"]
-name = "iFlow"
-agents = ["opencode"]
-base_url = "https://apis.iflow.cn/v1"
 
 [[providers]]
 id = ["inception"]
@@ -866,13 +854,6 @@ agents = ["opencode"]
 base_url = "https://api.getlilac.com/v1"
 
 [[providers]]
-id = ["llama"]
-name = "Llama"
-agents = ["opencode"]
-# The same vendor API as `meta`. Platform seals this host; models.dev lists no `llama`.
-base_url = "https://api.meta.ai/v1"
-
-[[providers]]
 id = ["llmgateway"]
 name = "DevPass (LLM Gateway)"
 agents = ["opencode"]
@@ -904,7 +885,7 @@ base_url = "https://api.meganova.ai/v1"
 [[providers]]
 id = ["meta", "meta-ai"]
 name = "Meta"
-agents = ["opencode", "hermes"]
+agents = ["pi", "opencode", "hermes"]
 base_url = "https://api.meta.ai/v1"
 # The Llama API host (api.llama.com) was retired; dev.meta.ai documents only
 # api.meta.ai/v1 with Bearer auth. Probed 2026-09-02: 401 unauthenticated, so
@@ -913,13 +894,15 @@ base_url = "https://api.meta.ai/v1"
 models_url = "https://api.meta.ai/v1/models"
 
 # Hermes reaches the Meta Model API as `meta-ai`; models.dev (OpenCode) uses
-# `meta`. Hermes reads MODEL_API_KEY, models.dev lists META_MODEL_API_KEY.
+# `meta`. Hermes reads MODEL_API_KEY, Pi reads META_API_KEY, models.dev lists
+# META_MODEL_API_KEY.
 [providers.provider_ids]
 meta = "opencode"
 meta-ai = "hermes"
 
 [providers.api_key_env_vars]
 hermes = "MODEL_API_KEY"
+pi = "META_API_KEY"
 
 [[providers]]
 id = ["minimax-cn-coding-plan"]
@@ -974,7 +957,7 @@ base_url = "https://api-inference.modelscope.cn/v1"
 [[providers]]
 id = ["moonshotai"]
 name = "Moonshot AI"
-agents = ["opencode", "claude", "kimi"]
+agents = ["pi", "opencode", "claude", "kimi"]
 base_url = "https://api.moonshot.ai/v1"
 models_url = "https://api.moonshot.ai/v1/models"
 
@@ -994,7 +977,7 @@ default_model = "kimi-k3"
 [[providers]]
 id = ["moonshotai-cn"]
 name = "Moonshot AI (China)"
-agents = ["opencode", "claude", "kimi"]
+agents = ["pi", "opencode", "claude", "kimi"]
 base_url = "https://api.moonshot.cn/v1"
 
 [providers.claude_code]
