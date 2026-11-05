@@ -9547,7 +9547,7 @@
                 "type": "null"
               }
             ],
-            "description": "Optional install action for `acps deps apply`. When absent, the\ncommand is \"check-only\" and `acps deps apply` will report it as\nnot actionable rather than guessing a package manager. This\nkeeps Dependency Apply narrowly scoped per the Phase 4 spec:\nno cross-distro reconciliation, no auto-derived package names.\nThe operator declares each install action explicitly.\nOnly valid under `[[dependencies.commands]]`; declaring it under\n`packages`, `runtimes`, or `mcp` fails config load."
+            "description": "Optional install action for `acps deps apply`. When absent, the\ncommand is \"check-only\" and `acps deps apply` will report it as\nnot actionable rather than guessing a package manager. This\nkeeps Dependency Apply narrowly scoped:\nno cross-distro reconciliation, no auto-derived package names.\nThe operator declares each install action explicitly.\nOnly valid under `[[dependencies.commands]]`; declaring it under\n`packages`, `runtimes`, or `mcp` fails config load."
           }
         },
         "additionalProperties": false

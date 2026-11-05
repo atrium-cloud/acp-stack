@@ -40,7 +40,7 @@ pub(crate) fn validate_dependencies(deps: &DependenciesConfig) -> Result<()> {
                     field: "dependencies",
                     reason: format!(
                         "dependency `{name}` under `{category}` declares an [install] block, \
-                         but install actions are only supported on `commands` (Phase 4 deps apply)",
+                         but install actions are only supported on `commands`",
                         name = entry.name,
                     ),
                 });

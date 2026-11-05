@@ -26,7 +26,7 @@ pub struct DependencyEntry {
     /// Optional install action for `acps deps apply`. When absent, the
     /// command is "check-only" and `acps deps apply` will report it as
     /// not actionable rather than guessing a package manager. This
-    /// keeps Dependency Apply narrowly scoped per the Phase 4 spec:
+    /// keeps Dependency Apply narrowly scoped:
     /// no cross-distro reconciliation, no auto-derived package names.
     /// The operator declares each install action explicitly.
     /// Only valid under `[[dependencies.commands]]`; declaring it under

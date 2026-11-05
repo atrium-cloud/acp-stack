@@ -400,7 +400,7 @@ fn parse_config_from_str_with_legacy(input: &str) -> Result<LoadedConfig> {
     if has_legacy_workspace_source_table(input) {
         return Err(StackError::InvalidParam {
             field: "workspace.source",
-            reason: "`[workspace.source]` was removed in Phase 4; declare \
+            reason: "`[workspace.source]` was removed; declare \
                  `[[workspace.code_sources]]` for git repositories or \
                  `[[workspace.data_sources]]` for local/https/s3 inputs (see docs/specs/config.md)"
                 .to_owned(),
