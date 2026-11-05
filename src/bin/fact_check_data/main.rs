@@ -348,6 +348,7 @@ fn check_pi_env_api_keys(
         report.fail("Pi env-api-keys.ts yielded no provider env mappings; its format changed");
         return;
     }
+    let mut shipped = BTreeSet::new();
     for provider in mapping
         .providers()
         .iter()
@@ -356,6 +357,7 @@ fn check_pi_env_api_keys(
         let Some(native_id) = native_provider_id(provider, "pi") else {
             continue;
         };
+        shipped.insert(native_id);
         let Some(env_var) = env_var_for_agent_provider(mapping, "pi", native_id) else {
             continue;
         };
@@ -376,6 +378,18 @@ fn check_pi_env_api_keys(
                 "Pi env-api-keys.ts has no provider `{native_id}` (shipped env ref `{env_var}`)"
             )),
         }
+    }
+
+    let unshipped: Vec<&str> = pi_env_vars
+        .keys()
+        .map(String::as_str)
+        .filter(|id| !shipped.contains(id))
+        .collect();
+    if !unshipped.is_empty() {
+        report.info(format!(
+            "Pi providers acp-stack does not ship: {}",
+            unshipped.join(", ")
+        ));
     }
 }
 
@@ -1054,6 +1068,42 @@ renamed-native = "opencode"
         assert!(report.failures[0].contains("`renamed-native`"));
         assert!(report.ok.is_empty(), "no summary pass beside a failure");
         assert_eq!(models_dev_tier, BTreeSet::from(["listed".to_owned()]));
+    }
+
+    #[test]
+    fn check_pi_env_api_keys_lists_providers_acp_stack_does_not_ship() {
+        let mapping = ProviderKeyMapping::from_toml_parts(
+            r#"
+[[api_keys]]
+env_var = "SHIPPED_API_KEY"
+provider_ids = ["shipped"]
+"#,
+            r#"
+[[providers]]
+id = ["shipped"]
+name = "Shipped"
+agents = ["pi"]
+"#,
+        )
+        .expect("mapping");
+        let source = r#"
+function getApiKeyEnvVars(provider: string): readonly string[] | undefined {
+	const envMap: Record<string, string> = {
+		shipped: "SHIPPED_API_KEY",
+		"new-provider": "NEW_PROVIDER_API_KEY",
+	};
+}
+"#;
+        let mut verified = BTreeSet::new();
+        let mut report = Report::default();
+
+        check_pi_env_api_keys(&mapping, source, &mut verified, &mut report);
+
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(
+            report.info,
+            ["Pi providers acp-stack does not ship: new-provider"]
+        );
     }
 
     #[test]
