@@ -5,7 +5,7 @@ use super::*;
 
 use std::path::Path;
 
-use agent_client_protocol::schema::v1::NewSessionResponse;
+use agent_client_protocol::v1::schema::NewSessionResponse;
 
 use crate::config::AgentConfig;
 use crate::runtime::agent::agent_headless_config::provision_agent_headless_config;

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     AgentCapabilities, CancelNotification, ClientCapabilities, CloseSessionRequest,
     CloseSessionResponse, ConfigOptionUpdate, ContentBlock, ContentChunk, CreateTerminalRequest,
     DeleteSessionRequest, DeleteSessionResponse, ForkSessionRequest, ForkSessionResponse,
@@ -23,8 +23,9 @@ use agent_client_protocol::schema::v1::{
     TerminalId, TerminalOutputRequest, TextContent, ToolCall, ToolCallStatus, ToolCallUpdate,
     ToolCallUpdateFields, ToolKind, Usage, WaitForTerminalExitRequest, WriteTextFileRequest,
 };
-use agent_client_protocol::schema::v1::{PermissionOption, PermissionOptionKind};
-use agent_client_protocol::{Agent, Client, ConnectionTo, Error, Responder};
+use agent_client_protocol::v1::schema::{PermissionOption, PermissionOptionKind};
+use agent_client_protocol::v1::{ConnectionTo, Responder};
+use agent_client_protocol::{Agent, Client, Error};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio::sync::Mutex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -101,7 +102,7 @@ async fn run_acp(args: AcpArgs) -> agent_client_protocol::Result<()> {
 
     let state = Arc::new(Mutex::new(PlaceboState::new(args)));
     Agent
-        .builder()
+        .v1()
         .name("placebo-agent")
         .on_receive_request(
             {

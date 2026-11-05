@@ -60,7 +60,7 @@ const AGENT_LAZY_START_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// spawn: no crash restart, and no lazy start on a request either.
 pub const AGENT_RESTART_NEVER: &str = "never";
 
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     ContentBlock, McpServer, PromptRequest, PromptResponse, SessionConfigOption,
     SessionConfigOptionValue, SessionConfigValueId, SessionId as AcpSessionId, StopReason,
 };

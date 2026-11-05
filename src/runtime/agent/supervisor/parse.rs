@@ -1,7 +1,7 @@
 //! Prompt/session input parsing and path resolution helpers.
 
 use super::*;
-use agent_client_protocol::schema::v1::Usage;
+use agent_client_protocol::v1::schema::Usage;
 
 pub(super) enum Outcome {
     Settled(Result<Box<PromptResponse>>),
@@ -285,7 +285,7 @@ fn stop_reason_str(reason: StopReason) -> String {
 pub fn parse_prompt_blocks(prompt: &Value) -> Result<Vec<ContentBlock>> {
     let blocks = match prompt {
         Value::String(text) => vec![ContentBlock::Text(
-            agent_client_protocol::schema::v1::TextContent::new(text.clone()),
+            agent_client_protocol::v1::schema::TextContent::new(text.clone()),
         )],
         Value::Array(items) => {
             if items.is_empty() {

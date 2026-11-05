@@ -152,7 +152,7 @@ async fn load_session_returns_unsupported_capability_when_agent_disables_flag() 
 
     let err = bridge
         .load_session(
-            agent_client_protocol::schema::v1::SessionId::new("sess_does_not_exist"),
+            agent_client_protocol::v1::schema::SessionId::new("sess_does_not_exist"),
             std::env::temp_dir(),
             vec![],
         )
@@ -190,7 +190,7 @@ async fn resume_session_returns_unsupported_capability_when_agent_disables_flag(
 
     let err = bridge
         .resume_session(
-            agent_client_protocol::schema::v1::SessionId::new("sess_does_not_exist"),
+            agent_client_protocol::v1::schema::SessionId::new("sess_does_not_exist"),
             std::env::temp_dir(),
             vec![],
         )
@@ -227,7 +227,7 @@ async fn close_session_returns_unsupported_capability_when_agent_disables_flag()
     .expect("spawn");
 
     let err = bridge
-        .close_session(agent_client_protocol::schema::v1::SessionId::new(
+        .close_session(agent_client_protocol::v1::schema::SessionId::new(
             "sess_does_not_exist",
         ))
         .await
@@ -264,7 +264,7 @@ async fn delete_session_returns_unsupported_capability_when_agent_disables_flag(
     assert!(!bridge.capabilities().supports_delete_session());
 
     let err = bridge
-        .delete_session(agent_client_protocol::schema::v1::SessionId::new(
+        .delete_session(agent_client_protocol::v1::schema::SessionId::new(
             "sess_does_not_exist",
         ))
         .await
@@ -299,7 +299,7 @@ async fn delete_session_round_trips_when_the_agent_advertises_the_capability() {
     assert!(bridge.capabilities().supports_delete_session());
 
     bridge
-        .delete_session(agent_client_protocol::schema::v1::SessionId::new(
+        .delete_session(agent_client_protocol::v1::schema::SessionId::new(
             "sess_fake_1",
         ))
         .await
@@ -329,7 +329,7 @@ async fn fork_session_returns_child_session() {
 
     let (fork, _) = bridge
         .fork_session(
-            agent_client_protocol::schema::v1::SessionId::new("sess_parent"),
+            agent_client_protocol::v1::schema::SessionId::new("sess_parent"),
             std::env::temp_dir(),
             vec![],
             None,
@@ -362,7 +362,7 @@ async fn fork_session_returns_unsupported_capability_when_agent_disables_flag() 
 
     let err = bridge
         .fork_session(
-            agent_client_protocol::schema::v1::SessionId::new("sess_parent"),
+            agent_client_protocol::v1::schema::SessionId::new("sess_parent"),
             std::env::temp_dir(),
             vec![],
             None,
@@ -404,7 +404,7 @@ async fn fork_session_sends_message_id_when_capability_is_present() {
 
     let (fork, _) = bridge
         .fork_session(
-            agent_client_protocol::schema::v1::SessionId::new("sess_parent"),
+            agent_client_protocol::v1::schema::SessionId::new("sess_parent"),
             std::env::temp_dir(),
             vec![],
             Some(ForkPoint::AcpStackMessageId(
@@ -446,7 +446,7 @@ async fn fork_session_sends_an_air_fork_point_without_the_acp_stack_capability()
 
     let (fork, _) = bridge
         .fork_session(
-            agent_client_protocol::schema::v1::SessionId::new("sess_parent"),
+            agent_client_protocol::v1::schema::SessionId::new("sess_parent"),
             std::env::temp_dir(),
             vec![],
             Some(ForkPoint::AirMessageId("msg_previous_turn".to_owned())),
@@ -481,7 +481,7 @@ async fn fork_session_rejects_message_id_when_capability_is_missing() {
 
     let err = bridge
         .fork_session(
-            agent_client_protocol::schema::v1::SessionId::new("sess_parent"),
+            agent_client_protocol::v1::schema::SessionId::new("sess_parent"),
             std::env::temp_dir(),
             vec![],
             Some(ForkPoint::AcpStackMessageId(

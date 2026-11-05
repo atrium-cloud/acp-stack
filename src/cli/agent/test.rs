@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     ContentBlock, PromptRequest, SessionId, SessionUpdate, StopReason, TextContent,
 };
 use tokio::sync::Notify;
@@ -1453,7 +1453,7 @@ async fn run_agent_test_prompt(
 async fn apply_agent_test_mode(
     bridge: &AcpBridge,
     mode_override: Option<&str>,
-    response: &agent_client_protocol::schema::v1::NewSessionResponse,
+    response: &agent_client_protocol::v1::schema::NewSessionResponse,
 ) -> Result<()> {
     let Some(mode) = mode_override else {
         return Ok(());
@@ -1479,7 +1479,7 @@ async fn apply_agent_test_mode(
 async fn apply_agent_test_model_and_effort(
     bridge: &AcpBridge,
     agent: &crate::config::AgentConfig,
-    response: &agent_client_protocol::schema::v1::NewSessionResponse,
+    response: &agent_client_protocol::v1::schema::NewSessionResponse,
 ) -> Result<()> {
     if let Some(model) = agent.model.as_deref().or_else(|| {
         agent
@@ -1694,7 +1694,7 @@ mod fs_cleanup_tests {
 #[cfg(test)]
 mod evidence_tests {
     use super::*;
-    use agent_client_protocol::schema::v1::{ContentChunk, ToolCall};
+    use agent_client_protocol::v1::schema::{ContentChunk, ToolCall};
 
     fn message_chunk(text: &str) -> SessionUpdate {
         SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(TextContent::new(

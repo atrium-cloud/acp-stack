@@ -1,7 +1,7 @@
 //! Generic projection of the whole advertised ACP session config option set
 //! into one wire/storage shape, backing the config-option routes and snapshots.
 
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     SessionConfigKind, SessionConfigOption, SessionConfigSelectOptions,
 };
 use serde::{Deserialize, Serialize};
@@ -122,7 +122,7 @@ fn project_config_option(option: &SessionConfigOption) -> Option<SessionConfigOp
 }
 
 fn project_choice(
-    choice: &agent_client_protocol::schema::v1::SessionConfigSelectOption,
+    choice: &agent_client_protocol::v1::schema::SessionConfigSelectOption,
 ) -> SessionConfigOptionChoice {
     SessionConfigOptionChoice {
         value: choice.value.0.to_string(),

@@ -7,7 +7,7 @@ use std::mem::size_of;
 use std::path::Path;
 use std::sync::Arc;
 
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     Diff, Meta, SessionUpdate, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
 };
 use rand::RngExt;

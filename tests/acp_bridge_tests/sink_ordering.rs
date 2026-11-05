@@ -43,7 +43,7 @@ impl SessionEventSink for BlockingSink {
 
 #[tokio::test]
 async fn shutdown_waits_for_connection_task_before_flushing_sink() {
-    use agent_client_protocol::schema::v1::{ContentBlock, PromptRequest, TextContent};
+    use agent_client_protocol::v1::schema::{ContentBlock, PromptRequest, TextContent};
 
     let sink = Arc::new(BlockingSink::default());
     let sink_dyn: Arc<dyn SessionEventSink> = sink.clone();
@@ -115,7 +115,7 @@ impl SessionEventSink for BlockingCaptureSink {
     fn capture_session_update<'a>(
         &'a self,
         _agent_session_id: &'a str,
-        _update: &'a agent_client_protocol::schema::v1::SessionUpdate,
+        _update: &'a agent_client_protocol::v1::schema::SessionUpdate,
     ) -> futures::future::BoxFuture<'a, bool> {
         Box::pin(async move {
             if !self.first_capture_seen.swap(true, Ordering::SeqCst) {
@@ -150,7 +150,7 @@ impl SessionEventSink for BlockingCaptureSink {
 
 #[tokio::test]
 async fn shutdown_drains_notification_queued_before_capture_blocks() {
-    use agent_client_protocol::schema::v1::{ContentBlock, PromptRequest, TextContent};
+    use agent_client_protocol::v1::schema::{ContentBlock, PromptRequest, TextContent};
 
     let sink = Arc::new(BlockingCaptureSink::default());
     let sink_dyn: Arc<dyn SessionEventSink> = sink.clone();
@@ -213,7 +213,7 @@ async fn shutdown_drains_notification_queued_before_capture_blocks() {
 
 #[tokio::test]
 async fn cancel_session_settles_prompt_with_cancelled_stop_reason() {
-    use agent_client_protocol::schema::v1::{ContentBlock, PromptRequest, StopReason, TextContent};
+    use agent_client_protocol::v1::schema::{ContentBlock, PromptRequest, StopReason, TextContent};
     let bridge = AcpBridge::spawn(
         &std::env::temp_dir(),
         &fake_agent_config(),

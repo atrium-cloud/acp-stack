@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use agent_client_protocol::RequestCancellation;
 use agent_client_protocol::schema::MaybeUndefined;
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     ContentBlock, ContentChunk, IdleStateUpdate, IdleStopReason, MessageId, Meta,
     NewSessionResponse, PermissionOption, PermissionOptionId, PermissionOptionKind,
     ReadTextFileRequest, ReadTextFileResponse, RequestPermissionOutcome, RequestPermissionRequest,
@@ -1179,7 +1179,9 @@ fn unknown_session_error(agent_session_id: &str) -> AcpFsError {
 /// Map workspace errors onto the ACP error space.
 fn acp_fs_error(error: StackError) -> AcpFsError {
     match &error {
-        StackError::WorkspaceNotFound { .. } => AcpFsError::resource_not_found(None),
+        StackError::WorkspaceNotFound { .. } => {
+            agent_client_protocol::v1::schema::Error::resource_not_found(None).into()
+        }
         StackError::WorkspacePathInvalid { .. }
         | StackError::WorkspaceSymlinkEscape { .. }
         | StackError::WorkspaceParentNotFound { .. }

@@ -8,7 +8,7 @@ use acp_stack::runtime::agent::acp_bridge::AgentSessionConfigCategory;
 use acp_stack::runtime::agent::model_discovery::{
     advertised_values_for_category, fetch_session_config_with_timeout,
 };
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     NewSessionResponse, SessionConfigKind, SessionConfigOptionCategory,
 };
 use tempfile::TempDir;

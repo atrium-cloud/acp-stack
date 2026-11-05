@@ -4,7 +4,7 @@
 //! Resolved secret values go straight to the agent's `session/new` call; they
 //! never enter SQLite, an event payload, or leave this resolver beside names.
 
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     EnvVariable, HttpHeader, McpServer, McpServerHttp, McpServerStdio,
 };
 

@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use agent_client_protocol::schema::v1::NewSessionResponse;
+use agent_client_protocol::v1::schema::NewSessionResponse;
 
 use crate::cli::agent::{agent_model_is_explicit_without_discovery, model_values_for_cli_display};
 use crate::config::{AgentConfigOptionValue, Config};
@@ -2080,7 +2080,7 @@ fn write_effort_into_config(config: &mut Config, effort: String) {
 /// authority, so a harness advertising values the registry denies changes
 /// nothing.
 fn emit_discovery_applicability_corrections(
-    response: &agent_client_protocol::schema::v1::NewSessionResponse,
+    response: &agent_client_protocol::v1::schema::NewSessionResponse,
     registry_set_model: bool,
     registry_set_mode: bool,
     registry_set_effort: bool,

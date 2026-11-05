@@ -191,7 +191,7 @@ async fn kill_terminates_long_running_child_and_publishes_signal() {
 
 #[tokio::test]
 async fn create_terminal_defaults_cwd_to_session_cwd() {
-    use agent_client_protocol::schema::v1::SessionId;
+    use agent_client_protocol::v1::schema::SessionId;
 
     struct CwdStubSink {
         cwd: String,
@@ -263,7 +263,7 @@ impl SessionEventSink for NoopStubSink {
 
 #[tokio::test]
 async fn create_terminal_start_failure_finalizes_command_row() {
-    use agent_client_protocol::schema::v1::SessionId;
+    use agent_client_protocol::v1::schema::SessionId;
 
     let state_dir = tempfile::tempdir().expect("tempdir");
     let db_path = state_dir.path().join("state.sqlite");
@@ -309,7 +309,7 @@ async fn create_terminal_start_failure_finalizes_command_row() {
 
 #[tokio::test]
 async fn kill_finalizes_command_row_as_canceled() {
-    use agent_client_protocol::schema::v1::SessionId;
+    use agent_client_protocol::v1::schema::SessionId;
 
     let state_dir = tempfile::tempdir().expect("tempdir");
     let store = StateStore::open(state_dir.path().join("state.sqlite")).expect("state open");
@@ -434,7 +434,7 @@ fn logging_state() -> (tempfile::TempDir, StateHandle) {
 
 #[tokio::test]
 async fn natural_exit_links_the_terminal_to_its_command_on_the_session_stream() {
-    use agent_client_protocol::schema::v1::SessionId;
+    use agent_client_protocol::v1::schema::SessionId;
 
     let (_state_dir, state) = logging_state();
     let context = logging_context(state.clone());
@@ -474,7 +474,7 @@ async fn natural_exit_links_the_terminal_to_its_command_on_the_session_stream() 
 
 #[tokio::test]
 async fn the_output_tail_respects_the_cap_and_cuts_at_a_utf8_boundary() {
-    use agent_client_protocol::schema::v1::SessionId;
+    use agent_client_protocol::v1::schema::SessionId;
 
     let (_state_dir, state) = logging_state();
     let context = logging_context(state.clone());
@@ -508,7 +508,7 @@ async fn the_output_tail_respects_the_cap_and_cuts_at_a_utf8_boundary() {
 
 #[tokio::test]
 async fn spawn_failure_still_records_the_session_event() {
-    use agent_client_protocol::schema::v1::SessionId;
+    use agent_client_protocol::v1::schema::SessionId;
 
     let (_state_dir, state) = logging_state();
     let context = logging_context(state.clone());
@@ -549,7 +549,7 @@ async fn spawn_failure_still_records_the_session_event() {
 
 #[tokio::test]
 async fn natural_signal_death_records_the_signal_on_the_command_event() {
-    use agent_client_protocol::schema::v1::SessionId;
+    use agent_client_protocol::v1::schema::SessionId;
 
     let (_state_dir, state) = logging_state();
     let context = logging_context(state.clone());
@@ -576,7 +576,7 @@ async fn natural_signal_death_records_the_signal_on_the_command_event() {
 
 #[tokio::test]
 async fn create_terminal_without_args_runs_the_command_through_a_shell() {
-    use agent_client_protocol::schema::v1::SessionId;
+    use agent_client_protocol::v1::schema::SessionId;
 
     let root = tempfile::tempdir().expect("workspace root");
     let context = TerminalHandlerContext {
@@ -609,7 +609,7 @@ async fn create_terminal_without_args_runs_the_command_through_a_shell() {
 
 #[tokio::test]
 async fn create_terminal_with_args_execs_the_program_verbatim() {
-    use agent_client_protocol::schema::v1::SessionId;
+    use agent_client_protocol::v1::schema::SessionId;
 
     let root = tempfile::tempdir().expect("workspace root");
     let context = TerminalHandlerContext {
@@ -646,7 +646,7 @@ async fn create_terminal_with_args_execs_the_program_verbatim() {
 
 #[tokio::test]
 async fn create_terminal_layers_the_declared_workload_env_beneath_the_request_env() {
-    use agent_client_protocol::schema::v1::SessionId;
+    use agent_client_protocol::v1::schema::SessionId;
 
     let root = tempfile::tempdir().expect("workspace root");
     let config = crate::config::SandboxConfig {
@@ -698,7 +698,7 @@ async fn create_terminal_layers_the_declared_workload_env_beneath_the_request_en
 
 #[tokio::test]
 async fn create_terminal_runs_the_configured_workspace_shell() {
-    use agent_client_protocol::schema::v1::SessionId;
+    use agent_client_protocol::v1::schema::SessionId;
     use std::os::unix::fs::PermissionsExt;
 
     let root = tempfile::tempdir().expect("workspace root");
@@ -755,7 +755,7 @@ fn terminal_invocation_selects_exec_form_from_argv_presence() {
 
 #[tokio::test]
 async fn create_terminal_rejects_a_blank_command() {
-    use agent_client_protocol::schema::v1::SessionId;
+    use agent_client_protocol::v1::schema::SessionId;
 
     let state_dir = tempfile::tempdir().expect("tempdir");
     let store = StateStore::open(state_dir.path().join("state.sqlite")).expect("state open");
@@ -792,7 +792,7 @@ async fn create_terminal_rejects_a_blank_command() {
 
 #[tokio::test]
 async fn shell_wrapped_terminal_logs_the_agent_requested_command() {
-    use agent_client_protocol::schema::v1::SessionId;
+    use agent_client_protocol::v1::schema::SessionId;
 
     let state_dir = tempfile::tempdir().expect("tempdir");
     let store = StateStore::open(state_dir.path().join("state.sqlite")).expect("state open");

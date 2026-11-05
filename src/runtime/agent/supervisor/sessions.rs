@@ -848,7 +848,7 @@ fn resolve_generic_config_option(
     option_id: &str,
     configured: &crate::config::AgentConfigOptionValue,
 ) -> Result<String> {
-    use agent_client_protocol::schema::v1::SessionConfigKind;
+    use agent_client_protocol::v1::schema::SessionConfigKind;
 
     let provision_error = |reason: String| StackError::AgentConfigProvision {
         path: std::path::PathBuf::from("ACP session config options"),

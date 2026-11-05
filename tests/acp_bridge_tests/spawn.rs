@@ -109,7 +109,7 @@ async fn shutdown_keeps_the_last_stderr_lines_past_the_rate_limit() {
 #[tokio::test]
 async fn unadvertised_http_mcp_transport_is_skipped_not_fatal() {
     use acp_stack::runtime::agent::acp_bridge::{McpSkipReason, PartitionedMcpServers};
-    use agent_client_protocol::schema::v1::{McpServer, McpServerHttp};
+    use agent_client_protocol::v1::schema::{McpServer, McpServerHttp};
 
     let bridge = AcpBridge::spawn(
         &std::env::temp_dir(),

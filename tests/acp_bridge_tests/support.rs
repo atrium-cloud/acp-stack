@@ -79,7 +79,7 @@ pub(crate) async fn run_terminal_probe(
     terminal_flags: &[&str],
     command_log: Option<acp_stack::runtime::agent::acp_bridge::TerminalCommandLog>,
 ) -> (serde_json::Value, AcpBridge, Arc<InMemorySink>) {
-    use agent_client_protocol::schema::v1::{ContentBlock, PromptRequest, TextContent};
+    use agent_client_protocol::v1::schema::{ContentBlock, PromptRequest, TextContent};
     let mut config = fake_agent_config();
     config
         .args

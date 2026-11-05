@@ -2,7 +2,7 @@
 //! registration, and the `initialize` handshake that produces a live
 //! [`AcpBridge`].
 
-use agent_client_protocol::schema::v1::CLIENT_METHOD_NAMES;
+use agent_client_protocol::v1::schema::CLIENT_METHOD_NAMES;
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
 
 use crate::runtime::mediation::commands::process::exit_signal;
@@ -374,7 +374,7 @@ fn spawn_connection_task(
 
     let task: JoinHandle<()> = tokio::spawn(async move {
         let run = Client
-            .builder()
+            .v1()
             .on_receive_request(
                 async move |request: RequestPermissionRequest, responder, cx| {
                     let permissions = permissions.clone();
@@ -699,7 +699,7 @@ fn client_capabilities() -> ClientCapabilities {
         .session(ClientSessionCapabilities::new().config_options(
             SessionConfigOptionsCapabilities::new().boolean(BooleanConfigOptionCapabilities::new()),
         ))
-        .subagents(agent_client_protocol::schema::v1::SubagentCapabilities::new())
+        .subagents(agent_client_protocol::v1::schema::SubagentCapabilities::new())
 }
 
 fn spawn_child_exit_watcher(child: Arc<TokioMutex<Option<Child>>>, exit: ExitReporter) {

@@ -965,7 +965,7 @@ async fn session_cwd_resolves_local_session_record() {
 async fn change_capture_maps_same_agent_session_id_to_each_array_target() {
     use crate::runtime::agent::session_changes::SessionChangesHandle;
     use crate::runtime::agent::session_sink::{SessionEventSink, StateStoreSessionSink};
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         Diff, SessionUpdate, ToolCall, ToolCallContent, ToolKind,
     };
 
@@ -1034,7 +1034,7 @@ async fn change_capture_maps_same_agent_session_id_to_each_array_target() {
 #[tokio::test]
 async fn change_capture_accepts_non_tool_updates_without_a_session_lookup() {
     use crate::runtime::agent::session_sink::{SessionEventSink, StateStoreSessionSink};
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         ContentBlock, ContentChunk, SessionUpdate, TextContent,
     };
 
@@ -1058,7 +1058,7 @@ async fn change_capture_accepts_non_tool_updates_without_a_session_lookup() {
 #[tokio::test]
 async fn the_last_stamped_chunk_id_is_taken_once_per_session() {
     use crate::runtime::agent::session_sink::{SessionEventSink, StateStoreSessionSink};
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         ContentBlock, ContentChunk, MessageId, SessionUpdate, TextContent,
     };
 
@@ -1133,7 +1133,7 @@ async fn an_announced_child_resolves_once_enqueued_and_streams_into_its_own_log(
         enqueue_session_notification, spawn_session_notification_queue,
     };
     use crate::runtime::agent::session_sink::{SessionEventSink, StateStoreSessionSink};
-    use agent_client_protocol::schema::v1::SessionNotification;
+    use agent_client_protocol::v1::schema::SessionNotification;
     use std::sync::Arc;
 
     let tempdir = tempfile::tempdir().expect("tempdir");

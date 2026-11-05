@@ -1,4 +1,4 @@
-use agent_client_protocol::schema::v1::{NewSessionResponse, SessionConfigOption};
+use agent_client_protocol::v1::schema::{NewSessionResponse, SessionConfigOption};
 use clap::Parser;
 
 use super::*;

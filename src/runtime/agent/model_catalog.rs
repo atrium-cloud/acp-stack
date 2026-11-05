@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     ContentBlock, EmbeddedResourceResource, ImageContent, ResourceLink,
 };
 use serde::{Deserialize, Serialize};
@@ -637,7 +637,7 @@ struct ModelsDevArchitecture {
 
 #[cfg(test)]
 mod tests {
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         AudioContent, BlobResourceContents, EmbeddedResource, TextContent,
     };
     use serde_json::json;

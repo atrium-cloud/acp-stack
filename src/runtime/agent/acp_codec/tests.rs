@@ -5,7 +5,7 @@ use crate::runtime::agent::session_changes::SessionChangesHandle;
 use crate::runtime::mediation::permissions::PermissionService;
 use crate::state::StateStore;
 use agent_client_protocol::JsonRpcMessage;
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     AgentNotification, PermissionOption, PermissionOptionId, PermissionOptionKind,
     RequestPermissionRequest, SessionId, SessionUpdate, ToolCallId, ToolCallUpdate,
     ToolCallUpdateFields,
@@ -71,7 +71,7 @@ fn the_user_prompt_chunk_round_trips_as_an_acp_session_update() {
 
 #[test]
 fn model_lookup_only_constructs_agent_config_provision() {
-    let response = agent_client_protocol::schema::v1::NewSessionResponse::new("session");
+    let response = agent_client_protocol::v1::schema::NewSessionResponse::new("session");
     assert!(matches!(
         session_model_selection_for_value(&response, "some-model"),
         Err(crate::error::StackError::AgentConfigProvision { .. })
@@ -82,7 +82,7 @@ fn model_lookup_only_constructs_agent_config_provision() {
 // so every mismatch must read as "not current".
 #[test]
 fn config_option_is_current_only_for_a_matching_kind_and_value() {
-    use agent_client_protocol::schema::v1::{SessionConfigOption, SessionConfigSelectOption};
+    use agent_client_protocol::v1::schema::{SessionConfigOption, SessionConfigSelectOption};
     let options = vec![
         SessionConfigOption::select(
             "model",
@@ -120,8 +120,8 @@ fn config_option_is_current_only_for_a_matching_kind_and_value() {
     ));
 }
 
-fn response_with_native_modes_only() -> agent_client_protocol::schema::v1::NewSessionResponse {
-    use agent_client_protocol::schema::v1::{NewSessionResponse, SessionMode, SessionModeState};
+fn response_with_native_modes_only() -> agent_client_protocol::v1::schema::NewSessionResponse {
+    use agent_client_protocol::v1::schema::{NewSessionResponse, SessionMode, SessionModeState};
     NewSessionResponse::new("session").modes(SessionModeState::new(
         "default",
         vec![
@@ -131,8 +131,8 @@ fn response_with_native_modes_only() -> agent_client_protocol::schema::v1::NewSe
     ))
 }
 
-fn response_with_config_mode_and_native() -> agent_client_protocol::schema::v1::NewSessionResponse {
-    use agent_client_protocol::schema::v1::{
+fn response_with_config_mode_and_native() -> agent_client_protocol::v1::schema::NewSessionResponse {
+    use agent_client_protocol::v1::schema::{
         NewSessionResponse, SessionConfigOption, SessionConfigOptionCategory,
         SessionConfigSelectOption, SessionMode, SessionModeState,
     };
@@ -242,7 +242,7 @@ fn advertised_select_keeps_the_agent_order_and_current_value() {
             ]"#,
     )
     .expect("session config options deserialize");
-    let response = agent_client_protocol::schema::v1::NewSessionResponse::new("session")
+    let response = agent_client_protocol::v1::schema::NewSessionResponse::new("session")
         .config_options(options);
     assert_eq!(
         session_advertised_select(&response, AgentSessionConfigCategory::Effort)
@@ -268,9 +268,9 @@ fn advertised_select_reads_native_modes_without_a_mode_option() {
 }
 
 fn response_with_model_option(
-    option: agent_client_protocol::schema::v1::SessionConfigOption,
-) -> agent_client_protocol::schema::v1::NewSessionResponse {
-    agent_client_protocol::schema::v1::NewSessionResponse::new("session")
+    option: agent_client_protocol::v1::schema::SessionConfigOption,
+) -> agent_client_protocol::v1::schema::NewSessionResponse {
+    agent_client_protocol::v1::schema::NewSessionResponse::new("session")
         .config_options(vec![option])
 }
 
@@ -278,7 +278,7 @@ fn response_with_model_option(
 // first occurrence, and each ACP select `name` rides along with its value.
 #[test]
 fn session_model_choices_preserves_order_and_dedups_by_value() {
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
     };
     let response = response_with_model_option(
@@ -318,7 +318,7 @@ fn session_model_choices_preserves_order_and_dedups_by_value() {
 // per-session `project_config_options` lane.
 #[test]
 fn session_model_choices_flattens_groups_in_order() {
-    use agent_client_protocol::schema::v1::{
+    use agent_client_protocol::v1::schema::{
         SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectGroup,
         SessionConfigSelectOption,
     };
@@ -355,7 +355,7 @@ fn session_model_choices_flattens_groups_in_order() {
 // through the id-only match the shared finder preserves.
 #[test]
 fn session_model_choices_matches_by_id_without_category() {
-    use agent_client_protocol::schema::v1::{SessionConfigOption, SessionConfigSelectOption};
+    use agent_client_protocol::v1::schema::{SessionConfigOption, SessionConfigSelectOption};
     let response = response_with_model_option(SessionConfigOption::select(
         "model",
         "Model",
@@ -370,7 +370,7 @@ fn session_model_choices_matches_by_id_without_category() {
 
 #[test]
 fn session_model_choices_errors_without_model_option() {
-    let response = agent_client_protocol::schema::v1::NewSessionResponse::new("session");
+    let response = agent_client_protocol::v1::schema::NewSessionResponse::new("session");
     assert!(matches!(
         session_model_choices(&response),
         Err(crate::error::StackError::AgentConfigProvision { .. })

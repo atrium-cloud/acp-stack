@@ -5,10 +5,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_client_protocol::schema::{
-    MaybeUndefined,
-    v1::{AvailableCommandInput, SessionUpdate, SubagentUpdate},
-};
+use agent_client_protocol::schema::MaybeUndefined;
+use agent_client_protocol::v1::schema::{AvailableCommandInput, SessionUpdate, SubagentUpdate};
 use tokio::sync::{Mutex as TokioMutex, oneshot};
 use tokio::task::JoinHandle;
 

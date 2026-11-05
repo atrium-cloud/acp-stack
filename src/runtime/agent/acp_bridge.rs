@@ -9,7 +9,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::ConnectionTo;
+use agent_client_protocol::v1::schema::{
     AgentNotification, BooleanConfigOptionCapabilities, CancelNotification, ClientCapabilities,
     ClientSessionCapabilities, CloseSessionRequest, CreateTerminalRequest, DeleteSessionRequest,
     FileSystemCapabilities, ForkSessionRequest, ForkSessionResponse, Implementation,
@@ -23,7 +24,7 @@ use agent_client_protocol::schema::v1::{
     SetSessionModeResponse, TerminalOutputRequest, WaitForTerminalExitRequest,
     WriteTextFileRequest,
 };
-use agent_client_protocol::{Agent, Client, ConnectionTo};
+use agent_client_protocol::{Agent, Client};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex as TokioMutex, Notify, oneshot, watch};
 use tokio::task::JoinHandle;

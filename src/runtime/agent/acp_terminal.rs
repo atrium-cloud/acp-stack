@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     CreateTerminalRequest, CreateTerminalResponse, EnvVariable, KillTerminalRequest,
     KillTerminalResponse, ReleaseTerminalRequest, ReleaseTerminalResponse, TerminalExitStatus,
     TerminalId, TerminalOutputRequest, TerminalOutputResponse, WaitForTerminalExitRequest,
@@ -928,7 +928,7 @@ pub(crate) async fn handle_release_terminal(
     let handle = registry
         .remove(&request.session_id.0, &request.terminal_id.0)
         .await
-        .ok_or_else(|| AcpError::resource_not_found(None))?;
+        .ok_or_else(terminal_not_found)?;
     if handle.exit_status().is_none() {
         handle.request_kill(TERMINAL_KILL_GRACE).await;
         handle.wait_for_exit().await;
@@ -944,7 +944,11 @@ async fn lookup(
     registry
         .get(session_id, terminal_id)
         .await
-        .ok_or_else(|| AcpError::resource_not_found(None))
+        .ok_or_else(terminal_not_found)
+}
+
+fn terminal_not_found() -> AcpError {
+    agent_client_protocol::v1::schema::Error::resource_not_found(None).into()
 }
 
 /// Resolve what `terminal/create` actually execs. An empty argv is the

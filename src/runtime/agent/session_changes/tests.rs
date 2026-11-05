@@ -1,5 +1,5 @@
 use super::*;
-use agent_client_protocol::schema::v1::{ToolCallId, ToolCallUpdateFields};
+use agent_client_protocol::v1::schema::{ToolCallId, ToolCallUpdateFields};
 
 fn diff(path: &str, old_text: Option<&str>, new_text: &str) -> ToolCallContent {
     ToolCallContent::Diff(Diff::new(path, new_text).old_text(old_text.map(str::to_owned)))

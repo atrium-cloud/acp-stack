@@ -128,11 +128,11 @@ pub(crate) async fn sessions_config_options_set_handler(
     ensure_agent_started(&state, &target.target_id).await?;
     let value = match payload.value {
         SessionConfigOptionSetValue::Bool(value) => {
-            agent_client_protocol::schema::v1::SessionConfigOptionValue::Boolean { value }
+            agent_client_protocol::v1::schema::SessionConfigOptionValue::Boolean { value }
         }
         SessionConfigOptionSetValue::Text(text) => {
-            agent_client_protocol::schema::v1::SessionConfigOptionValue::ValueId {
-                value: agent_client_protocol::schema::v1::SessionConfigValueId::new(text),
+            agent_client_protocol::v1::schema::SessionConfigOptionValue::ValueId {
+                value: agent_client_protocol::v1::schema::SessionConfigValueId::new(text),
             }
         }
     };

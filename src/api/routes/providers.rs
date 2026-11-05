@@ -1,6 +1,6 @@
 //! Provider and ACP-advertised model discovery for the unified API.
 
-use agent_client_protocol::schema::v1::NewSessionResponse;
+use agent_client_protocol::v1::schema::NewSessionResponse;
 use axum::extract::{Query, State};
 use serde::{Deserialize, Serialize};
 

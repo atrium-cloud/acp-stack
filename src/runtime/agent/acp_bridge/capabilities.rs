@@ -1,6 +1,6 @@
 use super::*;
 
-use agent_client_protocol::schema::v1::ContentBlock;
+use agent_client_protocol::v1::schema::ContentBlock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -433,7 +433,7 @@ impl AgentCapabilitiesDto {
 mod tests {
     use super::*;
 
-    use agent_client_protocol::schema::v1::{McpServerHttp, McpServerStdio};
+    use agent_client_protocol::v1::schema::{McpServerHttp, McpServerStdio};
     use serde_json::json;
 
     fn capabilities_with(mcp: Value) -> AgentCapabilitiesDto {

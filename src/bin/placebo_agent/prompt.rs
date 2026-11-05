@@ -50,7 +50,7 @@ pub(crate) async fn handle_prompt(
                     "cancelled permission returned a successful response",
                 ));
             };
-            if error.code != agent_client_protocol::ErrorCode::RequestCancelled {
+            if error.code != agent_client_protocol::ErrorCode::REQUEST_CANCELLED {
                 return responder.respond_with_error(Error::new(
                     -32000,
                     format!("cancelled permission returned error {}", error.code),
@@ -155,7 +155,7 @@ pub(crate) async fn handle_prompt(
                     // A client that cancels the request itself reports `-32800`,
                     // which carries the same meaning as the cancelled outcome.
                     Err(error)
-                        if error.code == agent_client_protocol::ErrorCode::RequestCancelled =>
+                        if error.code == agent_client_protocol::ErrorCode::REQUEST_CANCELLED =>
                     {
                         RequestPermissionOutcome::Cancelled
                     }

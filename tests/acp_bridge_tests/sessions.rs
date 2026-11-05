@@ -7,7 +7,7 @@ use crate::support::{InMemorySink, fake_agent_config, fake_env, null_sink};
 
 #[tokio::test]
 async fn new_session_round_trips_and_prompt_emits_notifications() {
-    use agent_client_protocol::schema::v1::{ContentBlock, PromptRequest, TextContent};
+    use agent_client_protocol::v1::schema::{ContentBlock, PromptRequest, TextContent};
 
     let sink = Arc::new(InMemorySink::default());
     let sink_dyn: Arc<dyn SessionEventSink> = sink.clone();
@@ -45,7 +45,7 @@ async fn new_session_round_trips_and_prompt_emits_notifications() {
         .stop_reason;
     assert!(matches!(
         stop,
-        agent_client_protocol::schema::v1::StopReason::EndTurn
+        agent_client_protocol::v1::schema::StopReason::EndTurn
     ));
 
     // The sink notifies via `tokio::spawn`, so drain microtasks before reading.
@@ -68,7 +68,7 @@ async fn new_session_round_trips_and_prompt_emits_notifications() {
 
 #[tokio::test]
 async fn prompt_rejects_unadvertised_image_content() {
-    use agent_client_protocol::schema::v1::{ContentBlock, ImageContent, PromptRequest, SessionId};
+    use agent_client_protocol::v1::schema::{ContentBlock, ImageContent, PromptRequest, SessionId};
 
     let bridge = AcpBridge::spawn(
         &std::env::temp_dir(),
@@ -112,7 +112,7 @@ async fn cancelled_permission_does_not_block_dispatch_and_is_persisted() {
     use acp_stack::events::EventHub;
     use acp_stack::runtime::mediation::permissions::PermissionService;
     use acp_stack::state::{StateHandle, StateStore};
-    use agent_client_protocol::schema::v1::{ContentBlock, PromptRequest, SessionId, TextContent};
+    use agent_client_protocol::v1::schema::{ContentBlock, PromptRequest, SessionId, TextContent};
 
     let state_dir = tempfile::tempdir().expect("state tempdir");
     let store = StateStore::open(state_dir.path().join("state.sqlite")).expect("open state");
@@ -195,7 +195,7 @@ async fn spawn_placebo(args: &[&str]) -> AcpBridge {
 // that a traced connection carries a full session and prompt round trip unchanged.
 #[tokio::test]
 async fn a_traced_connection_round_trips_a_session_and_prompt() {
-    use agent_client_protocol::schema::v1::{ContentBlock, PromptRequest, TextContent};
+    use agent_client_protocol::v1::schema::{ContentBlock, PromptRequest, TextContent};
 
     // Turns the process-wide flag back off even when an assertion panics.
     struct TraceOn;
@@ -222,7 +222,7 @@ async fn a_traced_connection_round_trips_a_session_and_prompt() {
     assert!(
         matches!(
             response.expect("session/prompt").stop_reason,
-            agent_client_protocol::schema::v1::StopReason::EndTurn
+            agent_client_protocol::v1::schema::StopReason::EndTurn
         ),
         "prompt must complete over the traced transport"
     );
@@ -390,7 +390,7 @@ async fn new_session_advertises_config_options_to_strict_agent() {
 
 #[tokio::test]
 async fn set_config_option_sends_boolean_values() {
-    use agent_client_protocol::schema::v1::{SessionConfigKind, SessionConfigOptionValue};
+    use agent_client_protocol::v1::schema::{SessionConfigKind, SessionConfigOptionValue};
 
     let mut config = fake_agent_config();
     config.id = "placebo".into();

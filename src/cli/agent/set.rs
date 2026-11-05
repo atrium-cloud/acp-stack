@@ -697,7 +697,7 @@ fn read_agent_new_session_response(
     home: &Path,
     config: &Config,
     model: Option<&str>,
-) -> Result<agent_client_protocol::schema::v1::NewSessionResponse> {
+) -> Result<agent_client_protocol::v1::schema::NewSessionResponse> {
     fetch_session_config(home, config, model).map(|discovered| discovered.response)
 }
 
@@ -706,7 +706,7 @@ fn read_agent_applied_session_response(
     home: &Path,
     config: &Config,
     model: Option<&str>,
-) -> Result<agent_client_protocol::schema::v1::NewSessionResponse> {
+) -> Result<agent_client_protocol::v1::schema::NewSessionResponse> {
     fetch_session_config(home, config, model).map(|discovered| discovered.applied())
 }
 
