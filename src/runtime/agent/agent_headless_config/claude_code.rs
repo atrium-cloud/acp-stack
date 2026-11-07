@@ -3,36 +3,31 @@ use super::*;
 use crate::runtime::agent::provider_model_catalog::cached_models;
 
 const CLAUDE_CODE_API_KEY_HELPER_PREFIX: &str = "printenv ";
+const CLAUDE_CODE_PLUGIN_CONFIGS_KEY: &str = "pluginConfigs";
+const CLAUDE_CODE_PLUGIN_OPTIONS_KEY: &str = "options";
+/// The built-in plugin that reads AGENTS.md. Claude Code honors its options only from user,
+/// `--settings`, or managed settings, never from a project's `.claude/settings.json`.
+const CLAUDE_CODE_AGENTS_MD_PLUGIN_ID: &str = "cc-plugin-agents-md@builtin";
+const CLAUDE_CODE_INSTRUCTION_FILES_KEY: &str = "instructionFiles";
+/// AGENTS.md always loads beside CLAUDE.md; the plugin skips one a CLAUDE.md imports or links to.
+const CLAUDE_CODE_INSTRUCTION_FILES: &str = "claude-md-and-agents-md";
 
 pub(super) fn provision_claude_code_config(
     config: &Config,
     workload: &WorkloadHome,
 ) -> Result<Vec<PathBuf>> {
     let home = workload.home();
-    let mut written = Vec::new();
+    let settings_path = home.join(".claude").join("settings.json");
+    let mut settings = read_json_object(workload, &settings_path)?;
+    write_claude_instruction_files(&mut settings, &settings_path)?;
     let Some(provider) = config.agent.provider.as_ref() else {
         // A provider-less config must not leave a previous provider's model allowlist behind; it
         // would silently constrain every session.
-        let settings_path = home.join(".claude").join("settings.json");
-        if workload.exists(&settings_path)? {
-            // Unreadable settings degrade to "nothing to strip" rather than blocking provision.
-            match read_json_object(workload, &settings_path) {
-                Ok(mut settings) => {
-                    if settings.remove("availableModels").is_some() {
-                        write_json_object(workload, &settings_path, settings)?;
-                        written.push(settings_path);
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(path = %settings_path.display(), error = %error, "unreadable Claude Code settings; leaving availableModels in place");
-                }
-            }
-        }
-        return Ok(written);
+        settings.remove("availableModels");
+        write_json_object(workload, &settings_path, settings)?;
+        return Ok(vec![settings_path]);
     };
-    let settings_path = home.join(".claude").join("settings.json");
     let onboarding_path = home.join(".claude.json");
-    let mut settings = read_json_object(workload, &settings_path)?;
     let remove_env = {
         let env = ensure_object_field(&mut settings, "env", &settings_path)?;
         remove_claude_managed_env(env);
@@ -45,29 +40,26 @@ pub(super) fn provision_claude_code_config(
     write_claude_api_key_helper(config, provider, &mut settings, &settings_path)?;
     write_claude_available_models(provider, &mut settings, workload.runtime_home());
     write_json_object(workload, &settings_path, settings)?;
-    written.push(settings_path);
 
     let mut onboarding = read_json_object(workload, &onboarding_path)?;
     onboarding.insert("hasCompletedOnboarding".to_owned(), json!(true));
     write_json_object(workload, &onboarding_path, onboarding)?;
-    written.push(onboarding_path);
-    Ok(written)
+    Ok(vec![settings_path, onboarding_path])
 }
 
 pub(super) fn cleanup_claude_code_config(
     config: &Config,
     workload: &WorkloadHome,
 ) -> Result<Vec<CleanedAgentConfig>> {
-    let mut cleaned = Vec::new();
-    let Some(provider) = config.agent.provider.as_ref() else {
-        return Ok(cleaned);
-    };
     let settings_path = workload.home().join(".claude").join("settings.json");
-    let expected_env = claude_provider_env_for_config(config, provider, &settings_path)?;
-    let expected_helper = claude_api_key_helper_for_provider(config, provider, &settings_path)?;
-    if workload.exists(&settings_path)? {
-        let mut settings = read_json_object(workload, &settings_path)?;
-        let mut changed = false;
+    if !workload.exists(&settings_path)? {
+        return Ok(Vec::new());
+    }
+    let mut settings = read_json_object(workload, &settings_path)?;
+    let mut changed = remove_matching_claude_instruction_files(&mut settings);
+    if let Some(provider) = config.agent.provider.as_ref() {
+        let expected_env = claude_provider_env_for_config(config, provider, &settings_path)?;
+        let expected_helper = claude_api_key_helper_for_provider(config, provider, &settings_path)?;
         let mut remove_env = false;
         if let Some(env) = settings
             .get_mut("env")
@@ -82,16 +74,70 @@ pub(super) fn cleanup_claude_code_config(
         }
         changed |= remove_matching_claude_api_key_helper(&mut settings, expected_helper.as_deref());
         changed |= settings.remove("availableModels").is_some();
-        if changed {
-            write_or_remove_json_object(workload, &settings_path, settings)?;
-            cleaned.push(CleanedAgentConfig {
-                label: "Claude Code config",
-                path: settings_path,
-            });
-        }
     }
+    if !changed {
+        return Ok(Vec::new());
+    }
+    write_or_remove_json_object(workload, &settings_path, settings)?;
+    Ok(vec![CleanedAgentConfig {
+        label: "Claude Code config",
+        path: settings_path,
+    }])
+}
 
-    Ok(cleaned)
+fn write_claude_instruction_files(
+    settings: &mut Map<String, serde_json::Value>,
+    path: &Path,
+) -> Result<()> {
+    let plugin_configs = ensure_object_field(settings, CLAUDE_CODE_PLUGIN_CONFIGS_KEY, path)?;
+    let plugin = ensure_object_field(plugin_configs, CLAUDE_CODE_AGENTS_MD_PLUGIN_ID, path)?;
+    let options = ensure_object_field(plugin, CLAUDE_CODE_PLUGIN_OPTIONS_KEY, path)?;
+    options.insert(
+        CLAUDE_CODE_INSTRUCTION_FILES_KEY.to_owned(),
+        json!(CLAUDE_CODE_INSTRUCTION_FILES),
+    );
+    Ok(())
+}
+
+/// Removes the instruction-files option only while it holds the acps value, then prunes the
+/// objects it leaves empty.
+fn remove_matching_claude_instruction_files(settings: &mut Map<String, serde_json::Value>) -> bool {
+    let Some(plugin_configs) = settings
+        .get_mut(CLAUDE_CODE_PLUGIN_CONFIGS_KEY)
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return false;
+    };
+    let Some(plugin) = plugin_configs
+        .get_mut(CLAUDE_CODE_AGENTS_MD_PLUGIN_ID)
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return false;
+    };
+    let Some(options) = plugin
+        .get_mut(CLAUDE_CODE_PLUGIN_OPTIONS_KEY)
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return false;
+    };
+    if options
+        .get(CLAUDE_CODE_INSTRUCTION_FILES_KEY)
+        .and_then(serde_json::Value::as_str)
+        != Some(CLAUDE_CODE_INSTRUCTION_FILES)
+    {
+        return false;
+    }
+    options.remove(CLAUDE_CODE_INSTRUCTION_FILES_KEY);
+    if options.is_empty() {
+        plugin.remove(CLAUDE_CODE_PLUGIN_OPTIONS_KEY);
+    }
+    if plugin.is_empty() {
+        plugin_configs.remove(CLAUDE_CODE_AGENTS_MD_PLUGIN_ID);
+    }
+    if plugin_configs.is_empty() {
+        settings.remove(CLAUDE_CODE_PLUGIN_CONFIGS_KEY);
+    }
+    true
 }
 
 fn claude_provider_env_for_config(
@@ -478,6 +524,44 @@ mod tests {
     }
 
     #[test]
+    fn claude_code_loads_agents_md_beside_claude_md_and_keeps_other_plugin_configs() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let settings_path = tempdir.path().join(".claude").join("settings.json");
+        std::fs::create_dir_all(settings_path.parent().expect("settings has parent"))
+            .expect("create settings dir");
+        std::fs::write(
+            &settings_path,
+            r#"{"pluginConfigs":{"formatter@team":{"options":{"style":"tabs"}}}}"#,
+        )
+        .expect("write settings");
+        let mut config = config_with_agent("claude", &["MOONSHOT_API_KEY"]);
+
+        provision_agent_headless_config(&config, tempdir.path()).expect("provision");
+        let settings = read_settings(tempdir.path());
+        assert_eq!(
+            settings["pluginConfigs"]["cc-plugin-agents-md@builtin"]["options"]["instructionFiles"],
+            "claude-md-and-agents-md"
+        );
+        assert_eq!(
+            settings["pluginConfigs"]["formatter@team"]["options"]["style"],
+            "tabs"
+        );
+
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "moonshotai".to_owned(),
+            model: None,
+            api_key_ref: Some("MOONSHOT_API_KEY".to_owned()),
+            custom: None,
+        });
+        provision_agent_headless_config(&config, tempdir.path()).expect("reprovision");
+        assert_eq!(
+            read_settings(tempdir.path())["pluginConfigs"]["cc-plugin-agents-md@builtin"]["options"]
+                ["instructionFiles"],
+            "claude-md-and-agents-md"
+        );
+    }
+
+    #[test]
     fn claude_code_profiled_provider_writes_available_models_from_cache() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         seed_provider_model_cache(
@@ -860,7 +944,7 @@ mod tests {
             .expect("create settings dir");
         std::fs::write(
             &settings_path,
-            r#"{"apiKeyHelper":"printenv MOONSHOT_API_KEY","env":{"ANTHROPIC_BASE_URL":"https://api.moonshot.ai/anthropic","ANTHROPIC_AUTH_TOKEN":"old","ANTHROPIC_API_KEY":"old","ANTHROPIC_MODEL":"kimi-k2.7-code","ANTHROPIC_DEFAULT_FABLE_MODEL":"kimi-k2.7-code","ANTHROPIC_DEFAULT_OPUS_MODEL":"kimi-k2.7-code","ANTHROPIC_DEFAULT_SONNET_MODEL":"kimi-k2.7-code","ANTHROPIC_DEFAULT_HAIKU_MODEL":"kimi-k2.7-code","CLAUDE_CODE_SUBAGENT_MODEL":"kimi-k2.7-code","KEEP_ME":"yes"},"theme":"keep"}"#,
+            r#"{"apiKeyHelper":"printenv MOONSHOT_API_KEY","env":{"ANTHROPIC_BASE_URL":"https://api.moonshot.ai/anthropic","ANTHROPIC_AUTH_TOKEN":"old","ANTHROPIC_API_KEY":"old","ANTHROPIC_MODEL":"kimi-k2.7-code","ANTHROPIC_DEFAULT_FABLE_MODEL":"kimi-k2.7-code","ANTHROPIC_DEFAULT_OPUS_MODEL":"kimi-k2.7-code","ANTHROPIC_DEFAULT_SONNET_MODEL":"kimi-k2.7-code","ANTHROPIC_DEFAULT_HAIKU_MODEL":"kimi-k2.7-code","CLAUDE_CODE_SUBAGENT_MODEL":"kimi-k2.7-code","KEEP_ME":"yes"},"pluginConfigs":{"cc-plugin-agents-md@builtin":{"options":{"instructionFiles":"claude-md-and-agents-md"}},"formatter@team":{"options":{"style":"tabs"}}},"theme":"keep"}"#,
         )
         .expect("write settings");
         let onboarding_path = tempdir.path().join(".claude.json");
@@ -911,6 +995,15 @@ mod tests {
         );
         assert!(settings["env"].get("CLAUDE_CODE_SUBAGENT_MODEL").is_none());
         assert_eq!(settings["env"]["KEEP_ME"], "yes");
+        assert!(
+            settings["pluginConfigs"]
+                .get("cc-plugin-agents-md@builtin")
+                .is_none()
+        );
+        assert_eq!(
+            settings["pluginConfigs"]["formatter@team"]["options"]["style"],
+            "tabs"
+        );
         assert_eq!(settings["theme"], "keep");
         let onboarding: Value = serde_json::from_str(
             &std::fs::read_to_string(onboarding_path).expect("onboarding should be readable"),
@@ -921,6 +1014,25 @@ mod tests {
     }
 
     #[test]
+    fn claude_code_cleanup_without_provider_removes_settings_it_alone_wrote() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workload = WorkloadHome::with_process_credentials(tempdir.path(), tempdir.path());
+        let config = config_with_agent("claude", &[]);
+        provision_agent_headless_config(&config, tempdir.path()).expect("provision");
+
+        let cleaned = cleanup_claude_code_config(&config, &workload).expect("cleanup");
+
+        assert_eq!(cleaned.len(), 1);
+        assert!(
+            !tempdir
+                .path()
+                .join(".claude")
+                .join("settings.json")
+                .exists()
+        );
+    }
+
+    #[test]
     fn claude_code_cleanup_preserves_unmatched_env_and_helper() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let settings_path = tempdir.path().join(".claude").join("settings.json");
@@ -928,7 +1040,7 @@ mod tests {
             .expect("create settings dir");
         std::fs::write(
             &settings_path,
-            r#"{"apiKeyHelper":"printenv USER_KEY","env":{"ANTHROPIC_BASE_URL":"https://user.example/anthropic","ANTHROPIC_MODEL":"user-model","KEEP_ME":"yes"}}"#,
+            r#"{"apiKeyHelper":"printenv USER_KEY","env":{"ANTHROPIC_BASE_URL":"https://user.example/anthropic","ANTHROPIC_MODEL":"user-model","KEEP_ME":"yes"},"pluginConfigs":{"cc-plugin-agents-md@builtin":{"options":{"instructionFiles":"claude-md"}}}}"#,
         )
         .expect("write settings");
         let mut config = config_with_agent("claude", &["MOONSHOT_API_KEY"]);
@@ -953,6 +1065,10 @@ mod tests {
         );
         assert_eq!(settings["env"]["ANTHROPIC_MODEL"], "user-model");
         assert_eq!(settings["env"]["KEEP_ME"], "yes");
+        assert_eq!(
+            settings["pluginConfigs"]["cc-plugin-agents-md@builtin"]["options"]["instructionFiles"],
+            "claude-md"
+        );
     }
 
     #[test]

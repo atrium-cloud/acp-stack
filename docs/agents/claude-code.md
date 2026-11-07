@@ -31,6 +31,7 @@ Native-auth providers such as Amazon Bedrock and Google Vertex AI omit `api_key_
 Claude Code reads managed provider settings from `~/.claude/settings.json` and onboarding state from `~/.claude.json`.
 
 - `acp-stack` writes Anthropic-compatible endpoint settings and model env vars to `settings.json`.
+- `acp-stack` sets `pluginConfigs."cc-plugin-agents-md@builtin".options.instructionFiles` to `claude-md-and-agents-md`, so Claude Code reads `AGENTS.md` alongside any `CLAUDE.md`. An `AGENTS.md` that a `CLAUDE.md` imports or symlinks to loads once.
 - Secrets stay in the encrypted secret store. They reach Claude Code through provider-specific env refs.
 - Mapped third-party profiles can supply default Claude model env vars when you pin no explicit provider model.
 
