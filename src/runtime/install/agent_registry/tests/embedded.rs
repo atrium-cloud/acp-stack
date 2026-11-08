@@ -363,6 +363,7 @@ fn embedded_registry_contains_only_curated_examples() {
     );
     assert!(!kimi.subagents);
     assert_eq!(kimi.github.as_deref(), Some("MoonshotAI/kimi-code"));
+    assert_eq!(kimi.sync_id.as_deref(), Some("kimi-code"));
     assert_eq!(kimi.support_doc.as_deref(), Some("docs/agents/kimi.md"));
     let kimi_harness = kimi.harness.as_ref().expect("Kimi Code harness");
     assert_eq!(kimi_harness.id, "kimi");
@@ -561,7 +562,7 @@ fn embedded_registry_contains_only_curated_examples() {
     for entry in catalog.entries() {
         assert_eq!(
             entry.sync_id.is_some(),
-            entry.id == "antigravity",
+            matches!(entry.id.as_str(), "antigravity" | "kimi"),
             "entry-level sync_id exists only for catalog ids that differ from the upstream \
              registry id; `{}` must not carry it",
             entry.id

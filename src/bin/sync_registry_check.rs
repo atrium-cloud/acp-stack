@@ -222,6 +222,8 @@ mod tests {
         // their own `sync_id`.
         assert!(embedded_sync_ids(&catalog).contains(&"antigravity-acp"));
         assert!(!embedded_sync_ids(&catalog).contains(&"antigravity"));
+        assert!(embedded_sync_ids(&catalog).contains(&"kimi-code"));
+        assert!(!embedded_sync_ids(&catalog).contains(&"kimi"));
     }
 
     #[test]

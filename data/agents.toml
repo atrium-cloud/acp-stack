@@ -365,6 +365,9 @@ id = "kimi"
 name = "Kimi Code"
 kind = "native"
 headless_compatible = true
+# The upstream ACP registry lists Kimi Code as `kimi-code`; its `kimi` id is the
+# archived Kimi CLI.
+sync_id = "kimi-code"
 set_provider = true
 set_model = true
 allow_custom_provider = true
