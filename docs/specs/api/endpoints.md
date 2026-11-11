@@ -783,6 +783,24 @@ Session creation proceeds when a configured `agent.mode`, model, `agent.effort`,
     - The client re-reads the feed from `0` when the page's `feed_epoch` differs from its stored one, when `head` is below its cursor, or when its cursor is below `pruned_through`. On that full read, a session the client holds that the feed omits was deleted.
     - A checkpoint restore rolls the counter back with the database, so later writes reuse the rolled-back values. The runtime restarts to serve the restored database, and the restart's new `feed_epoch` sends every client back to `0`.
 
+### `POST /v1/sessions/-/annotations`
+
+- Tier: `session`
+- Request: `{ "agent_session_id", "kind", "data" }`.
+    - `agent_session_id` is the agent's own id for the session, the session object's `agent_session_id`.
+    - `kind` is a dotted lowercase name of two or more segments of letters, digits, and underscores, such as `thekit.schedule`, at most 64 bytes.
+    - `data` is a JSON object of at most 16 KiB serialized.
+- Response: `{ session_id, event }`: the session the annotation landed on, and its row as `GET /v1/sessions/{id}/events` returns it.
+- Errors:
+    - `404 session.not_found` is returned when no session carries `agent_session_id`.
+    - `409 session.no_turn_in_flight` is returned when no session carrying it has a prompt `pending` or `running`.
+    - `409 session.agent_session_ambiguous` is returned when sessions on more than one target carry it, each with a turn in flight.
+    - `400 request.invalid_param` is returned for a `kind` or `data` outside the rules above.
+- Notes:
+    - Appends one `session.annotation` row, level `info`, source `api`, payload `{ "kind", "data" }`, to the session whose turn is in flight, so a tool the agent ran during that turn reports into its transcript. The route writes this one kind (see [Session Lifecycle Event Kinds](../state-logging.md#session-lifecycle-event-kinds)).
+    - The row takes the session's next `seq`, advances its `change_seq`, and goes out on its `sessions.{id}` topic, as every session event does. A fork that holds the turn carries it.
+    - Served on the TCP listener alone.
+
 ### `GET /v1/sessions/{id}`
 
 - Tier: `session`

@@ -1,7 +1,9 @@
+use acp_stack::error::StackError;
 use acp_stack::state::{
-    EVENT_KIND_PROMPT_SETTLED, EVENT_KIND_SESSION_AVAILABLE, EVENT_SOURCE_ACP, EVENT_SOURCE_SYSTEM,
-    ListedSessionRecord, NewPermissionRequest, NewPromptRecord, NewSessionRecord, PromptRecord,
-    PromptStatus, SESSION_ACTIVITY_ACTOR_AGENT, SESSION_ACTIVITY_ACTOR_USER, SESSION_STATUS_ACTIVE,
+    EVENT_KIND_PROMPT_SETTLED, EVENT_KIND_SESSION_ANNOTATION, EVENT_KIND_SESSION_AVAILABLE,
+    EVENT_SOURCE_ACP, EVENT_SOURCE_API, EVENT_SOURCE_SYSTEM, ListedSessionRecord,
+    NewPermissionRequest, NewPromptRecord, NewSessionRecord, PromptRecord, PromptStatus,
+    SESSION_ACTIVITY_ACTOR_AGENT, SESSION_ACTIVITY_ACTOR_USER, SESSION_STATUS_ACTIVE,
     SESSION_STATUS_AVAILABLE, SESSION_STATUS_CLOSED, SessionAvailableCommand, SessionEventCursor,
     StateStore,
 };
@@ -2752,4 +2754,218 @@ fn the_change_feed_counter_continues_after_the_database_reopens() {
         feed(&store, 3, 100),
         (vec![("sess_reopen_b".to_owned(), 4, false)], 4)
     );
+}
+
+const ANNOTATION_KIND: &str = "thekit.schedule";
+
+/// A session on `target_id` under `agent_session_id` with one prompt in `status`;
+/// answers the prompt id.
+fn seed_annotated_session(
+    store: &StateStore,
+    target_id: &str,
+    session_id: &str,
+    agent_session_id: &str,
+    status: PromptStatus,
+) -> String {
+    store
+        .insert_session_for_target(
+            target_id,
+            agent_session_id.to_owned(),
+            NewSessionRecord {
+                id: session_id.to_owned(),
+                agent_id: target_id.to_owned(),
+                cwd: format!("/tmp/{session_id}"),
+                title: None,
+                metadata_json: "{}".to_owned(),
+            },
+        )
+        .expect("session inserted");
+    let prompt_id = acp_stack::state::next_prompt_id();
+    store
+        .insert_prompt(NewPromptRecord {
+            id: prompt_id.clone(),
+            session_id: session_id.to_owned(),
+            prompt_json: "[]".to_owned(),
+        })
+        .expect("prompt inserted");
+    store
+        .update_prompt_status(&prompt_id, status, None, None, None, None, None)
+        .expect("prompt status set");
+    prompt_id
+}
+
+fn schedule_data() -> serde_json::Value {
+    serde_json::json!({ "verb": "create", "task_id": "task_1", "title": "Inbox digest" })
+}
+
+#[test]
+fn an_annotation_lands_on_the_session_whose_turn_is_in_flight() {
+    let (_dir, store) = fresh_state("annotation_lands.sqlite");
+    seed_annotated_session(
+        &store,
+        "pi",
+        "sess_settled",
+        "agent_settled",
+        PromptStatus::Completed,
+    );
+    seed_annotated_session(
+        &store,
+        "pi",
+        "sess_live",
+        "agent_live",
+        PromptStatus::Running,
+    );
+    let before = change_seq_of(&store, "sess_live");
+
+    let event = store
+        .append_session_annotation("agent_live", ANNOTATION_KIND, schedule_data())
+        .expect("annotation appended");
+
+    assert_eq!(event.session_id.as_deref(), Some("sess_live"));
+    assert_eq!(event.kind, EVENT_KIND_SESSION_ANNOTATION);
+    assert_eq!(event.level, "info");
+    assert_eq!(event.source, EVENT_SOURCE_API);
+    let payload: serde_json::Value =
+        serde_json::from_str(&event.payload_json).expect("payload JSON");
+    assert_eq!(
+        payload,
+        serde_json::json!({ "kind": ANNOTATION_KIND, "data": schedule_data() })
+    );
+    let log = session_log(&store, "sess_live");
+    assert_eq!(
+        log.last().map(|row| row.id.as_str()),
+        Some(event.id.as_str())
+    );
+    assert_eq!(event.seq, log.last().and_then(|row| row.seq));
+    assert!(change_seq_of(&store, "sess_live") > before);
+}
+
+#[test]
+fn an_annotation_without_one_turn_in_flight_is_refused() {
+    let (_dir, store) = fresh_state("annotation_refused.sqlite");
+    seed_annotated_session(
+        &store,
+        "pi",
+        "sess_settled",
+        "agent_settled",
+        PromptStatus::Completed,
+    );
+    seed_annotated_session(
+        &store,
+        "pi",
+        "sess_a",
+        "agent_shared",
+        PromptStatus::Running,
+    );
+    seed_annotated_session(
+        &store,
+        "codex",
+        "sess_b",
+        "agent_shared",
+        PromptStatus::Pending,
+    );
+    let append = |agent_session_id: &str| {
+        store.append_session_annotation(agent_session_id, ANNOTATION_KIND, schedule_data())
+    };
+
+    assert!(matches!(
+        append("agent_unknown"),
+        Err(StackError::SessionNotFound { .. })
+    ));
+    assert!(matches!(
+        append("agent_settled"),
+        Err(StackError::SessionNoTurnInFlight { .. })
+    ));
+    assert!(matches!(
+        append("agent_shared"),
+        Err(StackError::SessionAgentSessionAmbiguous { count: 2, .. })
+    ));
+    for session_id in ["sess_settled", "sess_a", "sess_b"] {
+        assert!(
+            session_log(&store, session_id)
+                .iter()
+                .all(|row| row.kind != EVENT_KIND_SESSION_ANNOTATION),
+            "{session_id} took no annotation"
+        );
+    }
+}
+
+#[test]
+fn an_annotation_kind_and_data_are_bounded() {
+    let (_dir, store) = fresh_state("annotation_bounds.sqlite");
+    seed_annotated_session(
+        &store,
+        "pi",
+        "sess_live",
+        "agent_live",
+        PromptStatus::Running,
+    );
+    let oversized = serde_json::json!({
+        "title": "a".repeat(acp_stack::state::MAX_SESSION_ANNOTATION_DATA_BYTES),
+    });
+    let long_kind = format!(
+        "thekit.{}",
+        "a".repeat(acp_stack::state::MAX_SESSION_ANNOTATION_KIND_BYTES)
+    );
+    for (kind, data) in [
+        ("thekit", schedule_data()),
+        ("Thekit.schedule", schedule_data()),
+        ("thekit..schedule", schedule_data()),
+        ("thekit.schedule-run", schedule_data()),
+        (long_kind.as_str(), schedule_data()),
+        (ANNOTATION_KIND, serde_json::json!(["create"])),
+        (ANNOTATION_KIND, oversized),
+    ] {
+        assert!(
+            matches!(
+                store.append_session_annotation("agent_live", kind, data.clone()),
+                Err(StackError::InvalidParam { .. })
+            ),
+            "{kind} {data}"
+        );
+    }
+    store
+        .append_session_annotation("agent_live", "thekit.schedule_v2.run", schedule_data())
+        .expect("a well-formed kind is appended");
+}
+
+#[test]
+fn a_fork_child_carries_the_annotations_of_the_turns_it_holds() {
+    let (_dir, store) = fresh_state("annotation_fork.sqlite");
+    let held = seed_annotated_session(
+        &store,
+        "fake",
+        "sess_annotated",
+        "agent_annotated",
+        PromptStatus::Running,
+    );
+    store
+        .append_session_annotation("agent_annotated", ANNOTATION_KIND, schedule_data())
+        .expect("annotation appended");
+    store
+        .update_prompt_status(
+            &held,
+            PromptStatus::Completed,
+            Some("end_turn"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("prompt completed");
+
+    fork_child(&store, "sess_annotated_fork", "sess_annotated", Some(&held));
+
+    let parent: Vec<_> = session_log(&store, "sess_annotated")
+        .iter()
+        .filter(|row| row.kind == EVENT_KIND_SESSION_ANNOTATION)
+        .map(event_projection)
+        .collect();
+    let child: Vec<_> = session_log(&store, "sess_annotated_fork")
+        .iter()
+        .filter(|row| row.kind == EVENT_KIND_SESSION_ANNOTATION)
+        .map(event_projection)
+        .collect();
+    assert_eq!(parent.len(), 1);
+    assert_eq!(child, parent);
 }

@@ -67,6 +67,7 @@ pub(super) enum AcpsResponseTypes {
     SecurityCheckResponse(crate::api::routes::security::SecurityCheckResponse),
     SecurityHistoryResponse(crate::api::routes::security::SecurityHistoryResponse),
     SecurityHistoryShowResponse(crate::api::routes::security::SecurityHistoryShowResponse),
+    SessionAnnotationResponse(crate::api::routes::sessions::events::SessionAnnotationResponse),
     SessionChangesSnapshot(crate::runtime::agent::session_changes::SessionChangesSnapshot),
     SessionCommandRunResponse(crate::api::routes::sessions::commands::SessionCommandRunResponse),
     SessionCommandsResponse(crate::api::routes::sessions::commands::SessionCommandsResponse),

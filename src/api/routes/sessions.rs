@@ -38,7 +38,8 @@ pub(crate) use config_options::{
     sessions_config_options_handler, sessions_config_options_set_handler,
 };
 pub(crate) use events::{
-    sessions_changes_handler, sessions_events_handler, sessions_snapshot_handler,
+    sessions_annotation_handler, sessions_changes_handler, sessions_events_handler,
+    sessions_snapshot_handler,
 };
 pub(crate) use lifecycle::{
     sessions_create_handler, sessions_fork_handler, sessions_get_handler, sessions_load_handler,

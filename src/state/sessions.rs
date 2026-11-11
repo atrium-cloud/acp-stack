@@ -6,8 +6,8 @@ use rusqlite::{OptionalExtension, params};
 
 use super::core::StateStore;
 use super::events::{
-    EVENT_COLUMNS, EVENT_SOURCE_ACP, EVENT_SOURCE_SYSTEM, Event, insert_unscoped_event_row,
-    row_to_event,
+    EVENT_COLUMNS, EVENT_SOURCE_ACP, EVENT_SOURCE_API, EVENT_SOURCE_SYSTEM, Event,
+    insert_unscoped_event_row, row_to_event,
 };
 use super::ids::{current_timestamp, next_event_id, next_prompt_id, next_session_id};
 use super::records::{LogOrder, SessionFilter, SessionTree};
@@ -88,6 +88,15 @@ pub const EVENT_KIND_TERMINAL_FINISHED: &str = "terminal.finished";
 /// `acp`; the accepted user prompt is recorded under the same kind with source
 /// `system`, since it originates on this side of the protocol.
 pub const EVENT_KIND_SESSION_UPDATE: &str = "session.update";
+/// A structured note a local tool appended to the turn in flight through
+/// `POST /v1/sessions/-/annotations`; payload is `{ "kind", "data" }`.
+pub const EVENT_KIND_SESSION_ANNOTATION: &str = "session.annotation";
+pub const SESSION_ANNOTATION_EVENT_MESSAGE: &str = "session annotation";
+/// Bounds on an annotation's dotted `kind` and its serialized `data` object.
+pub const MAX_SESSION_ANNOTATION_KIND_BYTES: usize = 64;
+pub const MAX_SESSION_ANNOTATION_DATA_BYTES: usize = 16 * 1024;
+/// An annotation `kind` has at least this many dotted segments.
+const MIN_SESSION_ANNOTATION_KIND_SEGMENTS: usize = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRecord {

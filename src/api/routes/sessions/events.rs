@@ -69,6 +69,46 @@ pub(crate) async fn sessions_events_handler(
     }))
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(crate) struct SessionAnnotationBody {
+    /// The agent's own id for the session, as `agent_session_id` on the session object.
+    agent_session_id: String,
+    /// A dotted lowercase name of two or more segments, such as `thekit.schedule`; at
+    /// most 64 bytes.
+    kind: String,
+    /// A JSON object, at most 16 KiB serialized.
+    data: serde_json::Value,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub(crate) struct SessionAnnotationResponse {
+    session_id: String,
+    event: LogEventJson,
+}
+
+pub(crate) async fn sessions_annotation_handler(
+    State(state): State<AppState>,
+    Json(body): Json<SessionAnnotationBody>,
+) -> std::result::Result<ApiSuccess<SessionAnnotationResponse>, StackError> {
+    // One write job resolves the turn and appends, so no settle lands between them.
+    let event = state
+        .state
+        .write(move |store| {
+            store.append_session_annotation(&body.agent_session_id, &body.kind, body.data)
+        })
+        .await?;
+    let session_id = event
+        .session_id
+        .clone()
+        .ok_or_else(|| StackError::StateAccessFailed {
+            reason: "an appended session annotation carries no session id".to_owned(),
+        })?;
+    Ok(ApiSuccess::new(SessionAnnotationResponse {
+        session_id,
+        event: LogEventJson::from(event),
+    }))
+}
+
 pub(crate) async fn sessions_changes_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,

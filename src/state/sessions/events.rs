@@ -26,6 +26,28 @@ pub(super) fn next_session_event_seq(conn: &rusqlite::Connection, session_id: &s
 /// `message` of every agent-streamed `session.update` row.
 const SESSION_UPDATE_EVENT_MESSAGE: &str = "ACP session update";
 
+/// A dotted lowercase name such as `thekit.schedule`: at least two segments of
+/// ASCII lowercase letters, digits, and underscores.
+fn validate_annotation_kind(kind: &str) -> Result<()> {
+    let well_formed = kind.len() <= MAX_SESSION_ANNOTATION_KIND_BYTES
+        && kind.split('.').count() >= MIN_SESSION_ANNOTATION_KIND_SEGMENTS
+        && kind.split('.').all(|segment| {
+            !segment.is_empty()
+                && segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        });
+    if well_formed {
+        return Ok(());
+    }
+    Err(StackError::InvalidParam {
+        field: "kind",
+        reason: format!(
+            "kind must be {MIN_SESSION_ANNOTATION_KIND_SEGMENTS} or more dotted segments of lowercase letters, digits, and underscores, at most {MAX_SESSION_ANNOTATION_KIND_BYTES} bytes"
+        ),
+    })
+}
+
 /// An agent-streamed row for `session_id`'s log, not yet written.
 pub(super) fn session_update_event(
     session_id: &str,
@@ -125,6 +147,83 @@ impl StateStore {
         event.seq = Some(seq);
         self.publish_session_event(session_id, &event);
         Ok(event)
+    }
+
+    /// Append a `session.annotation` row, `{ "kind", "data" }`, to the one session whose
+    /// agent session id is `agent_session_id` and whose own turn is in flight: the turn a
+    /// tool the agent ran reports into. The caller chooses the payload, never the row's kind.
+    pub fn append_session_annotation(
+        &self,
+        agent_session_id: &str,
+        kind: &str,
+        data: serde_json::Value,
+    ) -> Result<Event> {
+        validate_annotation_kind(kind)?;
+        if !data.is_object() {
+            return Err(StackError::InvalidParam {
+                field: "data",
+                reason: "data must be a JSON object".to_owned(),
+            });
+        }
+        let data_bytes = data.to_string().len();
+        if data_bytes > MAX_SESSION_ANNOTATION_DATA_BYTES {
+            return Err(StackError::InvalidParam {
+                field: "data",
+                reason: format!(
+                    "data is {data_bytes} bytes serialized, over the {MAX_SESSION_ANNOTATION_DATA_BYTES}-byte cap"
+                ),
+            });
+        }
+        let session_id = self.annotated_session_id(agent_session_id)?;
+        let payload = serde_json::json!({ "kind": kind, "data": data }).to_string();
+        self.append_session_event_with_source(
+            &session_id,
+            "info",
+            EVENT_KIND_SESSION_ANNOTATION,
+            EVENT_SOURCE_API,
+            SESSION_ANNOTATION_EVENT_MESSAGE,
+            &payload,
+        )
+    }
+
+    /// The session an annotation lands on. Uniqueness of an agent session id holds per
+    /// target only, so a match on two targets with a turn in flight each is refused.
+    fn annotated_session_id(&self, agent_session_id: &str) -> Result<String> {
+        let mut statement = self.connection().prepare(
+            r#"
+            SELECT id,
+                   EXISTS (
+                       SELECT 1 FROM prompts
+                       WHERE prompts.session_id = sessions.id
+                         AND prompts.status IN ('pending', 'running')
+                   )
+            FROM sessions
+            WHERE agent_session_id = ?1
+            "#,
+        )?;
+        let rows = statement.query_map(params![agent_session_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
+        })?;
+        let matched = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        if matched.is_empty() {
+            return Err(StackError::SessionNotFound {
+                id: agent_session_id.to_owned(),
+            });
+        }
+        let in_flight: Vec<String> = matched
+            .into_iter()
+            .filter_map(|(session_id, turn_in_flight)| turn_in_flight.then_some(session_id))
+            .collect();
+        match in_flight.as_slice() {
+            [] => Err(StackError::SessionNoTurnInFlight {
+                agent_session_id: agent_session_id.to_owned(),
+            }),
+            [session_id] => Ok(session_id.clone()),
+            _ => Err(StackError::SessionAgentSessionAmbiguous {
+                agent_session_id: agent_session_id.to_owned(),
+                count: in_flight.len(),
+            }),
+        }
     }
 
     /// Append one agent-streamed ACP `session/update` row and touch the in-flight prompt of

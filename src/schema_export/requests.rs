@@ -41,6 +41,7 @@ pub(super) enum AcpsRequestTypes {
     PermissionDenyBody(crate::api::routes::permissions::PermissionDenyBody),
     SecretsSetBody(crate::api::routes::config::SecretsSetBody),
     SecurityHistoryQuery(crate::api::routes::security::SecurityHistoryQuery),
+    SessionAnnotationBody(crate::api::routes::sessions::events::SessionAnnotationBody),
     SessionCommandRunBody(crate::api::routes::sessions::commands::SessionCommandRunBody),
     SessionConfigOptionSetBody(
         crate::api::routes::sessions::config_options::SessionConfigOptionSetBody,

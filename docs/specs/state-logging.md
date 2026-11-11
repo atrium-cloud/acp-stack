@@ -189,10 +189,13 @@ Session-scoped events written when a prompt reaches a terminal status:
 | `session.available` | info  | `system` | `{ "reason": "<label>", "threshold_secs"?: <u64> }`            | Startup reconcile, agent teardown, and the idle session sweep |
 | `session.list_synced` | info | `system` | `{ "target_id", "agent_id", "upserted": <u32>, "updated": <u32>, "skipped_invalid_cwd": <u32> }` | ACP session-list sync, in the transaction that writes the rows |
 | `session.subagent_announced` | info | `system` | `{ "child_session_id", "agent_session_id", "root_session_id" }` | On the parent, in the transaction that records the first `subagent_update` naming a child |
+| `session.annotation` | info | `api` | `{ "kind": "<dotted name>", "data": { ... } }` | `POST /v1/sessions/-/annotations`, on the session whose turn is in flight |
 
 `reason` is one of `daemon_restart`, `agent_stopped`, `agent_exited`, or `idle`; `threshold_secs` appears only on idle-sweep demotions.
 
 `session.list_synced` is unscoped and written only when a sync inserts rows (`upserted`) or changes stored ones (`updated`); a listing that matches the stored rows writes nothing.
+
+`session.annotation` is a note from a local tool the agent ran during the turn, such as a record the tool changed, so a transcript shows it in place. `kind` names the note and `data` holds it; the row's own kind is `session.annotation` whatever `kind` says. It is a conversation row (Fork Inheritance).
 
 ### Client Terminal Events
 
@@ -281,7 +284,7 @@ A fork child starts with the part of its parent's durable record that the fork h
 The child receives:
 
 - Events: the parent's conversation rows older than the fork point (all of them when the fork holds every prompt), in the parent's log order. They take the child's `seq` values 1 through n, and the child's own `session.forked` row follows them at n + 1.
-- Conversation rows: `session.update` from both sources, `prompt.inference_failed`, `prompt.stalled`, `prompt.stall_resolved`, `prompt.errored`, `prompt.usage_reported`, `prompt.settled`, `session.cancel_requested`, `terminal.finished`, and the session-scoped ACP permission decisions (`permission.approved`, `permission.denied`, `permission.cancelled`, `permission.expired`). Every other session-scoped kind stays with the parent:
+- Conversation rows: `session.update` from both sources, `prompt.inference_failed`, `prompt.stalled`, `prompt.stall_resolved`, `prompt.errored`, `prompt.usage_reported`, `prompt.settled`, `session.cancel_requested`, `session.annotation`, `terminal.finished`, and the session-scoped ACP permission decisions (`permission.approved`, `permission.denied`, `permission.cancelled`, `permission.expired`). Every other session-scoped kind stays with the parent:
     - `session.created`, `session.loaded`, `session.resumed`, `session.available`, and `session.closed` track the parent session's own lifecycle.
     - `session.forked` and `session.fork.created_child` mark the parent's own place in fork lineage. The child writes its own `session.forked`.
     - `session.capability_ignored`, `mcp.session_attached`, and `mcp.session_skipped` record what the parent's create or attach provisioned. The fork writes the child's own `mcp.session_skipped` when it skips servers.

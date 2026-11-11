@@ -865,6 +865,19 @@ pub enum StackError {
     #[error("session `{session_id}` already has a prompt in flight")]
     PromptInFlight { session_id: String },
 
+    /// An annotation names an agent session whose sessions hold no prompt
+    /// `pending` or `running`.
+    #[error("agent session `{agent_session_id}` has no turn in flight")]
+    SessionNoTurnInFlight { agent_session_id: String },
+
+    /// An annotation names an agent session that more than one session with a
+    /// turn in flight carries, across Array targets.
+    #[error("agent session `{agent_session_id}` names {count} sessions with a turn in flight")]
+    SessionAgentSessionAmbiguous {
+        agent_session_id: String,
+        count: usize,
+    },
+
     #[error("prompt `{id}` was not found")]
     PromptNotFound { id: String },
 

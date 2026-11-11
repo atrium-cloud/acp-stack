@@ -945,6 +945,27 @@
           }
         }
       },
+      "SessionAnnotationBody": {
+        "type": "object",
+        "properties": {
+          "agent_session_id": {
+            "type": "string",
+            "description": "The agent's own id for the session, as `agent_session_id` on the session object."
+          },
+          "kind": {
+            "type": "string",
+            "description": "A dotted lowercase name of two or more segments, such as `thekit.schedule`; at\nmost 64 bytes."
+          },
+          "data": {
+            "description": "A JSON object, at most 16 KiB serialized."
+          }
+        },
+        "required": [
+          "agent_session_id",
+          "kind",
+          "data"
+        ]
+      },
       "SessionCommandRunBody": {
         "type": "object",
         "properties": {
@@ -6136,6 +6157,21 @@
         "required": [
           "run",
           "findings"
+        ]
+      },
+      "SessionAnnotationResponse": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "event": {
+            "$ref": "#/$defs/response/LogEventJson"
+          }
+        },
+        "required": [
+          "session_id",
+          "event"
         ]
       },
       "SessionChangesSnapshot": {

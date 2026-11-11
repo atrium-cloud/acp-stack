@@ -36,6 +36,8 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         SessionReattachUnsupported { .. } => "session.reattach_unsupported",
         SessionEventCursorUnknown { .. } => "session.event_cursor_unknown",
         PromptInFlight { .. } => "session.prompt_in_flight",
+        SessionNoTurnInFlight { .. } => "session.no_turn_in_flight",
+        SessionAgentSessionAmbiguous { .. } => "session.agent_session_ambiguous",
         PromptNotFound { .. } => "prompt.not_found",
         PromptSessionMismatch { .. } => "prompt.session_mismatch",
         PromptBodyEmpty => "prompt.body_empty",
@@ -70,6 +72,15 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
         PromptInFlight { session_id } => {
             format!("session `{session_id}` already has a prompt in flight")
         }
+        SessionNoTurnInFlight { agent_session_id } => {
+            format!("agent session `{agent_session_id}` has no turn in flight")
+        }
+        SessionAgentSessionAmbiguous {
+            agent_session_id,
+            count,
+        } => format!(
+            "agent session `{agent_session_id}` names {count} sessions with a turn in flight"
+        ),
         PromptNotFound { id } => format!("prompt `{id}` was not found"),
         PromptSessionMismatch {
             session_id,
@@ -102,6 +113,8 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         | SubagentSessionRestricted { .. }
         | SubagentCancelUnavailable { .. }
         | PromptInFlight { .. }
+        | SessionNoTurnInFlight { .. }
+        | SessionAgentSessionAmbiguous { .. }
         | PromptSessionMismatch { .. } => StatusCode::CONFLICT,
         SessionTargetRenameConflict { .. } => StatusCode::CONFLICT,
         SessionDeleted { .. } => StatusCode::GONE,
