@@ -1,8 +1,12 @@
 use super::*;
 
+/// A session's log holds a row per streamed chunk, a few hundred bytes each, so
+/// one page carries a long turn whole where the other log routes' cap would not.
+pub(crate) const MAX_SESSION_EVENTS_LIMIT: u32 = 10_000;
+
 #[derive(Deserialize, Default, schemars::JsonSchema)]
 pub(crate) struct SessionsEventsParams {
-    /// Values above 1000 are silently clamped to 1000, not rejected.
+    /// Values above 10000 are silently clamped to 10000, not rejected.
     #[serde(default = "default_logs_limit")]
     limit: u32,
     /// Event id to page after. Mutually exclusive with `after_seq`.
@@ -40,7 +44,7 @@ pub(crate) async fn sessions_events_handler(
     Path(id): Path<String>,
     Query(params): Query<SessionsEventsParams>,
 ) -> std::result::Result<ApiSuccess<SessionsEventsResponse>, StackError> {
-    let limit = params.limit.min(MAX_LOGS_LIMIT);
+    let limit = params.limit.min(MAX_SESSION_EVENTS_LIMIT);
     let cursor = params.cursor()?;
     let events = state
         .state

@@ -1040,7 +1040,7 @@
             "type": "integer",
             "format": "uint32",
             "minimum": 0,
-            "description": "Values above 1000 are silently clamped to 1000, not rejected.",
+            "description": "Values above 10000 are silently clamped to 10000, not rejected.",
             "default": 100
           },
           "after": {

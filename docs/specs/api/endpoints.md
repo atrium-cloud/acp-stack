@@ -951,6 +951,7 @@ The `agent.inference_*` codes carry a sanitized public message of the form `"inf
     - `after=<event_id>` resumes after the named event.
     - `after_seq=<seq>` resumes after a log position; `0` reads from the start.
     - Passing both returns `400 request.invalid_param`.
+    - `limit` defaults to 100; values above 10,000 are clamped, not rejected. A session's log holds a row per streamed chunk, so its cap is ten times the other log routes'.
 - Response: durable session events in `seq` order. Each event carries `seq`, its position in the session's log, contiguous from 1.
 - Errors:
     - `404 session.event_cursor_unknown` is returned when `after` names an event this session does not have, or `after_seq` is past the session's newest event. A cursor stops resolving when the state database is rolled back to a checkpoint that predates it, so the client re-reads `GET /v1/sessions/{id}/snapshot` for a fresh cursor.
