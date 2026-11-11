@@ -103,7 +103,7 @@ A JSON Schema (draft 2020-12) of the typed contract is generated from the Rust w
 Consumers reference it two ways:
 
 - The raw committed file at a git ref: `https://raw.githubusercontent.com/atrium-cloud/acp-stack/<ref>/docs/specs/api/acps-schema.json`. Pin `main` for the current contract, or a tag for a reproducible one.
-- The release asset `https://github.com/atrium-cloud/acp-stack/releases/latest/download/acps-schema.json`, which resolves to the newest stable release. Nightlies are prereleases, so `latest` skips them.
+- The release asset `https://github.com/atrium-cloud/acp-stack/releases/latest/download/acps-schema.json`, which resolves to the newest release.
 
 The document splits `$defs` into three namespaces because serde's `#[serde(default)]`/`skip_serializing_if` fields belong to `required` under one direction but not the other:
 

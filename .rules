@@ -162,10 +162,8 @@ References:
     - Keep specs in `docs/specs/` and todos in `docs/todos/`.
 - Release workflows
     - Public release builds keep default Cargo features and are the only workflow that publishes GitHub Releases.
-    - Release types via `scripts/release.sh`: nightly (default; tags `main` HEAD as `vX.Y.Z.N` with no version commit or changelog; published as a GitHub prerelease), `--regular` (`vX.Y.Z` → `vX.Y.(Z+1)`), and `--major` (`vX.Y.Z` → `vX.(Y+1).0`).
-    - Regular and major releases require a human-authored changelog at `docs/changelogs/v<version>.md`, a human commit containing that changelog and release prep, then a human-created `v<version>` tag pointing at that commit. Nightlies require none of these.
-    - A nightly's fourth version component lives only in the git tag and packaging names; Cargo.toml keeps the three-part base version, so nightly binaries report the base version via `acps --version`.
-    - Nightlies install via `install.sh --version vX.Y.Z.N` or explicit `acps update --version vX.Y.Z.N`. `acps update` never offers them automatically (prereleases are excluded from the latest channel).
+    - Release types via `scripts/release.sh`: patch (default; `vX.Y.Z` → `vX.Y.(Z+1)`), `--minor` (`vX.Y.Z` → `vX.(Y+1).0`), and an explicit `X.Y.Z`. Each release is a version-bump commit plus its `v<version>` tag, and the binary reports exactly that version via `acps --version`.
+    - A release whose patch is 0 requires a human-authored changelog at `docs/changelogs/v<version>.md`, committed before the script runs.
     - Dev-build artifacts must be manual-only Actions artifacts and must build with `scripts/build-release.sh --no-default-features` so the binary omits `acps update`.
 - Testing agent with ACP
     - Run the harness to be tested in interactive shell outside sandbox to make use of existing env vars.

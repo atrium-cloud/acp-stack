@@ -215,9 +215,7 @@ fn reserved_environment() -> Value {
     json!({ "names": names, "prefixes": prefixes })
 }
 
-/// Version + per-namespace definition counts sidecar. `version` is the
-/// three-part `CARGO_PKG_VERSION`; nightlies carry their fourth component only
-/// in the git tag, so this stays stable and the drift test can byte-compare.
+/// Version + per-namespace definition counts sidecar.
 pub fn acps_schema_meta() -> Value {
     let schema = acps_schema();
     let count = |namespace: &str| -> usize {

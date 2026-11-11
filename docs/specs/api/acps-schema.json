@@ -4453,7 +4453,7 @@
         "properties": {
           "version": {
             "type": "string",
-            "description": "Running three-part base version. Not a capability signal: a nightly's\nfourth component lives only in the git tag, so builds with and without\na feature report the same version. Test `features` membership instead."
+            "description": "Running release version: its git tag without the leading `v`."
           },
           "features": {
             "type": "array",

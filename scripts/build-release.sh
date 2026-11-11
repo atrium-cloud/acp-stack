@@ -9,13 +9,9 @@ set -euo pipefail
 #
 # Usage: scripts/build-release.sh [--classification regular|security-critical] [--breaking true|false] [--no-default-features]
 #
-# The git tag for a regular/major release is `v<version>` where <version> is
+# The git tag for a release is `v<version>` where <version> is
 # the [package] version in Cargo.toml; install.sh derives the artifact
-# filename from the tag by stripping the leading `v`. Nightly releases instead
-# carry a fourth component that exists only in the tag (`v<version>.<n>`); the
-# release workflow then passes ACP_STACK_RELEASE_VERSION=<version>.<n> so the
-# tarballs and the self-updater manifest are versioned by the full nightly
-# version. The compiled binary still reports the Cargo.toml base version.
+# filename from the tag by stripping the leading `v`.
 
 # ----- CONSTANTS -----
 readonly PROJECT="acp-stack"
@@ -56,7 +52,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     -h|--help)
-      sed -n '3,17p' "$0"
+      sed -n '3,14p' "$0"
       exit 0
       ;;
     *)
@@ -100,18 +96,9 @@ cd "${REPO_ROOT}"
 # Single source of truth for the version: the Cargo manifest. Parsed without
 # sed so the script has no awk/sed dependency beyond tarball packaging.
 version_line="$(grep -m1 '^version = ' Cargo.toml)" || fail "could not read version from Cargo.toml"
-cargo_version="${version_line#version = \"}"
-cargo_version="${cargo_version%\"}"
-[[ -n "${cargo_version}" ]] || fail "parsed an empty version from Cargo.toml"
-# Nightly releases override the packaging version with the tag's fourth
-# component; anything else must match the Cargo manifest exactly.
-version="${ACP_STACK_RELEASE_VERSION:-$cargo_version}"
-if [[ "${version}" != "${cargo_version}" ]]; then
-  [[ "${version}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
-    || fail "ACP_STACK_RELEASE_VERSION must be the Cargo.toml version or a 4-part nightly version, got: ${version}"
-  [[ "${version%.*}" == "${cargo_version}" ]] \
-    || fail "nightly version ${version} does not extend the Cargo.toml version ${cargo_version}"
-fi
+version="${version_line#version = \"}"
+version="${version%\"}"
+[[ -n "${version}" ]] || fail "parsed an empty version from Cargo.toml"
 log "building ${PROJECT} v${version} for: ${TARGETS[*]}"
 
 # cargo-zigbuild compiles with zig but still links the rustup-managed Rust std

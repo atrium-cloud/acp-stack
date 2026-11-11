@@ -508,15 +508,12 @@ fn running_in_container() -> bool {
     railway || Path::new("/.dockerenv").exists()
 }
 
-// Semver core plus an optional nightly component that exists only in tags
-// (v0.1.1.2). FIELD ORDER IS THE SORT ORDER: the derived `Ord` places a nightly
-// after its base release and before the next patch, since None precedes Some.
+// Field order is the sort order of the derived `Ord`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct ReleaseVersion {
     major: u64,
     minor: u64,
     patch: u64,
-    nightly: Option<u64>,
 }
 
 fn is_major_upgrade(current: &str, target: &str) -> bool {
@@ -544,10 +541,6 @@ fn parse_version(value: &str) -> Option<ReleaseVersion> {
     let major = parse_version_component(parts.next()?)?;
     let minor = parse_version_component(parts.next()?)?;
     let patch = parse_version_component(parts.next()?)?;
-    let nightly = match parts.next() {
-        Some(part) => Some(parse_version_component(part)?),
-        None => None,
-    };
     if parts.next().is_some() {
         return None;
     }
@@ -555,7 +548,6 @@ fn parse_version(value: &str) -> Option<ReleaseVersion> {
         major,
         minor,
         patch,
-        nightly,
     })
 }
 

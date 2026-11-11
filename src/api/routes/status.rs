@@ -36,9 +36,7 @@ pub(crate) struct StatusResponse {
 // CONSTANTS
 
 /// Capability names advertised in [`ServerInfo::features`]. Orchestrators
-/// cannot infer capabilities from `version`: nightly builds carry their fourth
-/// component only in the git tag, so a nightly with and one without a feature
-/// both report the same three-part base version. An absent or empty `features`
+/// test membership to gate a capability. An absent or empty `features`
 /// list means none of these capabilities are present.
 pub const FEATURE_NETWORK_PROVIDER_WORKLOAD_ENV: &str = "network-provider-workload-env";
 pub const FEATURE_AGENT_TEST_JSON: &str = "agent-test-json";
@@ -80,9 +78,7 @@ const SERVER_FEATURES: &[&str] = &[
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct ServerInfo {
-    /// Running three-part base version. Not a capability signal: a nightly's
-    /// fourth component lives only in the git tag, so builds with and without
-    /// a feature report the same version. Test `features` membership instead.
+    /// Running release version: its git tag without the leading `v`.
     version: &'static str,
     /// Advertised capability names, currently `network-provider-workload-env`,
     /// `agent-test-json`, `sandbox-mask-files`,

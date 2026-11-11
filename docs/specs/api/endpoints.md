@@ -1215,7 +1215,7 @@ A `running` row is reconciled to `failed` with `error.code = "deps.apply_abandon
 }
 ```
 
-- `features` exists because `version` is not a usable capability signal: a nightly build carries its fourth version component only in the git tag, so a nightly with a feature and one without report the same three-part base version.
+- `version` is the running release version: its git tag without the leading `v`.
 - Orchestrators that gate wire calls or config writes on a capability must test membership in `features`. An absent or empty list means none of the listed capabilities are present.
 - The names are a stable contract:
     - `network-provider-workload-env` covers `[extensions.<name>.workload_env]`
