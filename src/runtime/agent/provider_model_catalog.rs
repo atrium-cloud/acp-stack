@@ -62,11 +62,19 @@ struct CachedProviderModels {
     /// Set by the endpoint probe when the key's account is offered nothing here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     unavailable_at: Option<u64>,
+    /// The key reference name (`api_key_ref` or mapped env var) the probe's verdict was earned with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    key_ref: Option<String>,
 }
 
 impl CachedProviderModels {
     fn is_usable(&self) -> bool {
         self.unavailable_at.is_none() && !self.models.is_empty()
+    }
+
+    /// A verdict earned with another reference, or with none, says nothing about this key.
+    fn earned_with(&self, key_ref: &str) -> bool {
+        self.key_ref.as_deref() == Some(key_ref)
     }
 
     /// A usable or unavailable answer younger than the cache TTL, which the endpoint probe reuses.
@@ -157,6 +165,7 @@ fn record_fetch_failure(home: &Path, provider_id: &str, reason: &str) -> Result<
             last_attempt_at: None,
             last_error: None,
             unavailable_at: None,
+            key_ref: None,
         });
     entry.last_attempt_at = Some(now_secs());
     entry.last_error = Some(reason.to_owned());
@@ -190,7 +199,9 @@ pub async fn refresh_provider_models(
 
     match fetch_provider_models(home, config, &provider.id, &models_url).await {
         Ok(models) => {
-            write_cache_entry(home, &provider.id, &models)?;
+            // The fetch resolved its key through this reference; it never lists without a key.
+            let key_ref = configured_api_key_ref(&config.agent, &provider.id);
+            write_cache_entry(home, &provider.id, &models, key_ref)?;
             Ok(Some(models))
         }
         Err(error) => {
@@ -237,32 +248,31 @@ pub async fn probe_provider_endpoints(
     if !ENDPOINT_VERDICT_AGENT_IDS.contains(&agent.id.as_str()) {
         return;
     }
-    let Some((provider, lanes)) = endpoint_row(agent) else {
+    let Some((_, key_ref, lanes)) = endpoint_row(agent) else {
         return;
     };
     // Without a key every listing answers unauthenticated, which says nothing about an account.
-    let key_ref = configured_api_key_ref(agent, &provider.id);
-    let Some(api_key) = key_ref.and_then(|key_ref| env.get(key_ref)) else {
+    let Some(api_key) = env.get(key_ref) else {
         return;
     };
     let cache = read_cache_file(&cache_path(home)).unwrap_or_default();
     let probes = lanes.iter().filter_map(|lane| {
         let endpoint_id = lane.primary_id();
         let entry = cache.providers.get(endpoint_id);
-        if entry.is_some_and(CachedProviderModels::has_fresh_verdict) {
+        if entry.is_some_and(|entry| entry.earned_with(key_ref) && entry.has_fresh_verdict()) {
             return None;
         }
-        let models_url = resolve_models_url(endpoint_id, lane.models_url.as_deref()?);
-        Some(probe_endpoint(home, endpoint_id, models_url, api_key))
+        let url = resolve_models_url(endpoint_id, lane.models_url.as_deref()?);
+        Some(probe_endpoint(home, endpoint_id, key_ref, url, api_key))
     });
     futures::future::join_all(probes).await;
 }
 
 /// One keyed listing: models mark the endpoint usable, and an empty list, 401 or 403 marks it
 /// unavailable. Any other answer is a fetch failure that leaves the earlier verdict in place.
-async fn probe_endpoint(home: &Path, endpoint_id: &str, models_url: String, api_key: &str) {
+async fn probe_endpoint(home: &Path, endpoint_id: &str, key_ref: &str, url: String, api_key: &str) {
     let timeout = PROVIDER_ENDPOINT_PROBE_TIMEOUT;
-    let listed = match send_models_request(endpoint_id, &models_url, api_key, timeout).await {
+    let listed = match send_models_request(endpoint_id, &url, api_key, timeout).await {
         Ok(response) if PROVIDER_ENDPOINT_REFUSALS.contains(&response.status()) => Ok(Vec::new()),
         Ok(response) => match read_models_payload(endpoint_id, response).await {
             Ok(body) if body["data"].as_array().is_some_and(Vec::is_empty) => Ok(Vec::new()),
@@ -271,7 +281,7 @@ async fn probe_endpoint(home: &Path, endpoint_id: &str, models_url: String, api_
         Err(error) => Err(error),
     };
     let recorded = match listed {
-        Ok(models) => record_listing(home, endpoint_id, models),
+        Ok(models) => record_listing(home, endpoint_id, key_ref, models),
         Err(error) => {
             tracing::warn!(error = %crate::error::report(&error), provider = %endpoint_id, "provider endpoint probe inconclusive");
             record_fetch_failure(home, endpoint_id, &failure_reason(&error))
@@ -283,7 +293,12 @@ async fn probe_endpoint(home: &Path, endpoint_id: &str, models_url: String, api_
 }
 
 /// Models replace the endpoint's entry, clearing its unavailable mark; an empty list sets the mark.
-fn record_listing(home: &Path, endpoint_id: &str, models: Vec<ProviderModel>) -> Result<()> {
+fn record_listing(
+    home: &Path,
+    endpoint_id: &str,
+    key_ref: &str,
+    models: Vec<ProviderModel>,
+) -> Result<()> {
     let path = cache_path(home);
     let mut file = read_cache_file(&path).unwrap_or_default();
     file.version = PROVIDER_MODEL_CACHE_VERSION;
@@ -294,6 +309,7 @@ fn record_listing(home: &Path, endpoint_id: &str, models: Vec<ProviderModel>) ->
         *entry = CachedProviderModels::default();
         (entry.fetched_at, entry.models) = (now_secs(), models);
     }
+    entry.key_ref = Some(key_ref.to_owned());
     write_cache_file(&path, endpoint_id, &file)
 }
 
@@ -302,13 +318,14 @@ fn record_listing(home: &Path, endpoint_id: &str, models: Vec<ProviderModel>) ->
 /// model or subagent model runs on stays. A mark holds until a keyed listing with models or an
 /// invalidation clears it.
 pub fn hidden_provider_endpoints(home: &Path, agent: &AgentConfig) -> Vec<&'static str> {
-    let Some((provider, lanes)) = endpoint_row(agent) else {
+    let Some((provider, key_ref, lanes)) = endpoint_row(agent) else {
         return Vec::new();
     };
     let cache = read_cache_file(&cache_path(home)).unwrap_or_default();
     let (mut marked, mut usable) = (Vec::new(), false);
     for &lane in &lanes {
-        match cache.providers.get(lane.primary_id()) {
+        let entry = cache.providers.get(lane.primary_id());
+        match entry.filter(|entry| entry.earned_with(key_ref)) {
             Some(entry) if entry.unavailable_at.is_some() => marked.push(lane.primary_id()),
             Some(entry) => usable |= entry.is_usable(),
             None => {}
@@ -336,18 +353,19 @@ pub fn hidden_provider_endpoints(home: &Path, agent: &AgentConfig) -> Vec<&'stat
     if usable { marked } else { Vec::new() }
 }
 
-/// The configured mapped provider and the endpoint lanes of its row that share its key env var.
+/// The configured mapped provider, its key reference and the row's lanes sharing its key env var.
 /// A lane with another key would receive the configured key, so it is never probed or hidden.
 fn endpoint_row(
     agent: &AgentConfig,
-) -> Option<(&AgentProviderConfig, Vec<&'static ProviderEnvMapping>)> {
+) -> Option<(&AgentProviderConfig, &str, Vec<&'static ProviderEnvMapping>)> {
     let provider = agent.provider.as_ref()?;
+    let key_ref = configured_api_key_ref(agent, &provider.id)?;
     let key = |id: &str| env_var_for_agent_provider_id(&agent.id, id);
     let row = endpoint_lanes_for_provider_id(&provider.id).iter();
     let lanes: Vec<_> = row
         .filter(|lane| key(lane.primary_id()) == key(&provider.id))
         .collect();
-    (provider.custom.is_none() && !lanes.is_empty()).then_some((provider, lanes))
+    (provider.custom.is_none() && !lanes.is_empty()).then_some((provider, key_ref, lanes))
 }
 
 /// Resolve the API key, fetch the listing endpoint, and parse the payload.
@@ -577,7 +595,12 @@ fn write_cache_file(path: &Path, provider_id: &str, file: &ProviderModelCacheFil
     atomic_write_owner_only(path, body.as_bytes())
 }
 
-fn write_cache_entry(home: &Path, provider_id: &str, models: &[ProviderModel]) -> Result<()> {
+fn write_cache_entry(
+    home: &Path,
+    provider_id: &str,
+    models: &[ProviderModel],
+    key_ref: Option<&str>,
+) -> Result<()> {
     let path = cache_path(home);
     let mut file = read_cache_file(&path).unwrap_or_default();
     file.version = PROVIDER_MODEL_CACHE_VERSION;
@@ -590,6 +613,7 @@ fn write_cache_entry(home: &Path, provider_id: &str, models: &[ProviderModel]) -
             last_attempt_at: None,
             last_error: None,
             unavailable_at: None,
+            key_ref: key_ref.map(str::to_owned),
         },
     );
     write_cache_file(&path, provider_id, &file)
@@ -681,6 +705,7 @@ mod tests {
                     ..Default::default()
                 },
             ],
+            None,
         )
         .expect("write cache");
         assert_eq!(
@@ -779,7 +804,7 @@ mod tests {
             display_name: Some("DeepSeek V4 Flash".to_owned()),
             ..Default::default()
         }];
-        write_cache_entry(home.path(), "openrouter", &models).expect("write cache");
+        write_cache_entry(home.path(), "openrouter", &models, None).expect("write cache");
         assert_eq!(cached_models(home.path(), "openrouter"), Some(models));
         assert_eq!(cached_models(home.path(), "moonshotai"), None);
     }
@@ -797,8 +822,8 @@ mod tests {
             display_name: None,
             ..Default::default()
         }];
-        write_cache_entry(home.path(), "openrouter", &openrouter).expect("write openrouter");
-        write_cache_entry(home.path(), "moonshotai", &moonshot).expect("write moonshot");
+        write_cache_entry(home.path(), "openrouter", &openrouter, None).expect("write openrouter");
+        write_cache_entry(home.path(), "moonshotai", &moonshot, None).expect("write moonshot");
         assert_eq!(cached_models(home.path(), "openrouter"), Some(openrouter));
         assert_eq!(cached_models(home.path(), "moonshotai"), Some(moonshot));
     }
@@ -875,7 +900,7 @@ mod tests {
             display_name: None,
             ..Default::default()
         }];
-        write_cache_entry(home.path(), "zai", &zai_models).expect("write zai");
+        write_cache_entry(home.path(), "zai", &zai_models, None).expect("write zai");
         assert_eq!(
             cached_models(home.path(), "openrouter"),
             Some(vec![ProviderModel {
@@ -895,7 +920,7 @@ mod tests {
             display_name: None,
             ..Default::default()
         }];
-        write_cache_entry(home.path(), "openrouter", &models).expect("write cache");
+        write_cache_entry(home.path(), "openrouter", &models, None).expect("write cache");
         record_fetch_failure(home.path(), "openrouter", "boom").expect("record failure");
         assert_eq!(cached_models(home.path(), "openrouter"), Some(models));
         assert_eq!(
@@ -907,7 +932,7 @@ mod tests {
     #[test]
     fn successful_write_clears_failure_and_unavailable_markers() {
         let home = temp_home();
-        record_listing(home.path(), "openrouter", Vec::new()).expect("mark unavailable");
+        record_listing(home.path(), "openrouter", "KEY", Vec::new()).expect("mark unavailable");
         record_fetch_failure(home.path(), "openrouter", "boom").expect("record failure");
         assert_eq!(
             recent_failure_reason(home.path(), "openrouter"),
@@ -918,10 +943,11 @@ mod tests {
             display_name: None,
             ..Default::default()
         }];
-        write_cache_entry(home.path(), "openrouter", &models).expect("write cache");
+        write_cache_entry(home.path(), "openrouter", &models, Some("KEY")).expect("write cache");
         assert_eq!(recent_failure_reason(home.path(), "openrouter"), None);
         let file = read_cache_file(&cache_path(home.path())).expect("cache");
         assert!(file.providers["openrouter"].is_usable());
+        assert!(file.providers["openrouter"].earned_with("KEY"));
     }
 
     #[test]
@@ -950,9 +976,9 @@ mod tests {
             display_name: None,
             ..Default::default()
         }];
-        write_cache_entry(home.path(), "openrouter", &openrouter).expect("write openrouter");
+        write_cache_entry(home.path(), "openrouter", &openrouter, None).expect("write openrouter");
         record_fetch_failure(home.path(), "openrouter", "boom").expect("record failure");
-        write_cache_entry(home.path(), "moonshotai", &moonshot).expect("write moonshot");
+        write_cache_entry(home.path(), "moonshotai", &moonshot, None).expect("write moonshot");
 
         invalidate_provider_models(home.path(), "openrouter").expect("invalidate");
 
@@ -974,6 +1000,7 @@ mod tests {
                 display_name: None,
                 ..Default::default()
             }],
+            None,
         )
         .expect("write moonshot");
         invalidate_provider_models(home.path(), "openrouter").expect("unknown entry is fine");
@@ -1056,7 +1083,7 @@ mod tests {
             ("500", "unknown"),
         ] {
             let url = server.url(&format!("/{answer}"));
-            probe_endpoint(home.path(), answer, url, "unused-test-key").await;
+            probe_endpoint(home.path(), answer, "TEST_KEY", url, "unused-test-key").await;
             let file = read_cache_file(&cache_path(home.path())).expect("cache written");
             let entry = &file.providers[answer];
             let recorded = match (entry.is_usable(), entry.unavailable_at, &entry.last_error) {
@@ -1077,11 +1104,18 @@ mod tests {
         let provider = agent.provider.as_mut().expect("provider");
         provider.id = "opencode".to_owned();
         provider.model = None;
+        let key_ref = "OPENCODE_API_KEY";
+        provider.api_key_ref = Some(key_ref.to_owned());
         let hidden = |agent: &AgentConfig| hidden_provider_endpoints(home.path(), agent);
         let listed = parse_models_response("opencode", &json!({ "data": [{ "id": "glm-5.2" }] }));
-        record_listing(home.path(), "opencode", listed.expect("models")).expect("usable");
-        record_listing(home.path(), "opencode-go", Vec::new()).expect("unavailable");
+        record_listing(home.path(), "opencode", key_ref, listed.expect("models")).expect("usable");
+        record_listing(home.path(), "opencode-go", key_ref, Vec::new()).expect("unavailable");
         assert_eq!(hidden(&agent), ["opencode-go"]);
+
+        // A mark earned with another key reference does not hide anything for this one.
+        agent.provider.as_mut().expect("provider").api_key_ref = Some("OPENCODE_WORK_KEY".into());
+        assert!(hidden(&agent).is_empty());
+        agent.provider.as_mut().expect("provider").api_key_ref = Some(key_ref.to_owned());
 
         // With no model, the configured provider's own lane stays.
         agent.provider.as_mut().expect("provider").id = "opencode-go".to_owned();
@@ -1093,7 +1127,7 @@ mod tests {
         assert!(hidden(&agent).is_empty());
 
         agent.provider.as_mut().expect("provider").model = None;
-        record_listing(home.path(), "opencode", Vec::new()).expect("unavailable");
+        record_listing(home.path(), "opencode", key_ref, Vec::new()).expect("unavailable");
         assert!(hidden(&agent).is_empty());
 
         // Any id of the row drops every endpoint's entry.

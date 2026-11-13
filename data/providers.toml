@@ -230,7 +230,7 @@ name = "OpenCode"
 agents = ["pi", "opencode", "hermes", "kimi"]
 base_url = "https://opencode.ai/inference/v1"
 
-# OpenCode Zen and Go route some models over Anthropic's wire; per-model wire
+# OpenCode and OpenCode Go route some models over Anthropic's wire; per-model wire
 # negotiation on those is between Hermes and the provider, so the managed
 # lane declares the baseline transport.
 [providers.kimi]
@@ -240,7 +240,7 @@ provider_type = "openai"
 # {"data":[{"id":...}]} shape, served even unauthenticated.
 [[providers.endpoints]]
 id = "opencode"
-name = "OpenCode Zen"
+name = "OpenCode"
 base_url = "https://opencode.ai/inference/v1"
 models_url = "https://opencode.ai/inference/v1/models"
 provider_ids = { opencode-zen = "hermes" }

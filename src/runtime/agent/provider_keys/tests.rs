@@ -156,16 +156,16 @@ fn provider_metadata_includes_models_dev_display_names() {
 }
 
 /// The OpenCode row's ids each answer from their own endpoint: `opencode` and its Hermes alias
-/// from Zen, `opencode-go` from Go.
+/// from OpenCode, `opencode-go` from OpenCode Go.
 #[test]
 fn opencode_ids_answer_from_their_endpoint() {
-    const ZEN: &str = "https://opencode.ai/inference/v1";
+    const OPENCODE: &str = "https://opencode.ai/inference/v1";
     const GO: &str = "https://opencode.ai/inference/go/v1";
-    let zen = ("OpenCode Zen", ZEN, "opencode-zen", "OPENCODE_ZEN_API_KEY");
+    let opencode = ("OpenCode", OPENCODE, "opencode-zen", "OPENCODE_ZEN_API_KEY");
     let go = ("OpenCode Go", GO, "opencode-go", "OPENCODE_GO_API_KEY");
     for (provider_id, (name, base, hermes_id, hermes_env)) in [
-        ("opencode", zen),
-        ("opencode-zen", zen),
+        ("opencode", opencode),
+        ("opencode-zen", opencode),
         ("opencode-go", go),
     ] {
         assert_eq!(provider_name_for_provider_id(provider_id), Some(name));
@@ -187,7 +187,7 @@ fn opencode_ids_answer_from_their_endpoint() {
         );
     }
     assert_eq!(
-        provider_id_for_agent_vendor_base_url("kimi", ZEN),
+        provider_id_for_agent_vendor_base_url("kimi", OPENCODE),
         Some("opencode")
     );
     assert_eq!(
@@ -211,8 +211,8 @@ fn opencode_ids_answer_from_their_endpoint() {
     assert_eq!(
         hermes,
         [
-            ("opencode", zen.0, Some("opencode-zen")),
-            ("opencode-zen", zen.0, None),
+            ("opencode", opencode.0, Some("opencode-zen")),
+            ("opencode-zen", opencode.0, None),
             ("opencode-go", go.0, None),
         ]
     );
@@ -648,7 +648,7 @@ base_url = "https://api.vendor.example/v1"
 {row_fields}
 [[providers.endpoints]]
 id = "vendor"
-name = "Vendor Zen"
+name = "Vendor"
 base_url = "https://api.vendor.example/v1"
 "#
         )

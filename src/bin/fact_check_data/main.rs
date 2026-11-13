@@ -482,7 +482,7 @@ fn check_agent_env_doc(
 }
 
 fn check_opencode_doc(body: &str, verified: &mut BTreeSet<String>, report: &mut Report) {
-    for (provider_id, label) in [("opencode", "OpenCode Zen"), ("opencode-go", "OpenCode Go")] {
+    for (provider_id, label) in [("opencode", "OpenCode"), ("opencode-go", "OpenCode Go")] {
         if body.contains(label) {
             verified.insert(provider_id.to_owned());
             report.ok(format!("OpenCode docs verify `{label}`"));

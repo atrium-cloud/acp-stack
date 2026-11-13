@@ -339,8 +339,10 @@ mod tests {
         let cache = crate::runtime::agent::provider_model_catalog::cache_path(home.path());
         std::fs::create_dir_all(cache.parent().expect("cache dir")).expect("create cache dir");
         let verdicts = r#"{"version": 2, "providers": {
-            "opencode": {"fetched_at": 1, "models": [{"value": "glm-5.2"}]},
-            "opencode-go": {"fetched_at": 0, "models": [], "unavailable_at": 1}}}"#;
+            "opencode": {"fetched_at": 1, "models": [{"value": "glm-5.2"}],
+                "key_ref": "OPENCODE_API_KEY"},
+            "opencode-go": {"fetched_at": 0, "models": [], "unavailable_at": 1,
+                "key_ref": "OPENCODE_API_KEY"}}}"#;
         std::fs::write(&cache, verdicts).expect("write verdicts");
         assert_eq!(hidden().as_deref(), Some("opencode-go"));
     }
