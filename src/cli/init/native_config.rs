@@ -216,7 +216,8 @@ pub(super) fn apply_for_init(
                 })?;
             // The model is validated against the advertised list, so the probe applies none: a
             // reduced post-set option list could reject a model the agent does offer.
-            let discovered = fetch_session_config(home, &prepared.canonical_config, None)?;
+            let serve = super::prompt::hosted_driver_active();
+            let discovered = fetch_session_config(home, &prepared.canonical_config, None, serve)?;
             validate_advertised_value(
                 &discovered.response,
                 AgentSessionConfigCategory::Model,

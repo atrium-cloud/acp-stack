@@ -1406,7 +1406,8 @@ fn fetch_session_config_with_retry(
     report: &dyn Fn(&str),
 ) -> Result<DiscoveredSessionConfig> {
     retry_discovery_probe(
-        |_| fetch_session_config(home, config, model),
+        // A hosted init runs inside `acps init serve`, so its discovery probes like a serve's.
+        |_| fetch_session_config(home, config, model, prompt::hosted_driver_active()),
         |attempt, error, delay| {
             tracing::warn!(
                 agent = %config.agent.id,

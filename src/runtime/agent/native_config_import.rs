@@ -40,9 +40,10 @@ use crate::runtime::agent::agent_headless_config::{
 use crate::runtime::agent::config_io::WorkloadHome;
 use crate::runtime::agent::mcp::validate_mcp_secret_refs;
 use crate::runtime::agent::provider_keys::{
-    agent_provider_id_for_provider_id, apply_catalog_mapped_agent_provider,
-    apply_mapped_agent_provider, canonical_provider_id_for_agent_native_id,
-    kimi_profile_for_provider_id, provider_id_for_agent_vendor_base_url,
+    agent_provider_id_for_provider_id, agent_provider_ids_for_provider_row,
+    apply_catalog_mapped_agent_provider, apply_mapped_agent_provider,
+    canonical_provider_id_for_agent_native_id, kimi_profile_for_provider_id,
+    provider_id_for_agent_vendor_base_url,
 };
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::secrets::SecretStore;
@@ -502,7 +503,15 @@ pub fn prepare_native_config_import(
                         &effective_provider.id,
                     )
                     .unwrap_or(&effective_provider.id);
-                    if effective_native != provider_hint {
+                    // A value qualified with another endpoint of the configured row runs on that
+                    // endpoint; a bare value runs on the configured one, so it must match it.
+                    let row = agent_provider_ids_for_provider_row(
+                        &candidate.agent.id,
+                        &effective_provider.id,
+                    );
+                    let names_row_lane = row.contains(&provider_hint.as_str())
+                        && value.starts_with(&format!("{provider_hint}/"));
+                    if effective_native != provider_hint && !names_row_lane {
                         return Err(native_error("agent.native_config_model_provider_mismatch"));
                     }
                 }

@@ -698,7 +698,7 @@ fn read_agent_new_session_response(
     config: &Config,
     model: Option<&str>,
 ) -> Result<agent_client_protocol::v1::schema::NewSessionResponse> {
-    fetch_session_config(home, config, model).map(|discovered| discovered.response)
+    fetch_session_config(home, config, model, false).map(|discovered| discovered.response)
 }
 
 /// The advertisement describing `model`, which the probe selects before reading the options.
@@ -707,7 +707,7 @@ fn read_agent_applied_session_response(
     config: &Config,
     model: Option<&str>,
 ) -> Result<agent_client_protocol::v1::schema::NewSessionResponse> {
-    fetch_session_config(home, config, model).map(|discovered| discovered.applied())
+    fetch_session_config(home, config, model, false).map(|discovered| discovered.applied())
 }
 
 #[cfg(test)]

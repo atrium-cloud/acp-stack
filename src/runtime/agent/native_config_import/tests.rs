@@ -151,6 +151,35 @@ fn default_selection_preserves_canonical_provider_and_selected_values_replace_it
         error.error_code(),
         "agent.native_config_model_provider_mismatch"
     );
+
+    // A Pi model naming the configured row's other endpoint passes the same guard.
+    let mut current = opencode_config("opencode", "opencode/old-model");
+    current.agent.id = "pi".to_owned();
+    let settings = r#"{"defaultProvider":"opencode-go","defaultModel":"glm-5.2"}"#;
+    let mut inspected =
+        inspect_native_config("pi", Some("settings.json"), settings).expect("inspect pi");
+    let selection = NativeConfigSelection {
+        revision: inspected.revision().to_owned(),
+        selected_managed_field_ids: vec!["model".to_owned()],
+        executable_settings_acknowledged: false,
+    };
+    prepare_native_config_import(&inspected, &selection, &current, Path::new("/tmp/home"))
+        .expect("another endpoint of the configured row");
+
+    // A bare value, as Hermes stores it, would run on the configured endpoint instead.
+    let (value, provider_hint) = ("glm-5.2".to_owned(), Some("opencode-go".to_owned()));
+    let bare = CandidateValue::Model {
+        value,
+        provider_hint,
+    };
+    inspected.candidates.insert("model".to_owned(), bare);
+    let error = prepare_native_config_import(&inspected, &selection, &current, Path::new("/"))
+        .err()
+        .expect("a bare model under another lane");
+    assert_eq!(
+        error.error_code(),
+        "agent.native_config_model_provider_mismatch"
+    );
 }
 
 /// The agent switch keeps the model when the configured provider is named again; a provider-only

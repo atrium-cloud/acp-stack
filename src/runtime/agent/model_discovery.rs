@@ -29,7 +29,7 @@ use crate::runtime::agent::provider_keys::{
     is_claude_code_profiled_provider, models_url_for_provider_id, resolve_agent_environment,
     resolve_agent_environment_without_secrets,
 };
-use crate::runtime::agent::provider_model_catalog::cached_models;
+use crate::runtime::agent::provider_model_catalog::{cached_models, probe_provider_endpoints};
 use crate::secrets::SecretStore;
 
 /// Default cap for one provisional discovery session, bounding an agent that
@@ -257,21 +257,25 @@ pub fn catalog_model_values(home: &Path, config: &Config) -> Result<Vec<String>>
 /// `session/new` response. `model` is applied in the probe session so the
 /// advertised per-model options describe that model rather than the harness's
 /// boot model; pass `configured_model_value(&config.agent)` when the caller has
-/// no more specific choice.
+/// no more specific choice. `probe_endpoints` runs the endpoint probe first; a serve process
+/// passes true, and a CLI process passes false and does not probe.
 pub fn fetch_session_config(
     home: &Path,
     config: &Config,
     model: Option<&str>,
+    probe_endpoints: bool,
 ) -> Result<DiscoveredSessionConfig> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|source| StackError::ServeIo { source })?;
-    runtime.block_on(fetch_session_config_with_timeout(
+    let timeout = DEFAULT_MODELS_DISCOVERY_TIMEOUT;
+    runtime.block_on(discover_session_config(
         home,
         config,
         model,
-        DEFAULT_MODELS_DISCOVERY_TIMEOUT,
+        timeout,
+        probe_endpoints,
     ))
 }
 
@@ -312,14 +316,24 @@ impl DiscoveredSessionConfig {
     }
 }
 
-/// Async variant used by the HTTP API. Timeout, request errors, and success all
-/// flow through `AcpBridge::terminate_probe` so the provisional child is reaped
-/// before the call returns.
+/// Async variant used by the HTTP API, which runs in a serve process and so probes the provider's
+/// endpoints first. Timeout, request errors, and success all flow through
+/// `AcpBridge::terminate_probe` so the provisional child is reaped before the call returns.
 pub async fn fetch_session_config_with_timeout(
     home: &Path,
     config: &Config,
     model: Option<&str>,
     timeout_duration: Duration,
+) -> Result<DiscoveredSessionConfig> {
+    discover_session_config(home, config, model, timeout_duration, true).await
+}
+
+async fn discover_session_config(
+    home: &Path,
+    config: &Config,
+    model: Option<&str>,
+    timeout_duration: Duration,
+    probe_endpoints: bool,
 ) -> Result<DiscoveredSessionConfig> {
     if let Some(path) = fixture_path(FIXTURE_CONFIG_OPTIONS_ENV) {
         let body = std::fs::read_to_string(&path).map_err(|source| StackError::ConfigRead {
@@ -360,6 +374,9 @@ pub async fn fetch_session_config_with_timeout(
     }
 
     let env = resolve_agent_env(home, config)?;
+    if probe_endpoints {
+        probe_provider_endpoints(home, &config.agent, &env).await;
+    }
     let cwd = config
         .agent
         .cwd
@@ -898,7 +915,7 @@ mod tests {
     fn a_discovery_session_is_refused_before_the_model_less_agent_is_spawned() {
         let home = tempfile::tempdir().expect("tempdir");
 
-        let error = fetch_session_config(home.path(), &goose_config(None), None)
+        let error = fetch_session_config(home.path(), &goose_config(None), None, false)
             .expect_err("a model-less goose must never be spawned for discovery");
 
         assert!(

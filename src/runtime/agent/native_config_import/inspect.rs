@@ -317,11 +317,11 @@ pub(super) fn inspect_pi(content: &str, revision: String) -> Result<InspectedNat
         InspectionBuilder::new("pi", NativeConfigFormat::Json, revision, content.len());
 
     // The adapter advertises each model as `<defaultProvider>/<defaultModel>`, so that is the
-    // value validated and stored.
-    let model_prefix = root
+    // value validated and stored; the native provider id is the hint apply checks it against.
+    let default_provider = root
         .get("defaultProvider")
         .and_then(JsonValue::as_str)
-        .map(|provider| format!("{provider}/"));
+        .map(str::to_owned);
     if let Some(value) = root.remove("defaultProvider") {
         builder.add_string_candidate(
             "provider",
@@ -342,8 +342,11 @@ pub(super) fn inspect_pi(content: &str, revision: String) -> Result<InspectedNat
             value,
             |value| {
                 Some(CandidateValue::Model {
-                    value: format!("{}{value}", model_prefix.as_deref().unwrap_or_default()),
-                    provider_hint: None,
+                    value: match &default_provider {
+                        Some(provider) => format!("{provider}/{value}"),
+                        None => value.to_owned(),
+                    },
+                    provider_hint: default_provider.clone(),
                 })
             },
         );

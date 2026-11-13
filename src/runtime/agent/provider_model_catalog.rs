@@ -299,44 +299,54 @@ fn record_listing(home: &Path, endpoint_id: &str, models: Vec<ProviderModel>) ->
 
 /// Endpoint ids of the configured provider's row to leave out of the agent's model list: each
 /// marked unavailable while another endpoint of the row is usable. An endpoint the configured
-/// model or subagent model runs on stays.
+/// model or subagent model runs on stays. A mark holds until a keyed listing with models or an
+/// invalidation clears it.
 pub fn hidden_provider_endpoints(home: &Path, agent: &AgentConfig) -> Vec<&'static str> {
     let Some((provider, lanes)) = endpoint_row(agent) else {
         return Vec::new();
     };
     let cache = read_cache_file(&cache_path(home)).unwrap_or_default();
     let (mut marked, mut usable) = (Vec::new(), false);
-    for lane in lanes {
+    for &lane in &lanes {
         match cache.providers.get(lane.primary_id()) {
             Some(entry) if entry.unavailable_at.is_some() => marked.push(lane.primary_id()),
             Some(entry) => usable |= entry.is_usable(),
             None => {}
         }
     }
-    let mut configured = vec![(provider, &agent.model), (provider, &provider.model)];
+    let mut configured = vec![(provider, vec![&agent.model, &provider.model])];
     let subagent = agent.subagent.as_ref().filter(|config| !config.disabled);
     if let Some(other) = subagent.and_then(|subagent| subagent.provider.as_ref()) {
-        configured.push((other, &other.model));
+        configured.push((other, vec![&other.model]));
     }
-    let lane_of = |id: &str| lanes.iter().find(|lane| lane.contains_id(id));
-    for (owner, model) in configured {
-        let (Some(owner_lane), Some(model)) = (lane_of(&owner.id), model.as_deref()) else {
+    let lane_of = |id: &str| lanes.iter().copied().find(|lane| lane.contains_id(id));
+    for (owner, models) in configured {
+        let Some(owner_lane) = lane_of(&owner.id) else {
             continue;
         };
-        // A model's `<id>/` prefix names its endpoint; a bare model runs on its provider's.
-        let (prefix, _) = model.split_once('/').unwrap_or_default();
-        let kept = lane_of(prefix).unwrap_or(owner_lane).primary_id();
-        marked.retain(|endpoint_id| *endpoint_id != kept);
+        // A model's `<id>/` prefix names its endpoint; a bare model, or none, runs on its provider's.
+        let mut kept: Vec<_> = (models.into_iter().flatten())
+            .map(|model| lane_of(model.split_once('/').unwrap_or_default().0).unwrap_or(owner_lane))
+            .collect();
+        if kept.is_empty() {
+            kept.push(owner_lane);
+        }
+        marked.retain(|endpoint_id| kept.iter().all(|lane| lane.primary_id() != *endpoint_id));
     }
     if usable { marked } else { Vec::new() }
 }
 
-/// The configured mapped provider and its row's endpoint lanes, for a row with endpoints.
+/// The configured mapped provider and the endpoint lanes of its row that share its key env var.
+/// A lane with another key would receive the configured key, so it is never probed or hidden.
 fn endpoint_row(
     agent: &AgentConfig,
-) -> Option<(&AgentProviderConfig, &'static [ProviderEnvMapping])> {
+) -> Option<(&AgentProviderConfig, Vec<&'static ProviderEnvMapping>)> {
     let provider = agent.provider.as_ref()?;
-    let lanes = endpoint_lanes_for_provider_id(&provider.id);
+    let key = |id: &str| env_var_for_agent_provider_id(&agent.id, id);
+    let row = endpoint_lanes_for_provider_id(&provider.id).iter();
+    let lanes: Vec<_> = row
+        .filter(|lane| key(lane.primary_id()) == key(&provider.id))
+        .collect();
     (provider.custom.is_none() && !lanes.is_empty()).then_some((provider, lanes))
 }
 
@@ -571,10 +581,7 @@ fn write_cache_entry(home: &Path, provider_id: &str, models: &[ProviderModel]) -
     let path = cache_path(home);
     let mut file = read_cache_file(&path).unwrap_or_default();
     file.version = PROVIDER_MODEL_CACHE_VERSION;
-    // A fresh entry drops the failure markers, clearing the recorded backoff. The unavailable mark
-    // stays: only the endpoint probe sets or clears it.
-    let previous = file.providers.get(provider_id);
-    let unavailable_at = previous.and_then(|entry| entry.unavailable_at);
+    // A fresh entry drops the failure markers and the unavailable mark, clearing the backoff.
     file.providers.insert(
         provider_id.to_owned(),
         CachedProviderModels {
@@ -582,7 +589,7 @@ fn write_cache_entry(home: &Path, provider_id: &str, models: &[ProviderModel]) -
             models: models.to_vec(),
             last_attempt_at: None,
             last_error: None,
-            unavailable_at,
+            unavailable_at: None,
         },
     );
     write_cache_file(&path, provider_id, &file)
@@ -898,8 +905,9 @@ mod tests {
     }
 
     #[test]
-    fn successful_write_clears_failure_marker() {
+    fn successful_write_clears_failure_and_unavailable_markers() {
         let home = temp_home();
+        record_listing(home.path(), "openrouter", Vec::new()).expect("mark unavailable");
         record_fetch_failure(home.path(), "openrouter", "boom").expect("record failure");
         assert_eq!(
             recent_failure_reason(home.path(), "openrouter"),
@@ -912,6 +920,8 @@ mod tests {
         }];
         write_cache_entry(home.path(), "openrouter", &models).expect("write cache");
         assert_eq!(recent_failure_reason(home.path(), "openrouter"), None);
+        let file = read_cache_file(&cache_path(home.path())).expect("cache");
+        assert!(file.providers["openrouter"].is_usable());
     }
 
     #[test]
@@ -1063,6 +1073,7 @@ mod tests {
     fn hidden_endpoints_need_a_usable_sibling_and_spare_the_configured_model() {
         let home = temp_home();
         let mut agent = codex_openrouter_config().agent;
+        agent.id = "pi".to_owned();
         let provider = agent.provider.as_mut().expect("provider");
         provider.id = "opencode".to_owned();
         provider.model = None;
@@ -1071,6 +1082,11 @@ mod tests {
         record_listing(home.path(), "opencode", listed.expect("models")).expect("usable");
         record_listing(home.path(), "opencode-go", Vec::new()).expect("unavailable");
         assert_eq!(hidden(&agent), ["opencode-go"]);
+
+        // With no model, the configured provider's own lane stays.
+        agent.provider.as_mut().expect("provider").id = "opencode-go".to_owned();
+        assert!(hidden(&agent).is_empty());
+        agent.provider.as_mut().expect("provider").id = "opencode".to_owned();
 
         let provider = agent.provider.as_mut().expect("provider");
         provider.model = Some("opencode-go/glm-5.2".to_owned());
