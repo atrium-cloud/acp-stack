@@ -48,6 +48,13 @@
 # `{"data": [{"id": ..., "name"?: ...}]}`. It backs live model-catalog
 # fetches; providers whose listing API differs simply omit the field. Only
 # declare it after a verified live fetch against the endpoint.
+#
+# `[[providers.endpoints]]` splits a row whose ids share one vendor and key
+# across that vendor's endpoints. Each endpoint carries its own `id`, `name`,
+# `base_url`, `models_url`, `provider_ids`, and `api_key_env_vars`, meaning
+# what the row-level fields mean. A row with endpoints leaves the last three
+# unset at row level and repeats its first endpoint's `base_url`. Every row id
+# belongs to exactly one endpoint: its `id` or a key of its `provider_ids`.
 
 [[providers]]
 id = ["anthropic"]
@@ -217,42 +224,34 @@ name = "Z.AI Coding Plan (China)"
 agents = ["pi"]
 
 [[providers]]
-id = ["opencode", "opencode-zen"]
-name = "OpenCode Models"
+id = ["opencode", "opencode-zen", "opencode-go"]
+name = "OpenCode"
 # does not appear to have a status page
 agents = ["pi", "opencode", "hermes", "kimi"]
 base_url = "https://opencode.ai/inference/v1"
-# Verified 2026-10-15: 200 with the standard {"data":[{"id":...}]} shape,
-# served even unauthenticated.
-models_url = "https://opencode.ai/inference/v1/models"
 
-[providers.provider_ids]
-opencode-zen = "hermes"
-
-[providers.api_key_env_vars]
-hermes = "OPENCODE_ZEN_API_KEY"
-
-# OpenCode Models/Go route some models over Anthropic's wire; per-model wire
+# OpenCode Zen and Go route some models over Anthropic's wire; per-model wire
 # negotiation on those is between Hermes and the provider, so the managed
 # lane declares the baseline transport.
 [providers.kimi]
 provider_type = "openai"
 
-[[providers]]
-id = ["opencode-go"]
+# Both models_url endpoints verified 2026-10-15: 200 with the standard
+# {"data":[{"id":...}]} shape, served even unauthenticated.
+[[providers.endpoints]]
+id = "opencode"
+name = "OpenCode Zen"
+base_url = "https://opencode.ai/inference/v1"
+models_url = "https://opencode.ai/inference/v1/models"
+provider_ids = { opencode-zen = "hermes" }
+api_key_env_vars = { hermes = "OPENCODE_ZEN_API_KEY" }
+
+[[providers.endpoints]]
+id = "opencode-go"
 name = "OpenCode Go"
-# does not appear to have a status page
-agents = ["pi", "opencode", "hermes", "kimi"]
 base_url = "https://opencode.ai/inference/go/v1"
-# Verified 2026-10-15: 200 with the standard {"data":[{"id":...}]} shape,
-# served even unauthenticated.
 models_url = "https://opencode.ai/inference/go/v1/models"
-
-[providers.api_key_env_vars]
-hermes = "OPENCODE_GO_API_KEY"
-
-[providers.kimi]
-provider_type = "openai"
+api_key_env_vars = { hermes = "OPENCODE_GO_API_KEY" }
 
 [[providers]]
 id = ["radius"]

@@ -112,6 +112,28 @@ pub struct ProviderEnvMapping {
     pub claude_code: Option<ClaudeCodeProviderProfile>,
     #[serde(default)]
     pub kimi: Option<KimiProviderProfile>,
+    /// Endpoints of one vendor that share the row's key; each row id belongs to exactly one.
+    #[serde(default)]
+    pub endpoints: Vec<ProviderEndpoint>,
+    /// Each endpoint as a row of its own, built at load so lookups can hand out `'static` borrows.
+    #[serde(skip)]
+    lanes: Vec<ProviderEnvMapping>,
+}
+
+/// One endpoint of a provider row; each field means what the row-level field means on a row
+/// without endpoints.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ProviderEndpoint {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub models_url: Option<String>,
+    #[serde(default)]
+    pub provider_ids: BTreeMap<String, String>,
+    #[serde(default)]
+    pub api_key_env_vars: BTreeMap<String, String>,
 }
 
 /// Claude Code-specific headless provisioning metadata for one provider. The env-var lists are
@@ -162,6 +184,43 @@ impl ProviderEnvMapping {
 
     fn contains_id(&self, provider_id: &str) -> bool {
         self.id.iter().any(|id| id == provider_id)
+    }
+
+    /// The rows lookups answer from: this row, or one per endpoint.
+    pub fn lanes(&self) -> &[ProviderEnvMapping] {
+        if self.endpoints.is_empty() {
+            std::slice::from_ref(self)
+        } else {
+            &self.lanes
+        }
+    }
+
+    fn lane(&self, provider_id: &str) -> Option<&ProviderEnvMapping> {
+        self.lanes()
+            .iter()
+            .find(|lane| lane.contains_id(provider_id))
+    }
+
+    /// The endpoint id leads each lane's ids, followed by the row ids its `provider_ids` claim.
+    fn endpoint_lanes(&self) -> Vec<ProviderEnvMapping> {
+        self.endpoints
+            .iter()
+            .map(|endpoint| ProviderEnvMapping {
+                id: std::iter::once(&endpoint.id)
+                    .chain(self.id.iter().filter(|id| {
+                        **id != endpoint.id && endpoint.provider_ids.contains_key(*id)
+                    }))
+                    .cloned()
+                    .collect(),
+                name: endpoint.name.clone(),
+                base_url: endpoint.base_url.clone(),
+                models_url: endpoint.models_url.clone(),
+                provider_ids: endpoint.provider_ids.clone(),
+                api_key_env_vars: endpoint.api_key_env_vars.clone(),
+                endpoints: Vec::new(),
+                ..self.clone()
+            })
+            .collect()
     }
 
     fn agent_native_provider_id(&self, agent_id: &str) -> Option<&str> {
@@ -223,12 +282,7 @@ impl ProviderKeyMapping {
             toml::from_str(body).map_err(|source| StackError::RegistryLoad {
                 reason: format!("provider mapping TOML is invalid: {source}"),
             })?;
-        let mapping = Self {
-            api_keys: raw.api_keys,
-            providers: raw.providers,
-        };
-        mapping.validate()?;
-        Ok(mapping)
+        Self::new(raw.api_keys, raw.providers)
     }
 
     pub fn from_toml_parts(env_vars_body: &str, providers_body: &str) -> Result<Self> {
@@ -240,9 +294,19 @@ impl ProviderKeyMapping {
             toml::from_str(providers_body).map_err(|source| StackError::RegistryLoad {
                 reason: format!("provider mapping TOML is invalid: {source}"),
             })?;
+        Self::new(env_vars.api_keys, providers.providers)
+    }
+
+    fn new(
+        api_keys: Vec<ApiKeyProviderMapping>,
+        mut providers: Vec<ProviderEnvMapping>,
+    ) -> Result<Self> {
+        for provider in &mut providers {
+            provider.lanes = provider.endpoint_lanes();
+        }
         let mapping = Self {
-            api_keys: env_vars.api_keys,
-            providers: providers.providers,
+            api_keys,
+            providers,
         };
         mapping.validate()?;
         Ok(mapping)
@@ -277,10 +341,11 @@ impl ProviderKeyMapping {
             })
     }
 
+    /// The lane answering for `provider_id`: its endpoint, or its whole row.
     fn provider_mapping(&self, provider_id: &str) -> Option<&ProviderEnvMapping> {
         self.providers
             .iter()
-            .find(|mapping| mapping.contains_id(provider_id))
+            .find_map(|mapping| mapping.lane(provider_id))
     }
 
     fn validate(&self) -> Result<()> {
@@ -325,8 +390,11 @@ impl ProviderKeyMapping {
             }
         }
 
+        for row in &self.providers {
+            Self::validate_endpoints(row)?;
+        }
         let mut provider_overrides = HashSet::new();
-        for mapping in &self.providers {
+        for mapping in self.providers.iter().flat_map(ProviderEnvMapping::lanes) {
             if mapping.id.is_empty() {
                 return provider_mapping_error("providers.id must not be empty".to_owned());
             }
@@ -499,6 +567,50 @@ impl ProviderKeyMapping {
             }
         }
 
+        Ok(())
+    }
+
+    /// A row with endpoints splits its ids among them; the per-lane checks then run on each.
+    fn validate_endpoints(row: &ProviderEnvMapping) -> Result<()> {
+        let Some(first) = row.endpoints.first() else {
+            return Ok(());
+        };
+        for endpoint in &row.endpoints {
+            if !row.contains_id(&endpoint.id) {
+                return provider_mapping_error(format!(
+                    "provider endpoint `{}` is not one of its row's ids",
+                    endpoint.id
+                ));
+            }
+        }
+        let primary_id = row.primary_id();
+        validate_tokens("providers.id".to_owned(), &row.id)?;
+        validate_token(&format!("providers.{primary_id}.name"), &row.name)?;
+        if row.models_url.is_some()
+            || !row.provider_ids.is_empty()
+            || !row.api_key_env_vars.is_empty()
+        {
+            return provider_mapping_error(format!(
+                "provider `{primary_id}` sets models_url, provider_ids or api_key_env_vars beside endpoints; each endpoint declares its own"
+            ));
+        }
+        if row.base_url != first.base_url {
+            return provider_mapping_error(format!(
+                "provider `{primary_id}` base_url must equal its first endpoint's"
+            ));
+        }
+        for id in &row.id {
+            let claims = row
+                .endpoints
+                .iter()
+                .filter(|endpoint| endpoint.id == *id || endpoint.provider_ids.contains_key(id))
+                .count();
+            if claims != 1 {
+                return provider_mapping_error(format!(
+                    "provider `{primary_id}` id `{id}` is claimed by {claims} endpoints; each id belongs to exactly one"
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -752,7 +864,7 @@ pub fn kimi_profile_for_provider_id(provider_id: &str) -> Option<&'static KimiPr
         .and_then(|provider| provider.kimi.as_ref())
 }
 
-/// The primary id of the first row `agent_id` runs whose vendor base equals `base_url`; a
+/// The primary id of the first lane `agent_id` runs whose vendor base equals `base_url`; a
 /// trailing slash on either side does not distinguish two endpoints.
 pub fn provider_id_for_agent_vendor_base_url(
     agent_id: &str,
@@ -765,6 +877,7 @@ pub fn provider_id_for_agent_vendor_base_url(
     ProviderKeyMapping::load_embedded()
         .providers
         .iter()
+        .flat_map(ProviderEnvMapping::lanes)
         .find(|provider| {
             provider
                 .vendor_base_url(agent_id)
@@ -849,7 +962,7 @@ pub fn providers_for_agent(agent_id: &str) -> Vec<AgentProviderSummary> {
     let mapping = ProviderKeyMapping::load_embedded();
     let mut seen: BTreeSet<&'static str> = BTreeSet::new();
     let mut summaries = Vec::new();
-    for provider in &mapping.providers {
+    for provider in mapping.providers.iter().flat_map(ProviderEnvMapping::lanes) {
         if !provider.agents.iter().any(|agent| agent == agent_id) {
             continue;
         }
@@ -1024,6 +1137,7 @@ pub fn provider_ids_for_env_refs<'a>(
             mapping
                 .providers
                 .iter()
+                .flat_map(ProviderEnvMapping::lanes)
                 .filter(|provider| {
                     provider
                         .api_key_env_vars

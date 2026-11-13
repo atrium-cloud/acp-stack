@@ -353,6 +353,7 @@ fn check_pi_env_api_keys(
         .providers()
         .iter()
         .filter(|provider| provider.agents.iter().any(|agent| agent == "pi"))
+        .flat_map(ProviderEnvMapping::lanes)
     {
         let Some(native_id) = native_provider_id(provider, "pi") else {
             continue;
@@ -481,10 +482,7 @@ fn check_agent_env_doc(
 }
 
 fn check_opencode_doc(body: &str, verified: &mut BTreeSet<String>, report: &mut Report) {
-    for (provider_id, label) in [
-        ("opencode", "OpenCode Models"),
-        ("opencode-go", "OpenCode Go"),
-    ] {
+    for (provider_id, label) in [("opencode", "OpenCode Zen"), ("opencode-go", "OpenCode Go")] {
         if body.contains(label) {
             verified.insert(provider_id.to_owned());
             report.ok(format!("OpenCode docs verify `{label}`"));
@@ -509,7 +507,11 @@ fn check_opencode_models_dev_ids(
         .collect();
     let mut listed = 0;
     let mut unlisted = 0;
-    for provider in mapping.providers() {
+    for provider in mapping
+        .providers()
+        .iter()
+        .flat_map(ProviderEnvMapping::lanes)
+    {
         let Some(native_id) = native_provider_id(provider, OPENCODE_AGENT_ID) else {
             continue;
         };
@@ -545,6 +547,7 @@ fn models_dev_scoped_providers(mapping: &ProviderKeyMapping) -> Vec<&ProviderEnv
                 .iter()
                 .all(|provider_id| primary_api_key_for_provider(mapping, provider_id).is_none())
         })
+        .flat_map(ProviderEnvMapping::lanes)
         .collect()
 }
 
@@ -706,6 +709,7 @@ fn env_var_for_agent_provider<'a>(
     let provider = mapping
         .providers()
         .iter()
+        .flat_map(ProviderEnvMapping::lanes)
         .find(|provider| provider.ids().iter().any(|id| id == provider_id))?;
     if !provider.agents.iter().any(|agent| agent == agent_id) {
         return None;
@@ -730,6 +734,7 @@ fn primary_api_key_for_provider<'a>(
             let provider = mapping
                 .providers()
                 .iter()
+                .flat_map(ProviderEnvMapping::lanes)
                 .find(|provider| provider.ids().iter().any(|id| id == provider_id))?;
             mapping
                 .api_keys()

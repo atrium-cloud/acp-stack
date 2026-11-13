@@ -34,7 +34,7 @@ Kimi Code runs every provider row in [../../data/providers.toml](../../data/prov
 
 - Kimi For Coding (`kimi-coding`, `kimi-code`, and aliases) on `api.kimi.com` and Kimi For Coding (Global) (`kimi-coding-global`) on `api.kimi.ai`: the subscription surfaces for kimi.com and kimi.ai accounts, on the `kimi` wire with `kimi-for-coding` as the default model.
 - Moonshot AI (`moonshotai`; `moonshotai-cn` for the China endpoint): the pay-as-you-go platform, on the `kimi` wire with `kimi-k3` as the default model.
-- OpenAI-compatible rows (`openrouter`, `deepseek`, `zai`, `opencode`, `opencode-go`, and the rest of the `openai` / `openai_responses` rows) and Anthropic-wire rows (`anthropic`, `minimax`, `minimax-cn`): no default model, so `--model` is required.
+- OpenAI-compatible rows (`openrouter`, `deepseek`, `zai`, OpenCode's `opencode` and `opencode-go` endpoints, and the rest of the `openai` / `openai_responses` rows) and Anthropic-wire rows (`anthropic`, `minimax`, `minimax-cn`): no default model, so `--model` is required.
 
 Select a lane with `acps init --agent kimi --provider <id>` or `acps agent provider use <id>`. The selection swaps the `[agent].env` credential declaration to the lane's key.
 
@@ -55,7 +55,7 @@ The API key stays in the encrypted secret store. At launch, `acp-stack`:
 
 - passes its value as `KIMI_MODEL_API_KEY`
 - selects the model through `KIMI_MODEL_NAME`
-- sets `KIMI_MODEL_BASE_URL` to the selected row's base (the `kimi` entry under `[providers.base_urls]` when present, else `base_url`)
+- sets `KIMI_MODEL_BASE_URL` to the selected row's base (the `kimi` entry under `[providers.base_urls]` when present, else `base_url`, taken from the selected endpoint on a row with `[[providers.endpoints]]`)
 - sets `KIMI_MODEL_PROVIDER_TYPE` to the row's `provider_type` on the `anthropic`, `openai`, and `openai_responses` wires; the `kimi` wire is Kimi Code's default and is left unset
 
 Reserve `[agent].env` for the credential ref; `acp-stack` owns the `KIMI_MODEL_*` launch vars.

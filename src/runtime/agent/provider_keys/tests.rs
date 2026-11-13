@@ -155,6 +155,69 @@ fn provider_metadata_includes_models_dev_display_names() {
     );
 }
 
+/// The OpenCode row's ids each answer from their own endpoint: `opencode` and its Hermes alias
+/// from Zen, `opencode-go` from Go.
+#[test]
+fn opencode_ids_answer_from_their_endpoint() {
+    const ZEN: &str = "https://opencode.ai/inference/v1";
+    const GO: &str = "https://opencode.ai/inference/go/v1";
+    let zen = ("OpenCode Zen", ZEN, "opencode-zen", "OPENCODE_ZEN_API_KEY");
+    let go = ("OpenCode Go", GO, "opencode-go", "OPENCODE_GO_API_KEY");
+    for (provider_id, (name, base, hermes_id, hermes_env)) in [
+        ("opencode", zen),
+        ("opencode-zen", zen),
+        ("opencode-go", go),
+    ] {
+        assert_eq!(provider_name_for_provider_id(provider_id), Some(name));
+        assert_eq!(
+            vendor_base_url_for_agent_provider_id("kimi", provider_id),
+            Some(base)
+        );
+        assert_eq!(
+            models_url_for_provider_id(provider_id).map(str::to_owned),
+            Some(format!("{base}/models"))
+        );
+        assert_eq!(
+            agent_provider_id_for_provider_id("hermes", provider_id),
+            Some(hermes_id)
+        );
+        assert_eq!(
+            env_var_for_agent_provider_id("hermes", provider_id),
+            Some(hermes_env)
+        );
+    }
+    assert_eq!(
+        provider_id_for_agent_vendor_base_url("kimi", ZEN),
+        Some("opencode")
+    );
+    assert_eq!(
+        provider_id_for_agent_vendor_base_url("kimi", GO),
+        Some("opencode-go")
+    );
+    assert_eq!(
+        provider_ids_for_env_refs(["OPENCODE_ZEN_API_KEY"]),
+        BTreeSet::from(["opencode", "opencode-zen"])
+    );
+    assert_eq!(
+        provider_ids_for_env_refs(["OPENCODE_GO_API_KEY"]),
+        BTreeSet::from(["opencode-go"])
+    );
+    assert!(!env_ref_allows_provider("OPENCODE_GO_API_KEY", "opencode"));
+    let hermes: Vec<_> = providers_for_agent("hermes")
+        .into_iter()
+        .filter(|summary| summary.id.starts_with("opencode"))
+        .map(|summary| (summary.id, summary.name, summary.agent_provider_id))
+        .collect();
+    assert_eq!(
+        hermes,
+        [
+            ("opencode", zen.0, Some("opencode-zen")),
+            ("opencode-zen", zen.0, None),
+            ("opencode-go", go.0, None),
+        ]
+    );
+}
+
 #[test]
 fn provider_lookup_works_for_every_collapsed_provider_id() {
     let mapping = ProviderKeyMapping::load_embedded();
@@ -570,6 +633,38 @@ base_url_env = "RESOURCE_BASE_URL"
         err.to_string()
             .contains("provider `resource` declares both a vendor base URL and base_url_env")
     );
+}
+
+#[test]
+fn invalid_mapping_rejects_unclaimed_ids_and_row_fields_beside_endpoints() {
+    let row = |ids: &str, row_fields: &str| {
+        format!(
+            r#"
+[[providers]]
+id = {ids}
+name = "Vendor"
+agents = ["pi"]
+base_url = "https://api.vendor.example/v1"
+{row_fields}
+[[providers.endpoints]]
+id = "vendor"
+name = "Vendor Zen"
+base_url = "https://api.vendor.example/v1"
+"#
+        )
+    };
+    let err = ProviderKeyMapping::from_toml(&row(r#"["vendor", "vendor-go"]"#, ""))
+        .expect_err("an id no endpoint claims fails");
+    assert!(
+        err.to_string()
+            .contains("id `vendor-go` is claimed by 0 endpoints"),
+        "{err}"
+    );
+
+    let models_url = r#"models_url = "https://api.vendor.example/v1/models""#;
+    let err = ProviderKeyMapping::from_toml(&row(r#"["vendor"]"#, models_url))
+        .expect_err("a row-level models_url beside endpoints fails");
+    assert!(err.to_string().contains("beside endpoints"), "{err}");
 }
 
 #[test]

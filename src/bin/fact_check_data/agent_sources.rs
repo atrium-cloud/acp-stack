@@ -557,6 +557,7 @@ fn evaluate_kilo(
     }
 }
 
+/// The lanes of every row `agent_id` runs, so each endpoint is checked on its own.
 fn agent_providers<'a>(
     mapping: &'a ProviderKeyMapping,
     agent_id: &'a str,
@@ -565,6 +566,7 @@ fn agent_providers<'a>(
         .providers()
         .iter()
         .filter(move |provider| provider.agents.iter().any(|agent| agent == agent_id))
+        .flat_map(ProviderEnvMapping::lanes)
 }
 
 fn agent_native_ids<'a>(
