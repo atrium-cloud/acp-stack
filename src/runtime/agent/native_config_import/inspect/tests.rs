@@ -510,6 +510,11 @@ fn pi_maps_provider_model_and_blocks_exec_permission_credential_keys() {
         .expect("model candidate");
     assert_eq!(model.kind, ManagedFieldKind::Model);
     assert!(model.compatible);
+    // The bare `defaultModel` imports in the adapter's advertised `provider/id` form.
+    assert_eq!(
+        model_candidate(&inspected),
+        Some(("anthropic/claude-sonnet-4-20250514".to_owned(), None))
+    );
     assert!(manifest.blocked_fields.iter().any(|field| {
         field.path == "defaultProjectTrust" && field.reason == BlockedReason::Permissions
     }));

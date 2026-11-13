@@ -316,6 +316,12 @@ pub(super) fn inspect_pi(content: &str, revision: String) -> Result<InspectedNat
     let mut builder =
         InspectionBuilder::new("pi", NativeConfigFormat::Json, revision, content.len());
 
+    // The adapter advertises each model as `<defaultProvider>/<defaultModel>`, so that is the
+    // value validated and stored.
+    let model_prefix = root
+        .get("defaultProvider")
+        .and_then(JsonValue::as_str)
+        .map(|provider| format!("{provider}/"));
     if let Some(value) = root.remove("defaultProvider") {
         builder.add_string_candidate(
             "provider",
@@ -336,7 +342,7 @@ pub(super) fn inspect_pi(content: &str, revision: String) -> Result<InspectedNat
             value,
             |value| {
                 Some(CandidateValue::Model {
-                    value: value.to_owned(),
+                    value: format!("{}{value}", model_prefix.as_deref().unwrap_or_default()),
                     provider_hint: None,
                 })
             },

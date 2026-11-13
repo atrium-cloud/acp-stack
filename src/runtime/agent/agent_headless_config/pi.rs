@@ -1,4 +1,5 @@
 use super::*;
+use crate::runtime::agent::provider_keys::agent_provider_ids_for_provider_row;
 
 /// `models.json` carries only a custom provider's own entry.
 pub(super) fn provision_pi_config(
@@ -36,13 +37,15 @@ pub(super) fn provision_pi_config(
             is_legacy_pi_override,
         )?;
     }
-    root.insert("defaultProvider".to_owned(), json!(native_provider));
-    match configured_provider_model(config) {
-        Some(model) => {
-            root.insert(
-                "defaultModel".to_owned(),
-                json!(pi_bare_model_id(model, &provider.id, native_provider)),
-            );
+    let model = configured_provider_model(config)
+        .map(|model| pi_default_model(model, &provider.id, native_provider));
+    root.insert(
+        "defaultProvider".to_owned(),
+        json!(model.map_or(native_provider, |(endpoint, _)| endpoint)),
+    );
+    match model {
+        Some((_, model_id)) => {
+            root.insert("defaultModel".to_owned(), json!(model_id));
         }
         None => {
             root.remove("defaultModel");
@@ -180,11 +183,18 @@ fn remove_legacy_pi_enabled_models(
     false
 }
 
-fn pi_bare_model_id<'a>(model: &'a str, provider_id: &str, native_provider: &str) -> &'a str {
-    model
-        .split_once('/')
-        .filter(|(prefix, _)| *prefix == provider_id || *prefix == native_provider)
-        .map_or(model, |(_, model_id)| model_id)
+/// The Pi provider and bare id `model` selects. A prefix naming any endpoint of the configured
+/// provider's row selects that endpoint, since one key makes every endpoint live in Pi.
+fn pi_default_model<'a>(
+    model: &'a str,
+    provider_id: &str,
+    native_provider: &'a str,
+) -> (&'a str, &'a str) {
+    let strip = |prefix: &str| model.strip_prefix(prefix)?.strip_prefix('/');
+    agent_provider_ids_for_provider_row("pi", provider_id)
+        .into_iter()
+        .find_map(|endpoint| Some((endpoint, strip(endpoint)?)))
+        .unwrap_or_else(|| (native_provider, strip(provider_id).unwrap_or(model)))
 }
 
 #[cfg(test)]
@@ -455,6 +465,44 @@ mod tests {
         assert_eq!(value["defaultProvider"], "openrouter");
         assert_eq!(value["defaultModel"], "deepseek/deepseek-v4");
         assert!(value.get("enabledModels").is_none());
+    }
+
+    // A model qualified with the row's other endpoint runs there; a slash inside an
+    // unqualified id stays part of the id.
+    #[test]
+    fn pi_default_provider_follows_the_model_endpoint() {
+        for (provider_id, model, default_provider, default_model) in [
+            (
+                "opencode",
+                "opencode-go/deepseek-v4.1-flash",
+                "opencode-go",
+                "deepseek-v4.1-flash",
+            ),
+            (
+                "openrouter",
+                "deepseek/deepseek-v4.1-flash",
+                "openrouter",
+                "deepseek/deepseek-v4.1-flash",
+            ),
+        ] {
+            let tempdir = tempfile::tempdir().expect("tempdir");
+            let mut config = config_with_agent("pi", &[]);
+            config.agent.provider = Some(crate::config::AgentProviderConfig {
+                id: provider_id.to_owned(),
+                model: Some(model.to_owned()),
+                api_key_ref: None,
+                custom: None,
+            });
+
+            provision_agent_headless_config(&config, tempdir.path()).expect("provision");
+
+            let path = tempdir.path().join(".pi/agent/settings.json");
+            let value: Value =
+                serde_json::from_str(&std::fs::read_to_string(path).expect("settings readable"))
+                    .expect("settings json parses");
+            assert_eq!(value["defaultProvider"], default_provider);
+            assert_eq!(value["defaultModel"], default_model);
+        }
     }
 
     #[test]

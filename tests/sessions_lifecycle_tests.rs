@@ -2523,6 +2523,24 @@ async fn advertised_current_model_yields_no_ignore_records() {
 }
 
 #[tokio::test]
+async fn bare_configured_model_applies_as_its_qualified_advertised_value() {
+    // The adapter advertises only provider-qualified values; the config holds the bare id.
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.extend([
+            "--model-config-option".to_owned(),
+            "opencode-go/deepseek-v4.1-flash".to_owned(),
+        ]);
+        config.agent.model = Some("deepseek-v4.1-flash".to_owned());
+    })
+    .await;
+
+    let response = create_session_response(&harness).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    assert!(body["data"].get("ignored").is_none(), "{body}");
+}
+
+#[tokio::test]
 async fn create_session_skips_setting_values_session_new_already_reports() {
     // The placebo refuses every `session/set_config_option` and `session/set_mode`, so
     // the create succeeds only if acps sends no set for a model, effort, generic option,

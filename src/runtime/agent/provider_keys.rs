@@ -830,6 +830,17 @@ pub fn agent_provider_id_for_provider_id(
         .and_then(|provider| provider.agent_native_provider_id(agent_id))
 }
 
+/// `agent_id`'s native provider id on every lane of the row holding `provider_id`.
+pub fn agent_provider_ids_for_provider_row(agent_id: &str, provider_id: &str) -> Vec<&'static str> {
+    ProviderKeyMapping::load_embedded()
+        .providers
+        .iter()
+        .filter(|row| row.contains_id(provider_id))
+        .flat_map(ProviderEnvMapping::lanes)
+        .filter_map(|lane| lane.agent_native_provider_id(agent_id))
+        .collect()
+}
+
 pub fn canonical_provider_id_for_agent_native_id(
     agent_id: &str,
     native_provider_id: &str,

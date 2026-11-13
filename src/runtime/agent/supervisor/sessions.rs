@@ -3,6 +3,8 @@
 
 use super::*;
 use crate::runtime::agent::acp_codec::session_config_option_is_current;
+use crate::runtime::agent::model_discovery::resolve_advertised_model_value;
+use crate::runtime::agent::provider_keys::agent_provider_id_for_provider_id;
 
 impl AgentSupervisor {
     /// `POST /v1/sessions`. Dispatches ACP `session/new` and persists a `sessions` row;
@@ -99,17 +101,36 @@ impl AgentSupervisor {
                 let advertised = latest_options
                     .as_deref()
                     .or(response.config_options.as_deref());
-                let lookup = session_config_id_for_value(
+                let mut model = model.to_owned();
+                let mut lookup = session_config_id_for_value(
                     advertised,
                     AgentSessionConfigCategory::Model,
-                    model,
+                    &model,
                 );
+                // A literal miss retries the id as `acps agent set` resolves it, so a bare stored
+                // id lands on its provider-qualified value; a failed retry keeps the miss.
+                if lookup.is_err() {
+                    let provider_id = agent.provider.as_ref().and_then(|provider| {
+                        agent_provider_id_for_provider_id(&agent.id, &provider.id)
+                    });
+                    if let Ok(resolved) =
+                        resolve_advertised_model_value(&response, provider_id, &model)
+                        && let Ok(config_id) = session_config_id_for_value(
+                            advertised,
+                            AgentSessionConfigCategory::Model,
+                            &resolved,
+                        )
+                    {
+                        lookup = Ok(config_id);
+                        model = resolved;
+                    }
+                }
                 if let Some(refreshed) = provision_session_option(
                     &bridge,
                     &response.session_id,
                     advertised,
                     lookup,
-                    model,
+                    &model,
                     IGNORED_FEATURE_AGENT_MODEL,
                     "sessionConfig.model",
                     &mut ignored,
