@@ -1211,6 +1211,7 @@ async fn start_agent_with_config(
     config: &Config,
 ) -> Result<()> {
     let environment = open_agent_environment(state, config)?;
+    probe_provider_endpoints(&state.runtime_paths.home, &config.agent, &environment.env).await;
     target
         .supervisor
         .start(AgentStartRequest {

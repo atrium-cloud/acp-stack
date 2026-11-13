@@ -100,7 +100,7 @@ Rejection happens before any revision watermark persists. An orchestrator that a
 
 The native config is rewritten immediately after the store write, under the mutation lock the apply handler already holds. The agent reads it at process start, and the orchestrator restarts the agent after a credential push. Rewriting also runs on a `noop` replay, so a retry after a failed native-config write still settles it.
 
-On an `applied` or `cleared` outcome, the provider model-catalog cache entries for the outgoing and incoming providers are invalidated. The next catalog read refetches at the declared `models_url` with the credential now in force. Only providers that declare a `models_url` are ever fetched.
+On an `applied` or `cleared` outcome, the provider model-catalog cache entries for the outgoing and incoming providers are invalidated, together with the entries of every other id and endpoint of their provider rows. The next catalog read refetches at the declared `models_url` with the credential now in force. Only providers that declare a `models_url` are ever fetched.
 
 A selection names no endpoint. The agent and the catalog fetch dial the provider's own host, so a sealed value in `values` is redeemed by the network provider that intercepts that host.
 

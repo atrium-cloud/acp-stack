@@ -13,6 +13,7 @@
     "names": [
       "HOME",
       "PATH",
+      "PI_ACP_HIDE_PROVIDERS",
       "PI_ACP_PI_BIN"
     ],
     "prefixes": [

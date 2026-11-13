@@ -22,7 +22,7 @@ For Kimi Code, the bridge derives Kimi's process-only model API key, selected mo
 
 The lane endpoint is the provider row's Kimi base from `data/providers.toml` (paired with the row's `provider_type` wire) or a custom provider's base URL. A legacy config that omits `[agent.provider]` uses the mainland subscription endpoint. Canonical config keeps only the encrypted key ref; the derived values live in the launched process alone.
 
-For Pi Agent, the bridge sets the process-only `PI_ACP_PI_BIN` to the managed `pi` path before launching `pi-acp`. The adapter bundle carries no Pi, so this names the harness it drives. Declaring the variable in `[agent].env` is rejected.
+For Pi Agent, the bridge sets the process-only `PI_ACP_PI_BIN` to the managed `pi` path before launching `pi-acp`. The adapter bundle carries no Pi, so this names the harness it drives. On a provider row with several endpoints, the bridge also sets `PI_ACP_HIDE_PROVIDERS` to the Pi providers of the endpoints the key's account cannot use, read from the endpoint probe's cached verdicts (see [Pi Agent launch](../../agents/pi.md#launch)). Declaring either variable in `[agent].env` is rejected.
 
 ### Client capabilities
 

@@ -20,6 +20,7 @@ use crate::runtime::agent::model_discovery::{
 use crate::runtime::agent::provider_keys::{
     ResolvedAgentEnvironment, resolve_agent_environment, resolve_agent_environment_without_secrets,
 };
+use crate::runtime::agent::provider_model_catalog::probe_provider_endpoints;
 use crate::runtime::agent::supervisor::{
     AGENT_RESTART_NEVER, AgentSnapshot, AgentStartReadiness, AgentStartRequest,
 };

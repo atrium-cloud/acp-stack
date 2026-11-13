@@ -31,6 +31,7 @@ use crate::runtime::agent::native_config_import::{
     validate_native_config_file_digests, validate_native_config_secret_refs_read_only,
     write_native_config_files,
 };
+use crate::runtime::agent::provider_model_catalog::probe_provider_endpoints;
 use crate::runtime::agent::supervisor::{AgentStartRequest, AgentStateLabel};
 
 mod apply;

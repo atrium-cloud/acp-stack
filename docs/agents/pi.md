@@ -37,7 +37,9 @@ The adapter and the harness install from separate sources.
 
 The adapter bundle carries no Pi, so the bridge names the managed `pi` through the process-only `PI_ACP_PI_BIN` before launching `pi-acp`.
 
-Declaring it in `[agent].env` is rejected.
+A provider row with several endpoints on one key, such as OpenCode's `opencode` and `opencode-go`, makes each endpoint its own Pi provider. Each Agent start the server runs probes every endpoint with one keyed `GET` of its model listing, bounded at 5 seconds, and reuses an answer younger than 5 minutes. An empty list, 401 or 403 marks the endpoint unavailable; a listing with models clears the mark.
+
+While another endpoint of the row lists models, the bridge names the unavailable endpoints in the process-only `PI_ACP_HIDE_PROVIDERS`, and `pi-acp` leaves their models out of the session's model list. The endpoint the configured model or subagent model runs on stays listed. Declaring either variable in `[agent].env` is rejected.
 
 ## Cloudflare Providers
 

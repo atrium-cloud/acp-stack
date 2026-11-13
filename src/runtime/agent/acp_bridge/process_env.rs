@@ -1,5 +1,6 @@
 use super::*;
 
+use crate::runtime::agent::provider_keys::agent_provider_id_for_provider_id;
 use crate::runtime::agent::provider_keys::{
     HERMES_AGENT_ID, KIMI_MODEL_API_KEY_ENV, KIMI_MODEL_BASE_URL_ENV, KIMI_MODEL_DISPLAY_NAME_ENV,
     KIMI_MODEL_MAX_CONTEXT_SIZE_ENV, KIMI_MODEL_MAX_OUTPUT_SIZE_ENV, KIMI_MODEL_NAME_ENV,
@@ -7,6 +8,7 @@ use crate::runtime::agent::provider_keys::{
     hermes_launch_base_url, kimi_profile_for_provider_id, providers_for_agent,
     vendor_base_url_for_agent_provider_id,
 };
+use crate::runtime::agent::provider_model_catalog::hidden_provider_endpoints;
 
 pub(crate) const KIMI_CODE_AGENT_ID: &str = "kimi";
 /// The lane's own API-key ref. Production code reaches it through the provider mapping;
@@ -42,11 +44,16 @@ pub(crate) const PI_AGENT_ID: &str = "pi";
 pub(crate) const PI_HARNESS_COMMAND: &str = "pi";
 /// The pi-acp bundle ships without Pi; it runs the `pi` this names.
 pub(crate) const PI_ACP_PI_BIN_ENV: &str = "PI_ACP_PI_BIN";
+/// Comma-separated Pi provider ids whose models the adapter leaves out of the session's list.
+pub(crate) const PI_ACP_HIDE_PROVIDERS_ENV: &str = "PI_ACP_HIDE_PROVIDERS";
+/// Agents whose launch env reads `hidden_provider_endpoints`; the endpoint probe runs for these.
+pub(crate) const ENDPOINT_VERDICT_AGENT_IDS: [&str; 1] = [PI_AGENT_ID];
 
 /// Kimi Code's launch namespace, which the runtime writes whole.
 pub(crate) const KIMI_MANAGED_ENV_PREFIX: &str = "KIMI_MODEL_";
 /// Launch vars the runtime owns for their agent; neither `[agent].env` nor workload env may declare them.
-pub(crate) const RUNTIME_MANAGED_LAUNCH_ENV: [&str; 1] = [PI_ACP_PI_BIN_ENV];
+pub(crate) const RUNTIME_MANAGED_LAUNCH_ENV: [&str; 2] =
+    [PI_ACP_PI_BIN_ENV, PI_ACP_HIDE_PROVIDERS_ENV];
 
 pub(super) fn build_agent_process_env(
     agent: &AgentConfig,
@@ -55,7 +62,7 @@ pub(super) fn build_agent_process_env(
 ) -> Result<HashMap<String, String>> {
     match agent.id.as_str() {
         KIMI_CODE_AGENT_ID => build_kimi_process_env(agent, env),
-        PI_AGENT_ID => build_pi_process_env(home, env),
+        PI_AGENT_ID => build_pi_process_env(agent, home, env),
         HERMES_AGENT_ID => build_hermes_process_env(agent, env),
         _ => Ok(env),
     }
@@ -87,16 +94,26 @@ fn build_hermes_process_env(
     Ok(env)
 }
 
+/// Hidden endpoints come from the cached probe verdicts, so no spawn makes a network call here.
 fn build_pi_process_env(
+    agent: &AgentConfig,
     home: &Path,
     mut env: HashMap<String, String>,
 ) -> Result<HashMap<String, String>> {
-    if env.contains_key(PI_ACP_PI_BIN_ENV) {
+    let declared = |name: &&str| env.contains_key(*name);
+    if let Some(name) = RUNTIME_MANAGED_LAUNCH_ENV.into_iter().find(declared) {
         return Err(StackError::AgentInitializeFailed {
             reason: format!(
-                "Pi Agent launch env `{PI_ACP_PI_BIN_ENV}` is runtime-managed; remove it from [agent].env"
+                "Pi Agent launch env `{name}` is runtime-managed; remove it from [agent].env"
             ),
         });
+    }
+    let hidden: Vec<&str> = hidden_provider_endpoints(home, agent)
+        .into_iter()
+        .filter_map(|endpoint_id| agent_provider_id_for_provider_id(PI_AGENT_ID, endpoint_id))
+        .collect();
+    if !hidden.is_empty() {
+        env.insert(PI_ACP_HIDE_PROVIDERS_ENV.to_owned(), hidden.join(","));
     }
     let pi_path = super::spawn::resolve_command_path(PI_HARNESS_COMMAND, home).ok_or_else(
         || StackError::AgentInitializeFailed {
@@ -305,6 +322,27 @@ mod tests {
             prepared.get("OPENROUTER_API_KEY").map(String::as_str),
             Some("secret")
         );
+    }
+
+    #[test]
+    fn pi_process_env_hides_the_endpoint_the_key_cannot_use() {
+        let home = home_with_managed_pi();
+        let mut agent = pi_agent();
+        let provider = serde_json::json!({ "id": "opencode" });
+        agent.provider = Some(serde_json::from_value(provider).expect("provider"));
+        let hidden = || {
+            let env = super::build_agent_process_env(&agent, home.path(), HashMap::new());
+            env.expect("pi env").remove(PI_ACP_HIDE_PROVIDERS_ENV)
+        };
+        assert_eq!(hidden(), None);
+
+        let cache = crate::runtime::agent::provider_model_catalog::cache_path(home.path());
+        std::fs::create_dir_all(cache.parent().expect("cache dir")).expect("create cache dir");
+        let verdicts = r#"{"version": 2, "providers": {
+            "opencode": {"fetched_at": 1, "models": [{"value": "glm-5.2"}]},
+            "opencode-go": {"fetched_at": 0, "models": [], "unavailable_at": 1}}}"#;
+        std::fs::write(&cache, verdicts).expect("write verdicts");
+        assert_eq!(hidden().as_deref(), Some("opencode-go"));
     }
 
     #[test]

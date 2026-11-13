@@ -176,13 +176,13 @@ impl ProviderEnvMapping {
         &self.id
     }
 
-    fn primary_id(&self) -> &str {
+    pub fn primary_id(&self) -> &str {
         self.id
             .first()
             .expect("provider mapping validated with at least one id")
     }
 
-    fn contains_id(&self, provider_id: &str) -> bool {
+    pub fn contains_id(&self, provider_id: &str) -> bool {
         self.id.iter().any(|id| id == provider_id)
     }
 
@@ -839,6 +839,16 @@ pub fn agent_provider_ids_for_provider_row(agent_id: &str, provider_id: &str) ->
         .flat_map(ProviderEnvMapping::lanes)
         .filter_map(|lane| lane.agent_native_provider_id(agent_id))
         .collect()
+}
+
+/// The endpoint lanes of the row holding `provider_id`, each led by its endpoint id; empty for a
+/// row without endpoints.
+pub fn endpoint_lanes_for_provider_id(provider_id: &str) -> &'static [ProviderEnvMapping] {
+    ProviderKeyMapping::load_embedded()
+        .providers
+        .iter()
+        .find(|row| row.contains_id(provider_id))
+        .map_or(&[], |row| row.lanes.as_slice())
 }
 
 pub fn canonical_provider_id_for_agent_native_id(

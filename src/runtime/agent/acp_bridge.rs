@@ -60,8 +60,8 @@ pub use self::capabilities::{
     IgnoredFeature, McpSkipReason, PartitionedMcpServers, SkippedMcpServer,
 };
 pub(crate) use self::process_env::{
-    KIMI_CODE_AGENT_ID, KIMI_MANAGED_ENV_PREFIX, RUNTIME_MANAGED_LAUNCH_ENV,
-    kimi_lane_for_provider_id,
+    ENDPOINT_VERDICT_AGENT_IDS, KIMI_CODE_AGENT_ID, KIMI_MANAGED_ENV_PREFIX,
+    RUNTIME_MANAGED_LAUNCH_ENV, kimi_lane_for_provider_id,
 };
 pub use self::sessions::ForkPoint;
 pub(crate) use self::spawn::resolve_command_path;
