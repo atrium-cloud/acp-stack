@@ -275,7 +275,7 @@ fn response_with_model_option(
 }
 
 // Advertised order is preserved (not sorted), duplicate values collapse to the
-// first occurrence, and each ACP select `name` rides along with its value.
+// first occurrence, each ACP select `name` rides along, and ungrouped choices carry no group.
 #[test]
 fn session_model_choices_preserves_order_and_dedups_by_value() {
     use agent_client_protocol::v1::schema::{
@@ -298,14 +298,15 @@ fn session_model_choices_preserves_order_and_dedups_by_value() {
         .category(SessionConfigOptionCategory::Model),
     );
     assert_eq!(
-        session_model_choices(&response).expect("choices"),
-        vec![
-            ("z".to_owned(), "Z.ai: GLM 5.3 Flash".to_owned()),
-            (
-                "openrouter/aion-labs/aion-2.0".to_owned(),
-                "openrouter/aion-labs/aion-2.0".to_owned()
-            ),
-        ]
+        serde_json::to_value(session_model_choices(&response).expect("choices"))
+            .expect("choices serialize"),
+        serde_json::json!([
+            { "value": "z", "name": "Z.ai: GLM 5.3 Flash" },
+            {
+                "value": "openrouter/aion-labs/aion-2.0",
+                "name": "openrouter/aion-labs/aion-2.0"
+            },
+        ])
     );
     // The value lane still sorts+dedups, unchanged by the shared finder refactor.
     assert_eq!(
@@ -314,7 +315,7 @@ fn session_model_choices_preserves_order_and_dedups_by_value() {
     );
 }
 
-// Grouped options flatten in group order with headers dropped, matching the
+// Grouped options flatten in group order, each choice carrying its group, matching the
 // per-session `project_config_options` lane.
 #[test]
 fn session_model_choices_flattens_groups_in_order() {
@@ -342,13 +343,18 @@ fn session_model_choices_flattens_groups_in_order() {
         )
         .category(SessionConfigOptionCategory::Model),
     );
+    let choices = session_model_choices(&response).expect("choices");
     assert_eq!(
-        session_model_choices(&response).expect("choices"),
-        vec![
-            ("two".to_owned(), "Two".to_owned()),
-            ("one".to_owned(), "One".to_owned()),
-        ]
+        serde_json::to_value(&choices).expect("choices serialize"),
+        serde_json::json!([
+            { "value": "two", "name": "Two", "group": { "id": "g2", "name": "Group Two" } },
+            { "value": "one", "name": "One", "group": { "id": "g1", "name": "Group One" } },
+        ])
     );
+    let snapshot = crate::runtime::agent::config_options::project_config_options(
+        response.config_options.as_deref().unwrap_or_default(),
+    );
+    assert_eq!(snapshot[0].options.as_ref(), Some(&choices));
 }
 
 // An agent advertising a bare `model`-id option with no category still resolves
@@ -363,8 +369,9 @@ fn session_model_choices_matches_by_id_without_category() {
         vec![SessionConfigSelectOption::new("one", "One")],
     ));
     assert_eq!(
-        session_model_choices(&response).expect("choices"),
-        vec![("one".to_owned(), "One".to_owned())]
+        serde_json::to_value(session_model_choices(&response).expect("choices"))
+            .expect("choices serialize"),
+        serde_json::json!([{ "value": "one", "name": "One" }])
     );
 }
 

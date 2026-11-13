@@ -12,6 +12,7 @@ use crate::runtime::agent::acp_bridge::AgentSessionConfigCategory;
 use crate::runtime::agent::acp_codec::{
     AdvertisedSelect, session_advertised_select, session_model_choices,
 };
+use crate::runtime::agent::config_options::{SessionConfigOptionChoice, SessionConfigOptionGroup};
 use crate::runtime::agent::model_discovery::{
     DEFAULT_MODELS_DISCOVERY_TIMEOUT, configured_model_value,
     effort_value_is_explicit_without_discovery, fetch_session_config_with_timeout,
@@ -113,6 +114,10 @@ pub(crate) struct ModelJson {
     /// the provider marks as effort-selectable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) efforts: Vec<String>,
+    /// The group the agent advertised this model under. Present only on `GET /v1/models`
+    /// with the `acp_advertised` source, for a model the agent advertised under a group.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) group: Option<SessionConfigOptionGroup>,
 }
 
 /// What a session started on the probed model begins with, per lane: the
@@ -315,6 +320,7 @@ pub(crate) async fn models_response_for_config(
                     } else {
                         model.efforts
                     },
+                    group: None,
                 })
                 .collect(),
             modes: lane_values(mode_lane.as_ref()),
@@ -399,16 +405,17 @@ fn start_value(configured: Option<&str>, lane: Option<&AdvertisedSelect>) -> Opt
     Some(value.to_owned())
 }
 
-/// Map advertised `(value, name)` choices to wire models. `display_name` is the
-/// agent's ACP option name, or `None` when the agent only echoes the value as the
-/// name. `value` always stays the full composite id a session runs on.
-fn advertised_models(choices: Vec<(String, String)>) -> Vec<ModelJson> {
+/// Map advertised choices to wire models. `display_name` is the agent's ACP option
+/// name, or `None` when the agent only echoes the value as the name. `value` always
+/// stays the full composite id a session runs on.
+fn advertised_models(choices: Vec<SessionConfigOptionChoice>) -> Vec<ModelJson> {
     choices
         .into_iter()
-        .map(|(value, name)| ModelJson {
-            display_name: advertised_display_name(&value, &name),
-            value,
+        .map(|choice| ModelJson {
+            display_name: advertised_display_name(&choice.value, &choice.name),
+            value: choice.value,
             efforts: Vec::new(),
+            group: choice.group,
         })
         .collect()
 }
@@ -421,6 +428,7 @@ fn advertised_display_name(value: &str, name: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::config::ArrayTargetConfig;
+    use serde_json::json;
 
     // A distinct ACP name is used verbatim.
     #[test]
@@ -444,19 +452,25 @@ mod tests {
         assert_eq!(advertised_display_name("openrouter/glm", "   "), None);
     }
 
+    // Values stay verbatim and a grouped choice's group rides along onto its model.
     #[test]
     fn advertised_models_maps_value_verbatim() {
-        let models = advertised_models(vec![
-            (
-                "openrouter/aion-labs/aion-2.0".to_owned(),
-                "openrouter/aion-labs/aion-2.0".to_owned(),
-            ),
-            ("openrouter/glm".to_owned(), "GLM 5.3".to_owned()),
-        ]);
-        assert_eq!(models[0].value, "openrouter/aion-labs/aion-2.0");
-        assert_eq!(models[0].display_name, None);
-        assert_eq!(models[1].value, "openrouter/glm");
-        assert_eq!(models[1].display_name.as_deref(), Some("GLM 5.3"));
+        let group = json!({ "id": "openrouter", "name": "OpenRouter" });
+        let choices = serde_json::from_value(json!([
+            {
+                "value": "openrouter/aion-labs/aion-2.0",
+                "name": "openrouter/aion-labs/aion-2.0"
+            },
+            { "value": "openrouter/glm", "name": "GLM 5.3", "group": group },
+        ]))
+        .expect("choices");
+        assert_eq!(
+            serde_json::to_value(advertised_models(choices)).expect("models serialize"),
+            json!([
+                { "value": "openrouter/aion-labs/aion-2.0" },
+                { "value": "openrouter/glm", "display_name": "GLM 5.3", "group": group },
+            ])
+        );
     }
 
     const BASE_TOML: &str = r#"

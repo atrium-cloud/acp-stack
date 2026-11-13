@@ -2471,7 +2471,7 @@
             "items": {
               "$ref": "#/$defs/response/SessionConfigOptionChoice"
             },
-            "description": "Select choices, flattened across groups (group headers dropped) so\nthis list never disagrees with the codec's value matching. Absent for\nboolean options."
+            "description": "Select choices in advertised order, flattened across groups, a grouped\nchoice carrying its `group`. Absent for boolean options."
           }
         },
         "required": [
@@ -2509,12 +2509,39 @@
               "string",
               "null"
             ]
+          },
+          "group": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/response/SessionConfigOptionGroup"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The group the agent advertised this choice under; absent when ungrouped."
           }
         },
         "required": [
           "value",
           "name"
         ]
+      },
+      "SessionConfigOptionGroup": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "description": "A select choice group's id and name as the agent advertised them."
       },
       "AgentInstallResponse": {
         "type": "object",
@@ -2949,6 +2976,17 @@
               "type": "string"
             },
             "description": "Reasoning-effort values the provider catalog reports for this model.\nPresent only on the `provider_catalog` source, and only for models\nthe provider marks as effort-selectable."
+          },
+          "group": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/response/SessionConfigOptionGroup"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The group the agent advertised this model under. Present only on `GET /v1/models`\nwith the `acp_advertised` source, for a model the agent advertised under a group."
           }
         },
         "required": [

@@ -12,8 +12,8 @@ use agent_client_protocol::v1::schema::{
     NewSessionResponse, PermissionOption, PermissionOptionId, PermissionOptionKind,
     ReadTextFileRequest, ReadTextFileResponse, RequestPermissionOutcome, RequestPermissionRequest,
     SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionValue,
-    SessionConfigSelectOptions, SessionId as AcpSessionId, SessionNotification, SessionUpdate,
-    StateUpdate, SubagentUpdate, WriteTextFileRequest, WriteTextFileResponse,
+    SessionId as AcpSessionId, SessionNotification, SessionUpdate, StateUpdate, SubagentUpdate,
+    WriteTextFileRequest, WriteTextFileResponse,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -22,6 +22,7 @@ use crate::error::{Result, StackError};
 use crate::runtime::agent::acp_bridge::{
     AgentSessionConfigCategory, AgentSessionModeSelection, AgentSessionModelSelection,
 };
+use crate::runtime::agent::config_options::{SessionConfigOptionChoice, project_select_choices};
 use crate::runtime::agent::session_sink::SessionEventSink;
 use crate::runtime::mediation::permissions::{
     NewPermission, PermissionOutcome, PermissionService, PermissionSource,
@@ -695,11 +696,13 @@ pub fn session_model_values(response: &NewSessionResponse) -> Result<Vec<String>
     )
 }
 
-/// Advertised `(value, name)` model choices in the agent's presentation order,
-/// deduped by value keeping the first occurrence. Unlike [`session_model_values`]
-/// the order is preserved and the ACP select `name` is carried, so a client can
+/// Advertised model choices in the agent's presentation order, deduped by value
+/// keeping the first occurrence. Unlike [`session_model_values`] the order is
+/// preserved and the ACP select `name` and group are carried, so a client can
 /// present models as the agent offered them with the agent's own labels.
-pub fn session_model_choices(response: &NewSessionResponse) -> Result<Vec<(String, String)>> {
+pub fn session_model_choices(
+    response: &NewSessionResponse,
+) -> Result<Vec<SessionConfigOptionChoice>> {
     let option = find_config_option(
         response.config_options.as_deref(),
         AgentSessionConfigCategory::Model,
@@ -707,7 +710,7 @@ pub fn session_model_choices(response: &NewSessionResponse) -> Result<Vec<(Strin
     let mut seen = std::collections::HashSet::new();
     Ok(session_config_option_choices(option)
         .into_iter()
-        .filter(|(value, _name)| seen.insert(value.clone()))
+        .filter(|choice| seen.insert(choice.value.clone()))
         .collect())
 }
 
@@ -866,27 +869,17 @@ pub(crate) fn session_config_option_is_current(
 fn session_config_option_values(option: &SessionConfigOption) -> Vec<String> {
     session_config_option_choices(option)
         .into_iter()
-        .map(|(value, _name)| value)
+        .map(|choice| choice.value)
         .collect()
 }
 
-/// Select `(value, name)` pairs in advertised order, flattening groups and
-/// dropping group headers, mirroring `project_config_options` so the two lanes
-/// never disagree on the choice set.
-fn session_config_option_choices(option: &SessionConfigOption) -> Vec<(String, String)> {
+/// Select choices in advertised order, each grouped one carrying its group, through the
+/// snapshot's own projection so the two lanes never disagree on the choice set.
+fn session_config_option_choices(option: &SessionConfigOption) -> Vec<SessionConfigOptionChoice> {
     match &option.kind {
-        SessionConfigKind::Select(select) => match &select.options {
-            SessionConfigSelectOptions::Ungrouped(options) => options
-                .iter()
-                .map(|option| (option.value.0.to_string(), option.name.clone()))
-                .collect(),
-            SessionConfigSelectOptions::Grouped(groups) => groups
-                .iter()
-                .flat_map(|group| group.options.iter())
-                .map(|option| (option.value.0.to_string(), option.name.clone()))
-                .collect(),
-            _ => Vec::new(),
-        },
+        SessionConfigKind::Select(select) => {
+            project_select_choices(&select.options).unwrap_or_default()
+        }
         _ => Vec::new(),
     }
 }

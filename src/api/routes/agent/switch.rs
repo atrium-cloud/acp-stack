@@ -260,6 +260,7 @@ pub(crate) async fn agent_switch_handler(
                     value,
                     display_name: None,
                     efforts: Vec::new(),
+                    group: None,
                 })
                 .collect()
         }

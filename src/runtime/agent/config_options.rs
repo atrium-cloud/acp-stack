@@ -2,7 +2,7 @@
 //! into one wire/storage shape, backing the config-option routes and snapshots.
 
 use agent_client_protocol::v1::schema::{
-    SessionConfigKind, SessionConfigOption, SessionConfigSelectOptions,
+    SessionConfigKind, SessionConfigOption, SessionConfigSelectOption, SessionConfigSelectOptions,
 };
 use serde::{Deserialize, Serialize};
 
@@ -26,9 +26,8 @@ pub struct SessionConfigOptionSnapshot {
     #[schemars(extend("enum" = ["select", "boolean"]))]
     pub kind: String,
     pub current_value: SessionConfigOptionSnapshotValue,
-    /// Select choices, flattened across groups (group headers dropped) so
-    /// this list never disagrees with the codec's value matching. Absent for
-    /// boolean options.
+    /// Select choices in advertised order, flattened across groups, a grouped
+    /// choice carrying its `group`. Absent for boolean options.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options: Option<Vec<SessionConfigOptionChoice>>,
 }
@@ -39,6 +38,16 @@ pub struct SessionConfigOptionChoice {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The group the agent advertised this choice under; absent when ungrouped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<SessionConfigOptionGroup>,
+}
+
+/// A select choice group's id and name as the agent advertised them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SessionConfigOptionGroup {
+    pub id: String,
+    pub name: String,
 }
 
 /// `Bool` first so JSON `true` never deserializes as the string `"true"`;
@@ -72,23 +81,13 @@ fn project_config_option(option: &SessionConfigOption) -> Option<SessionConfigOp
             });
     let (kind, current_value, choices) = match &option.kind {
         SessionConfigKind::Select(select) => {
-            let choices: Vec<SessionConfigOptionChoice> = match &select.options {
-                SessionConfigSelectOptions::Ungrouped(options) => {
-                    options.iter().map(project_choice).collect()
-                }
-                SessionConfigSelectOptions::Grouped(groups) => groups
-                    .iter()
-                    .flat_map(|group| group.options.iter())
-                    .map(project_choice)
-                    .collect(),
-                other => {
-                    tracing::warn!(
-                        option = %option.id.0,
-                        ?other,
-                        "skipping select config option with unencodable choices"
-                    );
-                    return None;
-                }
+            let Some(choices) = project_select_choices(&select.options) else {
+                tracing::warn!(
+                    option = %option.id.0,
+                    options = ?select.options,
+                    "skipping select config option with unencodable choices"
+                );
+                return None;
             };
             (
                 SNAPSHOT_KIND_SELECT,
@@ -121,12 +120,45 @@ fn project_config_option(option: &SessionConfigOption) -> Option<SessionConfigOp
     })
 }
 
+/// Select choices in advertised order, flattened across groups. `None` for a
+/// choice shape this runtime cannot encode (a future `SessionConfigSelectOptions` variant).
+pub(crate) fn project_select_choices(
+    options: &SessionConfigSelectOptions,
+) -> Option<Vec<SessionConfigOptionChoice>> {
+    match options {
+        SessionConfigSelectOptions::Ungrouped(options) => Some(
+            options
+                .iter()
+                .map(|choice| project_choice(choice, None))
+                .collect(),
+        ),
+        SessionConfigSelectOptions::Grouped(groups) => Some(
+            groups
+                .iter()
+                .flat_map(|group| {
+                    let projected = SessionConfigOptionGroup {
+                        id: group.group.0.to_string(),
+                        name: group.name.clone(),
+                    };
+                    group
+                        .options
+                        .iter()
+                        .map(move |choice| project_choice(choice, Some(projected.clone())))
+                })
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
 fn project_choice(
-    choice: &agent_client_protocol::v1::schema::SessionConfigSelectOption,
+    choice: &SessionConfigSelectOption,
+    group: Option<SessionConfigOptionGroup>,
 ) -> SessionConfigOptionChoice {
     SessionConfigOptionChoice {
         value: choice.value.0.to_string(),
         name: choice.name.clone(),
         description: choice.description.clone(),
+        group,
     }
 }
