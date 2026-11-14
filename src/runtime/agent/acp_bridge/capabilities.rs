@@ -114,12 +114,14 @@ pub const IGNORED_FEATURE_AGENT_MODEL: &str = "agent.model";
 pub const IGNORED_FEATURE_AGENT_EFFORT: &str = "agent.effort";
 pub const IGNORED_FEATURE_AGENT_CONFIG_OPTION: &str = "agent.config_option";
 
-/// Path to the breakpoint-fork sub-capability inside
-/// `capabilities.sessionCapabilities.fork`. A consumer of the reported snapshot
-/// reads the same path to decide whether it may fork at a message id.
-const FORK_META_KEY: &str = "_meta";
-const FORK_ACP_STACK_KEY: &str = "acpStack";
+/// The acp-stack extension namespace under a capability's `_meta`. The breakpoint-fork
+/// sub-capability sits under `capabilities.sessionCapabilities.fork`, and a consumer of the
+/// reported snapshot reads the same path to decide whether it may fork at a message id.
+const META_KEY: &str = "_meta";
+const ACP_STACK_META_KEY: &str = "acpStack";
 const FORK_MESSAGE_ID_KEY: &str = "messageId";
+/// `capabilities._meta.acpStack.launchEnv`: the adapter takes `_acpStack/launch_env`.
+const LAUNCH_ENV_KEY: &str = "launchEnv";
 
 impl AgentCapabilitiesDto {
     /// Pair the advertisement with the installed harness/adapter versions from
@@ -174,13 +176,13 @@ impl AgentCapabilitiesDto {
             return;
         };
         let meta = fork
-            .entry(FORK_META_KEY)
+            .entry(META_KEY)
             .or_insert_with(|| Value::Object(serde_json::Map::new()));
         let Some(meta) = meta.as_object_mut() else {
             return;
         };
         let stack = meta
-            .entry(FORK_ACP_STACK_KEY)
+            .entry(ACP_STACK_META_KEY)
             .or_insert_with(|| Value::Object(serde_json::Map::new()));
         let Some(stack) = stack.as_object_mut() else {
             return;
@@ -235,11 +237,21 @@ impl AgentCapabilitiesDto {
             .and_then(Value::as_object)
             .and_then(|caps| caps.get("fork"))
             .and_then(Value::as_object);
-        fork.and_then(|fork| fork.get(FORK_META_KEY))
+        fork.and_then(|fork| fork.get(META_KEY))
             .and_then(Value::as_object)
-            .and_then(|meta| meta.get(FORK_ACP_STACK_KEY))
+            .and_then(|meta| meta.get(ACP_STACK_META_KEY))
             .and_then(Value::as_object)
             .and_then(|stack| stack.get(FORK_MESSAGE_ID_KEY))
+            .is_some_and(Value::is_object)
+    }
+
+    /// Whether the adapter takes `_acpStack/launch_env`, so a new provider set reaches its later
+    /// agent launches without a restart.
+    pub fn supports_launch_env(&self) -> bool {
+        self.capabilities
+            .get(META_KEY)
+            .and_then(|meta| meta.get(ACP_STACK_META_KEY))
+            .and_then(|stack| stack.get(LAUNCH_ENV_KEY))
             .is_some_and(Value::is_object)
     }
 

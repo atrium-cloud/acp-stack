@@ -61,7 +61,7 @@ pub use self::capabilities::{
 };
 pub(crate) use self::process_env::{
     ENDPOINT_VERDICT_AGENT_IDS, KIMI_CODE_AGENT_ID, KIMI_MANAGED_ENV_PREFIX,
-    RUNTIME_MANAGED_LAUNCH_ENV, kimi_lane_for_provider_id,
+    RUNTIME_MANAGED_LAUNCH_ENV, hidden_native_providers, kimi_lane_for_provider_id,
 };
 pub use self::sessions::ForkPoint;
 pub(crate) use self::spawn::resolve_command_path;
@@ -108,6 +108,30 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 /// Poll cadence for the child exit watcher. ACP transports can remain parked
 /// until orderly shutdown, so process death is observed directly.
 const CHILD_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// The acp-stack extension request that hands an adapter the env its later agent launches take.
+pub const LAUNCH_ENV_METHOD: &str = "_acpStack/launch_env";
+
+/// `_acpStack/launch_env` params, each request the whole state: `env` to set, `unset` to remove
+/// from the adapter's inherited env, `hide_providers` the full hide list.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LaunchEnvRequest {
+    pub env: std::collections::BTreeMap<String, String>,
+    pub unset: Vec<String>,
+    pub hide_providers: Vec<String>,
+}
+
+impl std::fmt::Debug for LaunchEnvRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Values are key material; names are not secret.
+        f.debug_struct("LaunchEnvRequest")
+            .field("env_names", &self.env.keys().collect::<Vec<_>>())
+            .field("unset", &self.unset)
+            .field("hide_providers", &self.hide_providers)
+            .finish()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentSessionConfigCategory {

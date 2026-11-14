@@ -82,6 +82,11 @@ pub(crate) struct AcpArgs {
     /// advertises no MCP capability at all.
     #[arg(long)]
     pub(crate) cap_mcp_http: bool,
+    /// Advertise `_meta.acpStack.launchEnv` and write each `_acpStack/launch_env`
+    /// request's params to this file, the way an adapter that takes a new
+    /// launch env without a restart behaves.
+    #[arg(long)]
+    pub(crate) launch_env_record: Option<PathBuf>,
     #[arg(long)]
     pub(crate) expect_fork_message_id: Option<String>,
     /// Require `_meta.jetbrains.air.fork` to name this id on `session/fork`,

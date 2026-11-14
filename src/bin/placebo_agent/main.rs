@@ -204,6 +204,17 @@ async fn run_acp(args: AcpArgs) -> agent_client_protocol::Result<()> {
             },
             agent_client_protocol::on_receive_request!(),
         )
+        // Untyped requests match every method, so this stays behind every typed handler.
+        .on_receive_request(
+            {
+                let state = Arc::clone(&state);
+                async move |request, responder, connection| {
+                    handle_extension_request(Arc::clone(&state), request, responder, connection)
+                        .await
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
         .on_receive_notification(
             {
                 let state = Arc::clone(&state);

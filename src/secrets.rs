@@ -660,6 +660,12 @@ impl SecretStore {
         Ok(environment)
     }
 
+    /// The names [`Self::managed_environment`] sets, with no ref resolved.
+    pub fn managed_environment_names(&self) -> impl Iterator<Item = &str> {
+        (self.managed_state.values())
+            .flat_map(|record| record.environment.keys().map(String::as_str))
+    }
+
     /// The revision rule every managed-state kind shares: positive and never below the
     /// applied one. `Some` is a replay at the applied revision, whose content must match.
     fn replayed_record(

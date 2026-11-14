@@ -23,6 +23,10 @@ const ACP_ERROR_DETAIL_MAX_BYTES: usize = 2048;
 /// gate across it, so one reply the agent never sends must not stall every later sync.
 const SESSION_LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Longest an adapter may take to answer `_acpStack/launch_env`, which a managed-state apply
+/// waits on under the agent-config lock; past it the Agent restarts instead.
+const LAUNCH_ENV_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// A resolved breakpoint for `session/fork`, already translated into the
 /// dialect the running adapter reads. The supervisor owns the translation
 /// because only it can map an acp-stack prompt message id onto the adapter's
@@ -549,6 +553,24 @@ impl AcpBridge {
             .await
             .map_err(|err| self.request_failed("session/close", Some(&attached_id), err))?;
         self.forget_attached_session(&attached_id).await;
+        Ok(())
+    }
+
+    /// `_acpStack/launch_env`. The params carry key material, so nothing here formats them; an
+    /// adapter error comes back redacted and bounded like any request's.
+    pub async fn push_launch_env(&self, request: &LaunchEnvRequest) -> Result<()> {
+        let connection = self.connection().await?;
+        let message = agent_client_protocol::UntypedMessage::new(LAUNCH_ENV_METHOD, request)
+            .map_err(|err| self.request_failed(LAUNCH_ENV_METHOD, None, err))?;
+        let request = self.timed_request(&connection, LAUNCH_ENV_METHOD, None, message);
+        tokio::time::timeout(LAUNCH_ENV_TIMEOUT, request)
+            .await
+            .map_err(|_| {
+                let seconds = LAUNCH_ENV_TIMEOUT.as_secs();
+                let message = format!("the agent did not answer within {seconds}s");
+                self.local_request_failure(LAUNCH_ENV_METHOD, None, message)
+            })?
+            .map_err(|err| self.request_failed(LAUNCH_ENV_METHOD, None, err))?;
         Ok(())
     }
 

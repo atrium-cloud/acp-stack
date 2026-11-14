@@ -50,6 +50,14 @@ pub(crate) async fn handle_initialize(
     if state.args.cap_mcp_http {
         capabilities = capabilities.mcp_capabilities(McpCapabilities::new().http(true));
     }
+    if state.args.launch_env_record.is_some() {
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            "acpStack".to_owned(),
+            serde_json::json!({ "launchEnv": {} }),
+        );
+        capabilities = capabilities.meta(meta);
+    }
     responder.respond(
         InitializeResponse::new(ProtocolVersion::V1)
             .agent_capabilities(capabilities)
@@ -317,6 +325,24 @@ pub(crate) async fn handle_close_session(
     _connection: ConnectionTo<Client>,
 ) -> agent_client_protocol::Result<()> {
     responder.respond(CloseSessionResponse::new())
+}
+
+/// Answers `_acpStack/launch_env` with `{}` after recording its params, and every other method
+/// no typed handler took as not found.
+pub(crate) async fn handle_extension_request(
+    state: SharedState,
+    request: agent_client_protocol::UntypedMessage,
+    responder: Responder<serde_json::Value>,
+    _connection: ConnectionTo<Client>,
+) -> agent_client_protocol::Result<()> {
+    let record = state.lock().await.args.launch_env_record.clone();
+    let Some(record) = record.filter(|_| request.method() == "_acpStack/launch_env") else {
+        return responder.respond_with_error(Error::method_not_found());
+    };
+    tokio::fs::write(&record, request.params().to_string())
+        .await
+        .map_err(Error::into_internal_error)?;
+    responder.respond(serde_json::json!({}))
 }
 
 pub(crate) async fn handle_delete_session(

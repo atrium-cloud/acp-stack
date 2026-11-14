@@ -24,6 +24,22 @@ The lane endpoint is the provider row's Kimi base from `data/providers.toml` (pa
 
 For Pi Agent, the bridge sets the process-only `PI_ACP_PI_BIN` to the managed `pi` path before launching `pi-acp`. The adapter bundle carries no Pi, so this names the harness it drives. For active provider rows with several endpoints, the bridge also sets `PI_ACP_HIDE_PROVIDERS` to the Pi providers of the endpoints each row's key cannot use, read from the endpoint probe's cached verdicts (see [Pi Agent launch](../../agents/pi.md#launch)). Declaring either variable in `[agent].env` is rejected.
 
+### Launch Env (local extension)
+
+An adapter that launches its agent per session can take a new provider env without a restart. It advertises `agentCapabilities._meta.acpStack.launchEnv` as an object at `initialize`.
+
+After a `provider-credential-set` apply whose providers differ from the ones the running adapter holds, the apply probes the endpoints and rewrites the native config as a start does, then the bridge sends the request below. Each request is the whole state: `env` holds every resolved provider variable to set, except one the network provider's `workload_env` overrides at spawn; `unset` every provider-owned variable name the set leaves out and no other spawn source sets (a `secret-environment` namespace, `[workspace.sandbox].workload_env`, the network provider's `workload_env`), which the adapter removes from its inherited env; and `hideProviders` the full hide list as `PI_ACP_HIDE_PROVIDERS` carries it.
+
+```json
+{ "jsonrpc": "2.0", "id": 7, "method": "_acpStack/launch_env", "params": { "env": { "OPENROUTER_API_KEY": "sk-or-..." }, "unset": ["OPENAI_API_KEY"], "hideProviders": [] } }
+```
+
+- The adapter answers `{}` and applies the env to every agent launch after it.
+- On success the apply answers `agent_environment: "live"`, the status route's loaded providers become the applied set, and an `on-crash` respawn launches with this env and the Agent config it was resolved from, so the respawn's `PI_ACP_HIDE_PROVIDERS` covers the pushed set. A replay of the same set finds them matching and sends nothing.
+- An adapter without the capability, a failed request, or no answer within 10 seconds answers `restart_required`. The failure is logged with the adapter's error redacted and bounded.
+- An agent start needs no request: the process env is fresh.
+- The params carry key values. The request's `Debug` prints names only, and no log line, trace frame or event records them.
+
 ### Client capabilities
 
 The initialize request advertises the client capabilities `acp-stack` implements. Each flag is advertised only when its agent-to-client handlers exist, so the wire contract claims only support the runtime serves.

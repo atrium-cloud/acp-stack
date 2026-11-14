@@ -7,7 +7,7 @@ use tempfile::TempDir;
 use crate::common::agent::{AgentHarness, admin_bearer, http, session_bearer, test_config};
 
 #[cfg(unix)]
-fn kill_process(pid: u32) {
+pub(crate) fn kill_process(pid: u32) {
     let result = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
     let result = if result == 0 {
         result
@@ -27,7 +27,7 @@ fn read_fake_agent_pid(path: &std::path::Path) -> u32 {
 }
 
 #[cfg(unix)]
-async fn wait_for_agent_status(
+pub(crate) async fn wait_for_agent_status(
     client: &reqwest::Client,
     base_url: &str,
     predicate: impl Fn(&Value) -> bool,

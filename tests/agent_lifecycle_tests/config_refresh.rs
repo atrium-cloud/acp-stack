@@ -14,6 +14,32 @@ const OPENROUTER: (&str, &str, &str) = (
     "sk-or-example-not-a-real-key",
 );
 const DEEPSEEK: (&str, &str, &str) = ("deepseek", "DEEPSEEK_API_KEY", "sk-example-not-a-real-key");
+const OPENCODE: (&str, &str, &str) = (
+    "opencode",
+    "OPENCODE_API_KEY",
+    "sk-oc-example-not-a-real-key",
+);
+
+/// Local model listings that refuse the OpenCode key at `opencode` and serve it at `opencode-go`;
+/// the guard points provider listing fetches at them.
+async fn serve_opencode_listings() -> EnvVarGuard<'static> {
+    use axum::routing::get;
+    let listings = axum::Router::new()
+        .route("/opencode/models", get(|| async { r#"{"data":[]}"# }))
+        .route(
+            "/opencode-go/models",
+            get(|| async { r#"{"data":[{"id":"glm-5.2"}]}"# }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listings");
+    let base = format!(
+        "http://{}",
+        listener.local_addr().expect("listings address")
+    );
+    tokio::spawn(async move { axum::serve(listener, listings).await });
+    EnvVarGuard::set_many(vec![("ACP_STACK_PROVIDER_MODELS_BASE", base.into())])
+}
 
 /// A `provider_id` default slot and a managed credential namespace.
 fn credential_set_config(provider_id: &str) -> Config {
@@ -122,33 +148,66 @@ async fn a_credential_set_reaches_a_running_agent_through_its_restart() {
     assert_eq!(status["provider_restart_required"], false, "{status}");
 }
 
+/// An adapter advertising the launch-env extension takes a set in place: the same process
+/// receives the set's provider variables and the provider names it leaves out, except names
+/// another spawn source still sets.
+#[tokio::test]
+async fn a_credential_set_reaches_an_advertising_adapter_without_a_restart() {
+    let record = tempfile::NamedTempFile::new().expect("record file");
+    let mut config = credential_set_config(OPENROUTER.0);
+    config.agent.args.extend([
+        "--launch-env-record".to_owned(),
+        record.path().to_string_lossy().into_owned(),
+    ]);
+    config.agent.env.push("EXAMPLE_TOOL_TOKEN".to_owned());
+    let sandbox_env = &mut config.workspace.sandbox.workload_env;
+    sandbox_env.insert(
+        "OPENAI_API_KEY".to_owned(),
+        "sk-example-not-a-real-key".to_owned(),
+    );
+    let harness = spawn_for_credential_sets(config).await;
+    let mut store = SecretStore::open(&harness.home).expect("secret store");
+    store
+        .set("EXAMPLE_TOOL_TOKEN", "example-not-a-real-token")
+        .expect("tool token");
+    apply_set(&harness, 1, &[OPENROUTER]).await;
+    agent_lifecycle(&harness, "start").await;
+    let pid = agent_status(&harness).await["pid"].clone();
+
+    let data = apply_set(&harness, 2, &[OPENROUTER, DEEPSEEK]).await;
+
+    assert_eq!(data["agent_environment"], "live", "{data}");
+    let pushed: Value =
+        serde_json::from_slice(&std::fs::read(record.path()).expect("recorded launch env"))
+            .expect("launch env json");
+    assert_eq!(pushed["env"][OPENROUTER.1], OPENROUTER.2, "{pushed}");
+    assert_eq!(pushed["env"][DEEPSEEK.1], DEEPSEEK.2, "{pushed}");
+    assert!(
+        pushed["env"].get("EXAMPLE_TOOL_TOKEN").is_none(),
+        "{pushed}"
+    );
+    let unset = pushed["unset"].as_array().expect("unset names");
+    assert!(unset.contains(&json!("ANTHROPIC_API_KEY")), "{pushed}");
+    assert!(!unset.contains(&json!("OPENAI_API_KEY")), "{pushed}");
+    assert!(!unset.contains(&json!(DEEPSEEK.1)), "{pushed}");
+    assert_eq!(pushed["hideProviders"], json!([]));
+    let status = agent_status(&harness).await;
+    assert_eq!(status["pid"], pid, "{status}");
+    assert_eq!(status["provider_restart_required"], false, "{status}");
+
+    std::fs::write(record.path(), "").expect("clear record");
+    let unchanged = apply_set(&harness, 3, &[OPENROUTER, DEEPSEEK]).await;
+    assert_eq!(unchanged["outcome"], "applied", "{unchanged}");
+    assert_eq!(unchanged["agent_environment"], "live", "{unchanged}");
+    assert!(std::fs::read(record.path()).expect("record").is_empty());
+}
+
 /// After a swap onto a row whose new key is refused at its first endpoint, the next start points
 /// Pi's model-less default at the endpoint the key can use and hides the refused one, from the
 /// listings that start probes.
 #[tokio::test]
 async fn a_swapped_in_row_defaults_to_the_endpoint_its_key_can_use() {
-    use axum::routing::get;
-    const OPENCODE: (&str, &str, &str) = (
-        "opencode",
-        "OPENCODE_API_KEY",
-        "sk-oc-example-not-a-real-key",
-    );
-    let listings = axum::Router::new()
-        .route("/opencode/models", get(|| async { r#"{"data":[]}"# }))
-        .route(
-            "/opencode-go/models",
-            get(|| async { r#"{"data":[{"id":"glm-5.2"}]}"# }),
-        );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind listings");
-    let base = format!(
-        "http://{}",
-        listener.local_addr().expect("listings address")
-    );
-    tokio::spawn(async move { axum::serve(listener, listings).await });
-    let _listings_gate =
-        EnvVarGuard::set_many(vec![("ACP_STACK_PROVIDER_MODELS_BASE", base.into())]);
+    let _listings_gate = serve_opencode_listings().await;
     let mut config = credential_set_config(DEEPSEEK.0);
     config.agent.id = "pi".to_owned();
     config
@@ -172,6 +231,54 @@ async fn a_swapped_in_row_defaults_to_the_endpoint_its_key_can_use() {
     let settings = std::fs::read(harness.home.join(".pi/agent/settings.json")).expect("settings");
     let settings: Value = serde_json::from_slice(&settings).expect("settings json");
     assert_eq!(settings["defaultProvider"], "opencode-go", "{settings}");
+}
+
+/// A crash after a push that added a row respawns with the pushed set's hide list, which the
+/// start on the smaller set never carried.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_respawn_after_a_push_hides_what_the_pushed_set_hides() {
+    use super::crash_restart::{kill_process, wait_for_agent_status};
+    let _listings_gate = serve_opencode_listings().await;
+    let record = tempfile::NamedTempFile::new().expect("record file");
+    let mut config = credential_set_config(DEEPSEEK.0);
+    config.agent.id = "pi".to_owned();
+    config.agent.restart = "on-crash".to_owned();
+    let record_path = record.path().to_string_lossy().into_owned();
+    config.agent.args.extend([
+        "--launch-env-record".to_owned(),
+        record_path,
+        "--assert-env-equals".to_owned(),
+        "PI_ACP_HIDE_PROVIDERS".to_owned(),
+        "opencode".to_owned(),
+    ]);
+    let harness = spawn_for_credential_sets(config).await;
+    let bin_dir = harness.home.join(".local/bin");
+    std::fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_placebo_shim(&bin_dir.join("pi"));
+    apply_set(&harness, 1, &[DEEPSEEK]).await;
+    let first_pid = agent_lifecycle(&harness, "start").await["pid"].clone();
+
+    let data = apply_set(&harness, 2, &[DEEPSEEK, OPENCODE]).await;
+    assert_eq!(data["agent_environment"], "live", "{data}");
+    let pid = first_pid.as_u64().and_then(|pid| u32::try_from(pid).ok());
+    kill_process(pid.expect("pid"));
+
+    let client = http().await;
+    wait_for_agent_status(&client, &harness.base_url, |status| {
+        status["process_state"] == "running" && status["pid"] != first_pid
+    })
+    .await;
+    let capabilities: Value = (client.get(format!("{}/v1/agent/capabilities", harness.base_url)))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("capabilities")
+        .json()
+        .await
+        .expect("capabilities json");
+    let title = &capabilities["data"]["capabilities"]["agent_title"];
+    assert_eq!(title, "env assertions passed", "{capabilities}");
 }
 
 #[tokio::test]

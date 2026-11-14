@@ -2,7 +2,7 @@
 //! Revision semantics and ownership enforcement live in the secret store; this
 //! handler resolves the namespace, serializes writers, and audits.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -15,8 +15,12 @@ use crate::extensions::managed_state::{
     AGENT_ENVIRONMENT_LIVE, AGENT_ENVIRONMENT_RESTART_REQUIRED, ApplyRequest, ApplyResponse,
     KIND_PROVIDER_CREDENTIAL_SET, KIND_SECRET_ENVIRONMENT,
 };
+use crate::runtime::agent::acp_bridge::{
+    AgentCapabilitiesDto, LaunchEnvRequest, hidden_native_providers,
+};
 use crate::runtime::agent::agent_headless_config::provision_agent_headless_config;
-use crate::runtime::agent::provider_keys::ResolvedAgentEnvironment;
+use crate::runtime::agent::provider_keys::{ResolvedAgentEnvironment, agent_provider_env_names};
+use crate::runtime::agent::provider_model_catalog::probe_provider_endpoints;
 use crate::secrets::{ManagedApplyOutcome, ProviderCredentialSet, SecretStore};
 
 pub(crate) async fn extension_managed_state_apply_handler(
@@ -82,7 +86,8 @@ pub(crate) async fn extension_managed_state_apply_handler(
         provision_agent_headless_config(&config, &home)?;
     }
     if let Some(environment) = environment {
-        response.agent_environment = Some(agent_environment(&target, &environment).await);
+        response.agent_environment =
+            Some(agent_environment(&target, &config, environment, &home, &store).await);
     }
 
     record_apply_event(&state, &name, kind, &response, revision, &store).await;
@@ -133,21 +138,79 @@ fn invalidate_changed_provider_models<'a>(
     }
 }
 
-/// `live` when no Agent runs or the running Agent's loaded providers already match the applied
-/// set; else `restart_required`.
+/// `live` when no Agent runs, the running Agent's loaded providers already match the applied set,
+/// or its adapter took the set's env through a launch-env push; else `restart_required`.
 async fn agent_environment(
     target: &AgentTargetRuntime,
-    environment: &ResolvedAgentEnvironment,
+    config: &Config,
+    environment: ResolvedAgentEnvironment,
+    home: &std::path::Path,
+    store: &SecretStore,
 ) -> &'static str {
     let snapshot = target.supervisor.snapshot().await;
-    if super::status::provider_snapshot_requires_restart(
+    if !super::status::provider_snapshot_requires_restart(
         snapshot.state,
         snapshot.loaded_providers.as_deref(),
         &environment.providers,
     ) {
-        AGENT_ENVIRONMENT_RESTART_REQUIRED
-    } else {
-        AGENT_ENVIRONMENT_LIVE
+        return AGENT_ENVIRONMENT_LIVE;
+    }
+    let takes_launch_env = snapshot
+        .latest_capabilities
+        .as_ref()
+        .is_some_and(AgentCapabilitiesDto::supports_launch_env);
+    if !takes_launch_env {
+        return AGENT_ENVIRONMENT_RESTART_REQUIRED;
+    }
+    // The pushed hide list and Pi's default endpoint come from one probe, as at a start.
+    probe_provider_endpoints(home, &config.agent, &environment.env).await;
+    if let Err(error) = provision_agent_headless_config(config, home) {
+        tracing::warn!(
+            error = %crate::error::report(&error),
+            "launch env push: native config rewrite failed; the running Agent restarts instead"
+        );
+        return AGENT_ENVIRONMENT_RESTART_REQUIRED;
+    }
+    let provider_names = agent_provider_env_names(&config.agent.id);
+    // The network provider's `workload_env` lands last at spawn, so the adapter keeps its value,
+    // and a name any spawn source sets stays in the adapter's env, as a restart would keep it.
+    let network_names: BTreeSet<String> = crate::extensions::resolve_network_provider(config)
+        .map(|provider| provider.workload_env.into_keys().collect())
+        .unwrap_or_default();
+    let sandbox_names = config.workspace.sandbox.workload_env.keys();
+    let spawn_names: BTreeSet<&str> = (network_names.iter().chain(sandbox_names))
+        .map(String::as_str)
+        .chain(store.managed_environment_names())
+        .collect();
+    let request = LaunchEnvRequest {
+        env: (environment.env.iter())
+            .filter(|(name, _)| {
+                provider_names.contains(name.as_str()) && !network_names.contains(*name)
+            })
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect(),
+        unset: (provider_names.into_iter())
+            .filter(|name| !environment.env.contains_key(*name) && !spawn_names.contains(name))
+            .map(str::to_owned)
+            .collect(),
+        hide_providers: hidden_native_providers(home, &config.agent)
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+    };
+    match target
+        .supervisor
+        .push_launch_env(environment, config.agent.clone(), &request)
+        .await
+    {
+        Ok(()) => AGENT_ENVIRONMENT_LIVE,
+        Err(error) => {
+            tracing::warn!(
+                error = %crate::error::report(&error),
+                "launch env push failed; the running Agent restarts to take the applied providers"
+            );
+            AGENT_ENVIRONMENT_RESTART_REQUIRED
+        }
     }
 }
 

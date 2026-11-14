@@ -41,6 +41,8 @@ A provider row with several endpoints on one key, such as OpenCode's `opencode` 
 
 While another endpoint of its own row lists models, the bridge names each unavailable endpoint in the process-only `PI_ACP_HIDE_PROVIDERS`, and `pi-acp` leaves their models out of the session's model list. The endpoint the configured model or subagent model runs on stays listed. A default slot with no model that names the row runs on the row's first endpoint not hidden, and Pi's `defaultProvider` names that endpoint; an Agent start rewrites Pi's settings after its probe, so both come from the same verdicts unless that rewrite fails, which the start logs and runs through. Declaring either variable in `[agent].env` is rejected.
 
+A `pi-acp` that advertises the [launch env extension](../specs/acp/acp-bridge.md#launch-env-local-extension) takes a new provider set without an Agent restart: the apply probes the endpoints and rewrites Pi's settings as a start does, then the bridge sends the set's provider variables, the provider variables it leaves out and the current hide list, and every Pi launch after that uses them.
+
 ## Cloudflare Providers
 
 Cloudflare providers require companion env refs alongside the main API key. The base `companion_env_vars` list per provider lives in [../../data/env_vars.toml](../../data/env_vars.toml), with per-provider overrides in [../../data/providers.toml](../../data/providers.toml).

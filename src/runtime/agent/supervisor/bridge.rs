@@ -284,12 +284,26 @@ async fn monitor_bridge_exit(
         }
     }
 
+    // A pushed env launches with the config it resolved from, so the hide list the spawn derives
+    // covers the pushed set.
+    let (agent, env, providers) = match shared.pushed_launch.read().await.clone() {
+        Some(pushed) => (
+            pushed.agent,
+            pushed.environment.env,
+            pushed.environment.providers,
+        ),
+        None => (
+            restart_context.agent.clone(),
+            restart_context.env.clone(),
+            restart_context.providers.clone(),
+        ),
+    };
     match spawn_agent_bridge(
         &restart_context.home,
         &restart_context.target_id,
-        &restart_context.agent,
+        &agent,
         &restart_context.workspace_root,
-        restart_context.env.clone(),
+        env,
         &restart_context.state_store,
         &restart_context.session_changes,
         restart_context.event_hub.clone(),
@@ -309,7 +323,7 @@ async fn monitor_bridge_exit(
             }
             *shared.capabilities.write().await = Some(capabilities);
             *shared.last_pid.write().await = pid;
-            *shared.loaded_providers.write().await = Some(restart_context.providers.clone());
+            *shared.loaded_providers.write().await = Some(providers);
             spawn_list_sync_loop(shared.clone(), &new_bridge, &restart_context);
             spawn_bridge_exit_monitor(shared, new_bridge, restart_context);
         }

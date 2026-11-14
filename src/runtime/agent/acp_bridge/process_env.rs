@@ -94,7 +94,15 @@ fn build_hermes_process_env(
     Ok(env)
 }
 
-/// Hidden endpoints come from the cached probe verdicts, so no spawn makes a network call here.
+/// The agent's native ids of the endpoints to leave out of its model list, from the cached probe
+/// verdicts, so no caller makes a network call here.
+pub(crate) fn hidden_native_providers(home: &Path, agent: &AgentConfig) -> Vec<&'static str> {
+    hidden_provider_endpoints(home, agent)
+        .into_iter()
+        .filter_map(|endpoint_id| agent_provider_id_for_provider_id(&agent.id, endpoint_id))
+        .collect()
+}
+
 fn build_pi_process_env(
     agent: &AgentConfig,
     home: &Path,
@@ -108,10 +116,7 @@ fn build_pi_process_env(
             ),
         });
     }
-    let hidden: Vec<&str> = hidden_provider_endpoints(home, agent)
-        .into_iter()
-        .filter_map(|endpoint_id| agent_provider_id_for_provider_id(PI_AGENT_ID, endpoint_id))
-        .collect();
+    let hidden = hidden_native_providers(home, agent);
     if !hidden.is_empty() {
         env.insert(PI_ACP_HIDE_PROVIDERS_ENV.to_owned(), hidden.join(","));
     }

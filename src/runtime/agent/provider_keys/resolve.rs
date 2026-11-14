@@ -772,6 +772,21 @@ fn agent_provider_owned_env_refs(agent_id: &str) -> BTreeSet<String> {
     refs
 }
 
+/// Every env var a provider this agent supports reads, optional ones included: the names a
+/// launch-env push removes from the adapter's inherited env when the applied set leaves them out.
+pub fn agent_provider_env_names(agent_id: &str) -> BTreeSet<&'static str> {
+    providers_for_agent(agent_id)
+        .into_iter()
+        .flat_map(|summary| {
+            summary
+                .default_api_key_ref
+                .into_iter()
+                .chain(summary.companion_env_refs)
+                .chain(summary.optional_env_refs)
+        })
+        .collect()
+}
+
 /// Refs the current primary provider needs declared in `[agent].env`, falling back to
 /// the agent-scoped refs when no provider is configured.
 fn primary_provider_declaration_refs(agent: &AgentConfig) -> Vec<String> {
