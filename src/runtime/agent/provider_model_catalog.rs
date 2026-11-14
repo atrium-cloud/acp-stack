@@ -11,14 +11,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
-use crate::config::{AgentConfig, AgentProviderConfig, Config};
+use crate::config::{AgentConfig, Config};
 use crate::dev_gates::{PROVIDER_MODELS_BASE_ENV, fixture_string};
 use crate::error::{Result, StackError};
 use crate::fs_util::{atomic_write_owner_only, create_dir_owner_only};
 use crate::runtime::agent::acp_bridge::ENDPOINT_VERDICT_AGENT_IDS;
 use crate::runtime::agent::provider_keys::{
-    ProviderEnvMapping, endpoint_lanes_for_provider_id, env_var_for_agent_provider_id,
-    models_url_for_provider_id, resolve_agent_environment,
+    ProviderEnvMapping, effective_active_provider_ids, endpoint_lanes_for_provider_id,
+    env_var_for_agent_provider_id, models_url_for_provider_id, resolve_agent_environment,
 };
 use crate::secrets::SecretStore;
 
@@ -237,9 +237,9 @@ pub fn invalidate_provider_models(home: &Path, provider_id: &str) -> Result<()> 
     write_cache_file(&path, provider_id, &file)
 }
 
-/// Probe each endpoint of the configured provider's row with its key, concurrently, reusing a
-/// verdict younger than the cache TTL. An agent whose launch env reads no verdict, or a provider
-/// without endpoints, makes no call.
+/// Probe each endpoint of every active provider's row with that row's key, all concurrently,
+/// reusing a verdict younger than the cache TTL. An agent whose launch env reads no verdict, or a
+/// set without endpoints, makes no call.
 pub async fn probe_provider_endpoints(
     home: &Path,
     agent: &AgentConfig,
@@ -248,23 +248,28 @@ pub async fn probe_provider_endpoints(
     if !ENDPOINT_VERDICT_AGENT_IDS.contains(&agent.id.as_str()) {
         return;
     }
-    let Some((_, key_ref, lanes)) = endpoint_row(agent) else {
-        return;
-    };
-    // Without a key every listing answers unauthenticated, which says nothing about an account.
-    let Some(api_key) = env.get(key_ref) else {
-        return;
-    };
     let cache = read_cache_file(&cache_path(home)).unwrap_or_default();
-    let probes = lanes.iter().filter_map(|lane| {
-        let endpoint_id = lane.primary_id();
-        let entry = cache.providers.get(endpoint_id);
-        if entry.is_some_and(|entry| entry.earned_with(key_ref) && entry.has_fresh_verdict()) {
-            return None;
+    let mut probes = Vec::new();
+    for row in endpoint_rows(agent) {
+        // Without a key every listing answers unauthenticated, which says nothing about an account.
+        let Some(api_key) = env.get(row.key_ref) else {
+            continue;
+        };
+        for lane in row.lanes {
+            let endpoint_id = lane.primary_id();
+            let entry = cache.providers.get(endpoint_id);
+            if entry
+                .is_some_and(|entry| entry.earned_with(row.key_ref) && entry.has_fresh_verdict())
+            {
+                continue;
+            }
+            let Some(declared_url) = lane.models_url.as_deref() else {
+                continue;
+            };
+            let url = resolve_models_url(endpoint_id, declared_url);
+            probes.push(probe_endpoint(home, endpoint_id, row.key_ref, url, api_key));
         }
-        let url = resolve_models_url(endpoint_id, lane.models_url.as_deref()?);
-        Some(probe_endpoint(home, endpoint_id, key_ref, url, api_key))
-    });
+    }
     futures::future::join_all(probes).await;
 }
 
@@ -313,59 +318,122 @@ fn record_listing(
     write_cache_file(&path, endpoint_id, &file)
 }
 
-/// Endpoint ids of the configured provider's row to leave out of the agent's model list: each
-/// marked unavailable while another endpoint of the row is usable. An endpoint the configured
+/// Endpoint ids to leave out of the agent's model list, over every active provider's row: each
+/// marked unavailable while another endpoint of its own row is usable. An endpoint the configured
 /// model or subagent model runs on stays. A mark holds until a keyed listing with models or an
 /// invalidation clears it.
 pub fn hidden_provider_endpoints(home: &Path, agent: &AgentConfig) -> Vec<&'static str> {
-    let Some((provider, key_ref, lanes)) = endpoint_row(agent) else {
-        return Vec::new();
-    };
     let cache = read_cache_file(&cache_path(home)).unwrap_or_default();
-    let (mut marked, mut usable) = (Vec::new(), false);
-    for &lane in &lanes {
-        let entry = cache.providers.get(lane.primary_id());
-        match entry.filter(|entry| entry.earned_with(key_ref)) {
-            Some(entry) if entry.unavailable_at.is_some() => marked.push(lane.primary_id()),
-            Some(entry) => usable |= entry.is_usable(),
-            None => {}
-        }
-    }
-    let mut configured = vec![(provider, vec![&agent.model, &provider.model])];
-    let subagent = agent.subagent.as_ref().filter(|config| !config.disabled);
-    if let Some(other) = subagent.and_then(|subagent| subagent.provider.as_ref()) {
-        configured.push((other, vec![&other.model]));
-    }
-    let lane_of = |id: &str| lanes.iter().copied().find(|lane| lane.contains_id(id));
-    for (owner, models) in configured {
-        let Some(owner_lane) = lane_of(&owner.id) else {
+    let mut hidden = Vec::new();
+    for row in endpoint_rows(agent) {
+        let (mut marked, usable) = row.marks(&cache);
+        if !usable {
             continue;
-        };
-        // A model's `<id>/` prefix names its endpoint; a bare model, or none, runs on its provider's.
-        let mut kept: Vec<_> = (models.into_iter().flatten())
-            .map(|model| lane_of(model.split_once('/').unwrap_or_default().0).unwrap_or(owner_lane))
-            .collect();
-        if kept.is_empty() {
-            kept.push(owner_lane);
         }
-        marked.retain(|endpoint_id| kept.iter().all(|lane| lane.primary_id() != *endpoint_id));
+        let slot = (agent.provider.as_ref()).map(|slot| (slot, vec![&agent.model, &slot.model]));
+        let subagent = (agent.subagent.as_ref())
+            .filter(|subagent| !subagent.disabled)
+            .and_then(|subagent| subagent.provider.as_ref())
+            .map(|provider| (provider, vec![&provider.model]));
+        for (owner, models) in slot.into_iter().chain(subagent) {
+            let Some(owner_lane) = row.lane_of(&owner.id) else {
+                continue;
+            };
+            // A model's `<id>/` prefix names its endpoint; a bare model runs on its provider's.
+            let mut kept: Vec<_> = (models.into_iter().flatten())
+                .map(|model| {
+                    row.lane_of(model.split_once('/').unwrap_or_default().0)
+                        .unwrap_or(owner_lane)
+                })
+                .collect();
+            if kept.is_empty() {
+                kept.push(row.open_lane(owner_lane, &marked));
+            }
+            marked.retain(|lane| !kept.contains(lane));
+        }
+        hidden.extend(marked.into_iter().map(ProviderEnvMapping::primary_id));
     }
-    if usable { marked } else { Vec::new() }
+    hidden.sort_unstable();
+    hidden.dedup();
+    hidden
 }
 
-/// The configured mapped provider, its key reference and the row's lanes sharing its key env var.
-/// A lane with another key would receive the configured key, so it is never probed or hidden.
-fn endpoint_row(
-    agent: &AgentConfig,
-) -> Option<(&AgentProviderConfig, &str, Vec<&'static ProviderEnvMapping>)> {
+/// The endpoint a model-less `[agent.provider]` runs on. A slot naming its row runs on the row's
+/// first endpoint not hidden, so not on one the key is refused at while another is usable.
+pub fn default_endpoint(home: &Path, agent: &AgentConfig) -> Option<&'static str> {
     let provider = agent.provider.as_ref()?;
-    let key_ref = configured_api_key_ref(agent, &provider.id)?;
+    let row = endpoint_rows(agent)
+        .into_iter()
+        .find(|row| row.provider_id == provider.id)?;
+    let owner_lane = row.lane_of(&provider.id)?;
+    let (marked, usable) = row.marks(&read_cache_file(&cache_path(home)).unwrap_or_default());
+    let lane = if usable {
+        row.open_lane(owner_lane, &marked)
+    } else {
+        owner_lane
+    };
+    Some(lane.primary_id())
+}
+
+/// An active mapped provider, its key reference and the lanes of its row sharing its key env var.
+/// A lane with another key would receive this key, so it is never probed or hidden.
+struct EndpointRow<'a> {
+    provider_id: String,
+    key_ref: &'a str,
+    lanes: Vec<&'static ProviderEnvMapping>,
+}
+
+impl EndpointRow<'_> {
+    fn lane_of(&self, id: &str) -> Option<&'static ProviderEnvMapping> {
+        self.lanes.iter().copied().find(|lane| lane.contains_id(id))
+    }
+
+    /// The lanes marked unavailable for this row's key, and whether any lane is usable with it.
+    fn marks(&self, cache: &ProviderModelCacheFile) -> (Vec<&'static ProviderEnvMapping>, bool) {
+        let verdict = |lane: &ProviderEnvMapping| {
+            (cache.providers.get(lane.primary_id())).filter(|entry| entry.earned_with(self.key_ref))
+        };
+        let marked = (self.lanes.iter().copied())
+            .filter(|lane| verdict(lane).is_some_and(|entry| entry.unavailable_at.is_some()))
+            .collect();
+        let usable = (self.lanes.iter())
+            .any(|lane| verdict(lane).is_some_and(CachedProviderModels::is_usable));
+        (marked, usable)
+    }
+
+    /// The lane a model-less owner runs on. One on the row's first lane names the row, so it runs
+    /// on the first unmarked lane; one naming a later lane keeps it.
+    fn open_lane(
+        &self,
+        owner_lane: &'static ProviderEnvMapping,
+        marked: &[&'static ProviderEnvMapping],
+    ) -> &'static ProviderEnvMapping {
+        if self.lanes.first() != Some(&owner_lane) {
+            return owner_lane;
+        }
+        (self.lanes.iter().copied())
+            .find(|lane| !marked.contains(lane))
+            .unwrap_or(owner_lane)
+    }
+}
+
+/// One row per effective active provider whose row has endpoints, each with its own key reference.
+fn endpoint_rows(agent: &AgentConfig) -> Vec<EndpointRow<'_>> {
     let key = |id: &str| env_var_for_agent_provider_id(&agent.id, id);
-    let row = endpoint_lanes_for_provider_id(&provider.id).iter();
-    let lanes: Vec<_> = row
-        .filter(|lane| key(lane.primary_id()) == key(&provider.id))
-        .collect();
-    (provider.custom.is_none() && !lanes.is_empty()).then_some((provider, key_ref, lanes))
+    effective_active_provider_ids(agent)
+        .into_iter()
+        .filter_map(|provider_id| {
+            let key_ref = configured_api_key_ref(agent, &provider_id)?;
+            let lanes: Vec<_> = (endpoint_lanes_for_provider_id(&provider_id).iter())
+                .filter(|lane| key(lane.primary_id()) == key(&provider_id))
+                .collect();
+            (!lanes.is_empty()).then_some(EndpointRow {
+                provider_id,
+                key_ref,
+                lanes,
+            })
+        })
+        .collect()
 }
 
 /// Resolve the API key, fetch the listing endpoint, and parse the payload.
@@ -471,6 +539,7 @@ fn configured_api_key_ref<'a>(agent: &'a AgentConfig, provider_id: &str) -> Opti
     agent
         .provider
         .as_ref()
+        .filter(|provider| provider.id == provider_id)
         .and_then(|provider| provider.api_key_ref.as_deref())
         .or_else(|| env_var_for_agent_provider_id(&agent.id, provider_id))
 }
@@ -1133,6 +1202,30 @@ mod tests {
         // Any id of the row drops every endpoint's entry.
         invalidate_provider_models(home.path(), "opencode-zen").expect("invalidate");
         assert_eq!(cached_models(home.path(), "opencode"), None);
+    }
+
+    /// A row outside the slot is judged with its own key, and a slot moved onto it without a model
+    /// runs on its first endpoint the key is not refused at.
+    #[test]
+    fn each_active_row_hides_its_own_refused_endpoints() {
+        let home = temp_home();
+        let mut agent = codex_openrouter_config().agent;
+        agent.id = "pi".to_owned();
+        agent.providers = Some(crate::config::AgentProvidersConfig {
+            active: vec!["openrouter".to_owned(), "opencode".to_owned()],
+            selected_aliases: BTreeMap::new(),
+        });
+        let key_ref = "OPENCODE_API_KEY";
+        let listed =
+            parse_models_response("opencode-go", &json!({ "data": [{ "id": "glm-5.2" }] }));
+        record_listing(home.path(), "opencode-go", key_ref, listed.expect("models"))
+            .expect("usable");
+        record_listing(home.path(), "opencode", key_ref, Vec::new()).expect("unavailable");
+        assert_eq!(hidden_provider_endpoints(home.path(), &agent), ["opencode"]);
+
+        agent.provider = Some(serde_json::from_value(json!({ "id": "opencode" })).expect("slot"));
+        assert_eq!(default_endpoint(home.path(), &agent), Some("opencode-go"));
+        assert_eq!(hidden_provider_endpoints(home.path(), &agent), ["opencode"]);
     }
 
     fn codex_openrouter_config() -> Config {

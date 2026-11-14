@@ -89,7 +89,7 @@ pub(crate) async fn start_agent_target_locked(
     let (config, target) = load_fresh_config_for_target(state, target_id).await?;
     ensure_array_process_start_allowed(&config, target_id)?;
     let environment = open_agent_environment(state, &config)?;
-    probe_provider_endpoints(&state.runtime_paths.home, &config.agent, &environment.env).await;
+    probe_endpoints_for_start(state, &config, &environment).await;
     let capabilities = target
         .supervisor
         .start(AgentStartRequest {
@@ -403,8 +403,7 @@ async fn restart_agent_target(
         let mut live = target.live_agent_config.lock().await;
         *live = fresh_config.agent.clone();
     }
-    let home = &state.runtime_paths.home;
-    probe_provider_endpoints(home, &fresh_config.agent, &environment.env).await;
+    probe_endpoints_for_start(state, &fresh_config, &environment).await;
     let capabilities = target
         .supervisor
         .start(AgentStartRequest {

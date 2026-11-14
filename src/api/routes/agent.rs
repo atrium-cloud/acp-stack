@@ -9,9 +9,12 @@ use super::super::core::{AgentTargetRuntime, AppState, load_active_registry_for_
 use crate::config::{AgentAdapterConfig, Config, LocalSessionAuth};
 use crate::envelope::ApiSuccess;
 use crate::error::{Result, StackError};
-use crate::runtime::agent::acp_bridge::{AgentCapabilitiesDto, AgentSessionConfigCategory};
+use crate::runtime::agent::acp_bridge::{
+    AgentCapabilitiesDto, AgentSessionConfigCategory, ENDPOINT_VERDICT_AGENT_IDS,
+};
 use crate::runtime::agent::agent_headless_config::{
     CleanedAgentConfig, ProvisionedAgentConfig, cleanup_agent_headless_config,
+    provision_agent_headless_config,
 };
 use crate::runtime::agent::model_discovery::{
     DEFAULT_MODELS_DISCOVERY_TIMEOUT, advertised_values_for_category,
@@ -321,6 +324,26 @@ pub(crate) fn open_agent_environment(
         return Ok(environment);
     }
     resolve_agent_environment(config, &*state.secrets.open()?)
+}
+
+/// A start's endpoint probe, then the native config rewrite from the same verdicts, so a
+/// model-less slot never defaults to an endpoint the start hides. The rewrite is best effort: a
+/// restart has already stopped the Agent, which starting on the config as it is beats.
+pub(crate) async fn probe_endpoints_for_start(
+    state: &AppState,
+    config: &Config,
+    environment: &ResolvedAgentEnvironment,
+) {
+    let home = &state.runtime_paths.home;
+    probe_provider_endpoints(home, &config.agent, &environment.env).await;
+    if ENDPOINT_VERDICT_AGENT_IDS.contains(&config.agent.id.as_str())
+        && let Err(error) = provision_agent_headless_config(config, home)
+    {
+        tracing::warn!(
+            error = %crate::error::report(&error),
+            "agent start: native config rewrite failed; starting on the native config as it is"
+        );
+    }
 }
 
 async fn load_fresh_config_for_target(

@@ -309,7 +309,7 @@ pub(super) async fn start_agent_for_config(state: &AppState, config: &Config) ->
     ensure_array_process_start_allowed(config, &target_id)?;
     let target = state.agent_target(&target_id)?;
     let environment = open_agent_environment(state, config)?;
-    probe_provider_endpoints(&state.runtime_paths.home, &config.agent, &environment.env).await;
+    probe_endpoints_for_start(state, config, &environment).await;
     *target.live_agent_config.lock().await = config.agent.clone();
     target
         .supervisor

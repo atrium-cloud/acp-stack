@@ -37,9 +37,9 @@ The adapter and the harness install from separate sources.
 
 The adapter bundle carries no Pi, so the bridge names the managed `pi` through the process-only `PI_ACP_PI_BIN` before launching `pi-acp`.
 
-A provider row with several endpoints on one key, such as OpenCode's `opencode` and `opencode-go`, makes each endpoint its own Pi provider. Each Agent start the server runs probes every endpoint with one keyed `GET` of its model listing, bounded at 5 seconds, and reuses an answer younger than 5 minutes. An answer counts only for the key reference (`api_key_ref` or its default env var name) it was earned with. An empty list, 401 or 403 marks the endpoint unavailable; a listing with models clears the mark.
+A provider row with several endpoints on one key, such as OpenCode's `opencode` and `opencode-go`, makes each endpoint its own Pi provider. Each Agent start the server runs probes every endpoint of every active provider's row with that row's key, one keyed `GET` of its model listing each, all concurrently and bounded at 5 seconds, and reuses an answer younger than 5 minutes. An answer counts only for the key reference (`api_key_ref` for the default slot's provider, else the default env var name) it was earned with. An empty list, 401 or 403 marks the endpoint unavailable; a listing with models clears the mark.
 
-While another endpoint of the row lists models, the bridge names the unavailable endpoints in the process-only `PI_ACP_HIDE_PROVIDERS`, and `pi-acp` leaves their models out of the session's model list. The endpoint the configured model or subagent model runs on stays listed. Declaring either variable in `[agent].env` is rejected.
+While another endpoint of its own row lists models, the bridge names each unavailable endpoint in the process-only `PI_ACP_HIDE_PROVIDERS`, and `pi-acp` leaves their models out of the session's model list. The endpoint the configured model or subagent model runs on stays listed. A default slot with no model that names the row runs on the row's first endpoint not hidden, and Pi's `defaultProvider` names that endpoint; an Agent start rewrites Pi's settings after its probe, so both come from the same verdicts unless that rewrite fails, which the start logs and runs through. Declaring either variable in `[agent].env` is rejected.
 
 ## Cloudflare Providers
 

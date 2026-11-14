@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 use super::agent::{
     cancel_pending_acp_permissions_for_target, ensure_array_process_start_allowed,
-    open_agent_environment,
+    open_agent_environment, probe_endpoints_for_start,
 };
 use crate::api::core::AppState;
 use crate::config::Config;
@@ -31,7 +31,6 @@ use crate::runtime::agent::native_config_import::{
     validate_native_config_file_digests, validate_native_config_secret_refs_read_only,
     write_native_config_files,
 };
-use crate::runtime::agent::provider_model_catalog::probe_provider_endpoints;
 use crate::runtime::agent::supervisor::{AgentStartRequest, AgentStateLabel};
 
 mod apply;

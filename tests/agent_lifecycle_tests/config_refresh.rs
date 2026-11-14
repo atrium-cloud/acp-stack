@@ -3,7 +3,9 @@ use acp_stack::secrets::SecretStore;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
-use crate::common::agent::{AgentHarness, admin_bearer, http, session_bearer, test_config};
+use crate::common::agent::{
+    AgentHarness, EnvVarGuard, admin_bearer, http, session_bearer, test_config, write_placebo_shim,
+};
 
 const NAMESPACE: &str = "provider-state";
 const OPENROUTER: (&str, &str, &str) = (
@@ -70,7 +72,7 @@ async fn apply_set(harness: &AgentHarness, revision: i64, set: &[(&str, &str, &s
     body["data"].clone()
 }
 
-async fn agent_lifecycle(harness: &AgentHarness, action: &str) {
+async fn agent_lifecycle(harness: &AgentHarness, action: &str) -> Value {
     let response = http()
         .await
         .post(format!("{}/v1/agent/{action}", harness.base_url))
@@ -78,7 +80,10 @@ async fn agent_lifecycle(harness: &AgentHarness, action: &str) {
         .send()
         .await
         .expect("send agent lifecycle request");
-    assert_eq!(response.status(), StatusCode::OK, "{action}");
+    let status = response.status();
+    let body: Value = response.json().await.expect("agent lifecycle json");
+    assert_eq!(status, StatusCode::OK, "{action}: {body}");
+    body["data"].clone()
 }
 
 async fn agent_status(harness: &AgentHarness) -> Value {
@@ -115,6 +120,58 @@ async fn a_credential_set_reaches_a_running_agent_through_its_restart() {
     assert!(loaded.contains(&OPENROUTER.1), "{status}");
     assert!(loaded.contains(&DEEPSEEK.1), "{status}");
     assert_eq!(status["provider_restart_required"], false, "{status}");
+}
+
+/// After a swap onto a row whose new key is refused at its first endpoint, the next start points
+/// Pi's model-less default at the endpoint the key can use and hides the refused one, from the
+/// listings that start probes.
+#[tokio::test]
+async fn a_swapped_in_row_defaults_to_the_endpoint_its_key_can_use() {
+    use axum::routing::get;
+    const OPENCODE: (&str, &str, &str) = (
+        "opencode",
+        "OPENCODE_API_KEY",
+        "sk-oc-example-not-a-real-key",
+    );
+    let listings = axum::Router::new()
+        .route("/opencode/models", get(|| async { r#"{"data":[]}"# }))
+        .route(
+            "/opencode-go/models",
+            get(|| async { r#"{"data":[{"id":"glm-5.2"}]}"# }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listings");
+    let base = format!(
+        "http://{}",
+        listener.local_addr().expect("listings address")
+    );
+    tokio::spawn(async move { axum::serve(listener, listings).await });
+    let _listings_gate =
+        EnvVarGuard::set_many(vec![("ACP_STACK_PROVIDER_MODELS_BASE", base.into())]);
+    let mut config = credential_set_config(DEEPSEEK.0);
+    config.agent.id = "pi".to_owned();
+    config
+        .agent
+        .args
+        .extend(["--assert-env-equals", "PI_ACP_HIDE_PROVIDERS", "opencode"].map(str::to_owned));
+    let harness = spawn_for_credential_sets(config).await;
+    apply_set(&harness, 1, &[DEEPSEEK]).await;
+
+    // The apply writes Pi's settings from cached verdicts, of which there are none yet.
+    apply_set(&harness, 2, &[OPENCODE]).await;
+
+    let bin_dir = harness.home.join(".local/bin");
+    std::fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_placebo_shim(&bin_dir.join("pi"));
+    let started = agent_lifecycle(&harness, "start").await;
+    assert_eq!(
+        started["capabilities"]["agent_title"], "env assertions passed",
+        "{started}"
+    );
+    let settings = std::fs::read(harness.home.join(".pi/agent/settings.json")).expect("settings");
+    let settings: Value = serde_json::from_slice(&settings).expect("settings json");
+    assert_eq!(settings["defaultProvider"], "opencode-go", "{settings}");
 }
 
 #[tokio::test]

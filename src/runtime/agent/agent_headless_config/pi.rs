@@ -1,5 +1,6 @@
 use super::*;
 use crate::runtime::agent::provider_keys::agent_provider_ids_for_provider_row;
+use crate::runtime::agent::provider_model_catalog::default_endpoint;
 
 /// `models.json` carries only a custom provider's own entry.
 pub(super) fn provision_pi_config(
@@ -39,10 +40,15 @@ pub(super) fn provision_pi_config(
     }
     let model = configured_provider_model(config)
         .map(|model| pi_default_model(model, &provider.id, native_provider));
-    root.insert(
-        "defaultProvider".to_owned(),
-        json!(model.map_or(native_provider, |(endpoint, _)| endpoint)),
-    );
+    // Without a model Pi picks one on `defaultProvider`, which must not name an endpoint the key
+    // is refused at while another of the row is usable.
+    let default_provider = match model {
+        Some((endpoint, _)) => endpoint,
+        None => default_endpoint(workload.runtime_home(), &config.agent)
+            .and_then(|endpoint| agent_provider_id_for_provider_id("pi", endpoint))
+            .unwrap_or(native_provider),
+    };
+    root.insert("defaultProvider".to_owned(), json!(default_provider));
     match model {
         Some((_, model_id)) => {
             root.insert("defaultModel".to_owned(), json!(model_id));

@@ -17,7 +17,7 @@ use crate::extensions::managed_state::{
 };
 use crate::runtime::agent::agent_headless_config::provision_agent_headless_config;
 use crate::runtime::agent::provider_keys::ResolvedAgentEnvironment;
-use crate::secrets::{ProviderCredentialSet, SecretStore};
+use crate::secrets::{ManagedApplyOutcome, ProviderCredentialSet, SecretStore};
 
 pub(crate) async fn extension_managed_state_apply_handler(
     Path(name): Path<String>,
@@ -57,8 +57,8 @@ pub(crate) async fn extension_managed_state_apply_handler(
     let touched = previous_provider_ids.union(&applied_provider_ids);
     invalidate_changed_provider_models(&home, &previous_catalog, &store, touched);
 
-    // The config write and provisioning run on `noop` too, so a replay converges after a
-    // failed write. The agent reads its native config at process start.
+    // The config write runs on `noop` too, so a replay converges after a failed write. The
+    // agent reads its native config at process start.
     if let Some(canonical) = &canonical {
         super::skills::warn_dropped_declarations_healed(&dropped);
         crate::fs_util::atomic_write_owner_only(
@@ -73,7 +73,14 @@ pub(crate) async fn extension_managed_state_apply_handler(
     let environment = (kind == KIND_PROVIDER_CREDENTIAL_SET)
         .then(|| super::agent::open_agent_environment(&state, &config))
         .and_then(|resolved| applied_environment(resolved, &mut response));
-    provision_agent_headless_config(&config, &home)?;
+    // A `noop` set changes nothing a running Agent runs on, and a rewrite could move its default
+    // endpoint off the hide list it started with; every start rewrites native config itself.
+    let running_noop = kind == KIND_PROVIDER_CREDENTIAL_SET
+        && response.outcome == ManagedApplyOutcome::Noop.as_str()
+        && target.supervisor.is_running().await;
+    if !running_noop {
+        provision_agent_headless_config(&config, &home)?;
+    }
     if let Some(environment) = environment {
         response.agent_environment = Some(agent_environment(&target, &environment).await);
     }
