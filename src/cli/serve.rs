@@ -516,9 +516,7 @@ mod tests {
         ALLOW_ROOT_ENV, ServeArgs, ServeMode, StackError, allow_root_env_enabled,
         check_root_constraints, run_serve_with_euid,
     };
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::cli::init::test_env::lock_test_env;
 
     #[test]
     fn non_root_euid_passes_unconditionally() {
@@ -538,7 +536,7 @@ mod tests {
 
     #[test]
     fn allow_root_env_requires_exact_one() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = lock_test_env();
         unsafe {
             std::env::remove_var(ALLOW_ROOT_ENV);
         }
@@ -566,7 +564,7 @@ mod tests {
 
     #[test]
     fn root_without_opt_in_refuses_before_state_creation() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = lock_test_env();
         let tempdir = tempfile::tempdir().expect("tempdir");
         let previous_home = std::env::var_os("HOME");
         unsafe {

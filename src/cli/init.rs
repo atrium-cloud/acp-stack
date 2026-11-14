@@ -16,7 +16,7 @@ mod skills;
 mod starter_config;
 mod state_signal;
 #[cfg(test)]
-mod test_env;
+pub(in crate::cli) mod test_env;
 
 #[cfg(feature = "dev-tools")]
 pub(crate) use self::serve::{init_request_defs, init_response_defs};

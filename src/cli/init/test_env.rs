@@ -1,14 +1,19 @@
-//! Process-wide env guard shared by init tests that rewrite HOME or the discovery fixture paths.
+//! Process-wide env guard shared by lib tests that rewrite HOME or the discovery fixture paths.
 
-#[cfg(feature = "test-fixtures")]
 use std::sync::{Mutex, MutexGuard};
 
 /// Serializes tests that rewrite process-wide env (HOME, discovery fixture
 /// paths) so they cannot observe each other's mutation; drop restores the
 /// prior values. Paths are the only values these tests set, so the guard
 /// takes them directly.
-#[cfg(feature = "test-fixtures")]
 static TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+/// The bare lock, for tests that save and restore env themselves.
+pub(crate) fn lock_test_env() -> MutexGuard<'static, ()> {
+    TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 #[cfg(feature = "test-fixtures")]
 pub(crate) struct TestEnvGuard {
@@ -19,12 +24,10 @@ pub(crate) struct TestEnvGuard {
 #[cfg(feature = "test-fixtures")]
 impl TestEnvGuard {
     pub(crate) fn set(pairs: &[(&'static str, &std::path::Path)]) -> Self {
-        let lock = TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let lock = lock_test_env();
         let mut previous = Vec::with_capacity(pairs.len());
-        // SAFETY: TEST_ENV_LOCK serializes every test in this module tree
-        // that mutates these process-wide variables, and it is acquired
+        // SAFETY: TEST_ENV_LOCK serializes every lib test that mutates
+        // these process-wide variables, and it is acquired
         // exactly once for the whole batch.
         unsafe {
             for (key, value) in pairs {
