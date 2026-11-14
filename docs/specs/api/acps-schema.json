@@ -152,6 +152,29 @@
               "entries"
             ],
             "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "description": "Credentials for several providers, in active-set order, which become the\nAgent's active provider set.",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "const": "provider-credential-set"
+              },
+              "selections": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/request/CredentialSelection"
+                },
+                "minItems": 1,
+                "maxItems": 16
+              }
+            },
+            "required": [
+              "kind",
+              "selections"
+            ],
+            "additionalProperties": false
           }
         ],
         "description": "The desired payload, discriminated by `kind`. Kinds are additive; unknown\nkinds fail deserialization."
@@ -3409,6 +3432,17 @@
               "cleared",
               "noop"
             ]
+          },
+          "agent_environment": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Present on `provider-credential-set` answers only.",
+            "enum": [
+              "live",
+              "restart_required"
+            ]
           }
         },
         "required": [
@@ -4520,7 +4554,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Advertised capability names, currently `network-provider-workload-env`,\n`agent-test-json`, `sandbox-mask-files`,\n`managed-node-runtime`, `sandbox-workload-user`, `sandbox-capability-drop`,\n`sandbox-workload-termination`, `workload-io-identity`,\n`host-exec-trusted-inputs`, `install-workload-reachability`,\n`sandbox-require-network-provider`, `sandbox-off-identity`,\n`workload-io-follow-links`, `sandbox-workload-env`,\n`provider-http-proxy`, `init-provider-check`, and\n`managed-secret-environment`. The list grows over\ntime; an absent or empty list means none are present."
+            "description": "Advertised capability names, currently `network-provider-workload-env`,\n`agent-test-json`, `sandbox-mask-files`,\n`managed-node-runtime`, `sandbox-workload-user`, `sandbox-capability-drop`,\n`sandbox-workload-termination`, `workload-io-identity`,\n`host-exec-trusted-inputs`, `install-workload-reachability`,\n`sandbox-require-network-provider`, `sandbox-off-identity`,\n`workload-io-follow-links`, `sandbox-workload-env`,\n`provider-http-proxy`, `init-provider-check`,\n`managed-secret-environment`, and `managed-provider-credential-set`.\nThe list grows over time; an absent or empty list means none are present."
           }
         },
         "required": [

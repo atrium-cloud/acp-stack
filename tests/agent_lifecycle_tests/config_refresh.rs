@@ -1,7 +1,121 @@
+use acp_stack::config::{AgentProviderConfig, Config, ExtensionConfig, ExtensionType};
+use acp_stack::secrets::SecretStore;
 use reqwest::StatusCode;
-use serde_json::Value;
+use serde_json::{Value, json};
 
-use crate::common::agent::{AgentHarness, admin_bearer, http};
+use crate::common::agent::{AgentHarness, admin_bearer, http, session_bearer, test_config};
+
+const NAMESPACE: &str = "provider-state";
+const OPENROUTER: (&str, &str, &str) = (
+    "openrouter",
+    "OPENROUTER_API_KEY",
+    "sk-or-example-not-a-real-key",
+);
+const DEEPSEEK: (&str, &str, &str) = ("deepseek", "DEEPSEEK_API_KEY", "sk-example-not-a-real-key");
+
+/// A `provider_id` default slot and a managed credential namespace.
+fn credential_set_config(provider_id: &str) -> Config {
+    let mut config: Config = test_config();
+    config.agent.provider = Some(AgentProviderConfig {
+        id: provider_id.to_owned(),
+        model: None,
+        api_key_ref: None,
+        custom: None,
+    });
+    config.extensions.insert(
+        NAMESPACE.to_owned(),
+        ExtensionConfig {
+            extension_type: ExtensionType::ManagedState,
+            provider: Vec::new(),
+            provider_timeout: None,
+            provider_stderr: Default::default(),
+            workload_env: Default::default(),
+            capability: Some("provider-credential".to_owned()),
+        },
+    );
+    config
+}
+
+async fn spawn_for_credential_sets(config: Config) -> AgentHarness {
+    let harness = AgentHarness::spawn_with_config(config).await;
+    SecretStore::open_or_create(&harness.home).expect("secret store");
+    harness
+}
+
+async fn apply_set(harness: &AgentHarness, revision: i64, set: &[(&str, &str, &str)]) -> Value {
+    let selections = set
+        .iter()
+        .map(|(provider_id, env_var, value)| {
+            json!({ "provider_id": provider_id, "values": { *env_var: value }, "source_refs": {} })
+        })
+        .collect::<Vec<_>>();
+    let response = http()
+        .await
+        .post(format!(
+            "{}/v1/admin/extensions/{NAMESPACE}/apply",
+            harness.base_url
+        ))
+        .header("Authorization", admin_bearer())
+        .json(&json!({
+            "schema_version": 1,
+            "revision": revision,
+            "desired": { "kind": "provider-credential-set", "selections": selections },
+        }))
+        .send()
+        .await
+        .expect("send apply");
+    let status = response.status();
+    let body: Value = response.json().await.expect("apply json");
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    body["data"].clone()
+}
+
+async fn agent_lifecycle(harness: &AgentHarness, action: &str) {
+    let response = http()
+        .await
+        .post(format!("{}/v1/agent/{action}", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .send()
+        .await
+        .expect("send agent lifecycle request");
+    assert_eq!(response.status(), StatusCode::OK, "{action}");
+}
+
+async fn agent_status(harness: &AgentHarness) -> Value {
+    let body: Value = http()
+        .await
+        .get(format!("{}/v1/status/agent", harness.base_url))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("agent status")
+        .json()
+        .await
+        .expect("agent status json");
+    body["data"].clone()
+}
+
+/// A set applied under a running Agent waits for its restart, after which the Agent's launch env
+/// carries every provider of the set.
+#[tokio::test]
+async fn a_credential_set_reaches_a_running_agent_through_its_restart() {
+    let harness = spawn_for_credential_sets(credential_set_config(OPENROUTER.0)).await;
+    apply_set(&harness, 1, &[OPENROUTER]).await;
+    agent_lifecycle(&harness, "start").await;
+
+    let data = apply_set(&harness, 2, &[OPENROUTER, DEEPSEEK]).await;
+    assert_eq!(data["agent_environment"], "restart_required", "{data}");
+
+    agent_lifecycle(&harness, "restart").await;
+    let status = agent_status(&harness).await;
+    let loaded = (status["loaded_providers"].as_array().into_iter().flatten())
+        .flat_map(|provider| provider["env_names"].as_array().into_iter().flatten())
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(loaded.contains(&OPENROUTER.1), "{status}");
+    assert!(loaded.contains(&DEEPSEEK.1), "{status}");
+    assert_eq!(status["provider_restart_required"], false, "{status}");
+}
 
 #[tokio::test]
 async fn agent_restart_starts_when_not_running() {

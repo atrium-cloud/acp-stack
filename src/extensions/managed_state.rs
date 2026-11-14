@@ -20,7 +20,15 @@ pub const MANAGED_STATE_SCHEMA_VERSION: u16 = 1;
 /// a namespace accepts only the kind its declaration names.
 pub const KIND_PROVIDER_CREDENTIAL: &str = "provider-credential";
 pub const KIND_SECRET_ENVIRONMENT: &str = "secret-environment";
+/// The plural of `provider-credential`, applied under that same declared capability.
+pub const KIND_PROVIDER_CREDENTIAL_SET: &str = "provider-credential-set";
 
+/// `agent_environment` answers: the running Agent holds the applied env, or no Agent runs.
+pub const AGENT_ENVIRONMENT_LIVE: &str = "live";
+/// The running Agent must restart to take the applied env.
+pub const AGENT_ENVIRONMENT_RESTART_REQUIRED: &str = "restart_required";
+
+const MAX_SELECTION_COUNT: usize = 16;
 const MAX_PROVIDER_ID_BYTES: usize = 128;
 const MAX_VALUE_COUNT: usize = 8;
 const MAX_ENV_NAME_BYTES: usize = 128;
@@ -54,6 +62,22 @@ pub enum DesiredState {
     /// Refs resolve at every workload spawn (the agent, its terminals, and
     /// mediated commands); an empty map clears the namespace.
     SecretEnvironment { entries: BTreeMap<String, String> },
+    /// Credentials for several providers, in active-set order, which become the
+    /// Agent's active provider set.
+    ProviderCredentialSet {
+        #[schemars(length(min = 1, max = MAX_SELECTION_COUNT))]
+        selections: Vec<CredentialSelection>,
+    },
+}
+
+impl DesiredState {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::ProviderCredential { .. } => KIND_PROVIDER_CREDENTIAL,
+            Self::SecretEnvironment { .. } => KIND_SECRET_ENVIRONMENT,
+            Self::ProviderCredentialSet { .. } => KIND_PROVIDER_CREDENTIAL_SET,
+        }
+    }
 }
 
 /// Force `selection` into each variant's `required` list. `selection` is an
@@ -105,6 +129,10 @@ impl std::fmt::Debug for DesiredState {
                 .debug_struct("SecretEnvironment")
                 .field("entries", entries)
                 .finish(),
+            Self::ProviderCredentialSet { selections } => f
+                .debug_struct("ProviderCredentialSet")
+                .field("selections", selections)
+                .finish(),
         }
     }
 }
@@ -147,6 +175,10 @@ pub struct ApplyResponse {
     pub applied_revision: i64,
     #[schemars(extend("enum" = ["applied", "cleared", "noop"]))]
     pub outcome: &'static str,
+    /// Present on `provider-credential-set` answers only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("enum" = ["live", "restart_required"]))]
+    pub agent_environment: Option<&'static str>,
 }
 
 /// Fill the managed-state secret environment beneath a workload spawn's own env, so an
@@ -200,11 +232,128 @@ pub fn apply(
                 entries,
             )?
         }
+        DesiredState::ProviderCredentialSet { selections } => {
+            require_declared_kind(config, namespace, KIND_PROVIDER_CREDENTIAL)?;
+            validate_selection_set(&selections)?;
+            let selections = selections
+                .into_iter()
+                .map(|selection| resolve_selection(store, config, selection))
+                .collect::<Result<Vec<_>>>()?;
+            validate_shared_env_values(&selections)?;
+            // Recorded under the capability's kind, so a one-selection set and a
+            // `provider-credential` body of that selection replay each other.
+            store.apply_managed_state_credential_set(
+                namespace,
+                KIND_PROVIDER_CREDENTIAL,
+                request.revision,
+                selections,
+            )?
+        }
     };
     Ok(ApplyResponse {
         applied_revision: request.revision,
         outcome: outcome.as_str(),
+        agent_environment: None,
     })
+}
+
+/// The canonical config a credential apply writes, validated before anything is stored: `None`
+/// when the Agent config already matches. A set becomes the active set; a single selection takes
+/// out of it every provider the namespace holds and leaves out, and becomes it when nothing else
+/// remains. Validation refuses a config the Agent cannot run.
+pub fn credential_config(
+    config: &Config,
+    store: &SecretStore,
+    namespace: &str,
+    desired: &DesiredState,
+) -> Result<Option<String>> {
+    let mut candidate = config.clone();
+    match desired {
+        DesiredState::ProviderCredentialSet { selections } => {
+            validate_selection_set(selections)?;
+            let provider_ids: Vec<String> = selections
+                .iter()
+                .map(|selection| selection.provider_id.clone())
+                .collect();
+            crate::runtime::agent::provider_keys::apply_active_provider_set(
+                &mut candidate.agent,
+                &provider_ids,
+            );
+        }
+        DesiredState::ProviderCredential { selection } => {
+            let mut dropped = store.managed_provider_ids(namespace);
+            if let Some(selection) = selection {
+                dropped.remove(&selection.provider_id);
+            }
+            crate::runtime::agent::provider_keys::drop_active_providers(
+                &mut candidate.agent,
+                &dropped,
+            );
+            // A selection outside the set it emptied takes the set's place, so the Agent never
+            // starts on a provider whose credential is gone.
+            if let Some(selection) = selection
+                && config.agent.providers.is_some()
+                && candidate.agent.providers.is_none()
+            {
+                crate::runtime::agent::provider_keys::apply_active_provider_set(
+                    &mut candidate.agent,
+                    std::slice::from_ref(&selection.provider_id),
+                );
+            }
+        }
+        DesiredState::SecretEnvironment { .. } => return Ok(None),
+    }
+    if candidate.agent == config.agent {
+        return Ok(None);
+    }
+    let canonical = candidate.to_canonical_toml()?;
+    crate::config::load_config_from_str(&canonical)?;
+    Ok(Some(canonical))
+}
+
+fn validate_selection_set(selections: &[CredentialSelection]) -> Result<()> {
+    let invalid = |reason: String| StackError::InvalidParam {
+        field: "desired.selections",
+        reason,
+    };
+    if selections.is_empty() || selections.len() > MAX_SELECTION_COUNT {
+        return Err(invalid(format!(
+            "a set carries 1 to {MAX_SELECTION_COUNT} selections"
+        )));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for selection in selections {
+        if !seen.insert(selection.provider_id.as_str()) {
+            return Err(invalid(format!(
+                "provider `{}` appears more than once",
+                selection.provider_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Ids of one provider row read one env var, such as `opencode` and `opencode-go`, so a set that
+/// gives them different values could never launch.
+fn validate_shared_env_values(selections: &[ManagedCredentialSelection]) -> Result<()> {
+    let mut owners = BTreeMap::new();
+    for selection in selections {
+        for (env_name, value) in &selection.values {
+            let owner = (selection.provider_id.as_str(), value);
+            if let Some((other, other_value)) = owners.insert(env_name.as_str(), owner)
+                && other_value != value
+            {
+                return Err(StackError::InvalidParam {
+                    field: "desired.selections",
+                    reason: format!(
+                        "providers `{other}` and `{}` carry different values for `{env_name}`",
+                        selection.provider_id
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Deposit flat secrets and apply a managed-state credential selection in one transaction. Mirrors
@@ -253,6 +402,7 @@ where
     Ok(ApplyResponse {
         applied_revision: revision,
         outcome: outcome.as_str(),
+        agent_environment: None,
     })
 }
 

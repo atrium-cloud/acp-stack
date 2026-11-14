@@ -2,6 +2,7 @@
 //! inverse: writing a chosen provider back into canonical `[agent]` config.
 
 use super::*;
+use crate::config::AgentProvidersConfig;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedProviderSnapshot {
@@ -821,6 +822,74 @@ pub fn reconcile_provider_env_declarations(agent: &mut AgentConfig) {
         if !crate::config::agent_env_declares(&agent.env, &env_ref) {
             agent.env.push(env_ref);
         }
+    }
+}
+
+/// Make `provider_ids` the active set, in order. The default slot stays while its provider is in
+/// the set and otherwise moves to the first one with its model cleared; a subagent provider
+/// outside the set is cleared, so the subagent runs on the default slot. A custom default or
+/// subagent slot keeps everything as it is.
+pub fn apply_active_provider_set(agent: &mut AgentConfig, provider_ids: &[String]) {
+    let Some(first) = provider_ids.first() else {
+        return;
+    };
+    let subagent_slot = agent
+        .subagent
+        .as_ref()
+        .and_then(|subagent| subagent.provider.as_ref());
+    if [agent.provider.as_ref(), subagent_slot]
+        .into_iter()
+        .flatten()
+        .any(|provider| provider.custom.is_some())
+    {
+        return;
+    }
+    if let Some(subagent) = agent.subagent.as_mut()
+        && (subagent.provider.as_ref()).is_some_and(|provider| !provider_ids.contains(&provider.id))
+    {
+        subagent.provider = None;
+    }
+    let slot = agent.provider.as_ref();
+    if !slot.is_some_and(|provider| provider_ids.contains(&provider.id)) {
+        agent.model = None;
+        agent.provider = Some(AgentProviderConfig {
+            id: first.clone(),
+            model: None,
+            api_key_ref: None,
+            custom: None,
+        });
+    }
+    let mut selected_aliases = agent
+        .providers
+        .take()
+        .map(|providers| providers.selected_aliases)
+        .unwrap_or_default();
+    selected_aliases.retain(|provider_id, _| provider_ids.contains(provider_id));
+    agent.providers = Some(AgentProvidersConfig {
+        active: provider_ids.to_vec(),
+        selected_aliases,
+    });
+    reconcile_provider_env_declarations(agent);
+}
+
+/// Take `dropped` out of the active set, which then holds what remains as
+/// [`apply_active_provider_set`] writes it; a set left empty drops the table and the slot stays.
+pub fn drop_active_providers(agent: &mut AgentConfig, dropped: &BTreeSet<String>) {
+    let Some(providers) = agent.providers.as_ref() else {
+        return;
+    };
+    let remaining: Vec<String> = (providers.active.iter())
+        .filter(|provider_id| !dropped.contains(*provider_id))
+        .cloned()
+        .collect();
+    if remaining.len() == providers.active.len() {
+        return;
+    }
+    if remaining.is_empty() {
+        agent.providers = None;
+        reconcile_provider_env_declarations(agent);
+    } else {
+        apply_active_provider_set(agent, &remaining);
     }
 }
 

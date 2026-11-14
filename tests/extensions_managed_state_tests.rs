@@ -33,6 +33,10 @@ struct ServerHarness {
 
 impl ServerHarness {
     async fn spawn() -> Self {
+        Self::spawn_with(test_config()).await
+    }
+
+    async fn spawn_with(config: Config) -> Self {
         let tempdir = tempfile::tempdir().expect("tempdir");
         // The handler's SecretStore::open requires an existing store.
         SecretStore::open_or_create(tempdir.path()).expect("create secret store");
@@ -45,7 +49,6 @@ impl ServerHarness {
             .expect("seed auth verifiers");
 
         let config_path = tempdir.path().join("acps-config.toml");
-        let config = test_config();
         std::fs::write(
             &config_path,
             config.to_canonical_toml().expect("canonical test config"),
@@ -102,6 +105,10 @@ impl ServerHarness {
             config.to_canonical_toml().expect("canonical config"),
         )
         .expect("rewrite runtime config");
+    }
+
+    fn runtime_config(&self) -> Config {
+        Config::load_from_path(self.home.join("acps-config.toml")).expect("runtime config")
     }
 }
 
@@ -505,6 +512,7 @@ async fn apply_replay_conflict_stale_and_clear_lifecycle() {
     assert_eq!(body["ok"], true);
     assert_eq!(body["data"]["applied_revision"], 7);
     assert_eq!(body["data"]["outcome"], "applied");
+    assert!(body["data"].get("agent_environment").is_none());
     {
         let store = harness.reopen_store();
         let credential = store
@@ -762,4 +770,226 @@ async fn applying_a_credential_invalidates_the_provider_model_cache() {
             .is_none(),
         "an applied credential must invalidate the provider's cached catalog"
     );
+}
+
+const OPENROUTER: (&str, &str, &str) = (
+    "openrouter",
+    "OPENROUTER_API_KEY",
+    "sk-or-example-not-a-real-key",
+);
+const DEEPSEEK: (&str, &str, &str) = ("deepseek", "DEEPSEEK_API_KEY", "sk-example-not-a-real-key");
+
+/// A Pi config whose default slot is DeepSeek, as a single-provider config has it.
+fn pi_config() -> Config {
+    let mut config = test_config();
+    config.agent.id = "pi".to_owned();
+    config.agent.provider = Some(acp_stack::config::AgentProviderConfig {
+        id: "deepseek".to_owned(),
+        model: Some("deepseek-v4.1-flash".to_owned()),
+        api_key_ref: None,
+        custom: None,
+    });
+    config
+}
+
+fn selection((provider_id, env_var, value): (&str, &str, &str)) -> Value {
+    json!({ "provider_id": provider_id, "values": { env_var: value }, "source_refs": {} })
+}
+
+fn set_body(revision: i64, selections: &[(&str, &str, &str)]) -> Value {
+    let selections = selections
+        .iter()
+        .copied()
+        .map(selection)
+        .collect::<Vec<_>>();
+    json!({
+        "schema_version": 1,
+        "revision": revision,
+        "desired": { "kind": "provider-credential-set", "selections": selections },
+    })
+}
+
+async fn apply_set(harness: &ServerHarness, body: Value) -> Value {
+    let response = harness.post_apply(NAMESPACE, ADMIN_KEY, body).await;
+    let status = response.status();
+    let body: Value = response.json().await.expect("envelope");
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    body["data"].clone()
+}
+
+fn default_slot(config: &Config) -> (String, Option<String>) {
+    let provider = config.agent.provider.as_ref().expect("default slot");
+    (provider.id.clone(), provider.model.clone())
+}
+
+/// A setup deposit's `provider-credential` record is taken over by the set kind: a redrive of the
+/// same selection at the same revision is a replay, and a larger set at the next one applies.
+#[tokio::test]
+async fn a_credential_set_takes_over_a_single_selection_and_resolves_every_key() {
+    let harness = ServerHarness::spawn_with(pi_config()).await;
+    apply_set(&harness, apply_body(1, selection(DEEPSEEK))).await;
+
+    let data = apply_set(&harness, set_body(1, &[DEEPSEEK])).await;
+    assert_eq!(data["outcome"], "noop", "{data}");
+    let config = harness.runtime_config();
+    assert_eq!(
+        config.agent.providers.expect("active set").active,
+        ["deepseek"]
+    );
+
+    let data = apply_set(&harness, set_body(2, &[OPENROUTER, DEEPSEEK])).await;
+
+    assert_eq!(
+        data,
+        json!({ "applied_revision": 2, "outcome": "applied", "agent_environment": "live" })
+    );
+    let record = harness.reopen_store().managed_provider_ids(NAMESPACE);
+    assert_eq!(
+        record.into_iter().collect::<Vec<_>>(),
+        ["deepseek", "openrouter"]
+    );
+    let config = harness.runtime_config();
+    let active = &config.agent.providers.as_ref().expect("active set").active;
+    assert_eq!(active, &["openrouter", "deepseek"]);
+    assert_eq!(
+        default_slot(&config),
+        (
+            "deepseek".to_owned(),
+            Some("deepseek-v4.1-flash".to_owned())
+        )
+    );
+    let environment = acp_stack::runtime::agent::provider_keys::resolve_agent_environment(
+        &config,
+        &harness.reopen_store(),
+    )
+    .expect("resolve launch env");
+    assert_eq!(environment.env["OPENROUTER_API_KEY"], OPENROUTER.2);
+    assert_eq!(environment.env["DEEPSEEK_API_KEY"], DEEPSEEK.2);
+
+    // A `provider-credential` body over the set leaves exactly its own provider in both places.
+    let data = apply_set(&harness, apply_body(3, selection(OPENROUTER))).await;
+
+    assert_eq!(data["outcome"], "applied", "{data}");
+    let record = harness.reopen_store().managed_provider_ids(NAMESPACE);
+    assert_eq!(record.into_iter().collect::<Vec<_>>(), ["openrouter"]);
+    let config = harness.runtime_config();
+    assert_eq!(
+        config.agent.providers.as_ref().expect("active set").active,
+        ["openrouter"]
+    );
+    assert_eq!(default_slot(&config), ("openrouter".to_owned(), None));
+}
+
+#[tokio::test]
+async fn a_shrunk_set_drops_the_provider_and_its_replay_converges() {
+    let mut config = pi_config();
+    config.agent.subagent = Some(acp_stack::config::AgentSubagentConfig {
+        disabled: false,
+        provider: config.agent.provider.clone(),
+    });
+    let harness = ServerHarness::spawn_with(config).await;
+    apply_set(&harness, set_body(1, &[OPENROUTER, DEEPSEEK])).await;
+
+    let data = apply_set(&harness, set_body(2, &[OPENROUTER])).await;
+
+    assert_eq!(data["outcome"], "applied");
+    // The subagent's provider left the set, so the subagent runs on the default slot.
+    let subagent = harness.runtime_config().agent.subagent.expect("subagent");
+    assert!(subagent.provider.is_none(), "{subagent:?}");
+    assert!(
+        harness
+            .reopen_store()
+            .provider_credential_set("deepseek")
+            .is_none()
+    );
+    let config = harness.runtime_config();
+    assert_eq!(
+        config.agent.providers.as_ref().expect("active set").active,
+        ["openrouter"]
+    );
+    assert_eq!(default_slot(&config), ("openrouter".to_owned(), None));
+
+    // A config write that never landed is redone by the replay of the same revision.
+    harness.rewrite_runtime_config(&pi_config());
+    let data = apply_set(&harness, set_body(2, &[OPENROUTER])).await;
+
+    assert_eq!(data["outcome"], "noop");
+    assert_eq!(data["agent_environment"], "live");
+    let config = harness.runtime_config();
+    assert_eq!(
+        config.agent.providers.as_ref().expect("active set").active,
+        ["openrouter"]
+    );
+    assert_eq!(default_slot(&config), ("openrouter".to_owned(), None));
+
+    // A `provider-credential` body outside the set takes its place.
+    let data = apply_set(&harness, apply_body(3, selection(DEEPSEEK))).await;
+
+    assert_eq!(data["outcome"], "applied", "{data}");
+    let record = harness.reopen_store().managed_provider_ids(NAMESPACE);
+    assert_eq!(record.into_iter().collect::<Vec<_>>(), ["deepseek"]);
+    let config = harness.runtime_config();
+    assert_eq!(
+        config.agent.providers.as_ref().expect("active set").active,
+        ["deepseek"]
+    );
+    assert_eq!(default_slot(&config), ("deepseek".to_owned(), None));
+
+    // A `provider-credential` clear removes the namespace's providers from both places.
+    let data = apply_set(&harness, apply_body(4, Value::Null)).await;
+
+    assert_eq!(data["outcome"], "cleared");
+    assert!(
+        harness
+            .reopen_store()
+            .managed_provider_ids(NAMESPACE)
+            .is_empty()
+    );
+    assert!(harness.runtime_config().agent.providers.is_none());
+}
+
+/// A set the Agent could never launch is refused unstored, and one whose launch env fails only
+/// after the store write keeps its applied answer.
+#[tokio::test]
+async fn a_set_answers_for_what_it_stored() {
+    let mut config = pi_config();
+    config.agent.env.push("UNSET_EXAMPLE_TOKEN".to_owned());
+    let harness = ServerHarness::spawn_with(config).await;
+
+    let data = apply_set(&harness, set_body(1, &[DEEPSEEK])).await;
+
+    assert_eq!(
+        data,
+        json!({ "applied_revision": 1, "outcome": "applied", "agent_environment": "restart_required" })
+    );
+    let response = harness
+        .post_apply(
+            NAMESPACE,
+            ADMIN_KEY,
+            set_body(
+                2,
+                &[
+                    (
+                        "opencode",
+                        "OPENCODE_API_KEY",
+                        "sk-oc-example-a-not-a-real-key",
+                    ),
+                    (
+                        "opencode-go",
+                        "OPENCODE_API_KEY",
+                        "sk-oc-example-b-not-a-real-key",
+                    ),
+                ],
+            ),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.expect("envelope");
+    assert_eq!(body["error"]["code"], "request.invalid_param");
+    assert!(body.to_string().contains("different values"), "{body}");
+    let store = harness.reopen_store();
+    let revision = store
+        .managed_state_record(NAMESPACE)
+        .map(|record| record.revision);
+    assert_eq!(revision, Some(1));
 }

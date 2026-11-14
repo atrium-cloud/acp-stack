@@ -1,6 +1,6 @@
 //! Age-encrypted secret store (`age.key` + `secrets.age`), rewritten in full on every mutation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -247,11 +247,24 @@ pub struct ManagedStateRecord {
     pub revision: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<String>,
+    /// A `provider-credential-set` record's providers, in active-set order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     /// A `secret-environment` record's workload env names, each mapped to its secret ref.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub environment: BTreeMap<String, String>,
+}
+
+impl ManagedStateRecord {
+    /// Every provider whose catalog entry the namespace owns, whichever credential kind wrote it.
+    pub fn owned_provider_ids(&self) -> impl Iterator<Item = &str> {
+        self.provider_id
+            .iter()
+            .chain(&self.provider_ids)
+            .map(String::as_str)
+    }
 }
 
 /// The managed-state selection the store applies: env-keyed values plus optional secret refs for one provider.
@@ -528,6 +541,14 @@ impl SecretStore {
         &self.managed_state
     }
 
+    pub fn managed_provider_ids(&self, namespace: &str) -> BTreeSet<String> {
+        self.managed_state
+            .get(namespace)
+            .into_iter()
+            .flat_map(|record| record.owned_provider_ids().map(str::to_owned))
+            .collect()
+    }
+
     /// Apply one managed-state registry revision for `namespace`; the namespace may only create entries or replace its own.
     pub fn apply_managed_state_credential(
         &mut self,
@@ -536,7 +557,27 @@ impl SecretStore {
         revision: i64,
         selection: Option<ManagedCredentialSelection>,
     ) -> Result<ManagedApplyOutcome> {
-        match self.stage_managed_state_credential(namespace, kind, revision, selection)? {
+        let selections = selection.into_iter().collect();
+        self.commit_staged(
+            self.stage_managed_state_credential(namespace, kind, revision, selections, false)?,
+        )
+    }
+
+    /// Apply one `provider-credential-set` revision: the namespace owns exactly these providers.
+    pub fn apply_managed_state_credential_set(
+        &mut self,
+        namespace: &str,
+        kind: &str,
+        revision: i64,
+        selections: Vec<ManagedCredentialSelection>,
+    ) -> Result<ManagedApplyOutcome> {
+        self.commit_staged(
+            self.stage_managed_state_credential(namespace, kind, revision, selections, true)?,
+        )
+    }
+
+    fn commit_staged(&mut self, staged: StagedManagedCredential) -> Result<ManagedApplyOutcome> {
+        match staged {
             StagedManagedCredential::Noop => Ok(ManagedApplyOutcome::Noop),
             StagedManagedCredential::Changed {
                 provider_credentials,
@@ -572,7 +613,10 @@ impl SecretStore {
             return Ok(ManagedApplyOutcome::Noop);
         }
         let mut catalog = self.provider_credentials.clone();
-        if let Some(previous_provider) = record.and_then(|record| record.provider_id.as_deref()) {
+        for previous_provider in record
+            .into_iter()
+            .flat_map(ManagedStateRecord::owned_provider_ids)
+        {
             catalog.remove(previous_provider);
         }
         let outcome = if environment.is_empty() {
@@ -586,6 +630,7 @@ impl SecretStore {
             ManagedStateRecord {
                 revision,
                 provider_id: None,
+                provider_ids: Vec::new(),
                 kind: Some(kind.to_owned()),
                 environment,
             },
@@ -696,9 +741,9 @@ impl SecretStore {
                 self.secrets.insert(name.to_owned(), value.to_owned());
                 deposited_any = true;
             }
-            let selection = resolve(self)?;
+            let selections = resolve(self)?.into_iter().collect();
             let staged =
-                self.stage_managed_state_credential(namespace, kind, revision, selection)?;
+                self.stage_managed_state_credential(namespace, kind, revision, selections, false)?;
             let (provider_credentials, managed_state, outcome) = match staged {
                 StagedManagedCredential::Noop => {
                     if !deposited_any {
@@ -749,79 +794,102 @@ impl SecretStore {
 
     /// Pure validation + candidate construction for a managed-state credential apply: no mutation,
     /// no disk write. `apply_managed_state_credential` persists and commits the result;
-    /// `deposit_and_apply_managed_credential` folds it into a larger transaction.
+    /// `deposit_and_apply_managed_credential` folds it into a larger transaction. `as_set` records
+    /// the providers as a set rather than the one `provider-credential` selection.
     fn stage_managed_state_credential(
         &self,
         namespace: &str,
         kind: &str,
         revision: i64,
-        selection: Option<ManagedCredentialSelection>,
+        selections: Vec<ManagedCredentialSelection>,
+        as_set: bool,
     ) -> Result<StagedManagedCredential> {
         if let Some(record) = self.replayed_record(namespace, revision)? {
-            self.ensure_identical_replay(namespace, kind, record, selection.as_ref())?;
+            self.ensure_identical_replay(namespace, kind, record, &selections)?;
             return Ok(StagedManagedCredential::Noop);
         }
         let record = self.managed_state.get(namespace);
 
         let mut catalog = self.provider_credentials.clone();
-        if let Some(previous_provider) = record.and_then(|record| record.provider_id.as_deref()) {
+        for previous_provider in record
+            .into_iter()
+            .flat_map(ManagedStateRecord::owned_provider_ids)
+        {
             catalog.remove(previous_provider);
         }
-        let (new_record, outcome) = match selection {
-            None => (
-                ManagedStateRecord {
-                    revision,
-                    provider_id: None,
-                    kind: Some(kind.to_owned()),
-                    environment: BTreeMap::new(),
-                },
-                ManagedApplyOutcome::Cleared,
-            ),
-            Some(selection) => {
-                if let Some(existing) = catalog.get(&selection.provider_id) {
-                    let owned_by_namespace = existing.sole.as_ref().is_some_and(|credential| {
-                        credential.source == CredentialSource::External(namespace.to_owned())
+        let mut provider_ids = Vec::with_capacity(selections.len());
+        for selection in selections {
+            if let Some(existing) = catalog.get(&selection.provider_id) {
+                let owned_by_namespace = existing.sole.as_ref().is_some_and(|credential| {
+                    credential.source == CredentialSource::External(namespace.to_owned())
+                });
+                if !owned_by_namespace {
+                    return Err(StackError::ExtensionStateOwnership {
+                        namespace: namespace.to_owned(),
+                        provider_id: selection.provider_id.clone(),
+                        reason: "the provider already has a credential not owned by this \
+                                 namespace; refusing to overwrite it"
+                            .to_owned(),
                     });
-                    if !owned_by_namespace {
-                        return Err(StackError::ExtensionStateOwnership {
-                            namespace: namespace.to_owned(),
-                            provider_id: selection.provider_id.clone(),
-                            reason: "the provider already has a credential not owned by this \
-                                     namespace; refusing to overwrite it"
-                                .to_owned(),
-                        });
-                    }
                 }
-                let credential = ProviderCredential {
+            }
+            // An unchanged entry keeps its revision, so a running Agent's loaded snapshot still matches it.
+            let credential = match self.owned_credential(namespace, &selection.provider_id) {
+                Some(stored)
+                    if stored.values == selection.values
+                        && stored.source_refs == selection.source_refs =>
+                {
+                    stored.clone()
+                }
+                _ => ProviderCredential {
                     revision: format!("managed:{namespace}:{revision}"),
                     values: selection.values,
                     source_refs: selection.source_refs,
                     migrated: false,
                     source: CredentialSource::External(namespace.to_owned()),
-                };
-                catalog.insert(
-                    selection.provider_id.clone(),
-                    ProviderCredentialSet::aliasless(credential),
-                );
-                (
-                    ManagedStateRecord {
-                        revision,
-                        provider_id: Some(selection.provider_id),
-                        kind: Some(kind.to_owned()),
-                        environment: BTreeMap::new(),
-                    },
-                    ManagedApplyOutcome::Applied,
-                )
-            }
+                },
+            };
+            catalog.insert(
+                selection.provider_id.clone(),
+                ProviderCredentialSet::aliasless(credential),
+            );
+            provider_ids.push(selection.provider_id);
+        }
+        let outcome = if provider_ids.is_empty() {
+            ManagedApplyOutcome::Cleared
+        } else {
+            ManagedApplyOutcome::Applied
         };
-
+        let (provider_id, provider_ids) = if as_set {
+            (None, provider_ids)
+        } else {
+            (provider_ids.pop(), Vec::new())
+        };
         let mut managed_state = self.managed_state.clone();
-        managed_state.insert(namespace.to_owned(), new_record);
+        managed_state.insert(
+            namespace.to_owned(),
+            ManagedStateRecord {
+                revision,
+                provider_id,
+                provider_ids,
+                kind: Some(kind.to_owned()),
+                environment: BTreeMap::new(),
+            },
+        );
         Ok(StagedManagedCredential::Changed {
             provider_credentials: catalog,
             managed_state,
             outcome,
         })
+    }
+
+    fn owned_credential(&self, namespace: &str, provider_id: &str) -> Option<&ProviderCredential> {
+        self.provider_credentials
+            .get(provider_id)
+            .and_then(|set| set.sole.as_ref())
+            .filter(|credential| {
+                credential.source == CredentialSource::External(namespace.to_owned())
+            })
     }
 
     /// A replay at the already-applied revision must be an exact no-op; anything else at that revision is a conflict.
@@ -830,9 +898,9 @@ impl SecretStore {
         namespace: &str,
         kind: &str,
         record: &ManagedStateRecord,
-        selection: Option<&ManagedCredentialSelection>,
+        selections: &[ManagedCredentialSelection],
     ) -> Result<()> {
-        let conflict = |reason: String| StackError::ExtensionRevisionConflict {
+        let conflict = |reason: &str| StackError::ExtensionRevisionConflict {
             namespace: namespace.to_owned(),
             reason: format!(
                 "revision {} is already applied with different content: {reason}",
@@ -840,32 +908,25 @@ impl SecretStore {
             ),
         };
         if record.kind.as_deref() != Some(kind) {
-            return Err(conflict("desired kind differs".to_owned()));
+            return Err(conflict("desired kind differs"));
         }
-        match (selection, record.provider_id.as_deref()) {
-            (None, None) => Ok(()),
-            (Some(selection), Some(provider_id)) if provider_id == selection.provider_id => {
-                let credential = self
-                    .provider_credentials
-                    .get(provider_id)
-                    .and_then(|set| set.sole.as_ref())
-                    .ok_or_else(|| {
-                        conflict("stored credential for the applied provider is missing".to_owned())
-                    })?;
-                if credential.source != CredentialSource::External(namespace.to_owned()) {
-                    return Err(conflict(
-                        "stored credential is not owned by this namespace".to_owned(),
-                    ));
-                }
-                if credential.values != selection.values
-                    || credential.source_refs != selection.source_refs
-                {
-                    return Err(conflict("stored credential fields differ".to_owned()));
-                }
-                Ok(())
+        let selected = selections
+            .iter()
+            .map(|selection| selection.provider_id.as_str());
+        if !record.owned_provider_ids().eq(selected) {
+            return Err(conflict("selected credential differs"));
+        }
+        for selection in selections {
+            let credential = self
+                .owned_credential(namespace, &selection.provider_id)
+                .ok_or_else(|| conflict("the namespace no longer holds an applied credential"))?;
+            if credential.values != selection.values
+                || credential.source_refs != selection.source_refs
+            {
+                return Err(conflict("stored credential fields differ"));
             }
-            _ => Err(conflict("selected credential differs".to_owned())),
         }
+        Ok(())
     }
 
     pub fn set(&mut self, name: &str, value: &str) -> Result<()> {

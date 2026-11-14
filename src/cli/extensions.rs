@@ -99,9 +99,14 @@ fn run_status(output: OutputFormat) -> Result<()> {
                                 }
                             );
                         } else {
+                            let providers = record.owned_provider_ids().collect::<Vec<_>>();
                             println!(
                                 "  provider: {}",
-                                record.provider_id.as_deref().unwrap_or("none")
+                                if providers.is_empty() {
+                                    "none".to_owned()
+                                } else {
+                                    providers.join(", ")
+                                }
                             );
                         }
                     }
@@ -134,7 +139,9 @@ fn extension_json(
                 "type": extension.extension_type.as_str(),
                 "capability": extension.capability,
                 "applied_revision": record.map(|record| record.revision),
-                "provider_id": record.and_then(|record| record.provider_id.clone()),
+                "provider_ids": record
+                    .map(|record| record.owned_provider_ids().collect::<Vec<_>>())
+                    .unwrap_or_default(),
                 "environment_names": record
                     .map(|record| record.environment.keys().collect::<Vec<_>>())
                     .unwrap_or_default(),

@@ -51,9 +51,9 @@ The provider wire contract is specified in [security.md](security.md#network-iso
 
 ## Type `managed-state`
 
-A `managed-state` instance grants an external orchestrator ownership of one named state namespace. Its `capability` names the one `desired.kind` the namespace accepts; a body of another kind is rejected with `request.invalid_param`.
+A `managed-state` instance grants an external orchestrator ownership of one named state namespace. Its `capability` names the `desired.kind` family the namespace accepts; a body of another kind is rejected with `request.invalid_param`.
 
-- `provider-credential`: the namespace holds at most one provider credential selection. It is stored in the encrypted secret store's provider credential catalog, exactly like an operator-managed credential. The namespace is recorded as its provenance source.
+- `provider-credential`: the namespace holds provider credentials, stored in the encrypted secret store's provider credential catalog exactly like operator-managed ones, with the namespace recorded as their provenance source. It takes `kind: "provider-credential"` (at most one selection) and `kind: "provider-credential-set"` (see [Kind `provider-credential-set`](#kind-provider-credential-set)).
 - `secret-environment`: the namespace holds workload env vars whose values come from secret-store refs. See [Capability `secret-environment`](#capability-secret-environment).
 
 The seam is one fixed admin route, parameterized by the declared instance name:
@@ -98,11 +98,41 @@ Rejection happens before any revision watermark persists. An orchestrator that a
 
 ### After an apply
 
-The native config is rewritten immediately after the store write, under the mutation lock the apply handler already holds. The agent reads it at process start, and the orchestrator restarts the agent after a credential push. Rewriting also runs on a `noop` replay, so a retry after a failed native-config write still settles it.
+The native config is rewritten immediately after the store write, under the mutation lock the apply handler already holds. The agent reads it at process start, and the orchestrator restarts the agent after a credential push. Rewriting also runs on a `noop` replay, so a retry after a failed native-config write still settles it. A set whose Agent launch env does not resolve after the store write keeps its outcome and answers `agent_environment: "restart_required"`, and the failure is logged by name.
 
-On an `applied` or `cleared` outcome, the provider model-catalog cache entries for the outgoing and incoming providers are invalidated, together with the entries of every other id and endpoint of their provider rows. The next catalog read refetches at the declared `models_url` with the credential now in force. Only providers that declare a `models_url` are ever fetched.
+For each provider whose credential the apply added, removed or changed, the provider model-catalog cache entries are invalidated, together with the entries of every other id and endpoint of its provider row. The next catalog read refetches at the declared `models_url` with the credential now in force. Only providers that declare a `models_url` are ever fetched.
 
 A selection names no endpoint. The agent and the catalog fetch dial the provider's own host, so a sealed value in `values` is redeemed by the network provider that intercepts that host.
+
+### Kind `provider-credential-set`
+
+A namespace declared with `capability = "provider-credential"` also takes credentials for several providers in one revision:
+
+```json
+{
+  "schema_version": 1,
+  "revision": 8,
+  "desired": {
+    "kind": "provider-credential-set",
+    "selections": [
+      { "provider_id": "openrouter", "values": { "OPENROUTER_API_KEY": "sk-or-..." }, "source_refs": {} },
+      { "provider_id": "deepseek", "values": { "DEEPSEEK_API_KEY": "sk-..." }, "source_refs": {} }
+    ]
+  }
+}
+```
+
+- `selections` holds 1 to 16 entries with distinct `provider_id`, each validated as a `provider-credential` selection. After the apply the namespace owns exactly these providers' credentials; one it held before and the set leaves out is removed. A credential whose values are unchanged keeps its stored revision.
+- The selections become the Agent's `[agent.providers].active`, in order, written in the same call under the same lock. The `[agent.provider]` default slot stays while its provider is in the set; otherwise it moves to the first provider with its model cleared. Alias selections of providers outside the set are dropped, and a `[agent.subagent.provider]` outside the set is cleared, so the subagent runs on the default slot. With a custom provider in the default or subagent slot, the credentials are stored and the Agent config is left as it is.
+- The candidate config is validated before anything is stored, so a set the Agent cannot run (more than one provider on an agent without multiple active providers, a provider the agent does not support, two selections with different values for one env var such as `opencode` and `opencode-go`) is refused with no watermark written.
+- The config write and the native config rewrite run on a `noop` replay too, so a replay converges after an interrupted write. The write restarts nothing.
+- The answer adds `agent_environment`: `live` when no Agent runs or the running Agent's loaded providers match the applied set, and `restart_required` when the running Agent must restart to take it. A replay computes it again.
+
+```json
+{ "ok": true, "data": { "applied_revision": 8, "outcome": "applied", "agent_environment": "restart_required" } }
+```
+
+The two credential kinds share the namespace's record. A one-selection set at the applied revision of a `provider-credential` body carrying the same selection replays as `noop`, and the other way round. A `provider-credential` body at a higher revision over a set removes every provider of the set it leaves out, from the store and from `[agent.providers].active`. When nothing else remains active, its selection becomes the active set as a one-selection set does, and a `null` selection drops the `[agent.providers]` table and leaves the default slot as it is.
 
 ### Capability `secret-environment`
 
@@ -142,7 +172,7 @@ Ownership is store-level provenance, distinct from endpoint behavior. A namespac
 
 The declared namespace set is resolved from the config the daemon started with, like the rest of runtime config. A config import that adds a `managed-state` instance answers `404` until the next daemon start.
 
-Responses use the standard envelope: `{"ok": true, "data": {"applied_revision": 7, "outcome": "applied"}}` with `outcome` one of `applied`, `cleared`, `noop`. Every apply records a `server.extension_managed_state_applied` audit event carrying the namespace, kind, outcome, revision, provider id, and environment variable names only.
+Responses use the standard envelope: `{"ok": true, "data": {"applied_revision": 7, "outcome": "applied"}}` with `outcome` one of `applied`, `cleared`, `noop`. Every apply records a `server.extension_managed_state_applied` audit event carrying the namespace, kind, outcome, revision, provider ids, and environment variable names only.
 
 ## Versioning
 

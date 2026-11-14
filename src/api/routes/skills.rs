@@ -502,7 +502,7 @@ pub(crate) async fn skills_source_remove_handler(
 /// load dropped. Healing them out is the intended trade, but a hand-edited
 /// entry vanishing from the file without a trace is a silent mutation, so
 /// leave one warning per erased declaration.
-fn warn_dropped_declarations_healed(dropped: &crate::config::DroppedDeclarations) {
+pub(super) fn warn_dropped_declarations_healed(dropped: &crate::config::DroppedDeclarations) {
     for (alias, reason) in &dropped.skill_sources {
         tracing::warn!(
             alias = %alias,

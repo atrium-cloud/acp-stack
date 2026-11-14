@@ -421,9 +421,8 @@ async fn deposit_credential_handler(
     // wizard locks per store operation, so this deposit never queues behind a
     // parked prompt for longer than one store write.
     let outcome = tokio::task::spawn_blocking(move || -> Result<ApplyResponse> {
-        let previous_provider_id = lock_shared_secret_store(&store)
-            .managed_state_record(&request.namespace)
-            .and_then(|record| record.provider_id.clone());
+        let previous_provider_ids =
+            lock_shared_secret_store(&store).managed_provider_ids(&request.namespace);
         let response = {
             let mut guard = lock_shared_secret_store(&store);
             // One transaction: the flat secrets and the managed-state apply commit together, so a
@@ -441,21 +440,15 @@ async fn deposit_credential_handler(
             )?
         };
         // A picker call that raced the deposit may have cached a failed model
-        // listing; drop it for the outgoing and incoming provider, mirroring
-        // the admin-tier apply route.
+        // listing; drop it for every outgoing and incoming provider, changed or not.
         if response.outcome != "noop" {
-            let new_provider_id = lock_shared_secret_store(&store)
-                .managed_state_record(&request.namespace)
-                .and_then(|record| record.provider_id.clone());
-            for provider_id in [previous_provider_id, new_provider_id]
-                .into_iter()
-                .flatten()
-                .collect::<std::collections::BTreeSet<_>>()
-            {
+            let new_provider_ids =
+                lock_shared_secret_store(&store).managed_provider_ids(&request.namespace);
+            for provider_id in previous_provider_ids.union(&new_provider_ids) {
                 if let Err(error) =
                     crate::runtime::agent::provider_model_catalog::invalidate_provider_models(
                         &home,
-                        &provider_id,
+                        provider_id,
                     )
                 {
                     tracing::warn!(

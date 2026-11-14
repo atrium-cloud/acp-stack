@@ -342,7 +342,7 @@ The API withholds secret values from every response. Auth keys live outside the 
     - `404 extensions.not_found` is returned when `{name}` does not resolve to a declared `type = "managed-state"` instance.
     - `409 extensions.revision_conflict` reports a revision-ordering conflict.
     - `400 extensions.state_ownership` reports a provenance refusal.
-    - `400 request.invalid_param` is returned for a provider id that is neither mapped nor configured as a custom provider, a `desired.kind` other than the namespace's declared capability, and a `secret-environment` entry whose name another source sets or whose ref is not stored.
+    - `400 request.invalid_param` is returned for a provider id that is neither mapped nor configured as a custom provider, a `desired.kind` other than the namespace's declared capability, a `secret-environment` entry whose name another source sets or whose ref is not stored, and a `provider-credential-set` the Agent cannot run: more than 16 or repeated selections, two selections with different values for one env var, or an Agent config the set would make invalid.
 - Notes: the managed-state extension seam. Applies one managed-state registry revision to the named extension namespace. Full contract in [extensions.md](../extensions.md).
 
 ## Agent And Providers
@@ -1229,7 +1229,7 @@ A `running` row is reconciled to `failed` with `error.code = "deps.apply_abandon
 ```json
 {
   "version": "0.1.9",
-  "features": ["network-provider-workload-env", "agent-test-json", "sandbox-mask-files", "managed-node-runtime", "sandbox-workload-user", "sandbox-capability-drop", "sandbox-workload-termination", "workload-io-identity", "host-exec-trusted-inputs", "install-workload-reachability", "sandbox-require-network-provider", "sandbox-off-identity", "workload-io-follow-links", "sandbox-workload-env", "provider-http-proxy", "init-provider-check", "managed-secret-environment"]
+  "features": ["network-provider-workload-env", "agent-test-json", "sandbox-mask-files", "managed-node-runtime", "sandbox-workload-user", "sandbox-capability-drop", "sandbox-workload-termination", "workload-io-identity", "host-exec-trusted-inputs", "install-workload-reachability", "sandbox-require-network-provider", "sandbox-off-identity", "workload-io-follow-links", "sandbox-workload-env", "provider-http-proxy", "init-provider-check", "managed-secret-environment", "managed-provider-credential-set"]
 }
 ```
 
@@ -1253,6 +1253,7 @@ A `running` row is reconciled to `failed` with `error.code = "deps.apply_abandon
     - `provider-http-proxy` covers `ACPS_PROVIDER_HTTP_PROXY` carrying provider-keyed requests through an HTTP proxy, loopback destinations excepted (see [runtime.md](../runtime.md#provider-request-proxy))
     - `init-provider-check` covers `provider_check` on the init create body, the discovery-close park it adds, and the `provider_check` signal (see [init.md](../init.md#provider-check))
     - `managed-secret-environment` covers the `secret-environment` managed-state capability and its entries reaching the agent, ACP terminals, and mediated commands (see [extensions.md](../extensions.md#capability-secret-environment))
+    - `managed-provider-credential-set` covers the `provider-credential-set` managed-state kind, the active provider set it writes, and its `agent_environment` answer (see [extensions.md](../extensions.md#kind-provider-credential-set))
 
 ### `GET /v1/status/agent`
 
