@@ -16,8 +16,9 @@ pub use self::resolve::{
     apply_active_provider_set, apply_catalog_mapped_agent_provider, apply_mapped_agent_provider,
     catalog_covers_env_ref, configured_custom_provider_api_key_ref, drop_active_providers,
     effective_active_provider_ids, env_ref_is_satisfiable, env_ref_is_satisfiable_for_config,
-    push_delivers_env_ref_for_config, reconcile_provider_env_declarations,
-    resolve_agent_environment, resolve_agent_environment_without_secrets, target_uses_provider,
+    has_custom_provider_slot, push_delivers_env_ref_for_config,
+    reconcile_provider_env_declarations, resolve_agent_environment,
+    resolve_agent_environment_without_secrets, target_uses_provider,
 };
 
 const EMBEDDED_ENV_VARS: &str = include_str!("../../../data/env_vars.toml");

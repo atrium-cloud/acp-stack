@@ -319,11 +319,18 @@ pub(crate) async fn handle_resume_session(
 }
 
 pub(crate) async fn handle_close_session(
-    _state: SharedState,
-    _request: CloseSessionRequest,
+    state: SharedState,
+    request: CloseSessionRequest,
     responder: Responder<CloseSessionResponse>,
     _connection: ConnectionTo<Client>,
 ) -> agent_client_protocol::Result<()> {
+    let mut state = state.lock().await;
+    let held = state.opened_sessions.remove(request.session_id.0.as_ref());
+    if state.args.reject_unopened_session_close && !held {
+        return responder.respond_with_error(
+            Error::invalid_params().data(format!("unknown session \"{}\"", request.session_id.0)),
+        );
+    }
     responder.respond(CloseSessionResponse::new())
 }
 

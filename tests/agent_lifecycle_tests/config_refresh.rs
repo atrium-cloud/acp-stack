@@ -204,7 +204,8 @@ async fn a_credential_set_reaches_an_advertising_adapter_without_a_restart() {
 
 /// After a swap onto a row whose new key is refused at its first endpoint, the next start points
 /// Pi's model-less default at the endpoint the key can use and hides the refused one, from the
-/// listings that start probes.
+/// listings that start probes. A key rotation under the running adapter leaves that default where
+/// the adapter's hide list has it.
 #[tokio::test]
 async fn a_swapped_in_row_defaults_to_the_endpoint_its_key_can_use() {
     let _listings_gate = serve_opencode_listings().await;
@@ -217,7 +218,6 @@ async fn a_swapped_in_row_defaults_to_the_endpoint_its_key_can_use() {
     let harness = spawn_for_credential_sets(config).await;
     apply_set(&harness, 1, &[DEEPSEEK]).await;
 
-    // The apply writes Pi's settings from cached verdicts, of which there are none yet.
     apply_set(&harness, 2, &[OPENCODE]).await;
 
     let bin_dir = harness.home.join(".local/bin");
@@ -228,9 +228,57 @@ async fn a_swapped_in_row_defaults_to_the_endpoint_its_key_can_use() {
         started["capabilities"]["agent_title"], "env assertions passed",
         "{started}"
     );
-    let settings = std::fs::read(harness.home.join(".pi/agent/settings.json")).expect("settings");
-    let settings: Value = serde_json::from_slice(&settings).expect("settings json");
-    assert_eq!(settings["defaultProvider"], "opencode-go", "{settings}");
+    let default_provider = || {
+        let settings = std::fs::read(harness.home.join(".pi/agent/settings.json"));
+        serde_json::from_slice::<Value>(&settings.expect("settings")).expect("settings json")
+            ["defaultProvider"]
+            .clone()
+    };
+    assert_eq!(default_provider(), "opencode-go");
+
+    // The rotation drops OpenCode's verdicts, from which a rewrite would name `opencode`.
+    let rotated = (
+        OPENCODE.0,
+        OPENCODE.1,
+        "sk-oc-example-rotated-not-a-real-key",
+    );
+    let data = apply_set(&harness, 3, &[rotated]).await;
+    assert_eq!(data["agent_environment"], "restart_required", "{data}");
+    assert_eq!(default_provider(), "opencode-go");
+}
+
+/// A custom provider's key is not among the provider variables a push carries, so rotating it
+/// under an advertising adapter needs a restart.
+#[tokio::test]
+async fn a_custom_provider_rotation_needs_a_restart_under_an_advertising_adapter() {
+    use acp_stack::config::{AgentCustomProviderConfig, CustomProviderApi};
+    let record = tempfile::NamedTempFile::new().expect("record file");
+    let mut config = credential_set_config("my-custom");
+    config.agent.env.push("MY_CUSTOM_KEY".to_owned());
+    let slot = config.agent.provider.as_mut().expect("default slot");
+    slot.model = Some("my-model".to_owned());
+    slot.api_key_ref = Some("MY_CUSTOM_KEY".to_owned());
+    slot.custom = Some(AgentCustomProviderConfig {
+        name: "My Custom".to_owned(),
+        base_url: "https://example.test/v1".to_owned(),
+        api: CustomProviderApi::default(),
+        model_name: None,
+        context: 128_000,
+        output_max_tokens: 8_192,
+    });
+    let record_path = record.path().to_string_lossy().into_owned();
+    config
+        .agent
+        .args
+        .extend(["--launch-env-record".to_owned(), record_path]);
+    let harness = spawn_for_credential_sets(config).await;
+    let custom = |value| ("my-custom", "MY_CUSTOM_KEY", value);
+    apply_set(&harness, 1, &[custom("example-custom-key-a")]).await;
+    agent_lifecycle(&harness, "start").await;
+
+    let data = apply_set(&harness, 2, &[custom("example-custom-key-b")]).await;
+
+    assert_eq!(data["agent_environment"], "restart_required", "{data}");
 }
 
 /// A crash after a push that added a row respawns with the pushed set's hide list, which the

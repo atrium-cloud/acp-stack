@@ -28,7 +28,7 @@ For Pi Agent, the bridge sets the process-only `PI_ACP_PI_BIN` to the managed `p
 
 An adapter that launches its agent per session can take a new provider env without a restart. It advertises `agentCapabilities._meta.acpStack.launchEnv` as an object at `initialize`.
 
-After a `provider-credential-set` apply whose providers differ from the ones the running adapter holds, the apply probes the endpoints and rewrites the native config as a start does, then the bridge sends the request below. Each request is the whole state: `env` holds every resolved provider variable to set, except one the network provider's `workload_env` overrides at spawn; `unset` every provider-owned variable name the set leaves out and no other spawn source sets (a `secret-environment` namespace, `[workspace.sandbox].workload_env`, the network provider's `workload_env`), which the adapter removes from its inherited env; and `hideProviders` the full hide list as `PI_ACP_HIDE_PROVIDERS` carries it.
+After a `provider-credential-set` apply whose providers differ from the ones the running adapter holds, the apply probes the endpoints, then the bridge sends the request below; once the adapter answers, the native config is rewritten from the same verdicts, as at a launch. Each request is the whole state: `env` holds every resolved provider variable to set, except one the network provider's `workload_env` overrides at spawn; `unset` every provider-owned variable name the set leaves out and no other spawn source sets (a `secret-environment` namespace, `[workspace.sandbox].workload_env`, the network provider's `workload_env`), which the adapter removes from its inherited env; and `hideProviders` the full hide list as `PI_ACP_HIDE_PROVIDERS` carries it.
 
 ```json
 { "jsonrpc": "2.0", "id": 7, "method": "_acpStack/launch_env", "params": { "env": { "OPENROUTER_API_KEY": "sk-or-..." }, "unset": ["OPENAI_API_KEY"], "hideProviders": [] } }
@@ -36,7 +36,7 @@ After a `provider-credential-set` apply whose providers differ from the ones the
 
 - The adapter answers `{}` and applies the env to every agent launch after it.
 - On success the apply answers `agent_environment: "live"`, the status route's loaded providers become the applied set, and an `on-crash` respawn launches with this env and the Agent config it was resolved from, so the respawn's `PI_ACP_HIDE_PROVIDERS` covers the pushed set. A replay of the same set finds them matching and sends nothing.
-- An adapter without the capability, a failed request, or no answer within 10 seconds answers `restart_required`. The failure is logged with the adapter's error redacted and bounded.
+- An adapter without the capability, a custom provider in the default or subagent slot (its key is not a provider variable the request carries), a failed request, a native config rewrite that fails after it, or no answer within 10 seconds answers `restart_required`. The failure is logged with the adapter's error redacted and bounded.
 - An agent start needs no request: the process env is fresh.
 - The params carry key values. The request's `Debug` prints names only, and no log line, trace frame or event records them.
 

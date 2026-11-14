@@ -71,7 +71,7 @@ use tokio::sync::{Mutex as TokioMutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::AgentConfig;
+use crate::config::{AgentConfig, Config};
 use crate::error::{Result, StackError};
 use crate::events::EventHub;
 use crate::runtime::agent::acp_bridge::{
@@ -83,6 +83,7 @@ use crate::runtime::agent::acp_bridge::{
     meta_message_id, prompt_message_id_meta, resolve_command_path, session_config_id_for_value,
     session_mode_selection_for_value, user_prompt_chunk_payload,
 };
+use crate::runtime::agent::agent_headless_config::provision_for_launch;
 use crate::runtime::agent::model_discovery::{
     effort_value_is_explicit_without_discovery, model_applies_from_disk_only,
 };
@@ -393,9 +394,9 @@ pub struct AgentSupervisor {
     capabilities: Arc<RwLock<Option<AgentCapabilitiesDto>>>,
     last_pid: Arc<RwLock<Option<u32>>>,
     loaded_providers: Arc<RwLock<Option<Vec<ResolvedProviderSnapshot>>>>,
-    /// What a launch-env push handed the running adapter, which an `on-crash` respawn takes in
-    /// place of the start's.
-    pushed_launch: Arc<RwLock<Option<PushedLaunch>>>,
+    /// What a launch-env push handed the running adapter, or an apply recorded while the Agent was
+    /// down, which an `on-crash` respawn takes in place of the start's.
+    respawn_launch: Arc<RwLock<Option<RespawnLaunch>>>,
     /// In-flight prompt registry. Each entry is a fire-and-forget background
     /// task plus its cancellation token. We never block on these from
     /// session-tier handlers, because the durable `prompts` row is the source of
@@ -418,21 +419,22 @@ struct SupervisorShared {
     capabilities: Arc<RwLock<Option<AgentCapabilitiesDto>>>,
     last_pid: Arc<RwLock<Option<u32>>>,
     loaded_providers: Arc<RwLock<Option<Vec<ResolvedProviderSnapshot>>>>,
-    pushed_launch: Arc<RwLock<Option<PushedLaunch>>>,
+    respawn_launch: Arc<RwLock<Option<RespawnLaunch>>>,
     list_sync: Arc<ListSyncShared>,
 }
 
-/// A launch-env push: the env and the Agent config it resolved from, so a respawn's hide list
-/// covers the pushed set rather than the start's.
+/// An env and the config it resolved from, so a respawn's native config and hide list cover that
+/// provider set rather than the start's.
 #[derive(Clone)]
-struct PushedLaunch {
+struct RespawnLaunch {
     environment: ResolvedAgentEnvironment,
-    agent: AgentConfig,
+    config: Config,
 }
 
 #[derive(Clone)]
 struct RestartContext {
     target_id: String,
+    config: Config,
     agent: AgentConfig,
     workspace_root: String,
     home: PathBuf,
@@ -450,6 +452,8 @@ struct RestartContext {
 
 pub struct AgentStartRequest<'a> {
     pub target_id: &'a str,
+    /// The config the launch resolves from, which also writes the agent's native config.
+    pub config: &'a Config,
     pub agent: &'a AgentConfig,
     pub workspace_root: &'a str,
     /// Boot-time home of the daemon; the agent child and its terminals inherit
@@ -484,7 +488,7 @@ impl AgentSupervisor {
             capabilities: Arc::new(RwLock::new(None)),
             last_pid: Arc::new(RwLock::new(None)),
             loaded_providers: Arc::new(RwLock::new(None)),
-            pushed_launch: Arc::new(RwLock::new(None)),
+            respawn_launch: Arc::new(RwLock::new(None)),
             prompts: Arc::new(TokioMutex::new(HashMap::new())),
             dispatch_gate: Arc::new(RwLock::new(())),
             session_locks: SessionLocks::default(),
@@ -498,7 +502,7 @@ impl AgentSupervisor {
             capabilities: Arc::clone(&self.capabilities),
             last_pid: Arc::clone(&self.last_pid),
             loaded_providers: Arc::clone(&self.loaded_providers),
-            pushed_launch: Arc::clone(&self.pushed_launch),
+            respawn_launch: Arc::clone(&self.respawn_launch),
             list_sync: Arc::clone(&self.list_sync),
         }
     }
@@ -540,10 +544,12 @@ impl AgentSupervisor {
                 | AgentState::Updating => return Err(StackError::AgentAlreadyRunning),
             }
         }
+        provision_for_launch(request.config, &request.home);
 
         let loaded_providers = request.providers.clone();
         let restart_context = RestartContext {
             target_id: request.target_id.to_owned(),
+            config: request.config.clone(),
             agent: request.agent.clone(),
             workspace_root: request.workspace_root.to_owned(),
             home: request.home.clone(),
@@ -569,7 +575,7 @@ impl AgentSupervisor {
                 *self.capabilities.write().await = Some(capabilities.clone());
                 *self.last_pid.write().await = pid;
                 *self.loaded_providers.write().await = Some(loaded_providers);
-                *self.pushed_launch.write().await = None;
+                *self.respawn_launch.write().await = None;
                 spawn_list_sync_loop(self.shared(), &bridge, &restart_context);
                 spawn_bridge_exit_monitor(self.shared(), bridge, restart_context);
                 Ok(capabilities)
@@ -770,13 +776,13 @@ impl AgentSupervisor {
         matches!(*self.state.lock().await, AgentState::Running(_))
     }
 
-    /// Hand the running adapter `environment`, resolved from `agent`, for its later agent
+    /// Hand the running adapter `environment`, resolved from `config`, for its later agent
     /// launches. Once it answers, the loaded snapshot is `environment`'s, and an `on-crash`
     /// respawn launches with both.
     pub async fn push_launch_env(
         &self,
         environment: ResolvedAgentEnvironment,
-        agent: AgentConfig,
+        config: Config,
         request: &LaunchEnvRequest,
     ) -> Result<()> {
         let bridge = self.bridge().await?;
@@ -786,9 +792,36 @@ impl AgentSupervisor {
             });
         }
         bridge.push_launch_env(request).await?;
+        // Under the state lock and only for the process that answered, so a crash respawn takes
+        // the whole push or none of it.
+        let state = self.state.lock().await;
+        if !matches!(&*state, AgentState::Running(current) if Arc::ptr_eq(current, &bridge)) {
+            return Err(StackError::AgentNotRunning);
+        }
         *self.loaded_providers.write().await = Some(environment.providers.clone());
-        *self.pushed_launch.write().await = Some(PushedLaunch { environment, agent });
+        *self.respawn_launch.write().await = Some(RespawnLaunch {
+            environment,
+            config,
+        });
         Ok(())
+    }
+
+    /// Record `environment` for the crash respawn a stopped Agent may be waiting on; `false` once
+    /// a launch is under way, since it took the earlier context.
+    pub async fn record_respawn_launch(
+        &self,
+        environment: ResolvedAgentEnvironment,
+        config: Config,
+    ) -> bool {
+        let state = self.state.lock().await;
+        if !matches!(&*state, AgentState::Stopped) {
+            return false;
+        }
+        *self.respawn_launch.write().await = Some(RespawnLaunch {
+            environment,
+            config,
+        });
+        true
     }
 
     /// Classify the supervisor for a caller that needs a live bridge and is

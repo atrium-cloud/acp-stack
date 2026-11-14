@@ -935,7 +935,7 @@ The `agent.inference_*` codes carry a sanitized public message of the form `"inf
 - Response: standard envelope.
 - Notes:
     - Closes the agent-side session and preserves local history.
-    - The runtime calls ACP `session/close` when supported, marks the local row `closed`, and keeps durable events/query history.
+    - The runtime calls ACP `session/close` for a session the running adapter holds, marks the local row `closed`, and keeps durable events/query history. A session the adapter does not hold, a detached one among them, closes locally.
     - The session's subagent sessions close with it, and their pending ACP permission requests are settled as `cancelled`.
     - Permanent deletion is deferred until product semantics are defined.
 
@@ -944,7 +944,7 @@ The `agent.inference_*` codes carry a sanitized public message of the form `"inf
 - Tier: `session`
 - Request: none. Query: optional `target_id`, as cancel and close take.
 - Response: the session row, with `status: "available"`.
-- Errors: `404 session.not_found` for an unknown id, `409 session.closed` for a closed row and `409 session.subagent_restricted` for a subagent session, as the other session writes answer them.
+- Errors: `404 session.not_found` for an unknown id, `409 session.closed` for a closed row and `409 session.subagent_restricted` for a subagent session, as the other session writes answer them; `501 session.reattach_unsupported` for a session the running adapter holds but could not re-attach, advertising neither `session/resume` nor `session/load`, which stays attached.
 - Notes:
     - Releases the agent-side session and keeps it resumable. The runtime calls ACP `session/close` as `DELETE /v1/sessions/{id}` does, settles the session's live prompt as `cancelled`, settles the pending ACP permission requests of the session and its subagents as `cancelled`, and marks the row `available`.
     - Subagent sessions keep their rows and lose their live state and cancel grants.

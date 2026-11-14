@@ -94,6 +94,7 @@ pub(crate) async fn start_agent_target_locked(
         .supervisor
         .start(AgentStartRequest {
             target_id: &target.target_id,
+            config: &config,
             agent: &config.agent,
             workspace_root: &config.workspace.root,
             home: state.runtime_paths.home.clone(),
@@ -408,6 +409,7 @@ async fn restart_agent_target(
         .supervisor
         .start(AgentStartRequest {
             target_id: &target.target_id,
+            config: &fresh_config,
             agent: &fresh_config.agent,
             workspace_root: &fresh_config.workspace.root,
             home: state.runtime_paths.home.clone(),

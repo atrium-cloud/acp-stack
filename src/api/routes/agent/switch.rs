@@ -1216,6 +1216,7 @@ async fn start_agent_with_config(
         .supervisor
         .start(AgentStartRequest {
             target_id: &target.target_id,
+            config,
             agent: &config.agent,
             workspace_root: &config.workspace.root,
             home: state.runtime_paths.home.clone(),

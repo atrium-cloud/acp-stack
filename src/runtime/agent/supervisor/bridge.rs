@@ -284,24 +284,25 @@ async fn monitor_bridge_exit(
         }
     }
 
-    // A pushed env launches with the config it resolved from, so the hide list the spawn derives
-    // covers the pushed set.
-    let (agent, env, providers) = match shared.pushed_launch.read().await.clone() {
-        Some(pushed) => (
-            pushed.agent,
-            pushed.environment.env,
-            pushed.environment.providers,
+    // A recorded env launches with the config it resolved from, and native config is rewritten
+    // from the verdicts the spawn's hide list reads, as at a start.
+    let (config, env, providers) = match shared.respawn_launch.read().await.clone() {
+        Some(recorded) => (
+            recorded.config,
+            recorded.environment.env,
+            recorded.environment.providers,
         ),
         None => (
-            restart_context.agent.clone(),
+            restart_context.config.clone(),
             restart_context.env.clone(),
             restart_context.providers.clone(),
         ),
     };
+    provision_for_launch(&config, &restart_context.home);
     match spawn_agent_bridge(
         &restart_context.home,
         &restart_context.target_id,
-        &agent,
+        &config.agent,
         &restart_context.workspace_root,
         env,
         &restart_context.state_store,

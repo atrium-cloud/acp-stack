@@ -384,8 +384,52 @@ async fn a_session_detached_mid_turn_reattaches_on_its_next_prompt() {
     assert_eq!(resumed.count(), 1, "{kinds:?}");
 }
 
-async fn detach_session(harness: &Harness, session_id: &str) -> Value {
+/// An adapter that can re-attach no session keeps the one it holds: closing it would leave a
+/// session no later prompt reaches.
+#[tokio::test]
+async fn a_detach_is_refused_where_the_adapter_cannot_reattach() {
+    let harness = Harness::spawn_with(|config| {
+        let flags = ["--no-cap-resume-session", "--no-cap-load-session"];
+        config.agent.args.extend(flags.map(str::to_owned));
+    })
+    .await;
+    let session_id = create_session(&harness).await;
+
+    let response = post_detach(&harness, &session_id).await;
+
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    let body: Value = response.json().await.expect("detach json");
+    assert_eq!(
+        body["error"]["code"], "session.reattach_unsupported",
+        "{body}"
+    );
+}
+
+/// Closing a detached session closes the row without asking the adapter to close a session it
+/// already released.
+#[tokio::test]
+async fn a_detached_session_closes_without_a_second_agent_close() {
+    let harness = Harness::spawn_with(|config| {
+        let flag = "--reject-unopened-session-close".to_owned();
+        config.agent.args.push(flag);
+    })
+    .await;
+    let session_id = create_session(&harness).await;
+    detach_session(&harness, &session_id).await;
+
     let response = http()
+        .delete(format!("{}/v1/sessions/{}", harness.base_url, session_id))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("close request");
+
+    let body: Value = response.json().await.expect("close json");
+    assert_eq!(body["data"]["status"], "closed", "{body}");
+}
+
+async fn post_detach(harness: &Harness, session_id: &str) -> reqwest::Response {
+    http()
         .post(format!(
             "{}/v1/sessions/{}/detach",
             harness.base_url, session_id
@@ -393,7 +437,11 @@ async fn detach_session(harness: &Harness, session_id: &str) -> Value {
         .header("Authorization", session_bearer())
         .send()
         .await
-        .expect("detach request");
+        .expect("detach request")
+}
+
+async fn detach_session(harness: &Harness, session_id: &str) -> Value {
+    let response = post_detach(harness, session_id).await;
     assert_eq!(response.status(), StatusCode::OK);
     response.json().await.expect("detach json")
 }

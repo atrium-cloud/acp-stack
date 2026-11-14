@@ -315,6 +315,7 @@ pub(super) async fn start_agent_for_config(state: &AppState, config: &Config) ->
         .supervisor
         .start(AgentStartRequest {
             target_id: &target_id,
+            config,
             agent: &config.agent,
             workspace_root: &config.workspace.root,
             home: state.runtime_paths.home.clone(),

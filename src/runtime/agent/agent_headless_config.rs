@@ -11,6 +11,7 @@ use toml::{Value as TomlValue, map::Map as TomlMap};
 use crate::config::{AgentCustomProviderConfig, AgentProviderConfig, Config, CustomProviderApi};
 use crate::error::{Result, StackError};
 use crate::fs_util::parent_dir;
+use crate::runtime::agent::acp_bridge::ENDPOINT_VERDICT_AGENT_IDS;
 use crate::runtime::agent::config_io::{
     WorkloadHome, ensure_object_field, ensure_toml_table_field, insert_if_missing,
     read_json_object, read_toml_table, read_yaml_mapping, write_json_object, write_toml_table,
@@ -250,6 +251,24 @@ pub fn provision_agent_headless_config(
     home: &Path,
 ) -> Result<Vec<ProvisionedAgentConfig>> {
     provision_agent_headless_config_in(config, &WorkloadHome::resolve(config, home)?)
+}
+
+/// Right before a process launches or takes a pushed env: an agent whose launch env carries a hide
+/// list (Pi) has its native config rewritten from the verdicts that list reads, so its default
+/// endpoint is never one it hides. Best effort, `false` on failure: launching on the native config
+/// as it is beats not launching.
+pub fn provision_for_launch(config: &Config, home: &Path) -> bool {
+    if !ENDPOINT_VERDICT_AGENT_IDS.contains(&config.agent.id.as_str()) {
+        return true;
+    }
+    let provisioned = provision_agent_headless_config(config, home);
+    if let Err(error) = &provisioned {
+        tracing::warn!(
+            error = %crate::error::report(error),
+            "agent launch: native config rewrite failed; launching on the native config as it is"
+        );
+    }
+    provisioned.is_ok()
 }
 
 /// [`provision_agent_headless_config`] against an already resolved workload home.

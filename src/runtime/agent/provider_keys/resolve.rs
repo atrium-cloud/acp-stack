@@ -840,6 +840,15 @@ pub fn reconcile_provider_env_declarations(agent: &mut AgentConfig) {
     }
 }
 
+/// Whether the default or subagent slot holds a custom provider.
+pub fn has_custom_provider_slot(agent: &AgentConfig) -> bool {
+    let subagent_slot = (agent.subagent.as_ref()).and_then(|subagent| subagent.provider.as_ref());
+    [agent.provider.as_ref(), subagent_slot]
+        .into_iter()
+        .flatten()
+        .any(|provider| provider.custom.is_some())
+}
+
 /// Make `provider_ids` the active set, in order. The default slot stays while its provider is in
 /// the set and otherwise moves to the first one with its model cleared; a subagent provider
 /// outside the set is cleared, so the subagent runs on the default slot. A custom default or
@@ -848,15 +857,7 @@ pub fn apply_active_provider_set(agent: &mut AgentConfig, provider_ids: &[String
     let Some(first) = provider_ids.first() else {
         return;
     };
-    let subagent_slot = agent
-        .subagent
-        .as_ref()
-        .and_then(|subagent| subagent.provider.as_ref());
-    if [agent.provider.as_ref(), subagent_slot]
-        .into_iter()
-        .flatten()
-        .any(|provider| provider.custom.is_some())
-    {
+    if has_custom_provider_slot(agent) {
         return;
     }
     if let Some(subagent) = agent.subagent.as_mut()

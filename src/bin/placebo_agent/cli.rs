@@ -111,6 +111,10 @@ pub(crate) struct AcpArgs {
     /// never heard of.
     #[arg(long)]
     pub(crate) reject_unopened_session_prompt: bool,
+    /// Reject `session/close` the same way for a session this process does not hold; a close
+    /// releases the session it names.
+    #[arg(long)]
+    pub(crate) reject_unopened_session_close: bool,
     #[arg(long)]
     pub(crate) prompt_silent: bool,
     #[arg(long)]

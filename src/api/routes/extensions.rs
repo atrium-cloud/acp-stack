@@ -16,12 +16,17 @@ use crate::extensions::managed_state::{
     KIND_PROVIDER_CREDENTIAL_SET, KIND_SECRET_ENVIRONMENT,
 };
 use crate::runtime::agent::acp_bridge::{
-    AgentCapabilitiesDto, LaunchEnvRequest, hidden_native_providers,
+    AgentCapabilitiesDto, ENDPOINT_VERDICT_AGENT_IDS, LaunchEnvRequest, hidden_native_providers,
 };
-use crate::runtime::agent::agent_headless_config::provision_agent_headless_config;
-use crate::runtime::agent::provider_keys::{ResolvedAgentEnvironment, agent_provider_env_names};
+use crate::runtime::agent::agent_headless_config::{
+    provision_agent_headless_config, provision_for_launch,
+};
+use crate::runtime::agent::provider_keys::{
+    ResolvedAgentEnvironment, agent_provider_env_names, has_custom_provider_slot,
+};
 use crate::runtime::agent::provider_model_catalog::probe_provider_endpoints;
-use crate::secrets::{ManagedApplyOutcome, ProviderCredentialSet, SecretStore};
+use crate::runtime::agent::supervisor::AgentStateLabel;
+use crate::secrets::{ProviderCredentialSet, SecretStore};
 
 pub(crate) async fn extension_managed_state_apply_handler(
     Path(name): Path<String>,
@@ -77,12 +82,9 @@ pub(crate) async fn extension_managed_state_apply_handler(
     let environment = (kind == KIND_PROVIDER_CREDENTIAL_SET)
         .then(|| super::agent::open_agent_environment(&state, &config))
         .and_then(|resolved| applied_environment(resolved, &mut response));
-    // A `noop` set changes nothing a running Agent runs on, and a rewrite could move its default
-    // endpoint off the hide list it started with; every start rewrites native config itself.
-    let running_noop = kind == KIND_PROVIDER_CREDENTIAL_SET
-        && response.outcome == ManagedApplyOutcome::Noop.as_str()
-        && target.supervisor.is_running().await;
-    if !running_noop {
+    // An agent whose launch env carries a hide list has its native config rewritten at each
+    // launch or push instead, so a running adapter's default never leaves the list it holds.
+    if !ENDPOINT_VERDICT_AGENT_IDS.contains(&config.agent.id.as_str()) {
         provision_agent_headless_config(&config, &home)?;
     }
     if let Some(environment) = environment {
@@ -148,6 +150,21 @@ async fn agent_environment(
     store: &SecretStore,
 ) -> &'static str {
     let snapshot = target.supervisor.snapshot().await;
+    match snapshot.state {
+        // A crash respawn may be waiting out its backoff; it launches with this env instead.
+        AgentStateLabel::Stopped => {
+            let recorded = target
+                .supervisor
+                .record_respawn_launch(environment, config.clone());
+            return if recorded.await {
+                AGENT_ENVIRONMENT_LIVE
+            } else {
+                AGENT_ENVIRONMENT_RESTART_REQUIRED
+            };
+        }
+        AgentStateLabel::Running => {}
+        _ => return AGENT_ENVIRONMENT_RESTART_REQUIRED,
+    }
     if !super::status::provider_snapshot_requires_restart(
         snapshot.state,
         snapshot.loaded_providers.as_deref(),
@@ -159,18 +176,12 @@ async fn agent_environment(
         .latest_capabilities
         .as_ref()
         .is_some_and(AgentCapabilitiesDto::supports_launch_env);
-    if !takes_launch_env {
+    // A custom provider's key is not among the provider variables a push carries.
+    if !takes_launch_env || has_custom_provider_slot(&config.agent) {
         return AGENT_ENVIRONMENT_RESTART_REQUIRED;
     }
     // The pushed hide list and Pi's default endpoint come from one probe, as at a start.
     probe_provider_endpoints(home, &config.agent, &environment.env).await;
-    if let Err(error) = provision_agent_headless_config(config, home) {
-        tracing::warn!(
-            error = %crate::error::report(&error),
-            "launch env push: native config rewrite failed; the running Agent restarts instead"
-        );
-        return AGENT_ENVIRONMENT_RESTART_REQUIRED;
-    }
     let provider_names = agent_provider_env_names(&config.agent.id);
     // The network provider's `workload_env` lands last at spawn, so the adapter keeps its value,
     // and a name any spawn source sets stays in the adapter's env, as a restart would keep it.
@@ -200,10 +211,12 @@ async fn agent_environment(
     };
     match target
         .supervisor
-        .push_launch_env(environment, config.agent.clone(), &request)
+        .push_launch_env(environment, config.clone(), &request)
         .await
     {
-        Ok(()) => AGENT_ENVIRONMENT_LIVE,
+        // Native config follows the hide list only once the adapter holds it.
+        Ok(()) if provision_for_launch(config, home) => AGENT_ENVIRONMENT_LIVE,
+        Ok(()) => AGENT_ENVIRONMENT_RESTART_REQUIRED,
         Err(error) => {
             tracing::warn!(
                 error = %crate::error::report(&error),

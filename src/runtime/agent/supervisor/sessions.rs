@@ -632,9 +632,12 @@ impl AgentSupervisor {
                 id: session_id.to_owned(),
             })?;
         let agent_session_id = record.agent_session_id;
-        bridge
-            .close_session(AcpSessionId::new(agent_session_id.clone()))
-            .await?;
+        // A session the adapter does not hold, a detached one among them, has nothing to close there.
+        if bridge.has_attached_session(&agent_session_id).await {
+            bridge
+                .close_session(AcpSessionId::new(agent_session_id.clone()))
+                .await?;
+        }
         self.cancel_prompts_for_session(session_id).await;
         let session_id = session_id.to_owned();
         state
@@ -681,9 +684,18 @@ impl AgentSupervisor {
         };
         let closed = held.is_some();
         if let Some(bridge) = held {
+            let capabilities = bridge.capabilities();
+            // Closing it would leave a session no later prompt can re-attach.
+            if !(capabilities.supports_resume_session() || capabilities.supports_load_session()) {
+                return Err(StackError::SessionReattachUnsupported {
+                    id: session_id.to_owned(),
+                });
+            }
             bridge
                 .close_session(AcpSessionId::new(agent_session_id.clone()))
                 .await?;
+            // Updates queued before the close land before the subagent state is withdrawn.
+            bridge.drain_session_events().await;
         }
         self.cancel_prompts_for_session(session_id).await;
         let session_id = session_id.to_owned();
