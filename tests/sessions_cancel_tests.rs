@@ -356,6 +356,48 @@ async fn a_stalled_turn_does_not_block_cancelling_the_live_one() {
     await_prompt_status(&harness, &session_id, &stalled_prompt_id, "cancelled").await;
 }
 
+/// A detach closes the agent-side session but keeps the row resumable, so the next prompt
+/// re-attaches before it is dispatched.
+#[tokio::test]
+async fn a_session_detached_mid_turn_reattaches_on_its_next_prompt() {
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.push("--prompt-never-settle".to_owned());
+    })
+    .await;
+    let session_id = create_session(&harness).await;
+    let prompt_id = submit_prompt(&harness, &session_id, "interrupted turn").await;
+    await_agent_entered_the_turn(&harness, &session_id).await;
+
+    let body = detach_session(&harness, &session_id).await;
+    assert_eq!(body["data"]["status"], "available", "{body}");
+    await_prompt_status(&harness, &session_id, &prompt_id, "cancelled").await;
+
+    // A second detach finds nothing to release and records nothing.
+    detach_session(&harness, &session_id).await;
+    let kinds = session_event_kinds(&harness, &session_id).await;
+    let demotions = kinds.iter().filter(|kind| *kind == "session.available");
+    assert_eq!(demotions.count(), 1, "{kinds:?}");
+
+    submit_prompt(&harness, &session_id, "next turn").await;
+    let kinds = session_event_kinds(&harness, &session_id).await;
+    let resumed = kinds.iter().filter(|kind| *kind == "session.resumed");
+    assert_eq!(resumed.count(), 1, "{kinds:?}");
+}
+
+async fn detach_session(harness: &Harness, session_id: &str) -> Value {
+    let response = http()
+        .post(format!(
+            "{}/v1/sessions/{}/detach",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("detach request");
+    assert_eq!(response.status(), StatusCode::OK);
+    response.json().await.expect("detach json")
+}
+
 async fn post_prompt(harness: &Harness, session_id: &str, text: &str) -> reqwest::Response {
     http()
         .post(format!(

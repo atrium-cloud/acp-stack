@@ -6,6 +6,9 @@ use crate::runtime::agent::acp_codec::session_config_option_is_current;
 use crate::runtime::agent::model_discovery::resolve_advertised_model_value;
 use crate::runtime::agent::provider_keys::agent_provider_id_for_provider_id;
 
+/// The `session.available` reason a detach records.
+const SESSION_DETACHED_REASON: &str = "detached";
+
 impl AgentSupervisor {
     /// `POST /v1/sessions`. Dispatches ACP `session/new` and persists a `sessions` row;
     /// mode/model/effort values the agent did not advertise land in `ignored`, not an error.
@@ -651,6 +654,65 @@ impl AgentSupervisor {
                     .get_session(&session_id)?
                     .ok_or_else(|| StackError::SessionNotFound { id: session_id })?;
                 Ok((record, closed_subagents))
+            })
+            .await
+    }
+
+    /// `POST /v1/sessions/{id}/detach`. The adapter closes the session as [`Self::close_session`]
+    /// has it close, but the row becomes `available` and its subagents keep their rows, so the
+    /// next prompt re-attaches. A session the running adapter does not hold sends nothing, and a
+    /// detach that changes nothing writes nothing.
+    pub async fn detach_session(
+        &self,
+        session_id: &str,
+        state: &StateHandle,
+    ) -> Result<(SessionRecord, Vec<String>)> {
+        // Held as a submit holds them, so no prompt dispatches between the attach check and the close.
+        let _dispatch_guard = self.dispatch_gate.read().await;
+        let _session_guard = self.session_locks.lock(session_id).await;
+        let agent_session_id = fetch_open_session(state, session_id)
+            .await?
+            .agent_session_id;
+        let held = match self.bridge().await {
+            Ok(bridge) => (bridge.has_attached_session(&agent_session_id).await).then_some(bridge),
+            // A stopped Agent holds no session.
+            Err(StackError::AgentNotRunning) => None,
+            Err(error) => return Err(error),
+        };
+        let closed = held.is_some();
+        if let Some(bridge) = held {
+            bridge
+                .close_session(AcpSessionId::new(agent_session_id.clone()))
+                .await?;
+        }
+        self.cancel_prompts_for_session(session_id).await;
+        let session_id = session_id.to_owned();
+        state
+            .write(move |store| {
+                // Only an `active` row demotes, so a close that raced this detach stays closed.
+                let demoted = store.demote_active_session(&session_id)?;
+                let withdrawn = store.withdraw_subagent_state(&session_id)?;
+                let payload = json!({
+                    "reason": SESSION_DETACHED_REASON,
+                    "agent_session_id": agent_session_id,
+                });
+                if (closed || demoted || !withdrawn.is_empty())
+                    && let Err(error) = store.append_session_event_with_source(
+                        &session_id,
+                        "info",
+                        EVENT_KIND_SESSION_AVAILABLE,
+                        EVENT_SOURCE_SYSTEM,
+                        "session available",
+                        &payload.to_string(),
+                    )
+                {
+                    tracing::warn!(%error, session = %session_id, "session.available event write failed");
+                }
+                let subagents = store.subagent_sessions(&session_id)?;
+                let record = store
+                    .get_session(&session_id)?
+                    .ok_or_else(|| StackError::SessionNotFound { id: session_id })?;
+                Ok((record, subagents.into_iter().map(|record| record.id).collect()))
             })
             .await
     }

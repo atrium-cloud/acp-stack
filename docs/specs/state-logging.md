@@ -186,12 +186,12 @@ Session-scoped events written when a prompt reaches a terminal status:
 
 | Kind                | Level | Source   | Payload                                                       | Emit site                                                    |
 | ------------------- | ----- | -------- | -------------------------------------------------------------- | ------------------------------------------------------------ |
-| `session.available` | info  | `system` | `{ "reason": "<label>", "threshold_secs"?: <u64> }`            | Startup reconcile, agent teardown, and the idle session sweep |
+| `session.available` | info  | `system` | `{ "reason": "<label>", "threshold_secs"?: <u64>, "agent_session_id"?: "<id>" }` | Startup reconcile, agent teardown, the idle session sweep, and `POST /v1/sessions/{id}/detach` |
 | `session.list_synced` | info | `system` | `{ "target_id", "agent_id", "upserted": <u32>, "updated": <u32>, "skipped_invalid_cwd": <u32> }` | ACP session-list sync, in the transaction that writes the rows |
 | `session.subagent_announced` | info | `system` | `{ "child_session_id", "agent_session_id", "root_session_id" }` | On the parent, in the transaction that records the first `subagent_update` naming a child |
 | `session.annotation` | info | `api` | `{ "kind": "<dotted name>", "data": { ... } }` | `POST /v1/sessions/-/annotations`, on the session whose turn is in flight |
 
-`reason` is one of `daemon_restart`, `agent_stopped`, `agent_exited`, or `idle`; `threshold_secs` appears only on idle-sweep demotions.
+`reason` is one of `daemon_restart`, `agent_stopped`, `agent_exited`, `idle`, or `detached`; `threshold_secs` appears only on idle-sweep demotions, and `agent_session_id` only on a detach.
 
 `session.list_synced` is unscoped and written only when a sync inserts rows (`upserted`) or changes stored ones (`updated`); a listing that matches the stored rows writes nothing.
 

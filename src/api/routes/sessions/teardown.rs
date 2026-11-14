@@ -4,6 +4,7 @@ use super::*;
 /// teardown. The cancel path has its own, recorded by the supervisor that
 /// settles those requests.
 const SESSION_CLOSED_PERMISSION_REASON: &str = "session-closed";
+const SESSION_DETACHED_PERMISSION_REASON: &str = "session-detached";
 const SESSION_DELETED_PERMISSION_REASON: &str = "session-deleted";
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -39,6 +40,24 @@ pub(crate) async fn sessions_close_handler(
             &state,
             session_id,
             SESSION_CLOSED_PERMISSION_REASON,
+        )
+        .await;
+    }
+    Ok(ApiSuccess::new(SessionResponse::from(record)))
+}
+
+pub(crate) async fn sessions_detach_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<SessionsTargetParams>,
+) -> std::result::Result<ApiSuccess<SessionResponse>, StackError> {
+    let target = target_for_session_wind_down(&state, &id, params.target_id.as_deref()).await?;
+    let (record, subagents) = target.supervisor.detach_session(&id, &state.state).await?;
+    for session_id in std::iter::once(&id).chain(&subagents) {
+        cancel_pending_acp_permissions_for_session(
+            &state,
+            session_id,
+            SESSION_DETACHED_PERMISSION_REASON,
         )
         .await;
     }

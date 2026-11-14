@@ -169,7 +169,7 @@ Sessions learned from `session/list` are persisted only when their CWD is an exi
 
 ACP session lifecycle calls pass CWDs as paths because ACP has no directory-handle transport; the runtime revalidates those paths immediately before each call.
 
-`session/close` is surfaced as history-preserving close in `acp-stack`; it keeps local session history intact. `session/delete` (`POST /v1/sessions/{id}/delete`) is the destructive counterpart:
+`session/close` is surfaced as history-preserving close in `acp-stack`; it keeps local session history intact. `POST /v1/sessions/{id}/detach` sends the same `session/close` for a session the running adapter has attached and leaves the row `available`, so the next prompt re-attaches it through `session/resume` or `session/load`. `session/delete` (`POST /v1/sessions/{id}/delete`) is the destructive counterpart:
 
 - The agent removes the session from its own history.
 - The runtime then hard-deletes the local session row together with its prompts and per-session events.

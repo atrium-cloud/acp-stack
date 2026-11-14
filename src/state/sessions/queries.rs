@@ -1099,6 +1099,29 @@ impl StateStore {
         })
     }
 
+    /// Demote one `active` session to `available` as [`Self::reconcile_orphaned_sessions`] does,
+    /// leaving `updated_at` alone; `false` when the row was not `active`.
+    pub fn demote_active_session(&self, id: &str) -> Result<bool> {
+        const SQL: &str =
+            "UPDATE sessions SET status = ?1 WHERE id = ?2 AND status = ?3 RETURNING id";
+        let now = current_timestamp();
+        let demoted = self.persist_many_with_outbox("sessions", &now, |conn| {
+            let ids = {
+                let mut statement = conn.prepare(SQL)?;
+                let rows = statement.query_map(
+                    params![SESSION_STATUS_AVAILABLE, id, SESSION_STATUS_ACTIVE],
+                    |row| row.get::<_, String>(0),
+                )?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            for id in &ids {
+                bump_session_change(conn, id)?;
+            }
+            Ok(ids)
+        })?;
+        Ok(!demoted.is_empty())
+    }
+
     /// Demote every `active` session (of one target, or all) to `available`,
     /// returning the demoted ids. Runs at serve startup (all targets) and on
     /// agent teardown (that target only), where no session can still be

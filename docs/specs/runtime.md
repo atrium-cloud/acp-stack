@@ -359,7 +359,7 @@ The `reason_category` catalog is:
 
 ### Session Status Lifecycle
 
-A session row's durable `status` is `active` (attached to the running agent with recent work), `available` (known to the agent and promotable), or `closed` (terminal). `active` rows demote to `available` on agent stop, unplanned agent exit, daemon startup reconcile, and the idle sweep below. A demoted session re-promotes to `active` through `session/load`, `session/resume`, or a new `session/prompt`; when the running adapter has not opened that session, the prompt re-attaches it through `session/resume` or `session/load` first. Each demotion appends a `session.available` event whose payload names the reason (`agent_stopped`, `agent_exited`, `daemon_restart`, or `idle`).
+A session row's durable `status` is `active` (attached to the running agent with recent work), `available` (known to the agent and promotable), or `closed` (terminal). `active` rows demote to `available` on agent stop, unplanned agent exit, daemon startup reconcile, the idle sweep below, and `POST /v1/sessions/{id}/detach`. A demoted session re-promotes to `active` through `session/load`, `session/resume`, or a new `session/prompt`; when the running adapter has not opened that session, the prompt re-attaches it through `session/resume` or `session/load` first. Each demotion appends a `session.available` event whose payload names the reason (`agent_stopped`, `agent_exited`, `daemon_restart`, `idle`, or `detached`).
 
 ### Idle Session Sweep
 

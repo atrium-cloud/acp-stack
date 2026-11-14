@@ -939,6 +939,20 @@ The `agent.inference_*` codes carry a sanitized public message of the form `"inf
     - The session's subagent sessions close with it, and their pending ACP permission requests are settled as `cancelled`.
     - Permanent deletion is deferred until product semantics are defined.
 
+### `POST /v1/sessions/{id}/detach`
+
+- Tier: `session`
+- Request: none. Query: optional `target_id`, as cancel and close take.
+- Response: the session row, with `status: "available"`.
+- Errors: `404 session.not_found` for an unknown id, `409 session.closed` for a closed row and `409 session.subagent_restricted` for a subagent session, as the other session writes answer them.
+- Notes:
+    - Releases the agent-side session and keeps it resumable. The runtime calls ACP `session/close` as `DELETE /v1/sessions/{id}` does, settles the session's live prompt as `cancelled`, settles the pending ACP permission requests of the session and its subagents as `cancelled`, and marks the row `available`.
+    - Subagent sessions keep their rows and lose their live state and cancel grants.
+    - A session the running adapter has not attached, or any session while the Agent is stopped, sends nothing to the agent.
+    - The demotion leaves `updated_at` as it is, as the idle sweep does, and a detach that changes nothing writes and records nothing.
+    - The next prompt re-attaches the session through `session/resume` or `session/load` before it is dispatched.
+    - An adapter that records a session only once its first turn is stored has nothing to re-attach after a detach that lands before then, and that prompt fails with the adapter's refusal.
+
 ### `POST /v1/sessions/{id}/delete`
 
 - Tier: `session`

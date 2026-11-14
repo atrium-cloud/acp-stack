@@ -50,6 +50,7 @@ pub(crate) use prompts::{sessions_prompt_handler, sessions_prompt_status_handler
 pub(crate) use status::sessions_status_handler;
 pub(crate) use teardown::{
     sessions_cancel_handler, sessions_close_handler, sessions_delete_handler,
+    sessions_detach_handler,
 };
 
 #[derive(Serialize, schemars::JsonSchema)]

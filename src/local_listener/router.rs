@@ -34,9 +34,10 @@ use crate::api::routes::sessions::{
     sessions_cancel_handler, sessions_change_feed_handler, sessions_changes_handler,
     sessions_close_handler, sessions_commands_handler, sessions_commands_run_handler,
     sessions_config_options_handler, sessions_config_options_set_handler, sessions_create_handler,
-    sessions_events_handler, sessions_fork_handler, sessions_get_handler, sessions_list_handler,
-    sessions_load_handler, sessions_prompt_handler, sessions_prompt_status_handler,
-    sessions_resume_handler, sessions_snapshot_handler, sessions_status_handler,
+    sessions_detach_handler, sessions_events_handler, sessions_fork_handler, sessions_get_handler,
+    sessions_list_handler, sessions_load_handler, sessions_prompt_handler,
+    sessions_prompt_status_handler, sessions_resume_handler, sessions_snapshot_handler,
+    sessions_status_handler,
 };
 use crate::api::routes::skills::{
     skills_catalog_handler, skills_list_handler, skills_source_get_handler,
@@ -122,6 +123,7 @@ pub fn build_local_router(state: AppState) -> Router {
             get(sessions_config_options_handler).post(sessions_config_options_set_handler),
         )
         .route("/v1/sessions/{id}/cancel", post(sessions_cancel_handler))
+        .route("/v1/sessions/{id}/detach", post(sessions_detach_handler))
         .route(
             "/v1/sessions/{id}/prompts/{prompt_id}",
             get(sessions_prompt_status_handler),
