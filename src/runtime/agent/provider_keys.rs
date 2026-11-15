@@ -117,6 +117,9 @@ pub struct ProviderEnvMapping {
     /// Endpoints of one vendor that share the row's key; each row id belongs to exactly one.
     #[serde(default)]
     pub endpoints: Vec<ProviderEndpoint>,
+    /// Its endpoint's `preferred` on an endpoint lane; a row never sets it.
+    #[serde(skip)]
+    pub preferred: bool,
     /// Each endpoint as a row of its own, built at load so lookups can hand out `'static` borrows.
     #[serde(skip)]
     lanes: Vec<ProviderEnvMapping>,
@@ -136,6 +139,9 @@ pub struct ProviderEndpoint {
     pub provider_ids: BTreeMap<String, String>,
     #[serde(default)]
     pub api_key_env_vars: BTreeMap<String, String>,
+    /// A model-less slot naming the row runs here while the row's key lists models here.
+    #[serde(default)]
+    pub preferred: bool,
 }
 
 /// Claude Code-specific headless provisioning metadata for one provider. The env-var lists are
@@ -219,6 +225,7 @@ impl ProviderEnvMapping {
                 models_url: endpoint.models_url.clone(),
                 provider_ids: endpoint.provider_ids.clone(),
                 api_key_env_vars: endpoint.api_key_env_vars.clone(),
+                preferred: endpoint.preferred,
                 endpoints: Vec::new(),
                 ..self.clone()
             })
@@ -599,6 +606,12 @@ impl ProviderKeyMapping {
         if row.base_url != first.base_url {
             return provider_mapping_error(format!(
                 "provider `{primary_id}` base_url must equal its first endpoint's"
+            ));
+        }
+        let preferred = row.endpoints.iter().filter(|endpoint| endpoint.preferred);
+        if preferred.count() > 1 {
+            return provider_mapping_error(format!(
+                "provider `{primary_id}` marks more than one endpoint preferred; at most one may be"
             ));
         }
         for id in &row.id {

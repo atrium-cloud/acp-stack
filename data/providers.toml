@@ -55,6 +55,8 @@
 # what the row-level fields mean. A row with endpoints leaves the last three
 # unset at row level and repeats its first endpoint's `base_url`. Every row id
 # belongs to exactly one endpoint: its `id` or a key of its `provider_ids`.
+# `preferred = true` marks the endpoint a model-less slot naming the row runs
+# on while the row's key lists models there; at most one per row.
 
 [[providers]]
 id = ["anthropic"]
@@ -252,6 +254,7 @@ name = "OpenCode Go"
 base_url = "https://opencode.ai/inference/go/v1"
 models_url = "https://opencode.ai/inference/go/v1/models"
 api_key_env_vars = { hermes = "OPENCODE_GO_API_KEY" }
+preferred = true
 
 [[providers]]
 id = ["radius"]

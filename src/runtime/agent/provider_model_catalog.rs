@@ -353,7 +353,7 @@ pub fn hidden_provider_endpoints(home: &Path, agent: &AgentConfig) -> Vec<&'stat
                 })
                 .collect();
             if kept.is_empty() {
-                kept.push(row.open_lane(owner_lane, &marked));
+                kept.push(row.open_lane(owner_lane, &marked, &cache));
             }
             marked.retain(|lane| !kept.contains(lane));
         }
@@ -364,8 +364,8 @@ pub fn hidden_provider_endpoints(home: &Path, agent: &AgentConfig) -> Vec<&'stat
     hidden
 }
 
-/// The endpoint a model-less `[agent.provider]` runs on and its keyed listing's first model. A
-/// slot naming its row runs on the row's first endpoint not hidden.
+/// The endpoint a model-less `[agent.provider]` runs on, as `open_lane` picks it, and its keyed
+/// listing's first model.
 pub fn default_endpoint(
     home: &Path,
     agent: &AgentConfig,
@@ -378,7 +378,7 @@ pub fn default_endpoint(
     let cache = read_cache_file(&cache_path(home)).unwrap_or_default();
     let (marked, usable) = row.marks(&cache);
     let lane = if usable {
-        row.open_lane(owner_lane, &marked)
+        row.open_lane(owner_lane, &marked, &cache)
     } else {
         owner_lane
     };
@@ -435,18 +435,24 @@ impl EndpointRow<'_> {
         (marked, usable)
     }
 
-    /// The lane a model-less owner runs on. One on the row's first lane names the row, so it runs
-    /// on the first unmarked lane; one naming a later lane keeps it.
+    /// A model-less owner on the row's first lane names the row, so it runs on the preferred lane
+    /// while that lists models for the key, else on the first unmarked; a later lane keeps itself.
     fn open_lane(
         &self,
         owner_lane: &'static ProviderEnvMapping,
         marked: &[&'static ProviderEnvMapping],
+        cache: &ProviderModelCacheFile,
     ) -> &'static ProviderEnvMapping {
         if self.lanes.first() != Some(&owner_lane) {
             return owner_lane;
         }
-        (self.lanes.iter().copied())
-            .find(|lane| !marked.contains(lane))
+        let listed = |lane: &&ProviderEnvMapping| {
+            (cache.providers.get(lane.primary_id()))
+                .is_some_and(|entry| entry.listed_for(self.key_ref).is_some())
+        };
+        let lanes = || self.lanes.iter().copied();
+        (lanes().find(|lane| lane.preferred && listed(lane)))
+            .or_else(|| lanes().find(|lane| !marked.contains(lane)))
             .unwrap_or(owner_lane)
     }
 }
@@ -1240,7 +1246,7 @@ mod tests {
 
     /// A row outside the slot is judged with its own key, and a slot moved onto it without a model
     /// runs on its first endpoint the key is not refused at, on its listing's first model even
-    /// after a later listing failed.
+    /// after a later listing failed, and on the preferred endpoint while both list models.
     #[test]
     fn each_active_row_hides_its_own_refused_endpoints() {
         let home = temp_home();
@@ -1261,8 +1267,14 @@ mod tests {
         agent.provider = Some(serde_json::from_value(json!({ "id": "opencode" })).expect("slot"));
         record_fetch_failure(home.path(), "opencode-go", "HTTP 503").expect("inconclusive");
         let listed = ("opencode-go", Some("glm-5.2".to_owned()));
-        assert_eq!(default_endpoint(home.path(), &agent), Some(listed));
+        assert_eq!(default_endpoint(home.path(), &agent), Some(listed.clone()));
         assert_eq!(hidden_provider_endpoints(home.path(), &agent), ["opencode"]);
+
+        let first = json!({ "data": [{ "id": "deepseek-v4.1-flash" }] });
+        let models = parse_models_response("opencode", &first).expect("models");
+        record_listing(home.path(), "opencode", key_ref, models).expect("usable");
+        assert_eq!(default_endpoint(home.path(), &agent), Some(listed));
+        assert!(hidden_provider_endpoints(home.path(), &agent).is_empty());
     }
 
     fn codex_openrouter_config() -> Config {
