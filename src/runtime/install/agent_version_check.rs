@@ -8,7 +8,7 @@ use crate::runtime::install::agent_installer::{STEP_ADAPTER, STEP_HARNESS, STEP_
 use crate::runtime::install::agent_registry::{
     ForkPointDialect, RegistryCatalog, RegistryEntry, RegistryKind,
 };
-use crate::state::InstallerRun;
+use crate::state::{INSTALLER_METHOD_NATIVE, INSTALLER_METHOD_SHELL, InstallerRun};
 
 /// Result of comparing the installed managed-agent version against upstream.
 /// Carried as a typed enum so the CLI printer, the API route, and test cases
@@ -54,6 +54,7 @@ impl LatestVersionResolver for LiveLatestVersionResolver {
 fn resolve_upstream_version_for_step(
     entry: &RegistryEntry,
     step: &str,
+    recorded_method: Option<&str>,
     resolver: &dyn LatestVersionResolver,
 ) -> Result<Option<String>> {
     let (install, shell_rerun) = match step {
@@ -67,7 +68,15 @@ fn resolve_upstream_version_for_step(
         },
         _ => return Ok(None),
     };
-    if let Some(npm) = &install.npm {
+    // A shell or native row updates by rerunning the recipe, whose upstream is the release tag;
+    // the same lane the updater's `choose_update_plan` takes.
+    let reruns_recipe = install.shell.is_some()
+        && shell_rerun
+        && matches!(
+            recorded_method,
+            Some(INSTALLER_METHOD_SHELL | INSTALLER_METHOD_NATIVE)
+        );
+    if !reruns_recipe && let Some(npm) = &install.npm {
         return resolver.npm(&npm.package).map(Some);
     }
     // Only a shell_rerun recipe fetches from its declared repo; elsewhere
@@ -160,18 +169,19 @@ pub fn build_agent_check_report(
             out.push((step.to_owned(), AgentVersionStatus::NotInstalled));
             continue;
         };
-        let latest = match resolve_upstream_version_for_step(entry, step, resolver) {
-            Ok(value) => value,
-            Err(err) => {
-                out.push((
-                    step.to_owned(),
-                    AgentVersionStatus::Unknown {
-                        reason: format!("upstream lookup failed: {err}"),
-                    },
-                ));
-                continue;
-            }
-        };
+        let latest =
+            match resolve_upstream_version_for_step(entry, step, row.method.as_deref(), resolver) {
+                Ok(value) => value,
+                Err(err) => {
+                    out.push((
+                        step.to_owned(),
+                        AgentVersionStatus::Unknown {
+                            reason: format!("upstream lookup failed: {err}"),
+                        },
+                    ));
+                    continue;
+                }
+            };
         let status = match row.version.as_deref() {
             Some(installed) => compare_versions(installed, latest.as_deref()),
             None => AgentVersionStatus::Unknown {

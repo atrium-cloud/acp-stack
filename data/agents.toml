@@ -207,6 +207,14 @@ if { [ ! -x "$managed_pi" ] || [ -L "$managed_pi" ]; } && npm_prefix="$(npm pref
     fi
 fi
 test -x "$managed_pi"
+# `pi update` creates a release directory open to its owner alone, and the
+# installer keeps that mode on a reinstall. Open the active release so a
+# workload user can run it.
+pi_agent_dir="$(dirname "$(dirname "$(readlink -f "$managed_pi")")")"
+pi_current_version="${pi_agent_dir}/install/current-version"
+if [ -f "$pi_current_version" ]; then
+    chmod go+rx "${pi_agent_dir}/install/releases/$(cat "$pi_current_version")"
+fi
 '''
 creates = "pi"
 required_tools = ["curl", "node", "npm"]
@@ -226,6 +234,11 @@ checksums_asset = "SHA256SUMS"
 [agents.harness.install.github.arch]
 x86_64 = "x64"
 aarch64 = "arm64"
+
+# The recipe is the update path: a release `pi update` installs is one a
+# workload user cannot run.
+[agents.harness.update]
+shell_rerun = true
 
 # Goose
 

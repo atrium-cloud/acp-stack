@@ -772,6 +772,24 @@ mod tests {
     }
 
     #[test]
+    fn build_agent_check_report_follows_the_recipe_rerun_channel_for_a_shell_row() {
+        // npm is ahead of the release tag the recipe rerun compares against.
+        let entry = embedded_entry("pi");
+        let resolver = MockResolver::new()
+            .with_npm("@earendil-works/pi-coding-agent", "1.5.3")
+            .with_github("earendil-works/pi", "v1.5.2")
+            .with_github("atrium-cloud/pi-acp", "v0.1.0");
+        let mut harness = installer_row("harness", Some("1.5.2"));
+        harness.method = Some(crate::state::INSTALLER_METHOD_SHELL.to_owned());
+        let rows = vec![harness, installer_row("adapter", Some("0.1.0"))];
+        let report = build_agent_check_report(&entry, &check_agent("test-agent"), &rows, &resolver);
+        assert!(matches!(
+            &report[0],
+            (step, AgentCheckStatus::UpToDate { version }) if step == "harness" && version == "1.5.2"
+        ));
+    }
+
+    #[test]
     fn build_agent_check_report_keeps_vendor_installer_shell_recipes_unknown() {
         // No shell_rerun, so kimi's `github` is not an upstream.
         let entry = embedded_entry("kimi");

@@ -4,7 +4,8 @@ use std::os::unix::fs::PermissionsExt;
 use super::{
     AgentUpdateOptions, AgentUpdateReport, AgentUpdateStepStatus, KEPT_HARNESS_SKIP_REASON,
     UpdateComponent, UpdateExecutionContext, UpdatePlanKind, choose_update_plan,
-    help_output_contains_command, update_agent_for_config, update_component, update_components,
+    help_output_contains_command, recorded_version_is_current, update_agent_for_config,
+    update_component, update_components,
 };
 use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry};
 use crate::runtime::process_runner::HostExec;
@@ -114,6 +115,37 @@ fn update_plan_reruns_shell_install_when_the_entry_declares_it() {
     assert!(plan.install.npm.is_none());
     assert!(plan.install.github.is_none());
     assert!(plan.latest.is_none());
+}
+
+#[test]
+fn update_plan_reruns_shell_install_after_a_native_update() {
+    let registry = shell_rerun_registry();
+    let entry = registry.lookup_required("fake").expect("entry");
+    let agent = agent_config("fake", None);
+    let component = harness_update_component(entry, &agent);
+    let installed = installer_run_with_method(Some(INSTALLER_METHOD_NATIVE));
+
+    let plan = choose_update_plan(entry, &component, Some(&installed)).expect("plan");
+
+    assert_eq!(plan.method, INSTALLER_METHOD_SHELL);
+    assert!(matches!(plan.kind, UpdatePlanKind::InstallSet));
+}
+
+#[test]
+fn a_native_row_at_the_latest_version_still_reruns_the_recipe() {
+    let registry = shell_rerun_registry();
+    let entry = registry.lookup_required("fake").expect("entry");
+    let agent = agent_config("fake", None);
+    let component = harness_update_component(entry, &agent);
+    let mut native = installer_run_with_method(Some(INSTALLER_METHOD_NATIVE));
+    native.version = Some("1.5.2".to_owned());
+    let mut shell = installer_run_with_method(Some(INSTALLER_METHOD_SHELL));
+    shell.version = Some("1.5.2".to_owned());
+
+    let plan = choose_update_plan(entry, &component, Some(&native)).expect("plan");
+
+    assert!(!recorded_version_is_current(&plan, "v1.5.2", Some(&native)));
+    assert!(recorded_version_is_current(&plan, "v1.5.2", Some(&shell)));
 }
 
 #[test]

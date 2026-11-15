@@ -281,9 +281,7 @@ fn update_component(
     let plan = choose_update_plan(entry, component, installed_row)?;
     let installed = installed_row.and_then(|row| row.version.clone());
     if let Some(latest) = plan.latest.as_deref()
-        && installed_row
-            .and_then(|row| row.version.as_deref())
-            .is_some_and(|version| normalize_version(version) == normalize_version(latest))
+        && recorded_version_is_current(&plan, latest, installed_row)
         && !context.force
     {
         return Ok(AgentUpdateStepReport {
@@ -376,6 +374,26 @@ fn update_component(
         latest: plan.latest,
         message,
     })
+}
+
+/// Whether the recorded row already holds the plan's `latest`. A native update's row never does
+/// for a recipe rerun: the recipe also repairs what the native updater left behind.
+fn recorded_version_is_current(
+    plan: &UpdatePlan,
+    latest: &str,
+    installed_row: Option<&InstallerRun>,
+) -> bool {
+    let Some(row) = installed_row else {
+        return false;
+    };
+    if plan.method == INSTALLER_METHOD_SHELL
+        && row.method.as_deref() == Some(INSTALLER_METHOD_NATIVE)
+    {
+        return false;
+    }
+    row.version
+        .as_deref()
+        .is_some_and(|version| normalize_version(version) == normalize_version(latest))
 }
 
 fn persist_update_rows(
@@ -521,7 +539,10 @@ fn choose_update_plan(
                     .unwrap_or_else(|| native_probe_target(component)),
             ));
         }
-        Some(INSTALLER_METHOD_NATIVE) => return Ok(native_plan(component)),
+        // A declared rerun wins over an earlier native update's row.
+        Some(INSTALLER_METHOD_NATIVE) => {
+            return Ok(shell_rerun_plan(component).unwrap_or_else(|| native_plan(component)));
+        }
         Some(_) | None => {}
     }
     if let Some(apt) = component.apt {
