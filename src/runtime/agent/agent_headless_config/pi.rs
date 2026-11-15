@@ -40,17 +40,19 @@ pub(super) fn provision_pi_config(
     }
     let model = configured_provider_model(config)
         .map(|model| pi_default_model(model, &provider.id, native_provider));
-    // Without a model Pi picks one on `defaultProvider`, which must not name an endpoint the key
-    // is refused at while another of the row is usable.
-    let default_provider = match model {
-        Some((endpoint, _)) => endpoint,
+    // Pi starts on `defaultProvider` only beside a `defaultModel` it knows, else on its own table,
+    // so a model-less slot names the first model its default endpoint's keyed listing returned.
+    let (default_provider, default_model) = match model {
+        Some((endpoint, model_id)) => (endpoint, Some(model_id.to_owned())),
         None => default_endpoint(workload.runtime_home(), &config.agent)
-            .and_then(|endpoint| agent_provider_id_for_provider_id("pi", endpoint))
-            .unwrap_or(native_provider),
+            .and_then(|(endpoint, listed)| {
+                Some((agent_provider_id_for_provider_id("pi", endpoint)?, listed))
+            })
+            .unwrap_or((native_provider, None)),
     };
     root.insert("defaultProvider".to_owned(), json!(default_provider));
-    match model {
-        Some((_, model_id)) => {
+    match default_model {
+        Some(model_id) => {
             root.insert("defaultModel".to_owned(), json!(model_id));
         }
         None => {

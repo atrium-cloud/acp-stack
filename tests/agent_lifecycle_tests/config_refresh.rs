@@ -203,9 +203,9 @@ async fn a_credential_set_reaches_an_advertising_adapter_without_a_restart() {
 }
 
 /// After a swap onto a row whose new key is refused at its first endpoint, the next start points
-/// Pi's model-less default at the endpoint the key can use and hides the refused one, from the
-/// listings that start probes. A key rotation under the running adapter leaves that default where
-/// the adapter's hide list has it.
+/// Pi's model-less default at the endpoint the key can use and the first model it lists, and hides
+/// the refused one, from the listings that start probes. A key rotation under the running adapter
+/// leaves that default where the adapter's hide list has it.
 #[tokio::test]
 async fn a_swapped_in_row_defaults_to_the_endpoint_its_key_can_use() {
     let _listings_gate = serve_opencode_listings().await;
@@ -228,13 +228,14 @@ async fn a_swapped_in_row_defaults_to_the_endpoint_its_key_can_use() {
         started["capabilities"]["agent_title"], "env assertions passed",
         "{started}"
     );
-    let default_provider = || {
+    let defaults = || {
         let settings = std::fs::read(harness.home.join(".pi/agent/settings.json"));
-        serde_json::from_slice::<Value>(&settings.expect("settings")).expect("settings json")
-            ["defaultProvider"]
-            .clone()
+        let settings: Value =
+            serde_json::from_slice(&settings.expect("settings")).expect("settings json");
+        ["defaultProvider", "defaultModel"].map(|key| settings[key].clone())
     };
-    assert_eq!(default_provider(), "opencode-go");
+    let listed_default = [json!("opencode-go"), json!("glm-5.2")];
+    assert_eq!(defaults(), listed_default);
 
     // The rotation drops OpenCode's verdicts, from which a rewrite would name `opencode`.
     let rotated = (
@@ -244,7 +245,7 @@ async fn a_swapped_in_row_defaults_to_the_endpoint_its_key_can_use() {
     );
     let data = apply_set(&harness, 3, &[rotated]).await;
     assert_eq!(data["agent_environment"], "restart_required", "{data}");
-    assert_eq!(default_provider(), "opencode-go");
+    assert_eq!(defaults(), listed_default);
 }
 
 /// A custom provider's key is not among the provider variables a push carries, so rotating it

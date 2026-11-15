@@ -77,6 +77,12 @@ impl CachedProviderModels {
         self.key_ref.as_deref() == Some(key_ref)
     }
 
+    /// The models of a usable verdict earned with this reference, the one the hide list reads; a
+    /// later failed attempt leaves it in place.
+    fn listed_for(&self, key_ref: &str) -> Option<&[ProviderModel]> {
+        (self.earned_with(key_ref) && self.is_usable()).then_some(self.models.as_slice())
+    }
+
     /// A usable or unavailable answer younger than the cache TTL, which the endpoint probe reuses.
     fn has_fresh_verdict(&self) -> bool {
         let usable_at = self.is_usable().then_some(self.fetched_at);
@@ -358,21 +364,27 @@ pub fn hidden_provider_endpoints(home: &Path, agent: &AgentConfig) -> Vec<&'stat
     hidden
 }
 
-/// The endpoint a model-less `[agent.provider]` runs on. A slot naming its row runs on the row's
-/// first endpoint not hidden, so not on one the key is refused at while another is usable.
-pub fn default_endpoint(home: &Path, agent: &AgentConfig) -> Option<&'static str> {
+/// The endpoint a model-less `[agent.provider]` runs on and its keyed listing's first model. A
+/// slot naming its row runs on the row's first endpoint not hidden.
+pub fn default_endpoint(
+    home: &Path,
+    agent: &AgentConfig,
+) -> Option<(&'static str, Option<String>)> {
     let provider = agent.provider.as_ref()?;
     let row = endpoint_rows(agent)
         .into_iter()
         .find(|row| row.provider_id == provider.id)?;
     let owner_lane = row.lane_of(&provider.id)?;
-    let (marked, usable) = row.marks(&read_cache_file(&cache_path(home)).unwrap_or_default());
+    let cache = read_cache_file(&cache_path(home)).unwrap_or_default();
+    let (marked, usable) = row.marks(&cache);
     let lane = if usable {
         row.open_lane(owner_lane, &marked)
     } else {
         owner_lane
     };
-    Some(lane.primary_id())
+    let listed = (cache.providers.get(lane.primary_id()))
+        .and_then(|entry| entry.listed_for(row.key_ref)?.first());
+    Some((lane.primary_id(), listed.map(|model| model.value.clone())))
 }
 
 /// An active mapped provider, its key reference and the lanes of its row sharing its key env var.
@@ -1205,7 +1217,8 @@ mod tests {
     }
 
     /// A row outside the slot is judged with its own key, and a slot moved onto it without a model
-    /// runs on its first endpoint the key is not refused at.
+    /// runs on its first endpoint the key is not refused at, on its listing's first model even
+    /// after a later listing failed.
     #[test]
     fn each_active_row_hides_its_own_refused_endpoints() {
         let home = temp_home();
@@ -1224,7 +1237,9 @@ mod tests {
         assert_eq!(hidden_provider_endpoints(home.path(), &agent), ["opencode"]);
 
         agent.provider = Some(serde_json::from_value(json!({ "id": "opencode" })).expect("slot"));
-        assert_eq!(default_endpoint(home.path(), &agent), Some("opencode-go"));
+        record_fetch_failure(home.path(), "opencode-go", "HTTP 503").expect("inconclusive");
+        let listed = ("opencode-go", Some("glm-5.2".to_owned()));
+        assert_eq!(default_endpoint(home.path(), &agent), Some(listed));
         assert_eq!(hidden_provider_endpoints(home.path(), &agent), ["opencode"]);
     }
 
