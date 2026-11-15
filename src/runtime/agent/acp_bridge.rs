@@ -61,7 +61,8 @@ pub use self::capabilities::{
 };
 pub(crate) use self::process_env::{
     ENDPOINT_VERDICT_AGENT_IDS, KIMI_CODE_AGENT_ID, KIMI_MANAGED_ENV_PREFIX,
-    RUNTIME_MANAGED_LAUNCH_ENV, hidden_native_providers, kimi_lane_for_provider_id,
+    PI_ACP_PROVIDER_MODELS_ENV, RUNTIME_MANAGED_LAUNCH_ENV, hidden_native_providers,
+    kimi_lane_for_provider_id, probed_native_models,
 };
 pub use self::sessions::ForkPoint;
 pub(crate) use self::spawn::resolve_command_path;

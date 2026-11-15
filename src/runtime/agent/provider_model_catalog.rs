@@ -387,6 +387,28 @@ pub fn default_endpoint(
     Some((lane.primary_id(), listed.map(|model| model.value.clone())))
 }
 
+/// Each endpoint's model ids from its keyed listing over every active provider's row, sorted since
+/// a listing's order is the vendor's; an endpoint without a listing for its row's key is left out.
+pub fn probed_endpoint_models(
+    home: &Path,
+    agent: &AgentConfig,
+) -> Vec<(&'static str, Vec<String>)> {
+    let cache = read_cache_file(&cache_path(home)).unwrap_or_default();
+    let mut probed = Vec::new();
+    for row in endpoint_rows(agent) {
+        for lane in row.lanes {
+            let entry = cache.providers.get(lane.primary_id());
+            if let Some(models) = entry.and_then(|entry| entry.listed_for(row.key_ref)) {
+                let mut ids: Vec<_> = models.iter().map(|model| model.value.clone()).collect();
+                ids.sort_unstable();
+                ids.dedup();
+                probed.push((lane.primary_id(), ids));
+            }
+        }
+    }
+    probed
+}
+
 /// An active mapped provider, its key reference and the lanes of its row sharing its key env var.
 /// A lane with another key would receive this key, so it is never probed or hidden.
 struct EndpointRow<'a> {

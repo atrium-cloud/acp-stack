@@ -8,7 +8,9 @@ use crate::runtime::agent::provider_keys::{
     hermes_launch_base_url, kimi_profile_for_provider_id, providers_for_agent,
     vendor_base_url_for_agent_provider_id,
 };
-use crate::runtime::agent::provider_model_catalog::hidden_provider_endpoints;
+use crate::runtime::agent::provider_model_catalog::{
+    hidden_provider_endpoints, probed_endpoint_models,
+};
 
 pub(crate) const KIMI_CODE_AGENT_ID: &str = "kimi";
 /// The lane's own API-key ref. Production code reaches it through the provider mapping;
@@ -46,14 +48,19 @@ pub(crate) const PI_HARNESS_COMMAND: &str = "pi";
 pub(crate) const PI_ACP_PI_BIN_ENV: &str = "PI_ACP_PI_BIN";
 /// Comma-separated Pi provider ids whose models the adapter leaves out of the session's list.
 pub(crate) const PI_ACP_HIDE_PROVIDERS_ENV: &str = "PI_ACP_HIDE_PROVIDERS";
+/// JSON object of Pi provider ids to the model ids their endpoint's keyed listing returned.
+pub(crate) const PI_ACP_PROVIDER_MODELS_ENV: &str = "PI_ACP_PROVIDER_MODELS";
 /// Agents whose launch env reads `hidden_provider_endpoints`; the endpoint probe runs for these.
 pub(crate) const ENDPOINT_VERDICT_AGENT_IDS: [&str; 1] = [PI_AGENT_ID];
 
 /// Kimi Code's launch namespace, which the runtime writes whole.
 pub(crate) const KIMI_MANAGED_ENV_PREFIX: &str = "KIMI_MODEL_";
 /// Launch vars the runtime owns for their agent; neither `[agent].env` nor workload env may declare them.
-pub(crate) const RUNTIME_MANAGED_LAUNCH_ENV: [&str; 2] =
-    [PI_ACP_PI_BIN_ENV, PI_ACP_HIDE_PROVIDERS_ENV];
+pub(crate) const RUNTIME_MANAGED_LAUNCH_ENV: [&str; 3] = [
+    PI_ACP_PI_BIN_ENV,
+    PI_ACP_HIDE_PROVIDERS_ENV,
+    PI_ACP_PROVIDER_MODELS_ENV,
+];
 
 pub(super) fn build_agent_process_env(
     agent: &AgentConfig,
@@ -103,6 +110,17 @@ pub(crate) fn hidden_native_providers(home: &Path, agent: &AgentConfig) -> Vec<&
         .collect()
 }
 
+/// The `PI_ACP_PROVIDER_MODELS` value from the cached listings, compact and sorted, since the
+/// adapter compares it as a raw string; `None`, never `{}`, while no endpoint lists models.
+pub(crate) fn probed_native_models(home: &Path, agent: &AgentConfig) -> Option<String> {
+    let native_id = |endpoint_id| agent_provider_id_for_provider_id(&agent.id, endpoint_id);
+    let probed: std::collections::BTreeMap<_, _> = probed_endpoint_models(home, agent)
+        .into_iter()
+        .filter_map(|(endpoint_id, models)| Some((native_id(endpoint_id)?, models)))
+        .collect();
+    (!probed.is_empty()).then(|| serde_json::Value::from_iter(probed).to_string())
+}
+
 fn build_pi_process_env(
     agent: &AgentConfig,
     home: &Path,
@@ -119,6 +137,9 @@ fn build_pi_process_env(
     let hidden = hidden_native_providers(home, agent);
     if !hidden.is_empty() {
         env.insert(PI_ACP_HIDE_PROVIDERS_ENV.to_owned(), hidden.join(","));
+    }
+    if let Some(models) = probed_native_models(home, agent) {
+        env.insert(PI_ACP_PROVIDER_MODELS_ENV.to_owned(), models);
     }
     let pi_path = super::spawn::resolve_command_path(PI_HARNESS_COMMAND, home).ok_or_else(
         || StackError::AgentInitializeFailed {

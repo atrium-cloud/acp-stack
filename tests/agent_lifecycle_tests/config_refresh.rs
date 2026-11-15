@@ -19,6 +19,11 @@ const OPENCODE: (&str, &str, &str) = (
     "OPENCODE_API_KEY",
     "sk-oc-example-not-a-real-key",
 );
+/// The probed model lists a Pi launch env carries for the listings below: compact, ids sorted.
+const PROBED_MODELS: (&str, &str) = (
+    "PI_ACP_PROVIDER_MODELS",
+    r#"{"opencode-go":["deepseek-v4.1-flash","glm-5.2"]}"#,
+);
 
 /// Local model listings that refuse the OpenCode key at `opencode` and serve it at `opencode-go`;
 /// the guard points provider listing fetches at them.
@@ -28,7 +33,7 @@ async fn serve_opencode_listings() -> EnvVarGuard<'static> {
         .route("/opencode/models", get(|| async { r#"{"data":[]}"# }))
         .route(
             "/opencode-go/models",
-            get(|| async { r#"{"data":[{"id":"glm-5.2"}]}"# }),
+            get(|| async { r#"{"data":[{"id":"glm-5.2"},{"id":"deepseek-v4.1-flash"}]}"# }),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -215,6 +220,8 @@ async fn a_swapped_in_row_defaults_to_the_endpoint_its_key_can_use() {
         .agent
         .args
         .extend(["--assert-env-equals", "PI_ACP_HIDE_PROVIDERS", "opencode"].map(str::to_owned));
+    let probed = ["--assert-env-equals", PROBED_MODELS.0, PROBED_MODELS.1];
+    config.agent.args.extend(probed.map(str::to_owned));
     let harness = spawn_for_credential_sets(config).await;
     apply_set(&harness, 1, &[DEEPSEEK]).await;
 
@@ -282,8 +289,8 @@ async fn a_custom_provider_rotation_needs_a_restart_under_an_advertising_adapter
     assert_eq!(data["agent_environment"], "restart_required", "{data}");
 }
 
-/// A crash after a push that added a row respawns with the pushed set's hide list, which the
-/// start on the smaller set never carried.
+/// A crash after a push that added a row respawns with the pushed set's hide list and probed
+/// model lists, which the smaller set's start never carried; a later failed listing keeps them.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_respawn_after_a_push_hides_what_the_pushed_set_hides() {
@@ -301,6 +308,8 @@ async fn a_respawn_after_a_push_hides_what_the_pushed_set_hides() {
         "PI_ACP_HIDE_PROVIDERS".to_owned(),
         "opencode".to_owned(),
     ]);
+    let probed = ["--assert-env-equals", PROBED_MODELS.0, PROBED_MODELS.1];
+    config.agent.args.extend(probed.map(str::to_owned));
     let harness = spawn_for_credential_sets(config).await;
     let bin_dir = harness.home.join(".local/bin");
     std::fs::create_dir_all(&bin_dir).expect("bin dir");
@@ -310,6 +319,15 @@ async fn a_respawn_after_a_push_hides_what_the_pushed_set_hides() {
 
     let data = apply_set(&harness, 2, &[DEEPSEEK, OPENCODE]).await;
     assert_eq!(data["agent_environment"], "live", "{data}");
+    let pushed: Value =
+        serde_json::from_slice(&std::fs::read(record.path()).expect("recorded launch env"))
+            .expect("launch env json");
+    assert_eq!(pushed["env"][PROBED_MODELS.0], PROBED_MODELS.1, "{pushed}");
+    let cache_path = harness.home.join(".config/acp-stack/provider-models.json");
+    let mut cache: Value =
+        serde_json::from_slice(&std::fs::read(&cache_path).expect("cache")).expect("cache json");
+    cache["providers"]["opencode-go"]["last_error"] = json!("endpoint returned HTTP 503");
+    std::fs::write(&cache_path, cache.to_string()).expect("write cache");
     let pid = first_pid.as_u64().and_then(|pid| u32::try_from(pid).ok());
     kill_process(pid.expect("pid"));
 

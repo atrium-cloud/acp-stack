@@ -16,7 +16,8 @@ use crate::extensions::managed_state::{
     KIND_PROVIDER_CREDENTIAL_SET, KIND_SECRET_ENVIRONMENT,
 };
 use crate::runtime::agent::acp_bridge::{
-    AgentCapabilitiesDto, ENDPOINT_VERDICT_AGENT_IDS, LaunchEnvRequest, hidden_native_providers,
+    AgentCapabilitiesDto, ENDPOINT_VERDICT_AGENT_IDS, LaunchEnvRequest, PI_ACP_PROVIDER_MODELS_ENV,
+    hidden_native_providers, probed_native_models,
 };
 use crate::runtime::agent::agent_headless_config::{
     provision_agent_headless_config, provision_for_launch,
@@ -193,7 +194,7 @@ async fn agent_environment(
         .map(String::as_str)
         .chain(store.managed_environment_names())
         .collect();
-    let request = LaunchEnvRequest {
+    let mut request = LaunchEnvRequest {
         env: (environment.env.iter())
             .filter(|(name, _)| {
                 provider_names.contains(name.as_str()) && !network_names.contains(*name)
@@ -209,6 +210,16 @@ async fn agent_environment(
             .map(str::to_owned)
             .collect(),
     };
+    // The adapter takes the probed model lists as a pushed variable, unset when none lists models.
+    if ENDPOINT_VERDICT_AGENT_IDS.contains(&config.agent.id.as_str()) {
+        let name = PI_ACP_PROVIDER_MODELS_ENV.to_owned();
+        match probed_native_models(home, &config.agent) {
+            Some(models) => {
+                request.env.insert(name, models);
+            }
+            None => request.unset.push(name),
+        }
+    }
     match target
         .supervisor
         .push_launch_env(environment, config.clone(), &request)

@@ -14,7 +14,8 @@
       "HOME",
       "PATH",
       "PI_ACP_HIDE_PROVIDERS",
-      "PI_ACP_PI_BIN"
+      "PI_ACP_PI_BIN",
+      "PI_ACP_PROVIDER_MODELS"
     ],
     "prefixes": [
       "ACPS_",
