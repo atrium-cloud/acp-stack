@@ -69,7 +69,7 @@ When the agent answers an ACP request with a JSON-RPC error, `agent.request_fail
   "code": "agent.request_failed",
   "message": "agent rejected `session/new` request",
   "details": {
-    "acp_error": { "code": -32000, "message": "model not configured", "data": { "model": "deepseek-v4-flash" } }
+    "acp_error": { "code": -32000, "message": "model not configured", "data": { "model": "deepseek-flash" } }
   }
 }
 ```

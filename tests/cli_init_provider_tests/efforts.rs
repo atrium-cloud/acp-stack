@@ -120,7 +120,7 @@ fn init_codex_openrouter_validates_effort_against_the_catalog_and_pins_it() {
         write_acp_config_options_with_efforts(tempdir.path(), &["gpt-5.5"], &[], &[]);
     let models_base = crate::common::agent::spawn_provider_models_server(serde_json::json!({
         "data": [{
-            "id": "deepseek/deepseek-v4-flash",
+            "id": "deepseek/deepseek-v4.1-flash",
             "reasoning": { "mandatory": false, "supported_efforts": ["max", "xhigh", "high"] }
         }]
     }));
@@ -137,7 +137,7 @@ fn init_codex_openrouter_validates_effort_against_the_catalog_and_pins_it() {
             "--api-key-ref",
             "OPENROUTER_API_KEY",
             "--model",
-            "deepseek/deepseek-v4-flash",
+            "deepseek/deepseek-v4.1-flash",
             "--effort",
             "max",
         ])
@@ -157,7 +157,7 @@ fn init_codex_openrouter_validates_effort_against_the_catalog_and_pins_it() {
             "--api-key-ref",
             "OPENROUTER_API_KEY",
             "--model",
-            "deepseek/deepseek-v4-flash",
+            "deepseek/deepseek-v4.1-flash",
             "--effort",
             "high",
         ])

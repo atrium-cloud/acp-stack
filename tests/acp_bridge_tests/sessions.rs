@@ -320,7 +320,7 @@ async fn new_session_returns_custom_model_config_option_id() {
     config.id = "placebo".into();
     config.args.extend([
         "--model-config-option".into(),
-        "deepseek/deepseek-v4-flash".into(),
+        "deepseek/deepseek-v4.1-flash".into(),
         "--model-config-option-id".into(),
         "agent-model".into(),
     ]);
@@ -357,7 +357,7 @@ async fn new_session_advertises_config_options_to_strict_agent() {
     config.id = "placebo".into();
     config.args.extend([
         "--model-config-option".into(),
-        "deepseek/deepseek-v4-flash".into(),
+        "deepseek/deepseek-v4.1-flash".into(),
         "--require-client-config-options".into(),
     ]);
     let bridge = AcpBridge::spawn(

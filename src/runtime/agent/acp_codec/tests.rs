@@ -949,11 +949,11 @@ fn session_model_helpers_reject_removed_legacy_model_state() {
         r#"{
                 "sessionId": "sess_legacy",
                 "models": {
-                    "currentModelId": "opencode-go/deepseek-v4-flash",
+                    "currentModelId": "opencode-go/deepseek-v4.1-flash",
                     "availableModels": [
                         {
-                            "modelId": "opencode-go/deepseek-v4-flash",
-                            "name": "DeepSeek V4 Flash"
+                            "modelId": "opencode-go/deepseek-v4.1-flash",
+                            "name": "DeepSeek V4.1 Flash"
                         }
                     ]
                 }
@@ -963,9 +963,9 @@ fn session_model_helpers_reject_removed_legacy_model_state() {
 
     let err = session_model_values(&response).expect_err("legacy models must be rejected");
     assert!(err.to_string().contains("model"));
-    let err = session_model_selection_for_value(&response, "opencode-go/deepseek-v4-flash")
+    let err = session_model_selection_for_value(&response, "opencode-go/deepseek-v4.1-flash")
         .expect_err("legacy model selection must be rejected");
-    assert!(err.to_string().contains("opencode-go/deepseek-v4-flash"));
+    assert!(err.to_string().contains("opencode-go/deepseek-v4.1-flash"));
 }
 
 #[test]

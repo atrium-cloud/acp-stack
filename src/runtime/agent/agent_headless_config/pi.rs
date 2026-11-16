@@ -240,7 +240,7 @@ mod tests {
         let mut config = config_with_agent("pi", &["OPENCODE_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "opencode-go".to_owned(),
-            model: Some("opencode-go/deepseek-v4-flash".to_owned()),
+            model: Some("opencode-go/deepseek-v4.1-flash".to_owned()),
             api_key_ref: Some("OPENCODE_API_KEY".to_owned()),
             custom: None,
         });
@@ -364,7 +364,7 @@ mod tests {
         let mut config = config_with_agent("pi", &["OPENCODE_API_KEY", "ANTHROPIC_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "opencode-go".to_owned(),
-            model: Some("opencode-go/deepseek-v4-flash".to_owned()),
+            model: Some("opencode-go/deepseek-v4.1-flash".to_owned()),
             api_key_ref: Some("OPENCODE_API_KEY".to_owned()),
             custom: None,
         });
@@ -377,7 +377,7 @@ mod tests {
         .expect("pi settings json parses");
         assert_eq!(value["enabledModels"], json!(["anthropic/*"]));
         assert_eq!(value["defaultProvider"], "opencode-go");
-        assert_eq!(value["defaultModel"], "deepseek-v4-flash");
+        assert_eq!(value["defaultModel"], "deepseek-v4.1-flash");
     }
 
     #[test]
@@ -391,13 +391,13 @@ mod tests {
         std::fs::create_dir_all(path.parent().expect("path has parent")).expect("create parent");
         std::fs::write(
             &path,
-            r#"{"enabledModels":["opencode-go/deepseek-v4-flash"]}"#,
+            r#"{"enabledModels":["opencode-go/deepseek-v4.1-flash"]}"#,
         )
         .expect("write existing settings");
         let mut config = config_with_agent("pi", &["OPENCODE_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "opencode-go".to_owned(),
-            model: Some("opencode-go/deepseek-v4-flash".to_owned()),
+            model: Some("opencode-go/deepseek-v4.1-flash".to_owned()),
             api_key_ref: Some("OPENCODE_API_KEY".to_owned()),
             custom: None,
         });

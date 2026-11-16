@@ -228,7 +228,7 @@ creates = "opencode"
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
     seed_provider_credential(tempdir.path(), "openrouter", &["OPENROUTER_API_KEY"]);
     let options_path =
-        write_acp_config_options(tempdir.path(), &["deepseek/deepseek-v4-flash"], &[]);
+        write_acp_config_options(tempdir.path(), &["deepseek/deepseek-v4.1-flash"], &[]);
 
     acps_command(tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
@@ -238,7 +238,7 @@ creates = "opencode"
             "use",
             "openrouter",
             "--model",
-            "deepseek/deepseek-v4-flash",
+            "deepseek/deepseek-v4.1-flash",
         ])
         .assert()
         .success()
@@ -251,7 +251,7 @@ creates = "opencode"
         .expect("updated config should be readable");
     assert!(config.contains("[array.targets.agent.provider]"));
     assert!(config.contains(r#"id = "openrouter""#));
-    assert!(config.contains(r#"model = "deepseek/deepseek-v4-flash""#));
+    assert!(config.contains(r#"model = "deepseek/deepseek-v4.1-flash""#));
     assert!(!config.contains(r#"api_key_ref = "OPENROUTER_API_KEY""#));
 
     let goose_path = tempdir
@@ -264,7 +264,7 @@ creates = "opencode"
     )
     .expect("goose config should parse");
     assert_eq!(goose["GOOSE_PROVIDER"], "openrouter");
-    assert_eq!(goose["GOOSE_MODEL"], "deepseek/deepseek-v4-flash");
+    assert_eq!(goose["GOOSE_MODEL"], "deepseek/deepseek-v4.1-flash");
 }
 
 #[test]

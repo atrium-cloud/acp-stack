@@ -20,7 +20,7 @@ fn subagent_set_updates_config_and_generated_opencode_small_model() {
     seed_provider_credential(tempdir.path(), "opencode-go", &["OPENCODE_API_KEY"]);
     let options_path = write_acp_config_options(
         tempdir.path(),
-        &["openai/gpt-5.5", "opencode-go/deepseek-v4-flash"],
+        &["openai/gpt-5.5", "opencode-go/deepseek-v4.1-flash"],
         &[],
     );
 
@@ -32,7 +32,7 @@ fn subagent_set_updates_config_and_generated_opencode_small_model() {
             "--provider",
             "opencode-go",
             "--model",
-            "deepseek-v4-flash",
+            "deepseek-v4.1-flash",
         ])
         .assert()
         .success()
@@ -43,7 +43,7 @@ fn subagent_set_updates_config_and_generated_opencode_small_model() {
     let config = fs::read_to_string(config_dir.join("acps-config.toml"))
         .expect("updated config should be readable");
     assert!(config.contains("[array.targets.agent.subagent.provider]"));
-    assert!(config.contains(r#"model = "opencode-go/deepseek-v4-flash""#));
+    assert!(config.contains(r#"model = "opencode-go/deepseek-v4.1-flash""#));
 
     let opencode_path = tempdir
         .path()
@@ -55,7 +55,7 @@ fn subagent_set_updates_config_and_generated_opencode_small_model() {
     )
     .expect("opencode config should parse");
     assert_eq!(opencode["model"], "openai/gpt-5.5");
-    assert_eq!(opencode["small_model"], "opencode-go/deepseek-v4-flash");
+    assert_eq!(opencode["small_model"], "opencode-go/deepseek-v4.1-flash");
     assert_eq!(
         opencode["enabled_providers"],
         json!(["openai", "opencode-go"])
@@ -100,7 +100,7 @@ fn subagent_status_prints_provider_model_and_key_ref() {
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     let config = format!(
-        "{VALID_CONFIG}\n\n[agent.subagent.provider]\nid = \"opencode-go\"\nmodel = \"opencode-go/deepseek-v4-flash\"\napi_key_ref = \"OPENCODE_API_KEY\"\n"
+        "{VALID_CONFIG}\n\n[agent.subagent.provider]\nid = \"opencode-go\"\nmodel = \"opencode-go/deepseek-v4.1-flash\"\napi_key_ref = \"OPENCODE_API_KEY\"\n"
     );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
@@ -111,7 +111,7 @@ fn subagent_status_prints_provider_model_and_key_ref() {
         .stdout(predicates::str::contains("subagent: small_model"))
         .stdout(predicates::str::contains("provider: opencode-go"))
         .stdout(predicates::str::contains(
-            "model: opencode-go/deepseek-v4-flash",
+            "model: opencode-go/deepseek-v4.1-flash",
         ))
         .stdout(predicates::str::contains("api_key_ref: OPENCODE_API_KEY"));
 }
@@ -122,7 +122,7 @@ fn subagent_status_prints_inherited_main_model() {
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     let config = format!(
-        "{VALID_CONFIG}\n\n[agent.provider]\nid = \"opencode-go\"\nmodel = \"opencode-go/deepseek-v4-flash\"\napi_key_ref = \"OPENCODE_API_KEY\"\n"
+        "{VALID_CONFIG}\n\n[agent.provider]\nid = \"opencode-go\"\nmodel = \"opencode-go/deepseek-v4.1-flash\"\napi_key_ref = \"OPENCODE_API_KEY\"\n"
     );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
@@ -134,7 +134,7 @@ fn subagent_status_prints_inherited_main_model() {
         .stdout(predicates::str::contains("status: inherited"))
         .stdout(predicates::str::contains("provider: opencode-go"))
         .stdout(predicates::str::contains(
-            "model: opencode-go/deepseek-v4-flash",
+            "model: opencode-go/deepseek-v4.1-flash",
         ))
         .stdout(predicates::str::contains("api_key_ref: OPENCODE_API_KEY"));
 }
@@ -145,7 +145,7 @@ fn subagent_match_clears_explicit_provider_and_uses_main_model() {
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     let config = format!(
-        "{}\n\n[agent.provider]\nid = \"openai\"\nmodel = \"openai/gpt-5.5\"\napi_key_ref = \"OPENAI_API_KEY\"\n\n[agent.subagent.provider]\nid = \"opencode-go\"\nmodel = \"opencode-go/deepseek-v4-flash\"\napi_key_ref = \"OPENCODE_API_KEY\"\n",
+        "{}\n\n[agent.provider]\nid = \"openai\"\nmodel = \"openai/gpt-5.5\"\napi_key_ref = \"OPENAI_API_KEY\"\n\n[agent.subagent.provider]\nid = \"opencode-go\"\nmodel = \"opencode-go/deepseek-v4.1-flash\"\napi_key_ref = \"OPENCODE_API_KEY\"\n",
         VALID_CONFIG.replace(
             r#"env = ["OPENCODE_API_KEY"]"#,
             r#"env = ["OPENCODE_API_KEY", "OPENAI_API_KEY"]"#,
@@ -467,7 +467,7 @@ creates = "goose"
             "--provider",
             "opencode-go",
             "--model",
-            "opencode-go/deepseek-v4-flash",
+            "opencode-go/deepseek-v4.1-flash",
         ])
         .assert()
         .failure()
@@ -489,13 +489,13 @@ fn goose_config() -> String {
             r#"
 [agent.provider]
 id = "opencode-go"
-model = "opencode-go/deepseek-v4-flash"
+model = "opencode-go/deepseek-v4.1-flash"
 api_key_ref = "OPENCODE_API_KEY"
 "#,
             r#"
 [agent.provider]
 id = "openrouter"
-model = "deepseek/deepseek-v4-flash"
+model = "deepseek/deepseek-v4.1-flash"
 api_key_ref = "OPENROUTER_API_KEY"
 "#,
         )

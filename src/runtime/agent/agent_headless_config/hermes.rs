@@ -249,7 +249,7 @@ mod tests {
         let mut config = config_with_agent("hermes", &["OPENROUTER_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "openrouter".to_owned(),
-            model: Some("deepseek/deepseek-v4-flash".to_owned()),
+            model: Some("deepseek/deepseek-v4.1-flash".to_owned()),
             api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
             custom: None,
         });
@@ -265,14 +265,14 @@ mod tests {
         )
         .expect("hermes config yaml parses");
         assert_eq!(value["model"]["provider"], "openrouter");
-        assert_eq!(value["model"]["default"], "deepseek/deepseek-v4-flash");
+        assert_eq!(value["model"]["default"], "deepseek/deepseek-v4.1-flash");
     }
 
     #[test]
     fn hermes_native_model_strips_only_colon_qualified_provider_prefix() {
         assert_eq!(
-            hermes_native_model("openrouter", "openrouter:deepseek/deepseek-v4-flash"),
-            "deepseek/deepseek-v4-flash"
+            hermes_native_model("openrouter", "openrouter:deepseek/deepseek-v4.1-flash"),
+            "deepseek/deepseek-v4.1-flash"
         );
         assert_eq!(
             hermes_native_model("openrouter", "openrouter-tuned/model"),
@@ -283,8 +283,8 @@ mod tests {
             "openrouter"
         );
         assert_eq!(
-            hermes_native_model("openrouter", "deepseek/deepseek-v4-flash"),
-            "deepseek/deepseek-v4-flash"
+            hermes_native_model("openrouter", "deepseek/deepseek-v4.1-flash"),
+            "deepseek/deepseek-v4.1-flash"
         );
     }
 
@@ -294,7 +294,7 @@ mod tests {
         let mut config = config_with_agent("hermes", &["OPENROUTER_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "openrouter".to_owned(),
-            model: Some("openrouter:deepseek/deepseek-v4-flash".to_owned()),
+            model: Some("openrouter:deepseek/deepseek-v4.1-flash".to_owned()),
             api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
             custom: None,
         });
@@ -306,7 +306,7 @@ mod tests {
             &std::fs::read_to_string(&path).expect("hermes config should be readable"),
         )
         .expect("hermes config yaml parses");
-        assert_eq!(value["model"]["default"], "deepseek/deepseek-v4-flash");
+        assert_eq!(value["model"]["default"], "deepseek/deepseek-v4.1-flash");
     }
 
     #[test]
@@ -351,7 +351,7 @@ mod tests {
         let mut config = config_with_agent("hermes", &["OPENROUTER_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "openrouter".to_owned(),
-            model: Some("deepseek/deepseek-v4-flash".to_owned()),
+            model: Some("deepseek/deepseek-v4.1-flash".to_owned()),
             api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
             custom: None,
         });
@@ -362,7 +362,7 @@ mod tests {
             serde_norway::from_str(&std::fs::read_to_string(&path).expect("hermes readable"))
                 .expect("hermes yaml parses");
         assert_eq!(value["model"]["provider"], "openrouter");
-        assert_eq!(value["model"]["default"], "deepseek/deepseek-v4-flash");
+        assert_eq!(value["model"]["default"], "deepseek/deepseek-v4.1-flash");
         assert!(
             value["model"]
                 .as_mapping()
@@ -438,7 +438,7 @@ mod tests {
         let mut config = config_with_agent("hermes", &["OPENROUTER_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "openrouter".to_owned(),
-            model: Some("deepseek/deepseek-v4-flash".to_owned()),
+            model: Some("deepseek/deepseek-v4.1-flash".to_owned()),
             api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
             custom: None,
         });
@@ -460,7 +460,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().expect("path has parent")).expect("create parent");
         std::fs::write(
             &path,
-            "model:\n  provider: custom:acps-managed\n  default: deepseek/deepseek-v4-flash\nproviders:\n  acps-managed:\n    name: OpenRouter (managed endpoint)\n    base_url: http://127.0.0.1:3129/api/v1\n    key_env: OPENROUTER_API_KEY\n    transport: chat_completions\n",
+            "model:\n  provider: custom:acps-managed\n  default: deepseek/deepseek-v4.1-flash\nproviders:\n  acps-managed:\n    name: OpenRouter (managed endpoint)\n    base_url: http://127.0.0.1:3129/api/v1\n    key_env: OPENROUTER_API_KEY\n    transport: chat_completions\n",
         )
         .expect("write existing config");
 
@@ -545,7 +545,7 @@ mod tests {
         let mut config = config_with_agent("hermes", &["CUSTOM_OPENROUTER_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "openrouter".to_owned(),
-            model: Some("deepseek/deepseek-v4-flash".to_owned()),
+            model: Some("deepseek/deepseek-v4.1-flash".to_owned()),
             api_key_ref: Some("CUSTOM_OPENROUTER_KEY".to_owned()),
             custom: None,
         });
@@ -567,7 +567,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().expect("path has parent")).expect("create parent");
         std::fs::write(
             &path,
-            "model:\n  provider: custom:acps-managed\n  default: deepseek/deepseek-v4-flash\n  context_length: 128000\nkeep_me: yes\nproviders:\n  acps-managed:\n    name: OpenRouter (managed endpoint)\n    base_url: http://127.0.0.1:3129/openrouter\n    key_env: OPENROUTER_API_KEY\n    transport: chat_completions\n  other:\n    name: Other Provider\n    base_url: https://api.other.example/v1\n",
+            "model:\n  provider: custom:acps-managed\n  default: deepseek/deepseek-v4.1-flash\n  context_length: 128000\nkeep_me: yes\nproviders:\n  acps-managed:\n    name: OpenRouter (managed endpoint)\n    base_url: http://127.0.0.1:3129/openrouter\n    key_env: OPENROUTER_API_KEY\n    transport: chat_completions\n  other:\n    name: Other Provider\n    base_url: https://api.other.example/v1\n",
         )
         .expect("write hermes config");
 

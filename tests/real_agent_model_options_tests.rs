@@ -283,11 +283,11 @@ async fn real_terminal_uname_probe(agent: AgentConfig, env: HashMap<String, Stri
     let model_value = values
         .iter()
         .find(|value| {
-            value.as_str() == "opencode-go/deepseek-v4-flash"
-                || model_base_matches(value, "opencode-go", "deepseek-v4-flash")
+            value.as_str() == "opencode-go/deepseek-v4.1-flash"
+                || model_base_matches(value, "opencode-go", "deepseek-v4.1-flash")
         })
         .cloned()
-        .expect("deepseek-v4-flash advertised");
+        .expect("deepseek-v4.1-flash advertised");
     let acp_stack::runtime::agent::acp_bridge::AgentSessionModelSelection::ConfigOption {
         config_id,
     } = session_model_selection_for_value(&response, &model_value).expect("model selection");
@@ -358,7 +358,7 @@ async fn real_opencode_advertises_opencode_go_deepseek_model() {
         real_agent_config("opencode", "OpenCode", "opencode", &["acp"]),
         required_env(&["OPENCODE_API_KEY"]),
         "opencode-go",
-        "deepseek-v4-flash",
+        "deepseek-v4.1-flash",
     )
     .await;
 }
@@ -370,7 +370,7 @@ async fn real_pi_advertises_opencode_go_deepseek_model() {
         real_agent_config("pi", "Pi Agent", "pi-acp", &[]),
         required_env(&["OPENCODE_API_KEY"]),
         "opencode-go",
-        "deepseek-v4-flash",
+        "deepseek-v4.1-flash",
     )
     .await;
 }

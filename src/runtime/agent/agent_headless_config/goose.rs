@@ -223,7 +223,7 @@ mod tests {
         let mut config = config_with_agent("goose", &["OPENROUTER_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "openrouter".to_owned(),
-            model: Some("deepseek/deepseek-v4-flash".to_owned()),
+            model: Some("deepseek/deepseek-v4.1-flash".to_owned()),
             api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
             custom: None,
         });
@@ -242,7 +242,7 @@ mod tests {
         )
         .expect("goose config yaml parses");
         assert_eq!(value["GOOSE_PROVIDER"], "openrouter");
-        assert_eq!(value["GOOSE_MODEL"], "deepseek/deepseek-v4-flash");
+        assert_eq!(value["GOOSE_MODEL"], "deepseek/deepseek-v4.1-flash");
         assert_eq!(value["GOOSE_MODE"], "auto");
         assert_eq!(value["GOOSE_CONTEXT_STRATEGY"], "summarize");
         assert_eq!(value["GOOSE_DISABLE_SESSION_NAMING"], true);
@@ -370,7 +370,7 @@ mod tests {
         let mut config = config_with_agent("goose", &["CUSTOM_OPENROUTER_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "openrouter".to_owned(),
-            model: Some("deepseek/deepseek-v4-flash".to_owned()),
+            model: Some("deepseek/deepseek-v4.1-flash".to_owned()),
             api_key_ref: Some("CUSTOM_OPENROUTER_KEY".to_owned()),
             custom: None,
         });
@@ -397,7 +397,7 @@ mod tests {
         let mut config = config_with_agent("goose", &["OPENROUTER_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "openrouter".to_owned(),
-            model: Some("deepseek/deepseek-v4-flash".to_owned()),
+            model: Some("deepseek/deepseek-v4.1-flash".to_owned()),
             api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
             custom: None,
         });

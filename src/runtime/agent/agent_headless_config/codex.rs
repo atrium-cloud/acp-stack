@@ -177,7 +177,7 @@ fn provision_codex_main_config(
             path,
             reason: format!(
                 "codex OpenRouter model `{model}` must be the provider-native slug \
-                 (e.g. `deepseek/deepseek-v4-flash-0731`), not `{CODEX_OPENROUTER_SLUG_PREFIX}`-prefixed"
+                 (e.g. `deepseek/deepseek-v4.1-flash-1017`), not `{CODEX_OPENROUTER_SLUG_PREFIX}`-prefixed"
             ),
         });
     }
@@ -406,7 +406,7 @@ mod tests {
         let mut config = config_with_agent("codex", &["OPENROUTER_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "openrouter".to_owned(),
-            model: Some("deepseek/deepseek-v4-flash".to_owned()),
+            model: Some("deepseek/deepseek-v4.1-flash".to_owned()),
             api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
             custom: None,
         });
@@ -449,7 +449,7 @@ mod tests {
             serde_json::json!({
                 "version": 2,
                 "providers": { "openrouter": { "fetched_at": 100, "models": [
-                    { "value": "deepseek/deepseek-v4-flash", "efforts": ["xhigh", "high"] },
+                    { "value": "deepseek/deepseek-v4.1-flash", "efforts": ["xhigh", "high"] },
                     { "value": "meta-llama/llama-3.1-8b-instruct" }
                 ] } }
             })
@@ -542,7 +542,7 @@ mod tests {
         let mut config = config_with_agent("codex", &["OPENROUTER_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "openrouter".to_owned(),
-            model: Some("deepseek/deepseek-v4-flash".to_owned()),
+            model: Some("deepseek/deepseek-v4.1-flash".to_owned()),
             api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
             custom: None,
         });
@@ -556,7 +556,10 @@ mod tests {
             &std::fs::read_to_string(&path).expect("codex config should be readable"),
         )
         .expect("codex config toml parses");
-        assert_eq!(value["model"].as_str(), Some("deepseek/deepseek-v4-flash"));
+        assert_eq!(
+            value["model"].as_str(),
+            Some("deepseek/deepseek-v4.1-flash")
+        );
         assert_eq!(value["model_provider"].as_str(), Some("openrouter"));
         assert_eq!(
             value["model_providers"]["openrouter"]["base_url"].as_str(),
@@ -597,7 +600,7 @@ mod tests {
         let mut config = config_with_agent("codex", &["OPENROUTER_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "openrouter".to_owned(),
-            model: Some("openrouter/deepseek/deepseek-v4-flash".to_owned()),
+            model: Some("openrouter/deepseek/deepseek-v4.1-flash".to_owned()),
             api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
             custom: None,
         });
@@ -608,7 +611,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("deepseek/deepseek-v4-flash-0731"),
+                .contains("deepseek/deepseek-v4.1-flash-1017"),
             "{error}"
         );
         assert!(
@@ -726,7 +729,7 @@ mod tests {
         let path = codex_dir.join("config.toml");
         std::fs::write(
             &path,
-            r#"model = "deepseek/deepseek-v4-flash"
+            r#"model = "deepseek/deepseek-v4.1-flash"
 model_provider = "openrouter"
 preserve = "yes"
 

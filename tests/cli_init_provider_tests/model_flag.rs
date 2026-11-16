@@ -56,7 +56,7 @@ fn init_explicit_model_accepts_provider_model_shorthand() {
     );
     let options_path = write_acp_config_options(
         tempdir.path(),
-        &["openrouter/deepseek/deepseek-v4-flash"],
+        &["openrouter/deepseek/deepseek-v4.1-flash"],
         &[],
     );
 
@@ -71,14 +71,14 @@ fn init_explicit_model_accepts_provider_model_shorthand() {
             "--api-key-ref",
             "OPENROUTER_API_KEY",
             "--model",
-            "deepseek/deepseek-v4-flash",
+            "deepseek/deepseek-v4.1-flash",
         ])
         .assert()
         .success();
 
     let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
         .expect("config should be readable");
-    assert!(config.contains(r#"model = "openrouter/deepseek/deepseek-v4-flash""#));
+    assert!(config.contains(r#"model = "openrouter/deepseek/deepseek-v4.1-flash""#));
 
     let opencode_path = tempdir
         .path()
@@ -89,7 +89,7 @@ fn init_explicit_model_accepts_provider_model_shorthand() {
         &fs::read_to_string(opencode_path).expect("opencode config should be readable"),
     )
     .expect("opencode config should parse");
-    assert_eq!(opencode["model"], "openrouter/deepseek/deepseek-v4-flash");
+    assert_eq!(opencode["model"], "openrouter/deepseek/deepseek-v4.1-flash");
 }
 
 #[test]
@@ -103,8 +103,8 @@ fn init_explicit_model_shorthand_prefers_selected_provider() {
     let options_path = write_acp_config_options(
         tempdir.path(),
         &[
-            "deepseek/deepseek-v4-flash",
-            "openrouter/deepseek/deepseek-v4-flash",
+            "deepseek/deepseek-v4.1-flash",
+            "openrouter/deepseek/deepseek-v4.1-flash",
         ],
         &[],
     );
@@ -120,15 +120,15 @@ fn init_explicit_model_shorthand_prefers_selected_provider() {
             "--api-key-ref",
             "OPENROUTER_API_KEY",
             "--model",
-            "deepseek/deepseek-v4-flash",
+            "deepseek/deepseek-v4.1-flash",
         ])
         .assert()
         .success();
 
     let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
         .expect("config should be readable");
-    assert!(config.contains(r#"model = "openrouter/deepseek/deepseek-v4-flash""#));
-    assert!(!config.contains(r#"model = "deepseek/deepseek-v4-flash""#));
+    assert!(config.contains(r#"model = "openrouter/deepseek/deepseek-v4.1-flash""#));
+    assert!(!config.contains(r#"model = "deepseek/deepseek-v4.1-flash""#));
 }
 
 #[test]

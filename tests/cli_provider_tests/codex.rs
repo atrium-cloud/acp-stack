@@ -12,7 +12,7 @@ fn agent_provider_use_codex_openrouter_writes_responses_provider_config() {
         .expect("config should be written");
     seed_provider_credential(tempdir.path(), "openrouter", &["OPENROUTER_API_KEY"]);
     let options_path =
-        write_acp_config_options(tempdir.path(), &["deepseek/deepseek-v4-flash"], &[]);
+        write_acp_config_options(tempdir.path(), &["deepseek/deepseek-v4.1-flash"], &[]);
 
     acps_command(tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
@@ -22,7 +22,7 @@ fn agent_provider_use_codex_openrouter_writes_responses_provider_config() {
             "use",
             "openrouter",
             "--model",
-            "deepseek/deepseek-v4-flash",
+            "deepseek/deepseek-v4.1-flash",
         ])
         .assert()
         .success()
@@ -33,14 +33,17 @@ fn agent_provider_use_codex_openrouter_writes_responses_provider_config() {
         .expect("updated config should be readable");
     assert!(config.contains("[array.targets.agent.provider]"));
     assert!(config.contains(r#"id = "openrouter""#));
-    assert!(config.contains(r#"model = "deepseek/deepseek-v4-flash""#));
+    assert!(config.contains(r#"model = "deepseek/deepseek-v4.1-flash""#));
     assert!(!config.contains(r#"api_key_ref = "OPENROUTER_API_KEY""#));
 
     let codex_path = tempdir.path().join(".codex").join("config.toml");
     let codex: toml::Value =
         toml::from_str(&fs::read_to_string(codex_path).expect("codex config should be readable"))
             .expect("codex config should parse");
-    assert_eq!(codex["model"].as_str(), Some("deepseek/deepseek-v4-flash"));
+    assert_eq!(
+        codex["model"].as_str(),
+        Some("deepseek/deepseek-v4.1-flash")
+    );
     assert_eq!(codex["model_provider"].as_str(), Some("openrouter"));
     assert_eq!(
         codex["model_providers"]["openrouter"]["base_url"].as_str(),
@@ -87,7 +90,7 @@ fn agent_provider_use_codex_openai_model_removes_custom_provider_with_backup() {
     fs::create_dir_all(&codex_dir).expect("codex config dir should be created");
     fs::write(
         codex_dir.join("config.toml"),
-        r#"model = "deepseek/deepseek-v4-flash"
+        r#"model = "deepseek/deepseek-v4.1-flash"
 model_provider = "openrouter"
 preserve = "yes"
 
@@ -317,18 +320,21 @@ fn agent_provider_use_codex_openrouter_accepts_custom_model_without_discovery() 
             "use",
             "openrouter",
             "--model",
-            "deepseek/deepseek-v4-flash",
+            "deepseek/deepseek-v4.1-flash",
         ])
         .assert()
         .success()
         .stdout(predicates::str::contains(
-            "model: deepseek/deepseek-v4-flash",
+            "model: deepseek/deepseek-v4.1-flash",
         ));
 
     let codex_path = tempdir.path().join(".codex").join("config.toml");
     let codex: toml::Value =
         toml::from_str(&fs::read_to_string(codex_path).expect("codex config should be readable"))
             .expect("codex config should parse");
-    assert_eq!(codex["model"].as_str(), Some("deepseek/deepseek-v4-flash"));
+    assert_eq!(
+        codex["model"].as_str(),
+        Some("deepseek/deepseek-v4.1-flash")
+    );
     assert_eq!(codex["model_provider"].as_str(), Some("openrouter"));
 }

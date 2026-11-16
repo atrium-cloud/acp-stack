@@ -407,6 +407,6 @@ creates = "opencode"
             "",
         );
     format!(
-        "{config}\n\n[agent.provider]\nid = \"openrouter\"\nmodel = \"deepseek/deepseek-v4-flash\"\napi_key_ref = \"OPENROUTER_API_KEY\"\n"
+        "{config}\n\n[agent.provider]\nid = \"openrouter\"\nmodel = \"deepseek/deepseek-v4.1-flash\"\napi_key_ref = \"OPENROUTER_API_KEY\"\n"
     )
 }

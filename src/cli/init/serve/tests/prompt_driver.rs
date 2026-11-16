@@ -75,7 +75,7 @@ fn hosted_driver_accepts_provider_password_and_model_responses() {
     let model = send_select_response(
         HostedPromptKind::Model,
         "select model",
-        &["deepseek-v4-flash", "openai/gpt-5-mini"],
+        &["deepseek-v4.1-flash", "openai/gpt-5-mini"],
         json!({ "index": 1 }),
     );
     assert_eq!(model, HostedPromptOutcome::Handled(Some(1)));

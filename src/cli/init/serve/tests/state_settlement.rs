@@ -300,7 +300,7 @@ fn hosted_settlement_reports_the_harness_values_already_in_the_config() {
     let mut config = settlement_fixture_config();
     config.agent.provider = Some(crate::config::AgentProviderConfig {
         id: "openrouter".to_owned(),
-        model: Some("deepseek-v4-flash".to_owned()),
+        model: Some("deepseek-v4.1-flash".to_owned()),
         api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
         custom: None,
     });
@@ -322,7 +322,7 @@ fn hosted_settlement_reports_the_harness_values_already_in_the_config() {
         ("agent", "opencode"),
         ("provider", "openrouter"),
         // Provider-backed agents keep the model inside `[agent.provider]`.
-        ("model", "deepseek-v4-flash"),
+        ("model", "deepseek-v4.1-flash"),
         ("mode", "smart"),
         ("effort", "high"),
     ] {

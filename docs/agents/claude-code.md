@@ -74,7 +74,7 @@ When the catalog is unavailable (offline fetch, no cache):
 Exact default model ids, role env vars, and window values live in `data/providers.toml`, under each provider's `[providers.claude_code]` table.
 
 - Moonshot AI defaults every Claude role and subagent to a single one-million-token-profile model.
-- DeepSeek splits its defaults: the main, Opus, Sonnet, and Fable roles use the Pro model; Haiku and subagents use the Flash model.
+- DeepSeek uses the Flash model for every role: the main, Opus, Sonnet, and Fable roles use its 1M-context alias; Haiku and subagents use the base id.
 - Kimi For Coding ships tier-universal defaults. Higher tiers can pin larger models; see `data/providers.toml`.
 - Z.AI and Zhipu share role defaults but are separate platforms with non-interchangeable keys. Each platform's key env var is listed in `data/env_vars.toml`.
 - MiniMax widens the auto-compact window to match its model's context window.

@@ -9,7 +9,7 @@ fn subagent_free_infers_openrouter_from_main_provider() {
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     let config = format!(
-        "{}\n\n[agent.provider]\nid = \"openrouter\"\nmodel = \"openrouter/deepseek/deepseek-v4-flash\"\napi_key_ref = \"OPENROUTER_API_KEY\"\n",
+        "{}\n\n[agent.provider]\nid = \"openrouter\"\nmodel = \"openrouter/deepseek/deepseek-v4.1-flash\"\napi_key_ref = \"OPENROUTER_API_KEY\"\n",
         VALID_CONFIG.replace(
             r#"env = ["OPENCODE_API_KEY"]"#,
             r#"env = ["OPENROUTER_API_KEY"]"#,
@@ -40,7 +40,7 @@ fn subagent_free_infers_openrouter_from_main_provider() {
         &fs::read_to_string(opencode_path).expect("opencode config should be readable"),
     )
     .expect("opencode config should parse");
-    assert_eq!(opencode["model"], "openrouter/deepseek/deepseek-v4-flash");
+    assert_eq!(opencode["model"], "openrouter/deepseek/deepseek-v4.1-flash");
     assert_eq!(opencode["small_model"], "openrouter/free");
     assert_eq!(opencode["enabled_providers"], json!(["openrouter"]));
 }
@@ -72,7 +72,7 @@ fn subagent_free_prefers_current_opencode_provider_over_stale_openrouter_env() {
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     let config = format!(
-        "{}\n\n[agent.provider]\nid = \"opencode-go\"\nmodel = \"opencode-go/deepseek-v4-flash\"\napi_key_ref = \"OPENCODE_API_KEY\"\n",
+        "{}\n\n[agent.provider]\nid = \"opencode-go\"\nmodel = \"opencode-go/deepseek-v4.1-flash\"\napi_key_ref = \"OPENCODE_API_KEY\"\n",
         VALID_CONFIG.replace(
             r#"env = ["OPENCODE_API_KEY"]"#,
             r#"env = ["OPENCODE_API_KEY", "OPENROUTER_API_KEY"]"#,
@@ -145,7 +145,7 @@ fn subagent_free_resolves_opencode_go_alias_with_custom_main_api_key_ref() {
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     let config = format!(
-        "{}\n\n[agent.provider]\nid = \"opencode-go\"\nmodel = \"opencode-go/deepseek-v4-flash\"\napi_key_ref = \"MY_OPENCODE_KEY\"\n",
+        "{}\n\n[agent.provider]\nid = \"opencode-go\"\nmodel = \"opencode-go/deepseek-v4.1-flash\"\napi_key_ref = \"MY_OPENCODE_KEY\"\n",
         VALID_CONFIG.replace(
             r#"env = ["OPENCODE_API_KEY"]"#,
             r#"env = ["MY_OPENCODE_KEY"]"#,

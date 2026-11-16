@@ -6,7 +6,7 @@ Hermes Agent reaches ACP through the `hermes-agent-acp` adapter, which `acp-stac
 
 ```sh
 acps secrets set OPENROUTER_API_KEY
-acps init --agent hermes --provider openrouter --model deepseek/deepseek-v4-flash-0731
+acps init --agent hermes --provider openrouter --model deepseek/deepseek-v4.1-flash-1017
 ```
 
 The `[agent]` config block is generated from the `hermes` entry in `data/agents.toml`; `[agent.provider]` comes from the selected provider and `data/providers.toml`.

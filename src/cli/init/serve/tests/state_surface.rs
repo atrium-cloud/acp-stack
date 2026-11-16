@@ -258,7 +258,7 @@ fn replay_after_seq_returns_signal_events_in_order() {
     });
     session.apply_state_signal(InitStateSignal::CategorySettled {
         category: InitCategory::Model,
-        value: Some("deepseek-v4-flash".to_owned()),
+        value: Some("deepseek-v4.1-flash".to_owned()),
     });
 
     let replayed = session.events_after(after);
@@ -276,7 +276,7 @@ fn replay_after_seq_returns_signal_events_in_order() {
         settled,
         [
             (json!("provider"), json!("openrouter")),
-            (json!("model"), json!("deepseek-v4-flash")),
+            (json!("model"), json!("deepseek-v4.1-flash")),
         ]
     );
 }

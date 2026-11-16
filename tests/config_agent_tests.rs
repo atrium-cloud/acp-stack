@@ -421,7 +421,7 @@ fn parses_subagent_provider_config() {
         "{VALID_CONFIG}\n\
          [agent.subagent.provider]\n\
          id = \"opencode-go\"\n\
-         model = \"opencode-go/deepseek-v4-flash\"\n\
+         model = \"opencode-go/deepseek-v4.1-flash\"\n\
          api_key_ref = \"OPENCODE_API_KEY\"\n"
     );
 
@@ -436,7 +436,7 @@ fn parses_subagent_provider_config() {
     assert_eq!(provider.id, "opencode-go");
     assert_eq!(
         provider.model.as_deref(),
-        Some("opencode-go/deepseek-v4-flash")
+        Some("opencode-go/deepseek-v4.1-flash")
     );
     assert_eq!(provider.api_key_ref.as_deref(), Some("OPENCODE_API_KEY"));
 }

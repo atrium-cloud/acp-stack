@@ -68,11 +68,11 @@ async fn create_session_applies_model_with_custom_config_option_id() {
     let harness = Harness::spawn_with(|config| {
         config.agent.args.extend([
             "--config-option-select".to_owned(),
-            "agent-model@model=boot/model:boot/model,deepseek/deepseek-v4-flash".to_owned(),
+            "agent-model@model=boot/model:boot/model,deepseek/deepseek-v4.1-flash".to_owned(),
             "--expect-config-option".to_owned(),
-            "agent-model=deepseek/deepseek-v4-flash".to_owned(),
+            "agent-model=deepseek/deepseek-v4.1-flash".to_owned(),
         ]);
-        config.agent.model = Some("deepseek/deepseek-v4-flash".to_owned());
+        config.agent.model = Some("deepseek/deepseek-v4.1-flash".to_owned());
     })
     .await;
     let session_id = create_session(&harness).await;
@@ -189,9 +189,9 @@ async fn updates_sent_while_a_session_is_created_land_in_its_log_before_the_firs
         emit_update_after_answer(config);
         config.agent.args.extend([
             "--config-option-select".to_owned(),
-            "agent-model@model=boot/model:boot/model,deepseek/deepseek-v4-flash".to_owned(),
+            "agent-model@model=boot/model:boot/model,deepseek/deepseek-v4.1-flash".to_owned(),
         ]);
-        config.agent.model = Some("deepseek/deepseek-v4-flash".to_owned());
+        config.agent.model = Some("deepseek/deepseek-v4.1-flash".to_owned());
     })
     .await;
     let session_id = create_session(&harness).await;
@@ -2172,7 +2172,7 @@ async fn codex_openrouter_effort_pinned_on_disk_is_not_an_ignore_record() {
             config.agent.env = vec!["OPENROUTER_API_KEY".to_owned()];
             config.agent.provider = Some(acp_stack::config::AgentProviderConfig {
                 id: "openrouter".to_owned(),
-                model: Some("deepseek/deepseek-v4-flash".to_owned()),
+                model: Some("deepseek/deepseek-v4.1-flash".to_owned()),
                 api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
                 custom: None,
             });
@@ -2203,7 +2203,7 @@ async fn unadvertised_mode_model_and_effort_are_ignored_not_fatal() {
     // ignored record, not fail session create with `agent.config_provision`.
     let harness = Harness::spawn_with(|config| {
         config.agent.mode = Some("plan".to_owned());
-        config.agent.model = Some("deepseek/deepseek-v4-flash".to_owned());
+        config.agent.model = Some("deepseek/deepseek-v4.1-flash".to_owned());
         config.agent.effort = Some("high".to_owned());
     })
     .await;
@@ -2228,7 +2228,7 @@ async fn unadvertised_mode_model_and_effort_are_ignored_not_fatal() {
         "{body}"
     );
     assert_eq!(ignored[0]["value"], "plan");
-    assert_eq!(ignored[1]["value"], "deepseek/deepseek-v4-flash");
+    assert_eq!(ignored[1]["value"], "deepseek/deepseek-v4.1-flash");
     assert_eq!(ignored[2]["value"], "high");
 
     let session_id = body["data"]["id"].as_str().expect("session id").to_owned();
@@ -2486,11 +2486,11 @@ async fn advertised_current_model_yields_no_ignore_records() {
     let harness = Harness::spawn_with(|config| {
         config.agent.args.extend([
             "--model-config-option".to_owned(),
-            "deepseek/deepseek-v4-flash".to_owned(),
+            "deepseek/deepseek-v4.1-flash".to_owned(),
             "--model-config-option-id".to_owned(),
             "agent-model".to_owned(),
         ]);
-        config.agent.model = Some("deepseek/deepseek-v4-flash".to_owned());
+        config.agent.model = Some("deepseek/deepseek-v4.1-flash".to_owned());
     })
     .await;
 
@@ -2550,7 +2550,7 @@ async fn create_session_skips_setting_values_session_new_already_reports() {
             "--fail-set-config-option".to_owned(),
             "--fail-set-mode".to_owned(),
             "--model-config-option".to_owned(),
-            "deepseek/deepseek-v4-flash".to_owned(),
+            "deepseek/deepseek-v4.1-flash".to_owned(),
             "--config-option-select".to_owned(),
             "reasoning_effort@thought_level=high:low,high".to_owned(),
             "--config-option-boolean".to_owned(),
@@ -2562,7 +2562,7 @@ async fn create_session_skips_setting_values_session_new_already_reports() {
             "--session-mode-current".to_owned(),
             "plan".to_owned(),
         ]);
-        config.agent.model = Some("deepseek/deepseek-v4-flash".to_owned());
+        config.agent.model = Some("deepseek/deepseek-v4.1-flash".to_owned());
         config.agent.effort = Some("high".to_owned());
         config.agent.mode = Some("plan".to_owned());
         config.agent.config_options.insert(

@@ -362,7 +362,7 @@ fn init_hermes_writes_provider_backed_config_and_hermes_yaml() {
             "--api-key-ref",
             "OPENROUTER_API_KEY",
             "--model",
-            "deepseek/deepseek-v4-flash",
+            "deepseek/deepseek-v4.1-flash",
             "--skip-workspace-init",
             "--skip-testflight",
         ])
@@ -382,7 +382,7 @@ fn init_hermes_writes_provider_backed_config_and_hermes_yaml() {
     assert_eq!(provider.id, "openrouter");
     assert_eq!(
         provider.model.as_deref(),
-        Some("deepseek/deepseek-v4-flash")
+        Some("deepseek/deepseek-v4.1-flash")
     );
     assert_eq!(provider.api_key_ref.as_deref(), Some("OPENROUTER_API_KEY"));
     assert!(config.agent.model.is_none());
@@ -392,7 +392,7 @@ fn init_hermes_writes_provider_backed_config_and_hermes_yaml() {
     let hermes: serde_norway::Value =
         serde_norway::from_str(&hermes_yaml).expect("hermes config parses");
     assert_eq!(hermes["model"]["provider"], "openrouter");
-    assert_eq!(hermes["model"]["default"], "deepseek/deepseek-v4-flash");
+    assert_eq!(hermes["model"]["default"], "deepseek/deepseek-v4.1-flash");
     assert!(!hermes_yaml.contains("test-openrouter-key"));
 }
 
@@ -488,7 +488,7 @@ fn init_codex_openrouter_lists_provider_catalog_models() {
     let options_path = write_acp_config_options(tempdir.path(), &["gpt-5.5"], &[]);
     let base = spawn_provider_models_server(serde_json::json!({
         "data": [
-            { "id": "deepseek/deepseek-v4-flash", "name": "DeepSeek V4 Flash" },
+            { "id": "deepseek/deepseek-v4.1-flash", "name": "DeepSeek V4.1 Flash" },
             { "id": "moonshotai/kimi-k3" },
         ]
     }));
@@ -511,7 +511,7 @@ fn init_codex_openrouter_lists_provider_catalog_models() {
         .stdout(predicates::str::contains(
             "provider catalog models for Codex:",
         ))
-        .stdout(predicates::str::contains("  deepseek/deepseek-v4-flash"))
+        .stdout(predicates::str::contains("  deepseek/deepseek-v4.1-flash"))
         .stdout(predicates::str::contains("  moonshotai/kimi-k3"))
         .stdout(predicates::str::contains("  gpt-5.5").not())
         .stdout(predicates::str::contains("advertised models for Codex:").not());
@@ -566,7 +566,7 @@ fn init_hermes_openrouter_lists_provider_catalog_models() {
     let options_path = write_acp_config_options(tempdir.path(), &[], &[]);
     let base = spawn_provider_models_server(serde_json::json!({
         "data": [
-            { "id": "deepseek/deepseek-v4-flash-0731", "name": "DeepSeek V4 Flash 0731" },
+            { "id": "deepseek/deepseek-v4.1-flash-1017", "name": "DeepSeek V4.1 Flash 1017" },
             { "id": "moonshotai/kimi-k3" },
         ]
     }));
@@ -590,7 +590,7 @@ fn init_hermes_openrouter_lists_provider_catalog_models() {
             "provider catalog models for Hermes Agent:",
         ))
         .stdout(predicates::str::contains(
-            "  deepseek/deepseek-v4-flash-0731",
+            "  deepseek/deepseek-v4.1-flash-1017",
         ))
         .stdout(predicates::str::contains("  moonshotai/kimi-k3"))
         .stdout(predicates::str::contains("advertised models for Hermes Agent:").not());
@@ -598,7 +598,7 @@ fn init_hermes_openrouter_lists_provider_catalog_models() {
     let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
         .expect("config should be readable");
     assert!(config.contains(r#"id = "openrouter""#));
-    assert!(!config.contains(r#"model = "deepseek/deepseek-v4-flash-0731""#));
+    assert!(!config.contains(r#"model = "deepseek/deepseek-v4.1-flash-1017""#));
 }
 
 #[test]

@@ -276,7 +276,7 @@ fn init_codex_openrouter_writes_both_explicit_model_and_mode() {
             "--api-key-ref",
             "OPENROUTER_API_KEY",
             "--model",
-            "deepseek/deepseek-v4-flash",
+            "deepseek/deepseek-v4.1-flash",
             "--mode",
             "auto",
         ])
@@ -290,7 +290,7 @@ fn init_codex_openrouter_writes_both_explicit_model_and_mode() {
     let provider = config.agent.provider.as_ref().expect("provider configured");
     assert_eq!(
         provider.model.as_deref(),
-        Some("deepseek/deepseek-v4-flash")
+        Some("deepseek/deepseek-v4.1-flash")
     );
 }
 
@@ -307,7 +307,7 @@ fn init_hermes_writes_explicit_model_and_validated_mode() {
     );
     let options_path = write_acp_config_options(
         tempdir.path(),
-        &["openrouter/deepseek/deepseek-v4-flash-0731"],
+        &["openrouter/deepseek/deepseek-v4.1-flash-1017"],
         &["default", "dont_ask"],
     );
 
@@ -322,7 +322,7 @@ fn init_hermes_writes_explicit_model_and_validated_mode() {
             "--api-key-ref",
             "OPENROUTER_API_KEY",
             "--model",
-            "deepseek/deepseek-v4-flash-0731",
+            "deepseek/deepseek-v4.1-flash-1017",
             "--mode",
             "bogus",
         ])
@@ -344,7 +344,7 @@ fn init_hermes_writes_explicit_model_and_validated_mode() {
             "--api-key-ref",
             "OPENROUTER_API_KEY",
             "--model",
-            "deepseek/deepseek-v4-flash-0731",
+            "deepseek/deepseek-v4.1-flash-1017",
             "--mode",
             "dont_ask",
         ])
@@ -361,12 +361,12 @@ fn init_hermes_writes_explicit_model_and_validated_mode() {
             .provider
             .as_ref()
             .and_then(|provider| provider.model.as_deref()),
-        Some("deepseek/deepseek-v4-flash-0731")
+        Some("deepseek/deepseek-v4.1-flash-1017")
     );
     let hermes_config = fs::read_to_string(tempdir.path().join(".hermes/config.yaml"))
         .expect("hermes config.yaml written");
     assert!(
-        hermes_config.contains("default: deepseek/deepseek-v4-flash-0731"),
+        hermes_config.contains("default: deepseek/deepseek-v4.1-flash-1017"),
         "{hermes_config}"
     );
     assert!(

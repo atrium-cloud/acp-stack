@@ -901,10 +901,10 @@ fn claude_code_profiles_declare_role_model_defaults() {
     let cases = [
         (
             "deepseek",
-            "deepseek-v4-pro[1m]",
-            "deepseek-v4-pro[1m]",
-            "deepseek-v4-pro[1m]",
-            "deepseek-v4-flash",
+            "deepseek-flash[1m]",
+            "deepseek-flash[1m]",
+            "deepseek-flash[1m]",
+            "deepseek-flash",
         ),
         (
             "zai",

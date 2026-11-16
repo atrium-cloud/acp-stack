@@ -39,7 +39,7 @@ acps agent provider use openrouter --model <model-id>
 
 ### Model ids on OpenRouter and custom providers
 
-- The model id is accepted verbatim and written to `config.toml`. The adapter's advertised list covers only codex-core's builtin OpenAI presets, so provider-native slugs like `deepseek/deepseek-v4-flash-0731` bypass it.
+- The model id is accepted verbatim and written to `config.toml`. The adapter's advertised list covers only codex-core's builtin OpenAI presets, so provider-native slugs like `deepseek/deepseek-v4.1-flash-1017` bypass it.
 - The `openai` provider validates against advertised models.
 - During init, the model list for these lanes comes from the provider's live catalog (the same listing that backs `GET /v1/models`), so the picker shows real provider slugs.
 - When no catalog is available (custom provider or an offline fetch), init skips the list and asks for an explicit `--model` instead of showing the OpenAI presets.

@@ -622,7 +622,7 @@ mod tests {
         let mut config = config_with_agent("codex", &["OPENROUTER_API_KEY"]);
         config.agent.provider = Some(AgentProviderConfig {
             id: "openrouter".to_owned(),
-            model: Some("deepseek/deepseek-v4-flash".to_owned()),
+            model: Some("deepseek/deepseek-v4.1-flash".to_owned()),
             api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
             custom: None,
         });
@@ -647,7 +647,7 @@ mod tests {
             json!({
                 "version": 2,
                 "providers": { "openrouter": { "fetched_at": 100, "models": [
-                    { "value": "deepseek/deepseek-v4-flash", "efforts": ["xhigh"] }
+                    { "value": "deepseek/deepseek-v4.1-flash", "efforts": ["xhigh"] }
                 ] } }
             })
             .to_string(),

@@ -15,7 +15,7 @@ fn codex_openrouter_home() -> (tempfile::TempDir, String) {
     let models_base = spawn_provider_models_server(json!({
         "data": [
             {
-                "id": "deepseek/deepseek-v4-flash",
+                "id": "deepseek/deepseek-v4.1-flash",
                 "reasoning": { "mandatory": false, "supported_efforts": ["max", "xhigh", "high"] }
             },
             { "id": "meta-llama/llama-3.1-8b-instruct" }
@@ -29,7 +29,7 @@ fn codex_openrouter_home() -> (tempfile::TempDir, String) {
             "use",
             "openrouter",
             "--model",
-            "deepseek/deepseek-v4-flash",
+            "deepseek/deepseek-v4.1-flash",
         ])
         .assert()
         .success();

@@ -520,7 +520,7 @@ mod tests {
         let mut config = valid_config();
         config.agent.provider = Some(AgentProviderConfig {
             id: "opencode-go".to_owned(),
-            model: Some("opencode-go/deepseek-v4-flash".to_owned()),
+            model: Some("opencode-go/deepseek-v4.1-flash".to_owned()),
             api_key_ref: None,
             custom: None,
         });
@@ -709,7 +709,7 @@ mod tests {
         let mut config = valid_config();
         config.agent.provider = Some(AgentProviderConfig {
             id: "openrouter".to_owned(),
-            model: Some("deepseek/deepseek-v4-flash".to_owned()),
+            model: Some("deepseek/deepseek-v4.1-flash".to_owned()),
             api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
             custom: None,
         });
@@ -930,7 +930,7 @@ mod tests {
         let mut config = valid_config();
         config.agent.provider = Some(AgentProviderConfig {
             id: "openrouter".to_owned(),
-            model: Some("openrouter/deepseek/deepseek-v4-flash".to_owned()),
+            model: Some("openrouter/deepseek/deepseek-v4.1-flash".to_owned()),
             api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
             custom: None,
         });

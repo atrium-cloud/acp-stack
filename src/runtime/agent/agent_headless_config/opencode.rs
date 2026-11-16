@@ -335,11 +335,11 @@ mod tests {
         write_openrouter_catalog(
             tempdir.path(),
             json!([
-                { "value": "deepseek/deepseek-v4-flash", "efforts": ["xhigh", "high"] },
+                { "value": "deepseek/deepseek-v4.1-flash", "efforts": ["xhigh", "high"] },
                 { "value": "meta-llama/llama-3.1-8b-instruct" }
             ]),
         );
-        let config = opencode_openrouter_config("openrouter/deepseek/deepseek-v4-flash");
+        let config = opencode_openrouter_config("openrouter/deepseek/deepseek-v4.1-flash");
 
         provision_agent_headless_config(&config, tempdir.path()).expect("provision");
 
@@ -347,9 +347,9 @@ mod tests {
             &std::fs::read_to_string(&path).expect("opencode config should be readable"),
         )
         .expect("opencode config json parses");
-        assert_eq!(value["model"], "openrouter/deepseek/deepseek-v4-flash");
+        assert_eq!(value["model"], "openrouter/deepseek/deepseek-v4.1-flash");
         assert_eq!(
-            value["provider"]["openrouter"]["models"]["deepseek/deepseek-v4-flash"]["variants"],
+            value["provider"]["openrouter"]["models"]["deepseek/deepseek-v4.1-flash"]["variants"],
             json!({
                 "xhigh": { "reasoning": { "effort": "xhigh" } },
                 "high": { "reasoning": { "effort": "high" } }
@@ -389,7 +389,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().expect("path has parent")).expect("create parent");
         std::fs::write(
             &path,
-            r#"{"model":"opencode-go/deepseek-v4-flash","provider":{"openai":{"options":{"apiKey":"{env:OLD_KEY}","timeout":600000}}}}"#,
+            r#"{"model":"opencode-go/deepseek-v4.1-flash","provider":{"openai":{"options":{"apiKey":"{env:OLD_KEY}","timeout":600000}}}}"#,
         )
         .expect("write existing config");
         let mut config = config_with_agent("opencode", &["OPENCODE_API_KEY", "OPENAI_API_KEY"]);
@@ -529,7 +529,7 @@ mod tests {
         let mut config = config_with_agent("opencode", &[]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
             id: "opencode-go".to_owned(),
-            model: Some("opencode-go/deepseek-v4-flash".to_owned()),
+            model: Some("opencode-go/deepseek-v4.1-flash".to_owned()),
             api_key_ref: None,
             custom: None,
         });
@@ -577,7 +577,7 @@ mod tests {
             disabled: false,
             provider: Some(crate::config::AgentProviderConfig {
                 id: "opencode-go".to_owned(),
-                model: Some("opencode-go/deepseek-v4-flash".to_owned()),
+                model: Some("opencode-go/deepseek-v4.1-flash".to_owned()),
                 api_key_ref: Some("OPENCODE_API_KEY".to_owned()),
                 custom: None,
             }),
@@ -595,7 +595,7 @@ mod tests {
         )
         .expect("opencode config json parses");
         assert_eq!(value["model"], "openai/gpt-5.5");
-        assert_eq!(value["small_model"], "opencode-go/deepseek-v4-flash");
+        assert_eq!(value["small_model"], "opencode-go/deepseek-v4.1-flash");
         assert_eq!(value["enabled_providers"], json!(["openai", "opencode-go"]));
         assert_eq!(
             value["provider"]["openai"]["options"]["apiKey"],

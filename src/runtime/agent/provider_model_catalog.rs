@@ -775,7 +775,7 @@ mod tests {
         let body = json!({
             "data": [
                 {
-                    "id": "deepseek/deepseek-v4-flash",
+                    "id": "deepseek/deepseek-v4.1-flash",
                     "reasoning": {
                         "mandatory": false,
                         "supported_efforts": ["xhigh", "high", 7],
@@ -805,7 +805,7 @@ mod tests {
             "openrouter",
             &[
                 ProviderModel {
-                    value: "deepseek/deepseek-v4-flash".to_owned(),
+                    value: "deepseek/deepseek-v4.1-flash".to_owned(),
                     efforts: vec!["xhigh".to_owned(), "high".to_owned()],
                     ..Default::default()
                 },
@@ -818,7 +818,7 @@ mod tests {
         )
         .expect("write cache");
         assert_eq!(
-            cached_model_efforts(home.path(), "openrouter", "deepseek/deepseek-v4-flash"),
+            cached_model_efforts(home.path(), "openrouter", "deepseek/deepseek-v4.1-flash"),
             Some(vec!["xhigh".to_owned(), "high".to_owned()])
         );
         assert_eq!(
@@ -834,7 +834,7 @@ mod tests {
             None
         );
         assert_eq!(
-            cached_model_efforts(home.path(), "moonshotai", "deepseek/deepseek-v4-flash"),
+            cached_model_efforts(home.path(), "moonshotai", "deepseek/deepseek-v4.1-flash"),
             None
         );
     }
@@ -909,8 +909,8 @@ mod tests {
     fn cache_round_trips_per_provider() {
         let home = temp_home();
         let models = vec![ProviderModel {
-            value: "deepseek/deepseek-v4-flash".to_owned(),
-            display_name: Some("DeepSeek V4 Flash".to_owned()),
+            value: "deepseek/deepseek-v4.1-flash".to_owned(),
+            display_name: Some("DeepSeek V4.1 Flash".to_owned()),
             ..Default::default()
         }];
         write_cache_entry(home.path(), "openrouter", &models, None).expect("write cache");
@@ -1322,7 +1322,7 @@ restart = "on-crash"
 
 [agent.provider]
 id = "openrouter"
-model = "deepseek/deepseek-v4-flash"
+model = "deepseek/deepseek-v4.1-flash"
 api_key_ref = "OPENROUTER_API_KEY"
 "#,
         )

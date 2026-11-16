@@ -288,7 +288,7 @@ fn codex_openrouter_config() -> Config {
     config.agent.name = "Codex".to_owned();
     config.agent.provider = Some(AgentProviderConfig {
         id: "openrouter".to_owned(),
-        model: Some("deepseek/deepseek-v4-flash".to_owned()),
+        model: Some("deepseek/deepseek-v4.1-flash".to_owned()),
         api_key_ref: None,
         custom: None,
     });
@@ -379,7 +379,7 @@ async fn models_serves_provider_catalog_for_codex_openrouter() {
         "data": [
             { "id": "openai/gpt-5.5", "name": "GPT-5.5" },
             {
-                "id": "deepseek/deepseek-v4-flash",
+                "id": "deepseek/deepseek-v4.1-flash",
                 "reasoning": { "mandatory": false, "supported_efforts": ["max", "xhigh", "high"], "default_effort": "high" }
             },
         ]
@@ -409,7 +409,7 @@ async fn models_serves_provider_catalog_for_codex_openrouter() {
     // Codex reads the model and the effort pin from its own config, so both start as configured.
     assert_eq!(
         body["data"]["current"],
-        json!({ "model": "deepseek/deepseek-v4-flash", "mode": "default", "effort": "high" }),
+        json!({ "model": "deepseek/deepseek-v4.1-flash", "mode": "default", "effort": "high" }),
         "{body}"
     );
     let models = body["data"]["models"].as_array().expect("models array");
@@ -424,7 +424,7 @@ async fn models_serves_provider_catalog_for_codex_openrouter() {
     );
     let deepseek = models
         .iter()
-        .find(|model| model["value"].as_str() == Some("deepseek/deepseek-v4-flash"))
+        .find(|model| model["value"].as_str() == Some("deepseek/deepseek-v4.1-flash"))
         .expect("catalog model");
     // Codex has no `max` level, so the catalog list is trimmed to what it parses.
     assert_eq!(deepseek["efforts"], json!(["xhigh", "high"]));
@@ -527,8 +527,8 @@ async fn models_degrades_to_empty_for_hermes_on_catalog_outage() {
                 "name": "Model",
                 "category": "model",
                 "type": "select",
-                "currentValue": "openrouter/deepseek/deepseek-v4-flash",
-                "options": [{ "value": "openrouter/deepseek/deepseek-v4-flash", "name": "deepseek/deepseek-v4-flash" }]
+                "currentValue": "openrouter/deepseek/deepseek-v4.1-flash",
+                "options": [{ "value": "openrouter/deepseek/deepseek-v4.1-flash", "name": "deepseek/deepseek-v4.1-flash" }]
             }
         ])
         .to_string(),

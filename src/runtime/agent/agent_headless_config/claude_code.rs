@@ -594,7 +594,7 @@ mod tests {
         seed_provider_model_cache(
             tempdir.path(),
             "deepseek",
-            &["deepseek-v4-pro", "deepseek-v4-flash"],
+            &["deepseek-v4-pro", "deepseek-flash"],
         );
         let mut config = config_with_agent("claude", &["DEEPSEEK_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
@@ -609,11 +609,7 @@ mod tests {
         let settings = read_settings(tempdir.path());
         assert_eq!(
             settings["availableModels"],
-            json!([
-                "deepseek-v4-pro[1m]",
-                "deepseek-v4-flash",
-                "deepseek-v4-pro"
-            ])
+            json!(["deepseek-flash[1m]", "deepseek-flash", "deepseek-v4-pro"])
         );
     }
 
@@ -843,14 +839,14 @@ mod tests {
                 .expect("settings"),
         )
         .expect("settings parse");
-        assert_eq!(settings["env"]["ANTHROPIC_MODEL"], "deepseek-v4-pro[1m]");
+        assert_eq!(settings["env"]["ANTHROPIC_MODEL"], "deepseek-flash[1m]");
         assert_eq!(
             settings["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"],
-            "deepseek-v4-flash"
+            "deepseek-flash"
         );
         assert_eq!(
             settings["env"]["CLAUDE_CODE_SUBAGENT_MODEL"],
-            "deepseek-v4-flash"
+            "deepseek-flash"
         );
         assert_eq!(settings["env"]["CLAUDE_CODE_EFFORT_LEVEL"], "max");
         assert_eq!(settings["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "786432");
@@ -865,7 +861,7 @@ mod tests {
         .expect("settings parse");
         assert_eq!(
             settings["env"]["CLAUDE_CODE_SUBAGENT_MODEL"],
-            "deepseek-v4-flash"
+            "deepseek-flash"
         );
     }
 
