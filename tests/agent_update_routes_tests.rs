@@ -671,6 +671,8 @@ async fn update_status_reports_unmanaged_for_non_registry_agent() {
     assert_eq!(body["data"]["managed"], false);
     assert_eq!(body["data"]["reason"], NON_REGISTRY_SKIP_REASON);
     assert_eq!(body["data"]["components"].as_array().map(Vec::len), Some(0));
+    let features = body["data"]["features"].as_array().expect("features");
+    assert!(features.contains(&Value::from("agent-update-components")));
 }
 
 #[cfg(unix)]

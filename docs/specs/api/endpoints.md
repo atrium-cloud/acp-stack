@@ -602,7 +602,8 @@ All skill routes load config leniently, dropping individually invalid `[[skills.
 
 - Tier: `session`
 - Request: none.
-- Response: `{ "agent_id", "managed", "reason"?, "pinned"?, "auto_update": { "enabled", "frequency" }, "components": [{ "step", "status", ... }] }`.
+- Response: `{ "agent_id", "managed", "reason"?, "pinned"?, "auto_update": { "enabled", "frequency" }, "components": [{ "step", "status", ... }], "features" }`.
+    - `features` is the same list as `server.features` on `GET /v1/status` (see [Server Object And Feature Flags](#server-object-and-feature-flags)), so a caller that stores this body reads the `agent-update-components` gate from it.
     - `pinned` is the configured `harness_version` (harness/install step only).
     - `auto_update` reports the effective policy; an absent `[agent.auto_update]` section is reported as `enabled: false` with the default frequency.
     - Component `status` is `up_to_date` (`version`), `stale` (`installed`, `latest`), `unknown` (`reason`), or `not_installed`.
@@ -1246,7 +1247,7 @@ A `running` row is reconciled to `failed` with `error.code = "deps.apply_abandon
 ```json
 {
   "version": "0.1.9",
-  "features": ["network-provider-workload-env", "agent-test-json", "sandbox-mask-files", "managed-node-runtime", "sandbox-workload-user", "sandbox-capability-drop", "sandbox-workload-termination", "workload-io-identity", "host-exec-trusted-inputs", "install-workload-reachability", "sandbox-require-network-provider", "sandbox-off-identity", "workload-io-follow-links", "sandbox-workload-env", "provider-http-proxy", "init-provider-check", "managed-secret-environment", "managed-provider-credential-set"]
+  "features": ["network-provider-workload-env", "agent-test-json", "sandbox-mask-files", "managed-node-runtime", "sandbox-workload-user", "sandbox-capability-drop", "sandbox-workload-termination", "workload-io-identity", "host-exec-trusted-inputs", "install-workload-reachability", "sandbox-require-network-provider", "sandbox-off-identity", "workload-io-follow-links", "sandbox-workload-env", "provider-http-proxy", "init-provider-check", "managed-secret-environment", "managed-provider-credential-set", "agent-update-components"]
 }
 ```
 
@@ -1271,6 +1272,7 @@ A `running` row is reconciled to `failed` with `error.code = "deps.apply_abandon
     - `init-provider-check` covers `provider_check` on the init create body, the discovery-close park it adds, and the `provider_check` signal (see [init.md](../init.md#provider-check))
     - `managed-secret-environment` covers the `secret-environment` managed-state capability and its entries reaching the agent, ACP terminals, and mediated commands (see [extensions.md](../extensions.md#capability-secret-environment))
     - `managed-provider-credential-set` covers the `provider-credential-set` managed-state kind, the active provider set it writes, and its `agent_environment` answer (see [extensions.md](../extensions.md#kind-provider-credential-set))
+    - `agent-update-components` covers `components` on the `POST /v1/agent/update` body and `features` on the `GET /v1/agent/update/status` body
 
 ### `GET /v1/status/agent`
 

@@ -56,8 +56,9 @@ pub const FEATURE_PROVIDER_HTTP_PROXY: &str = "provider-http-proxy";
 pub const FEATURE_INIT_PROVIDER_CHECK: &str = "init-provider-check";
 pub const FEATURE_MANAGED_SECRET_ENVIRONMENT: &str = "managed-secret-environment";
 pub const FEATURE_MANAGED_PROVIDER_CREDENTIAL_SET: &str = "managed-provider-credential-set";
+pub const FEATURE_AGENT_UPDATE_COMPONENTS: &str = "agent-update-components";
 
-const SERVER_FEATURES: &[&str] = &[
+pub(crate) const SERVER_FEATURES: &[&str] = &[
     FEATURE_NETWORK_PROVIDER_WORKLOAD_ENV,
     FEATURE_AGENT_TEST_JSON,
     FEATURE_SANDBOX_MASK_FILES,
@@ -76,6 +77,7 @@ const SERVER_FEATURES: &[&str] = &[
     FEATURE_INIT_PROVIDER_CHECK,
     FEATURE_MANAGED_SECRET_ENVIRONMENT,
     FEATURE_MANAGED_PROVIDER_CREDENTIAL_SET,
+    FEATURE_AGENT_UPDATE_COMPONENTS,
 ];
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -90,7 +92,8 @@ pub(crate) struct ServerInfo {
     /// `sandbox-require-network-provider`, `sandbox-off-identity`,
     /// `workload-io-follow-links`, `sandbox-workload-env`,
     /// `provider-http-proxy`, `init-provider-check`,
-    /// `managed-secret-environment`, and `managed-provider-credential-set`.
+    /// `managed-secret-environment`, `managed-provider-credential-set`, and
+    /// `agent-update-components`.
     /// The list grows over time; an absent or empty list means none are present.
     features: &'static [&'static str],
 }
@@ -436,6 +439,7 @@ mod tests {
                 "init-provider-check",
                 "managed-secret-environment",
                 "managed-provider-credential-set",
+                "agent-update-components",
             ])
         );
     }

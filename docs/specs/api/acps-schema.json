@@ -3359,13 +3359,21 @@
             "items": {
               "$ref": "#/$defs/response/AgentUpdateStatusComponent"
             }
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The `server.features` list of `GET /v1/status`, carried here for callers\nthat store this body and gate update requests on it."
           }
         },
         "required": [
           "agent_id",
           "managed",
           "auto_update",
-          "components"
+          "components",
+          "features"
         ]
       },
       "AgentAutoUpdatePolicyJson": {
@@ -4606,7 +4614,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Advertised capability names, currently `network-provider-workload-env`,\n`agent-test-json`, `sandbox-mask-files`,\n`managed-node-runtime`, `sandbox-workload-user`, `sandbox-capability-drop`,\n`sandbox-workload-termination`, `workload-io-identity`,\n`host-exec-trusted-inputs`, `install-workload-reachability`,\n`sandbox-require-network-provider`, `sandbox-off-identity`,\n`workload-io-follow-links`, `sandbox-workload-env`,\n`provider-http-proxy`, `init-provider-check`,\n`managed-secret-environment`, and `managed-provider-credential-set`.\nThe list grows over time; an absent or empty list means none are present."
+            "description": "Advertised capability names, currently `network-provider-workload-env`,\n`agent-test-json`, `sandbox-mask-files`,\n`managed-node-runtime`, `sandbox-workload-user`, `sandbox-capability-drop`,\n`sandbox-workload-termination`, `workload-io-identity`,\n`host-exec-trusted-inputs`, `install-workload-reachability`,\n`sandbox-require-network-provider`, `sandbox-off-identity`,\n`workload-io-follow-links`, `sandbox-workload-env`,\n`provider-http-proxy`, `init-provider-check`,\n`managed-secret-environment`, `managed-provider-credential-set`, and\n`agent-update-components`.\nThe list grows over time; an absent or empty list means none are present."
           }
         },
         "required": [

@@ -3,6 +3,7 @@
 
 use super::*;
 
+use crate::api::routes::status::SERVER_FEATURES;
 use crate::config::DEFAULT_AGENT_AUTO_UPDATE_FREQUENCY;
 use crate::runtime::install::agent_updater::{
     AgentUpdateComponents, AgentUpdateOptions, AgentUpdateReport, AgentUpdateSkipCode,
@@ -245,6 +246,9 @@ pub(crate) struct AgentUpdateStatusResponse {
     pinned: Option<String>,
     auto_update: AgentAutoUpdatePolicyJson,
     components: Vec<AgentUpdateStatusComponent>,
+    /// The `server.features` list of `GET /v1/status`, carried here for callers
+    /// that store this body and gate update requests on it.
+    features: &'static [&'static str],
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -290,6 +294,7 @@ pub(crate) async fn agent_update_status_handler(
                 pinned,
                 auto_update,
                 components: Vec::new(),
+                features: SERVER_FEATURES,
             }));
         }
         Err(error) => return Err(error),
@@ -324,6 +329,7 @@ pub(crate) async fn agent_update_status_handler(
             .into_iter()
             .map(|(step, result)| AgentUpdateStatusComponent { step, result })
             .collect(),
+        features: SERVER_FEATURES,
     }))
 }
 
