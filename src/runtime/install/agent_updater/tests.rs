@@ -2,10 +2,10 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
 use super::{
-    AgentUpdateOptions, AgentUpdateReport, AgentUpdateStepStatus, KEPT_HARNESS_SKIP_REASON,
-    UpdateComponent, UpdateExecutionContext, UpdatePlanKind, choose_update_plan,
-    help_output_contains_command, recorded_version_is_current, update_agent_for_config,
-    update_component, update_components,
+    AgentUpdateComponents, AgentUpdateOptions, AgentUpdateReport, AgentUpdateStepStatus,
+    KEPT_HARNESS_SKIP_REASON, UpdateComponent, UpdateExecutionContext, UpdatePlanKind,
+    choose_update_plan, help_output_contains_command, recorded_version_is_current,
+    update_agent_for_config, update_component, update_components,
 };
 use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry};
 use crate::runtime::process_runner::HostExec;
@@ -211,7 +211,7 @@ provided_by = "adapter"
     let entry = catalog.lookup_required("sdk-backed").expect("entry");
 
     let agent = agent_config("sdk-backed", None);
-    let components = update_components(entry, &agent).expect("components");
+    let components = update_components(entry, &agent, None).expect("components");
 
     assert_eq!(components.len(), 1);
     assert_eq!(components[0].step, "adapter");
@@ -503,7 +503,7 @@ fn update_skips_a_kept_agent_cli_even_when_forced() {
         None,
         AgentUpdateOptions {
             force: true,
-            agent_running: false,
+            ..AgentUpdateOptions::default()
         },
     )
     .expect("update");
@@ -523,7 +523,43 @@ fn update_skips_a_kept_agent_cli_even_when_forced() {
 }
 
 #[test]
-fn update_components_pin_applies_to_harness_not_adapter() {
+fn a_requested_version_fails_a_shell_only_step() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let workspace = tempdir.path().join("workspace");
+    fs::create_dir_all(&workspace).expect("workspace");
+    let registry = native_shell_registry();
+    let state = StateStore::open(tempdir.path().join("state.sqlite")).expect("state");
+    state.migrate().expect("migrate");
+    let options = AgentUpdateOptions {
+        components: Some(targets(
+            serde_json::json!({ "harness": { "version": "v1.2.3" } }),
+        )),
+        ..AgentUpdateOptions::default()
+    };
+
+    let report = update_agent_for_config(
+        &fake_config(&workspace),
+        registry.lookup_required("fake").expect("entry"),
+        &state,
+        &host(tempdir.path()),
+        tempdir.path(),
+        None,
+        options,
+    )
+    .expect("update");
+
+    let step = &report.steps[0];
+    assert_eq!(step.status, AgentUpdateStepStatus::Failed, "{report:?}");
+    assert_eq!(step.method.as_deref(), Some(INSTALLER_METHOD_SHELL));
+    assert!(
+        step.message
+            .as_deref()
+            .is_some_and(|message| message.contains("via shell"))
+    );
+}
+
+#[test]
+fn update_components_apply_the_config_pin_and_requested_versions() {
     let catalog = RegistryCatalog::from_toml(
         r#"
 [[agents]]
@@ -558,13 +594,25 @@ aarch64 = "arm64"
     let entry = catalog.lookup_required("pinned").expect("entry");
     let agent = agent_config("pinned", Some("v9.9.9"));
 
-    let components = update_components(entry, &agent).expect("components");
+    let components = update_components(entry, &agent, None).expect("components");
 
     assert_eq!(components.len(), 2);
     assert_eq!(components[0].step, "harness");
     assert_eq!(components[0].version_pin, Some("v9.9.9"));
     assert_eq!(components[1].step, "adapter");
     assert_eq!(components[1].version_pin, None);
+
+    // Naming only the adapter drops the harness; its version skips the npm lookup.
+    let targets = targets(serde_json::json!({ "adapter": { "version": "v1.2.3" } }));
+    let components = update_components(entry, &agent, Some(&targets)).expect("components");
+    assert_eq!(components.len(), 1);
+    let plan = choose_update_plan(entry, &components[0], None).expect("plan");
+    assert_eq!(plan.method, INSTALLER_METHOD_NPM);
+    assert_eq!(plan.latest.as_deref(), Some("1.2.3"));
+}
+
+fn targets(value: serde_json::Value) -> AgentUpdateComponents {
+    serde_json::from_value(value).expect("update targets")
 }
 
 fn npm_only_registry() -> RegistryCatalog {
@@ -664,7 +712,7 @@ fn adapter_override_components_use_operator_adapter_spec() {
     let effective =
         crate::runtime::install::agent_registry::effective_registry_entry(entry, &agent)
             .expect("effective entry");
-    let components = update_components(effective.as_ref(), &agent).expect("components");
+    let components = update_components(effective.as_ref(), &agent, None).expect("components");
 
     assert_eq!(components.len(), 2);
     assert_eq!(components[0].step, "harness");
@@ -786,7 +834,7 @@ fn adapter_override_shell_rerun_opts_into_recipe_rerun() {
     let effective =
         crate::runtime::install::agent_registry::effective_registry_entry(entry, &agent)
             .expect("effective entry");
-    let components = update_components(effective.as_ref(), &agent).expect("components");
+    let components = update_components(effective.as_ref(), &agent, None).expect("components");
     let adapter = components
         .iter()
         .find(|component| component.step == "adapter")

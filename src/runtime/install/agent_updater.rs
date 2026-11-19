@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::{AgentConfig, Config};
 use crate::error::{Result, StackError};
@@ -55,10 +55,37 @@ pub const ADAPTER_OVERRIDE_SHELL_SKIP_REASON: &str = "operator adapter override 
 /// unmanaged and update never installs over it.
 pub const KEPT_HARNESS_SKIP_REASON: &str = "agent CLI was kept by the operator (acps init --existing-agent use-existing); managed update does not replace a kept CLI";
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct AgentUpdateOptions {
     pub force: bool,
     pub agent_running: bool,
+    /// `None` updates every component to latest; a map runs only the named ones.
+    pub components: Option<AgentUpdateComponents>,
+}
+
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentUpdateComponents {
+    /// The agent CLI: the `install` step of a native agent, the `harness` step of an adapter agent.
+    pub harness: Option<AgentUpdateTarget>,
+    pub adapter: Option<AgentUpdateTarget>,
+}
+
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentUpdateTarget {
+    /// Absent targets the latest release; a request version wins over `[agent].harness_version`.
+    pub version: Option<String>,
+}
+
+impl AgentUpdateComponents {
+    fn target(&self, step: &str) -> Option<&AgentUpdateTarget> {
+        if step == STEP_ADAPTER {
+            self.adapter.as_ref()
+        } else {
+            self.harness.as_ref()
+        }
+    }
 }
 
 /// Why an update never ran, beside the prose `reason`.
@@ -181,6 +208,25 @@ pub fn run_managed_agent_update(
     )
 }
 
+/// Whether `targets` names a step the configured agent has. A non-registry agent
+/// answers true so it keeps the updater's own not-managed skip.
+pub fn selects_any_step(
+    home: &Path,
+    agent: &AgentConfig,
+    targets: &AgentUpdateComponents,
+) -> Result<bool> {
+    let registry = crate::runtime::install::agent_registry::RegistryCatalog::load_with_override(
+        &crate::runtime::install::operator_registry_override(home),
+    )?;
+    let entry = match registry.lookup_required(&agent.id) {
+        Ok(entry) => entry,
+        Err(StackError::AgentRegistryMissing { .. }) => return Ok(true),
+        Err(error) => return Err(error),
+    };
+    let entry = crate::runtime::install::agent_registry::effective_registry_entry(entry, agent)?;
+    Ok(!update_components(entry.as_ref(), agent, Some(targets))?.is_empty())
+}
+
 pub fn update_agent_for_config(
     config: &Config,
     entry: &RegistryEntry,
@@ -211,7 +257,8 @@ pub fn update_agent_for_config(
         force: options.force,
     };
     let mut steps = Vec::new();
-    for component in update_components(entry, &config.agent)? {
+    let targets = options.components.as_ref();
+    for component in update_components(entry, &config.agent, targets)? {
         let installed_row = installed_rows.iter().find(|row| row.step == component.step);
         if let Some(kept) = installed_row.filter(|row| row.status == INSTALLER_STATUS_KEPT) {
             steps.push(AgentUpdateStepReport {
@@ -221,6 +268,31 @@ pub fn update_agent_for_config(
                 installed: kept.version.clone(),
                 latest: None,
                 message: Some(KEPT_HARNESS_SKIP_REASON.to_owned()),
+            });
+            continue;
+        }
+        // Only the npm and github lanes install a chosen version; any other lane would
+        // silently land on latest.
+        let requested_version =
+            targets.and_then(|targets| targets.target(component.step)?.version.as_deref());
+        if let Some(version) = requested_version
+            && component.install.version_pin_blocker().is_some()
+        {
+            let method = component
+                .install
+                .shell
+                .as_ref()
+                .map_or(INSTALLER_METHOD_NATIVE, |_| INSTALLER_METHOD_SHELL);
+            steps.push(AgentUpdateStepReport {
+                step: component.step.to_owned(),
+                status: AgentUpdateStepStatus::Failed,
+                method: Some(method.to_owned()),
+                installed: installed_row.and_then(|row| row.version.clone()),
+                latest: None,
+                message: Some(format!(
+                    "agent update: the {} step installs via {method}, which cannot install requested version {version}",
+                    component.step
+                )),
             });
             continue;
         }
@@ -428,6 +500,7 @@ struct UpdateComponent<'a> {
 fn update_components<'a>(
     entry: &'a RegistryEntry,
     agent: &'a AgentConfig,
+    targets: Option<&'a AgentUpdateComponents>,
 ) -> Result<Vec<UpdateComponent<'a>>> {
     let harness = entry
         .harness
@@ -435,6 +508,7 @@ fn update_components<'a>(
         .ok_or_else(|| StackError::RegistryLoad {
             reason: format!("registry entry `{}` has no harness block", entry.id),
         })?;
+    let mut components = Vec::new();
     if entry.kind == RegistryKind::Adapter {
         let adapter = entry
             .adapter
@@ -442,14 +516,25 @@ fn update_components<'a>(
             .ok_or_else(|| StackError::RegistryLoad {
                 reason: format!("registry entry `{}` has no adapter block", entry.id),
             })?;
-        let mut components = Vec::new();
         if !harness.install.is_provided_by_adapter() {
             components.push(harness_component(entry, harness, STEP_HARNESS, agent));
         }
         components.push(adapter_component(entry, adapter));
-        return Ok(components);
+    } else {
+        components.push(harness_component(entry, harness, STEP_INSTALL, agent));
     }
-    Ok(vec![harness_component(entry, harness, STEP_INSTALL, agent)])
+    if let Some(targets) = targets {
+        components.retain_mut(|component| {
+            let Some(target) = targets.target(component.step) else {
+                return false;
+            };
+            if let Some(version) = target.version.as_deref() {
+                component.version_pin = Some(version);
+            }
+            true
+        });
+    }
+    Ok(components)
 }
 
 fn harness_component<'a>(
@@ -504,8 +589,8 @@ fn choose_update_plan(
     component: &UpdateComponent<'_>,
     installed_row: Option<&InstallerRun>,
 ) -> Result<UpdatePlan> {
-    // A harness_version pin walks install's pinned lanes (github, then npm) and
-    // wins over the recorded install method.
+    // A version pin walks install's pinned lanes (github, then npm) and wins over
+    // the recorded install method.
     if let Some(pin) = component.version_pin {
         if component.install.github.is_some() {
             return github_plan(entry, component);

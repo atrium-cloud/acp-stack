@@ -5,8 +5,8 @@ use super::*;
 
 use crate::config::DEFAULT_AGENT_AUTO_UPDATE_FREQUENCY;
 use crate::runtime::install::agent_updater::{
-    AgentUpdateOptions, AgentUpdateReport, AgentUpdateSkipCode, NON_REGISTRY_SKIP_REASON,
-    run_managed_agent_update,
+    AgentUpdateComponents, AgentUpdateOptions, AgentUpdateReport, AgentUpdateSkipCode,
+    NON_REGISTRY_SKIP_REASON, run_managed_agent_update, selects_any_step,
 };
 use crate::runtime::install::agent_version_check::{
     AgentVersionStatus, LiveLatestVersionResolver, build_agent_check_report,
@@ -20,6 +20,8 @@ const UPDATE_TRIGGER_API: &str = "api";
 pub(crate) struct AgentUpdateRequest {
     #[serde(default)]
     force: bool,
+    /// Absent updates every component to latest; present updates only the named ones.
+    components: Option<AgentUpdateComponents>,
 }
 
 pub(crate) async fn agent_update_handler(
@@ -34,6 +36,19 @@ pub(crate) async fn agent_update_handler(
     // begin and finish would leave the supervisor stuck in `Updating`.
     let home = state.runtime_paths.home.clone();
     let state_path = state.runtime_paths.state_path.clone();
+    // A selection with no step for this agent is a no-op that leaves it running.
+    if let Some(targets) = &request.components
+        && !selects_any_step(&home, &config.agent, targets)?
+    {
+        return Ok(ApiSuccess::new(AgentUpdateReport {
+            agent_id,
+            updated: false,
+            skipped: false,
+            reason: None,
+            skip_code: None,
+            steps: Vec::new(),
+        }));
+    }
 
     // A running agent is stopped for the update and started again after it,
     // but only under the restart route's safety rule: a turn or permission in
@@ -69,7 +84,11 @@ pub(crate) async fn agent_update_handler(
         home,
         state_path,
         config,
-        request.force,
+        AgentUpdateOptions {
+            force: request.force,
+            agent_running: false,
+            components: request.components,
+        },
         restart_after,
         target_id,
     ));
@@ -116,7 +135,7 @@ async fn run_update_and_release(
     home: std::path::PathBuf,
     state_path: std::path::PathBuf,
     config: Config,
-    force: bool,
+    options: AgentUpdateOptions,
     restart_after: bool,
     target_id: String,
 ) -> std::result::Result<AgentUpdateReport, StackError> {
@@ -129,15 +148,7 @@ async fn run_update_and_release(
     )
     .await;
     let result = tokio::task::spawn_blocking(move || {
-        run_managed_agent_update(
-            home,
-            state_path,
-            config,
-            AgentUpdateOptions {
-                force,
-                agent_running: false,
-            },
-        )
+        run_managed_agent_update(home, state_path, config, options)
     })
     .await;
     supervisor.finish_update().await;

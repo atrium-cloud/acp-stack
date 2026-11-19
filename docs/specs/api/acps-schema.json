@@ -79,8 +79,59 @@
           "force": {
             "type": "boolean",
             "default": false
+          },
+          "components": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/request/AgentUpdateComponents"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Absent updates every component to latest; present updates only the named ones."
           }
         }
+      },
+      "AgentUpdateComponents": {
+        "type": "object",
+        "properties": {
+          "harness": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/request/AgentUpdateTarget"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The agent CLI: the `install` step of a native agent, the `harness` step of an adapter agent."
+          },
+          "adapter": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/request/AgentUpdateTarget"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentUpdateTarget": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Absent targets the latest release; a request version wins over `[agent].harness_version`."
+          }
+        },
+        "additionalProperties": false
       },
       "ApplyRequest": {
         "type": "object",

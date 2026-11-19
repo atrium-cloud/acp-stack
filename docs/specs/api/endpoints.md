@@ -357,7 +357,10 @@ The API withholds secret values from every response. Auth keys live outside the 
 ### `POST /v1/agent/update`
 
 - Tier: `admin`
-- Request: optional `{ "force": bool }` (default `false`). `force` reinstalls even when the resolved target version matches the installed one.
+- Request: optional `{ "force": bool, "components": { "harness": { "version": string? }, "adapter": { "version": string? } } }`; every key is optional.
+    - `force` (default `false`) reinstalls even when the resolved target version matches the installed one.
+    - Absent `components` updates every component to its latest release. Present `components` updates only the named components, each to its `version`, else to its latest release. `harness` is the agent CLI: the `install` step of a native agent and the `harness` step of an adapter agent. A named component the agent has no step for is a no-op; a selection with no step at all returns zero steps and leaves a running agent up.
+    - A `version` takes precedence over `[agent].harness_version` and resolves on the github and npm lanes as the pin does. A `version` requested for a component without either lane reports its step `failed`, with a `message` naming the install method.
 - Response: the updater report `{ "agent_id", "updated", "skipped", "reason"?, "skip_code"?, "steps": [{ "step", "status", "method"?, "installed"?, "latest"?, "message"? }] }`.
     - A skipped report carries `skip_code` beside the prose `reason`: `agent_busy` when the agent stayed up, `not_managed` for a non-registry agent.
     - Step `status` is `updated`, `up_to_date`, `skipped`, or `failed`.
@@ -371,7 +374,7 @@ The API withholds secret values from every response. Auth keys live outside the 
     - A starting, stopping, or already-updating agent is never touched: the route returns `200` with `skipped: true` and `skip_code: "agent_busy"`, including for a second update request arriving while one is in flight. Callers may retry safely.
     - A failed post-update restart is logged and left to the next session request, which starts the agent on demand (a target with `restart = "never"` needs a manual start instead); the update report still stands.
     - A non-registry (escape-hatch) agent likewise returns `200` with `skipped: true` and `skip_code: "not_managed"`. An agent CLI kept by `acps init --existing-agent use-existing` is left in place, `force` included: its step reports `skipped` with the kept version as `installed` and no `method`.
-    - A `harness_version` pin constrains the update target the same way it constrains install: the pin is used instead of the latest release (harness component, as the GitHub Release tag on the github lane, else as the npm version with one leading `v` dropped when a digit follows it). A pinned agent already at its pin reports `up_to_date`.
+    - A `harness_version` pin constrains the update target the same way it constrains install: the pin is used instead of the latest release (harness component, as the GitHub Release tag on the github lane, else as the npm version with one leading `v` dropped when a digit follows it). A pinned agent already at its pin reports `up_to_date`. A requested `version` resolves the same way for either component.
     - Each run records `agent.update.started` plus a terminal `agent.update.finished`/`agent.update.skipped`/`agent.update.failed` lifecycle event, payload-tagged with `"trigger": "api"` to distinguish it from the timer's runs. An `agent.update.skipped` payload carries the report's `skip_code`. These surface in `GET /v1/agent/status` `lifecycle_events`.
 
 ### `POST /v1/agent/start`

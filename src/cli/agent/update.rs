@@ -165,6 +165,7 @@ fn run_agent_update_execute(
         AgentUpdateOptions {
             force,
             agent_running: daemon_running && !restart,
+            components: None,
         },
     );
 

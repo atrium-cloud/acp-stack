@@ -279,6 +279,57 @@ async fn update_reports_up_to_date_at_pinned_version() {
     assert_eq!(steps[0]["installed"], "1.2.3");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn update_runs_only_the_named_component() {
+    let tempdir = TempDir::new().expect("tempdir");
+    write_opencode_github_override(&registry_config_dir(tempdir.path()));
+
+    let harness =
+        AgentHarness::spawn_with_config_and_home(test_config(), tempdir.path().to_path_buf()).await;
+    seed_installed_row(&harness, "install", "github", "0.1.0").await;
+    // Planning the unnamed CLI would hit this unreachable upstream and fail the request.
+    let _env = EnvVarGuard::set_many(vec![(
+        GITHUB_API_BASE_ENV,
+        std::ffi::OsString::from("http://127.0.0.1:1"),
+    )]);
+    let client = http().await;
+    let start = client
+        .post(format!("{}/v1/agent/start", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .send()
+        .await
+        .expect("start");
+    let first_pid = start.json::<Value>().await.expect("start json")["data"]["pid"].clone();
+    let response = client
+        .post(format!("{}/v1/agent/update", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .json(&serde_json::json!({ "components": { "adapter": { "version": PINNED_TAG } } }))
+        .send()
+        .await
+        .expect("send update");
+    let status = response.status();
+    let body: Value = response.json().await.expect("json");
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["data"]["updated"], false, "body: {body}");
+    assert_eq!(body["data"]["steps"].as_array().map(Vec::len), Some(0));
+    // No step selected: the agent keeps its process and no update event is recorded.
+    let status_body: Value = client
+        .get(format!("{}/v1/agent/status", harness.base_url))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("status")
+        .json()
+        .await
+        .expect("status json");
+    assert_eq!(status_body["data"]["process_state"], "running");
+    assert_eq!(status_body["data"]["pid"], first_pid, "{status_body}");
+    let events = status_body["data"]["lifecycle_events"].to_string();
+    assert!(!events.contains("agent.update."), "{events}");
+}
+
 #[tokio::test]
 async fn update_skips_a_kept_agent_cli() {
     let tempdir = TempDir::new().expect("tempdir");
