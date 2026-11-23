@@ -243,13 +243,51 @@ fn fetch_release(
     version: Option<&str>,
     token: Option<&str>,
 ) -> Result<ReleaseResponse> {
-    let url = match version {
-        Some(tag) => format!("{base}/repos/{repo}/releases/tags/{tag}"),
-        None => format!("{base}/repos/{repo}/releases/latest"),
+    let Some(tag) = version else {
+        let url = format!("{base}/repos/{repo}/releases/latest");
+        return fetch_release_at(client, &url, repo, token);
     };
-    acquire_for_url(&url)?;
+    let by_tag = |tag: &str| {
+        let url = format!("{base}/repos/{repo}/releases/tags/{tag}");
+        fetch_release_at(client, &url, repo, token)
+    };
+    // A pin is written with or without the tag's leading `v`, so a tag GitHub does not know is
+    // asked for once more in the other spelling.
+    match (by_tag(tag), other_tag_spelling(tag)) {
+        (Err(error), Some(other)) if is_not_found(&error) => match by_tag(&other) {
+            Err(second) if is_not_found(&second) => Err(error),
+            result => result,
+        },
+        (result, _) => result,
+    }
+}
+
+fn other_tag_spelling(tag: &str) -> Option<String> {
+    let starts_with_digit = |value: &str| value.starts_with(|c: char| c.is_ascii_digit());
+    match tag.strip_prefix('v') {
+        Some(rest) if starts_with_digit(rest) => Some(rest.to_owned()),
+        None if starts_with_digit(tag) => Some(format!("v{tag}")),
+        _ => None,
+    }
+}
+
+fn is_not_found(error: &StackError) -> bool {
+    matches!(
+        error,
+        StackError::GithubReleaseFetch { source, .. }
+            if source.status() == Some(reqwest::StatusCode::NOT_FOUND)
+    )
+}
+
+fn fetch_release_at(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    repo: &str,
+    token: Option<&str>,
+) -> Result<ReleaseResponse> {
+    acquire_for_url(url)?;
     let mut request = client
-        .get(&url)
+        .get(url)
         .header("Accept", "application/vnd.github+json");
     if let Some(token) = token {
         request = request.bearer_auth(token);
@@ -1394,5 +1432,38 @@ mod tests {
             "502",
         );
         assert!(asset_body.contains("[truncated"), "{asset_body}");
+    }
+
+    #[test]
+    fn a_pin_written_without_the_leading_v_resolves_the_v_tagged_release() {
+        use axum::routing::get;
+
+        let router = axum::Router::new().route(
+            "/repos/acme/tool/releases/tags/v1.5.2",
+            get(|| async { r#"{"tag_name":"v1.5.2","assets":[]}"# }),
+        );
+        let server = crate::http_client::test_server::spawn(router);
+        let client = build_client("").expect("client");
+
+        let release = fetch_release(
+            &client,
+            &server.base_url(),
+            "acme/tool",
+            Some("1.5.2"),
+            None,
+        )
+        .expect("the v-tagged release");
+        assert_eq!(release.tag_name, "v1.5.2");
+
+        // A version neither spelling knows reports the tag the pin named.
+        let error = fetch_release(
+            &client,
+            &server.base_url(),
+            "acme/tool",
+            Some("9.9.9"),
+            None,
+        )
+        .expect_err("unknown version");
+        assert!(error.to_string().contains("/tags/9.9.9"), "{error}");
     }
 }

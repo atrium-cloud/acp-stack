@@ -176,7 +176,7 @@ VIRTUAL_ENV = "/opt/venvs/x/.venv"
 | `env`             | secret refs injected as environment variables                                                       |
 | `expected_sha256` | optional pinned digest of the installed harness binary, verified after install                      |
 | `restart`         | process restart policy: `on-crash` or `never`                                                       |
-| `harness_version` | optional agent CLI pin for install and managed update: a GitHub Release tag, used as the npm version with one leading `v` dropped when a digit follows it; `acps init --agent-version` sets it (see [runtime.md](runtime.md#installer-behavior)) |
+| `harness_version` | optional agent CLI pin for install and managed update: a GitHub Release tag, matched as written and then with one leading `v` added or dropped, and used as the npm version with one leading `v` dropped when a digit follows it; `acps init --agent-version` sets it (see [runtime.md](runtime.md#installer-behavior)) |
 
 Provider and model fields are documented in [agents/config.md](agents/config.md). Root `agent.model` and `[agent.provider].model` are mutually exclusive.
 

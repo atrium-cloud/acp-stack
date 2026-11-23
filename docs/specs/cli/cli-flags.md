@@ -72,7 +72,7 @@ acps init \
 #### Agent CLI version and existing installs
 
 - `--agent-version <version>`: installs this version of the agent CLI instead of its latest release and writes it to `[agent].harness_version`. The ACP adapter still installs its latest release.
-    - A GitHub install fetches the value as its release tag verbatim (`v1.2.3`). An npm install uses it as the package version with one leading `v` dropped when a digit follows it (`v1.2.3` installs `1.2.3`).
+    - A GitHub install fetches the value as its release tag as written (`v1.2.3`), then with one leading `v` added or dropped when that tag has no release. An npm install uses it as the package version with one leading `v` dropped when a digit follows it (`v1.2.3` installs `1.2.3`).
     - The value is letters, digits, `.`, `_`, `+`, and `-`, starting with a letter or digit.
     - A CLI installed only by its vendor's script, bundled inside its adapter, or installed by `[agent.install]` fails with `agent.version_unsupported` before any step runs.
 - `--existing-agent <use-existing|replace-latest|replace-version>`: what init does with an agent CLI that acp-stack did not install.
