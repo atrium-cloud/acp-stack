@@ -110,7 +110,10 @@ References:
     - Commit message suggestion should also be one-liners starting with "feat:" "fix:" "docs:" "refactor:" "ci:", etc. The theme of the commit should be apparent from the diffs.
     - Each code change commit should ideally have fewer than 1,000 lines changed. If staged changes are large, suggest humans to make multiple commits instead.
 - Git worktrees
-    - When implementing multi-phase changes, if current repo's main has uncommitted changes, you may (with human permission) make changes on a worktree instead, and create a patch for the human to apply on main later.
+    - When implementing multi-phase changes, if current repo's main has uncommitted changes, you may (with human permission) make changes on a worktree instead.
+    - In a worktree, do not commit. Stage changes only.
+    - Preserve commit boundaries as patches, one per planned commit. After each logical unit, snapshot the index with `git write-tree` and write the diff from the previous snapshot (the worktree's base commit for the first patch) to `<repo>-worktrees/<worktree>.patches/NN-<repo>-<slug>.patch`. Keep patch files out of git.
+    - When asked for apply and commit commands, the target repos' main branches must be clean; if one is not, report it and stop. Give the commands interleaved, one pair per planned commit in order: `git -C <repo> apply --index <patch>` followed by `git -C <repo> commit -m "<message>"`, with the message drafted from that patch's diff.
 - Pre-commit hook
     - Run it as needed if there is one, as it typically runs checks over code changes. It may also fix formatting.
 - Code review
