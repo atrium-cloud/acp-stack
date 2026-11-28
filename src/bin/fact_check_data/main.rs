@@ -395,8 +395,8 @@ fn check_pi_env_api_keys(
 }
 
 /// Reads the provider-to-env-var table out of Pi's `getApiKeyEnvVars`: the `envMap`
-/// entries plus the `if (provider === "...")` early returns, whose arrays may name
-/// exported string constants.
+/// entries, whose values are a string or an array, plus the `if (provider === "...")` early
+/// returns, whose arrays may name exported string constants.
 fn pi_provider_env_vars(source: &str) -> BTreeMap<String, BTreeSet<String>> {
     let constants: BTreeMap<&str, &str> = source
         .lines()
@@ -408,6 +408,16 @@ fn pi_provider_env_vars(source: &str) -> BTreeMap<String, BTreeSet<String>> {
             Some((name, quoted_env_var(value.trim_end_matches(';'))?))
         })
         .collect();
+    let list_items = |items: &'_ str| -> Vec<String> {
+        items
+            .split(',')
+            .filter_map(|item| {
+                let item = item.trim();
+                quoted_env_var(item).or_else(|| constants.get(item).copied())
+            })
+            .map(str::to_owned)
+            .collect()
+    };
     let mut env_vars: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut early_return_provider: Option<&str> = None;
     for line in source.lines().map(str::trim) {
@@ -416,14 +426,10 @@ fn pi_provider_env_vars(source: &str) -> BTreeMap<String, BTreeSet<String>> {
                 .strip_prefix("return [")
                 .and_then(|rest| rest.strip_suffix("];"))
         {
-            let resolved = items.split(',').filter_map(|item| {
-                let item = item.trim();
-                quoted_env_var(item).or_else(|| constants.get(item).copied())
-            });
             env_vars
                 .entry(provider_id.to_owned())
                 .or_default()
-                .extend(resolved.map(str::to_owned));
+                .extend(list_items(items));
             continue;
         }
         if let Some((_, rest)) = line.split_once("provider === \"") {
@@ -444,11 +450,18 @@ fn pi_provider_env_vars(source: &str) -> BTreeMap<String, BTreeSet<String>> {
         if !key_is_provider_id {
             continue;
         }
-        if let Some(env_var) = quoted_env_var(value) {
-            env_vars
-                .entry(key.to_owned())
-                .or_default()
-                .insert(env_var.to_owned());
+        let values = match value
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+        {
+            Some(items) => list_items(items),
+            None => quoted_env_var(value)
+                .map(str::to_owned)
+                .into_iter()
+                .collect(),
+        };
+        if !values.is_empty() {
+            env_vars.entry(key.to_owned()).or_default().extend(values);
         }
     }
     env_vars
@@ -1123,8 +1136,9 @@ function getApiKeyEnvVars(provider: string): readonly string[] | undefined {
 	if (provider === "anthropic") {
 		return [ANTHROPIC_AUTH_TOKEN_ENV, ANTHROPIC_API_KEY_ENV];
 	}
-	const envMap: Record<string, string> = {
+	const envMap: Record<string, string | readonly string[]> = {
 		"ant-ling": "ANT_LING_API_KEY",
+		"qwen-token-plan": ["QWEN_TOKEN_PLAN_TEAM_API_KEY", "QWEN_TOKEN_PLAN_API_KEY"],
 		azure: "AZURE_OPENAI_API_KEY",
 	};
 }
@@ -1148,8 +1162,12 @@ function getApiKeyEnvVars(provider: string): readonly string[] | undefined {
             expected(&["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"])
         );
         assert_eq!(env_vars["ant-ling"], expected(&["ANT_LING_API_KEY"]));
+        assert_eq!(
+            env_vars["qwen-token-plan"],
+            expected(&["QWEN_TOKEN_PLAN_TEAM_API_KEY", "QWEN_TOKEN_PLAN_API_KEY"])
+        );
         assert_eq!(env_vars["azure"], expected(&["AZURE_OPENAI_API_KEY"]));
-        assert_eq!(env_vars.len(), 4);
+        assert_eq!(env_vars.len(), 5);
     }
 
     #[test]

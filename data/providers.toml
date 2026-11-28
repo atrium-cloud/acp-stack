@@ -850,12 +850,6 @@ agents = ["opencode"]
 base_url = "https://coding-plan-endpoint.kuaecloud.net/v1"
 
 [[providers]]
-id = ["lilac"]
-name = "Lilac"
-agents = ["opencode"]
-base_url = "https://api.getlilac.com/v1"
-
-[[providers]]
 id = ["llmgateway"]
 name = "DevPass (LLM Gateway)"
 agents = ["opencode"]

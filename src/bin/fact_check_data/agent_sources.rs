@@ -15,6 +15,9 @@ const HERMES_REPO: &str = "NousResearch/hermes-agent";
 const HERMES_AUTH_PATH: &str = "hermes_cli/auth.py";
 const HERMES_PLUGINS_DIR: &str = "plugins/model-providers";
 const HERMES_PLUGIN_FILE: &str = "__init__.py";
+const HERMES_MODULE_EXTENSION: &str = ".py";
+const PYTHON_FROM_KEYWORD: &str = "from";
+const PYTHON_IMPORT_KEYWORD: &str = "import";
 const HERMES_REGISTRY_ROWS_ANCHOR: &str = "\n_REGISTRY_ROWS";
 const HERMES_REGISTRY_END_ANCHOR: &str = "\nPROVIDER_REGISTRY";
 const HERMES_PROVIDER_CONFIG_CALL: &str = "ProviderConfig";
@@ -149,15 +152,35 @@ pub(super) fn check_hermes_sources(
         return Ok(());
     }
 
-    for native_id in agent_native_ids(mapping, HERMES_AGENT_ID) {
-        if !providers.contains_key(native_id) && plugin_dirs.contains(native_id) {
-            let plugin_source = http.github_raw_text(
+    for provider in agent_providers(mapping, HERMES_AGENT_ID) {
+        let Some(native_id) = native_provider_id(provider, HERMES_AGENT_ID) else {
+            continue;
+        };
+        if providers.contains_key(native_id) {
+            continue;
+        }
+        // A bundled plugin can sit under one of the row's other ids, such as `google` for `gemini`.
+        let Some(plugin_dir) = std::iter::once(native_id)
+            .chain(provider.ids().iter().map(String::as_str))
+            .find(|id| plugin_dirs.contains(*id))
+        else {
+            continue;
+        };
+        let plugin_path = |file: &str| format!("{HERMES_PLUGINS_DIR}/{plugin_dir}/{file}");
+        let entry_source = http.github_raw_text(HERMES_REPO, &plugin_path(HERMES_PLUGIN_FILE))?;
+        let mut plugin = hermes_plugin_providers(&entry_source).remove(native_id);
+        let mut modules = hermes_plugin_modules(&entry_source).into_iter();
+        while plugin.is_none()
+            && let Some(module) = modules.next()
+        {
+            let module_source = http.github_raw_text(
                 HERMES_REPO,
-                &format!("{HERMES_PLUGINS_DIR}/{native_id}/{HERMES_PLUGIN_FILE}"),
+                &plugin_path(&format!("{module}{HERMES_MODULE_EXTENSION}")),
             )?;
-            if let Some(plugin) = hermes_plugin_providers(&plugin_source).remove(native_id) {
-                providers.insert(native_id.to_owned(), plugin);
-            }
+            plugin = hermes_plugin_providers(&module_source).remove(native_id);
+        }
+        if let Some(plugin) = plugin {
+            providers.insert(native_id.to_owned(), plugin);
         }
     }
     let upstream = HermesUpstream {
@@ -681,6 +704,25 @@ fn hermes_plugin_providers(source: &str) -> BTreeMap<String, HermesProvider> {
         (name, HermesProvider { key_env_vars })
     })
     .collect()
+}
+
+/// The sibling modules a plugin's `__init__.py` imports with `from .module import ...`, where a
+/// bundled plugin defines its profiles.
+fn hermes_plugin_modules(source: &str) -> Vec<String> {
+    tokens(source, Syntax::Python)
+        .windows(4)
+        .filter_map(|window| match window {
+            [
+                Token::Word(from),
+                Token::Punct('.'),
+                Token::Word(module),
+                Token::Word(import),
+            ] if from == PYTHON_FROM_KEYWORD && import == PYTHON_IMPORT_KEYWORD => {
+                Some(module.clone())
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// The provider names and config keys across a Rust goose provider's files.
@@ -1219,6 +1261,24 @@ PROVIDER_REGISTRY: dict[str, ProviderConfig] = {
     #[test]
     fn hermes_registry_without_rows_anchor_is_empty() {
         assert!(hermes_registry_providers("PROVIDER_REGISTRY = {}\n").is_empty());
+    }
+
+    #[test]
+    fn hermes_bundled_plugins_name_their_profile_modules() {
+        let source = r#"
+"""Google model-provider plugin: registers ``gemini`` and ``solstice``."""
+from __future__ import annotations
+
+from providers import register_provider
+
+from .api_key import gemini
+
+register_provider(gemini)
+
+from .account import solstice
+"#;
+
+        assert_eq!(hermes_plugin_modules(source), ["api_key", "account"]);
     }
 
     #[test]
