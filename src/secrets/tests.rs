@@ -1,6 +1,23 @@
 use super::*;
 use tempfile::TempDir;
 
+/// A store written by age 0.11, the version live installs were created with.
+#[test]
+fn a_store_written_by_an_earlier_age_release_still_opens() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/age-0.11");
+    let home = fresh_home();
+    let key_path = home.path().join("age-key.txt");
+    let store_path = home.path().join("secrets.age");
+    std::fs::copy(fixtures.join("test-only-age-key.txt"), &key_path).expect("copy key");
+    std::fs::copy(fixtures.join("test-only-secrets.age"), &store_path).expect("copy store");
+
+    let store = SecretStore::open_at_paths(&key_path, &store_path).expect("open");
+    assert_eq!(
+        store.get("FIXTURE_SECRET").expect("get"),
+        "not-a-real-secret"
+    );
+}
+
 fn fresh_home() -> TempDir {
     TempDir::new().expect("tempdir")
 }

@@ -77,5 +77,7 @@ tests/perf/perf-test-results/
 
 # age-encrypted secrets and key material (per docs/specs/security.md)
 *.age
+# Test-only store, encrypted to the committed test-only key beside it.
+!tests/fixtures/age-0.11/test-only-secrets.age
 *.key
 *.pem
