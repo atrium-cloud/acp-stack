@@ -25,7 +25,7 @@ const HERMES_PLUGIN_ENV_VARS_ARGUMENT: &str = "env_vars";
 const BASE_URL_ENV_SUFFIX: &str = "_URL";
 
 const GOOSE_REPO: &str = "aaif-goose/goose";
-const GOOSE_DEFINITIONS_DIR: &str = "crates/goose-providers/src/declarative/definitions";
+const GOOSE_DEFINITIONS_DIR: &str = "crates/oi-kit-providers/src/declarative/definitions";
 const GOOSE_DEFINITION_EXTENSION: &str = ".json";
 /// The Rust-implemented goose providers acp-stack ships, with the files holding each one's
 /// `*_PROVIDER_NAME` constant and `ConfigKey` list. Every other goose provider is a declarative
@@ -34,12 +34,12 @@ const GOOSE_RUST_PROVIDERS: [(&str, &[&str]); 4] = [
     (
         "anthropic",
         &[
-            "crates/goose-providers/src/anthropic.rs",
-            "crates/goose-provider-types/src/formats/anthropic.rs",
+            "crates/oi-kit-providers/src/anthropic.rs",
+            "crates/oi-kit-provider-types/src/formats/anthropic.rs",
         ],
     ),
-    ("openai", &["crates/goose-providers/src/openai.rs"]),
-    ("openrouter", &["crates/goose-providers/src/openrouter.rs"]),
+    ("openai", &["crates/oi-kit-providers/src/openai.rs"]),
+    ("openrouter", &["crates/oi-kit-providers/src/openrouter.rs"]),
     ("xai", &["crates/goose/src/providers/xai.rs"]),
 ];
 const GOOSE_PROVIDER_NAME_SUFFIX: &str = "_PROVIDER_NAME";
@@ -63,7 +63,7 @@ const KIMI_MODEL_ENV_PATHS: [&str; 2] = [
     "packages/agent-core-v2/src/app/kosongConfig/envOverlay.ts",
 ];
 const KIMI_PROVIDER_DEFINITION_PATH: &str =
-    "packages/agent-core-v2/src/llm-adapter/provider/provider-definition.ts";
+    "packages/agent-core-v2/src/provider-catalog/provider/provider-definition.ts";
 
 const KILO_REPO: &str = "Kilo-Org/kilocode";
 const KILO_MODELS_PATH: &str = "packages/opencode/src/provider/models.ts";

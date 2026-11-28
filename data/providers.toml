@@ -9,9 +9,9 @@
 # [Hermes Agent providers docs](https://hermes-agent.nousresearch.com/docs/integrations/providers)
 # [Hermes auth.py provider registry](https://github.com/NousResearch/hermes-agent/blob/main/hermes_cli/auth.py)
 # [Hermes model-provider plugins](https://github.com/NousResearch/hermes-agent/tree/main/plugins/model-providers)
-# [Goose declarative provider definitions](https://github.com/aaif-goose/goose/tree/main/crates/goose-providers/src/declarative/definitions)
+# [Goose declarative provider definitions](https://github.com/aaif-goose/goose/tree/main/crates/oi-kit-providers/src/declarative/definitions)
 # [Codex built-in model providers](https://github.com/openai/codex/blob/main/codex-rs/model-provider-info/src/lib.rs)
-# [Kimi Code provider definitions](https://github.com/MoonshotAI/kimi-code/blob/main/packages/agent-core-v2/src/llm-adapter/provider/provider-definition.ts)
+# [Kimi Code provider definitions](https://github.com/MoonshotAI/kimi-code/blob/main/packages/agent-core-v2/src/provider-catalog/provider/provider-definition.ts)
 # [Kilo provider overlay](https://github.com/Kilo-Org/kilocode/blob/main/packages/opencode/src/provider/models.ts)
 # Last updated on 2026-11-16
 #
