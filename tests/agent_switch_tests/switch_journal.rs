@@ -299,6 +299,55 @@ async fn agent_switch_rename_collision_clears_journal_and_unblocks_retry() {
 }
 
 #[tokio::test]
+async fn deleting_a_session_of_the_agent_switched_away_from_keeps_the_row() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let shim_path = tempdir.path().join("kimi-shim");
+    let fixture_path = write_config_options_fixture(tempdir.path(), &["kimi/kimi-k3"]);
+    let _fixture_guard = EnvVarGuard::set("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &fixture_path);
+    set_kimi_secret(&tempdir);
+    write_placebo_shim(&shim_path);
+    let harness = spawn_kimi_switch_fixture(&tempdir, &shim_path).await;
+    start_primary(&harness).await;
+    let client = http().await;
+    let created: Value = client
+        .post(format!("{}/v1/sessions", harness.base_url))
+        .header("Authorization", session_bearer())
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("create session")
+        .json()
+        .await
+        .expect("create json");
+    let session_id = created["data"]["id"]
+        .as_str()
+        .expect("session id")
+        .to_owned();
+    let (status, body) = switch_request(&harness, "kimi").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let delete = client
+        .post(format!(
+            "{}/v1/sessions/{session_id}/delete",
+            harness.base_url
+        ))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("delete");
+    assert_eq!(delete.status(), StatusCode::CONFLICT);
+    let body: Value = delete.json().await.expect("delete json");
+    assert_eq!(body["error"]["code"], "session.agent_mismatch");
+    let record = harness
+        .state
+        .read(move |store| store.get_session(&session_id))
+        .await
+        .expect("session lookup")
+        .expect("session kept");
+    assert_eq!(record.agent_id, "opencode");
+}
+
+#[tokio::test]
 async fn agent_switch_conflicting_target_is_rejected_while_journal_incomplete() {
     let tempdir = TempDir::new().expect("tempdir");
     let shim_path = tempdir.path().join("kimi-shim");

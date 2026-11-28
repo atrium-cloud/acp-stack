@@ -785,6 +785,15 @@ impl AgentSupervisor {
             return Ok(None);
         };
         let bridge = self.bridge().await?;
+        // Another Agent may answer an unknown id with success, which would wipe a row
+        // whose session the owning Agent still holds and lists back in later.
+        if record.agent_id != bridge.agent_id() {
+            return Err(StackError::SessionAgentMismatch {
+                id: record.id,
+                agent_id: record.agent_id,
+                running_agent_id: bridge.agent_id().to_owned(),
+            });
+        }
         bridge
             .delete_session(AcpSessionId::new(record.agent_session_id.clone()))
             .await?;

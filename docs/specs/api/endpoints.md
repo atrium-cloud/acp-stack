@@ -963,9 +963,10 @@ The `agent.inference_*` codes carry a sanitized public message of the form `"inf
 - Tier: `session`
 - Request: none.
 - Response: includes a `deleted` boolean.
-- Errors: `501 agent.unsupported_capability` is returned when the agent does not advertise `sessionCapabilities.delete`. The local row is kept.
+- Errors: `501 agent.unsupported_capability` is returned when the agent does not advertise `sessionCapabilities.delete`, and `409 session.agent_mismatch` when the running Agent is a different one from the Agent that owns the session. The local row is kept.
 - Notes:
     - Forwards ACP `session/delete` and hard-deletes local history, the session's subagent sessions included.
+    - A delete is served by the Agent that owns the session, so it runs while that Agent is the running one.
     - The deletion leaves a tombstone per deleted session: `GET /v1/sessions/-/changes` reports it with `deleted: true`, and the other per-session routes answer the id with `410 session.deleted`.
     - Tombstones are pruned 30 days after the deletion. The id then answers `404 session.not_found`, and the feed's `pruned_through` tells a reader further behind than that to re-read from `0`.
     - Idempotent: an unknown or already-deleted id returns success with `deleted: false` and never dials the agent.

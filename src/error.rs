@@ -831,6 +831,15 @@ pub enum StackError {
     #[error("session `{id}` is closed")]
     SessionClosed { id: String },
 
+    #[error(
+        "session `{id}` belongs to agent `{agent_id}`, not the running agent `{running_agent_id}`"
+    )]
+    SessionAgentMismatch {
+        id: String,
+        agent_id: String,
+        running_agent_id: String,
+    },
+
     /// The id names a subagent session, which belongs to the agent that
     /// announced it; the client may read it but not drive it.
     #[error("session `{id}` is a subagent session and accepts no client mutations")]

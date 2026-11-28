@@ -30,6 +30,7 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
     Some(match err {
         SessionNotFound { .. } => "session.not_found",
         SessionClosed { .. } => "session.closed",
+        SessionAgentMismatch { .. } => "session.agent_mismatch",
         SubagentSessionRestricted { .. } => "session.subagent_restricted",
         SubagentCancelUnavailable { .. } => "session.subagent_cancel_unavailable",
         SessionDeleted { .. } => "session.deleted",
@@ -55,6 +56,13 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
     Some(match err {
         SessionNotFound { id } => format!("session `{id}` was not found"),
         SessionClosed { id } => format!("session `{id}` is closed"),
+        SessionAgentMismatch {
+            id,
+            agent_id,
+            running_agent_id,
+        } => format!(
+            "session `{id}` belongs to agent `{agent_id}`, not the running agent `{running_agent_id}`"
+        ),
         SubagentSessionRestricted { id } => {
             format!("session `{id}` is a subagent session and accepts no client mutations")
         }
@@ -110,6 +118,7 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
             StatusCode::NOT_FOUND
         }
         SessionClosed { .. }
+        | SessionAgentMismatch { .. }
         | SubagentSessionRestricted { .. }
         | SubagentCancelUnavailable { .. }
         | PromptInFlight { .. }
