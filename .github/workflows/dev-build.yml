@@ -30,7 +30,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99.1"
+          toolchain: "1.100.0"
           targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
 
       - uses: mlugg/setup-zig@v2
