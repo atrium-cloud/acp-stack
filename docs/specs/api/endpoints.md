@@ -1029,7 +1029,7 @@ The `agent.inference_*` codes carry a sanitized public message of the form `"inf
 
 ## Workspace Files
 
-Workspace routes are session-tier. Paths are workspace-relative. The runtime rejects absolute paths, NUL bytes, `..` traversal, symlink escapes, and reads, writes, and uploads above `workspace.max_file_bytes`. Symlinks that resolve inside the root are followed: a write through one replaces the file it leads to and keeps the link.
+Workspace routes are session-tier. Paths are workspace-relative, and `GET /v1/files/download` also takes an absolute path as described below. The runtime rejects other absolute paths, NUL bytes, `..` traversal, symlink escapes, and reads, writes, and uploads above `workspace.max_file_bytes`. Symlinks that resolve inside the root are followed: a write through one replaces the file it leads to and keeps the link.
 
 ### `GET /v1/workspace`
 
@@ -1067,7 +1067,7 @@ Workspace routes are session-tier. Paths are workspace-relative. The runtime rej
 ### `GET /v1/files/download?path=...`
 
 - Tier: `session`
-- Request: `path` query parameter.
+- Request: `path` query parameter, workspace-relative or absolute. With `[workspace.sandbox].workload_user` set, an absolute path opens the file with the identity's credentials, so it reaches any regular file the identity can read outside the sandbox masks (the runtime's config and state directories, `mask_paths`, and `mask_files`). A masked location returns `404 workspace.not_found`, as a missing file does. Without one, an absolute path returns `400 workspace.path_invalid`.
 - Response: streams raw file bytes. Not wrapped in the response envelope.
 - Notes: `Content-Length` is the opened file's size. The stream has no size cap or total deadline and follows the reader's pace. The connection aborts mid-body if the file shrinks during the download or the server begins shutdown. A file that grows is sent up to its size at open. During shutdown, a download whose client has stopped reading is closed 10 seconds after every other in-flight request has returned its response.
 

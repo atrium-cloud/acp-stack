@@ -120,6 +120,22 @@ pub fn sensitive_mask_paths(home: &Path, sandbox: &SandboxConfig) -> Vec<PathBuf
     paths
 }
 
+/// Every masked directory and file, declared and, where it resolves, canonical, so a mask reached
+/// through a symlink still matches.
+pub fn masked_locations(home: &Path, sandbox: &SandboxConfig) -> Vec<PathBuf> {
+    sensitive_mask_paths(home, sandbox)
+        .into_iter()
+        .chain(sandbox.mask_files.iter().map(PathBuf::from))
+        .flat_map(|path| [std::fs::canonicalize(&path).ok(), Some(path)])
+        .flatten()
+        .collect()
+}
+
+/// Whether `resolved` is a masked location or lies below one, compared by path component.
+pub fn is_masked(resolved: &Path, masks: &[PathBuf]) -> bool {
+    masks.iter().any(|mask| resolved.starts_with(mask))
+}
+
 /// Wrap `program`/`args` according to `profile`; a declared `network` extension (`unshare` only) also moves the spawn into an isolated network namespace.
 /// `home` is the runtime home whose config and state directories get masked.
 pub fn wrap(
@@ -1144,6 +1160,20 @@ mod tests {
             mask_file_index < setpriv_index,
             "masking must run while caps are still held"
         );
+    }
+
+    #[test]
+    fn masks_match_by_path_component() {
+        let masks = [
+            PathBuf::from("/var/lib/network-egress"),
+            PathBuf::from("/run/host-control.sock"),
+        ];
+        assert!(is_masked(Path::new("/var/lib/network-egress/key"), &masks));
+        assert!(is_masked(Path::new("/run/host-control.sock"), &masks));
+        assert!(!is_masked(
+            Path::new("/var/lib/network-egress-other/a.png"),
+            &masks
+        ));
     }
 
     /// Config validation rejects `mask_files` under bwrap and custom, so a declaration

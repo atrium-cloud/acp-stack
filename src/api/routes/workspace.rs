@@ -1,3 +1,4 @@
+use std::os::fd::AsRawFd as _;
 use std::path::{Path, PathBuf};
 
 use axum::Extension;
@@ -16,7 +17,7 @@ use super::super::core::AppState;
 use crate::auth::KeyKind;
 use crate::envelope::ApiSuccess;
 use crate::error::StackError;
-use crate::runtime::sandbox::SandboxProfile;
+use crate::runtime::sandbox::{self, SandboxProfile};
 use crate::workload_fs::{Anchor, DEFAULT_JOB_TIMEOUT};
 use crate::workspace::{self, FileMetadata, FileOpen, FileRead, PathIntent, WorkspaceListing};
 
@@ -24,6 +25,8 @@ use crate::workspace::{self, FileMetadata, FileOpen, FileRead, PathIntent, Works
 
 /// Largest read a download body makes per chunk, which bounds the file data one download holds.
 const DOWNLOAD_CHUNK_BYTES: usize = 64 * 1024;
+/// Where the kernel names each open descriptor's file by its path in the runtime's mounts.
+const PROC_SELF_FD: &str = "/proc/self/fd";
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct WorkspaceMetadataResponse {
@@ -124,7 +127,14 @@ pub(crate) async fn files_download_handler(
     State(state): State<AppState>,
     Query(params): Query<FilesPathParams>,
 ) -> std::result::Result<Response, StackError> {
-    let opened = open_workspace_file(&state, &params.path).await?;
+    let profile = SandboxProfile::resolve(&state.config.workspace.sandbox)?;
+    let opened = open_workspace_file(
+        &profile,
+        &state.runtime_paths.home,
+        &state.config.workspace.root,
+        &params.path,
+    )
+    .await?;
     let filename = Path::new(&params.path)
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
@@ -550,7 +560,17 @@ async fn run_in_workspace<T: Send + 'static>(
     job: impl FnOnce(&Anchor, &Path, &str) -> crate::error::Result<T> + Send + 'static,
 ) -> std::result::Result<T, StackError> {
     let relative = workspace::workspace_relative_path(requested, intent)?;
-    let root = PathBuf::from(root);
+    run_below(profile, PathBuf::from(root), relative, requested, job).await
+}
+
+/// Run `job` on an already validated `relative` path below `root`, as [`run_in_workspace`] does.
+async fn run_below<T: Send + 'static>(
+    profile: &SandboxProfile,
+    root: PathBuf,
+    relative: PathBuf,
+    requested: &str,
+    job: impl FnOnce(&Anchor, &Path, &str) -> crate::error::Result<T> + Send + 'static,
+) -> std::result::Result<T, StackError> {
     let requested = requested.to_owned();
     profile
         .executor()
@@ -583,20 +603,51 @@ async fn read_workspace_file(
 }
 
 /// Only the open runs as a workspace job, under the same credentials and timeout as a read. Reads
-/// through the opened handle need no credentials, so the body streams with no job deadline.
+/// through the opened handle need no credentials, so the body streams with no job deadline. An
+/// absolute path walks from `/` on a thread holding the workload identity's credentials.
 async fn open_workspace_file(
-    state: &AppState,
+    profile: &SandboxProfile,
+    home: &Path,
+    root: &str,
     requested: &str,
 ) -> std::result::Result<FileOpen, StackError> {
-    let profile = SandboxProfile::resolve(&state.config.workspace.sandbox)?;
-    run_in_workspace(
-        &profile,
-        &state.config.workspace.root,
-        requested,
-        PathIntent::ReadExisting,
-        workspace::open_file,
-    )
-    .await
+    if !Path::new(requested).is_absolute() {
+        return run_in_workspace(
+            profile,
+            root,
+            requested,
+            PathIntent::ReadExisting,
+            workspace::open_file,
+        )
+        .await;
+    }
+    let relative = workspace::filesystem_relative_path(requested, profile)?;
+    let root = PathBuf::from(workspace::FILESYSTEM_ROOT);
+    let masks = sandbox::masked_locations(home, &profile.config);
+    let hidden = || StackError::WorkspaceNotFound {
+        requested: requested.to_owned(),
+    };
+    // This walk sees the runtime's mounts, not the Agent's masks, so a masked location answers as
+    // missing: by the opened descriptor's own path, or by the resolved request when the open fails.
+    match run_below(profile, root, relative, requested, workspace::open_file).await {
+        Ok(opened) => {
+            let descriptor = Path::new(PROC_SELF_FD).join(opened.file.as_raw_fd().to_string());
+            let resolved =
+                std::fs::read_link(descriptor).map_err(|source| StackError::WorkspaceIo {
+                    requested: requested.to_owned(),
+                    source,
+                })?;
+            if sandbox::is_masked(&resolved, &masks) {
+                Err(hidden())
+            } else {
+                Ok(opened)
+            }
+        }
+        Err(error) => match std::fs::canonicalize(requested) {
+            Ok(resolved) if sandbox::is_masked(&resolved, &masks) => Err(hidden()),
+            _ => Err(error),
+        },
+    }
 }
 
 /// Writes run with the workload identity's credentials when one is declared,
@@ -780,5 +831,107 @@ mod tests {
             received.extend_from_slice(&chunk.expect("chunk"));
         }
         assert_eq!(received, content);
+    }
+
+    fn identity_profile(
+        name: &str,
+        uid: u32,
+        gid: u32,
+        config: crate::config::SandboxConfig,
+    ) -> SandboxProfile {
+        SandboxProfile {
+            config,
+            identity: Some(crate::runtime::sandbox::WorkloadIdentity {
+                name: name.to_owned(),
+                uid,
+                gid,
+                home: PathBuf::from("/home").join(name),
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_absolute_path_is_refused_without_an_identity_or_with_traversal() {
+        let root = workspace_with(b"inside");
+        let absolute = root.path().join(FILE_NAME).to_string_lossy().into_owned();
+        let without_identity = files_download_handler(
+            State(state_for(&root)),
+            Query(FilesPathParams { path: absolute }),
+        )
+        .await;
+        assert!(matches!(
+            without_identity,
+            Err(StackError::WorkspacePathInvalid { .. })
+        ));
+
+        let traversal = open_workspace_file(
+            &identity_profile("agent", 2001, 2001, Default::default()),
+            root.path(),
+            &root.path().to_string_lossy(),
+            "/tmp/../etc/passwd",
+        )
+        .await;
+        assert!(matches!(
+            traversal,
+            Err(StackError::WorkspacePathInvalid { ref reason, .. }) if reason.contains("..")
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires CAP_SETUID/CAP_SETGID and ACPS_TEST_WORKLOAD_USER"]
+    async fn an_absolute_path_outside_the_workspace_downloads_as_the_workload() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let user = std::env::var("ACPS_TEST_WORKLOAD_USER").expect("ACPS_TEST_WORKLOAD_USER");
+        let entry = crate::ownership::lookup_user(&user)
+            .expect("lookup")
+            .expect("workload user exists");
+        let root = workspace_with(b"inside");
+        let shots = tempfile::tempdir().expect("outside the workspace");
+        std::fs::set_permissions(shots.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("open the directory to the workload user");
+        std::fs::write(shots.path().join("a.png"), b"png").expect("shot");
+        std::fs::set_permissions(
+            shots.path().join("a.png"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .expect("readable shot");
+
+        let opened = open_workspace_file(
+            &identity_profile(&user, entry.uid, entry.gid, Default::default()),
+            root.path(),
+            &root.path().to_string_lossy(),
+            &shots.path().join("a.png").to_string_lossy(),
+        )
+        .await
+        .expect("download as the workload");
+        assert_eq!(opened.size, 3);
+
+        let masking = identity_profile(
+            &user,
+            entry.uid,
+            entry.gid,
+            crate::config::SandboxConfig {
+                mask_paths: vec![shots.path().to_string_lossy().into_owned()],
+                ..Default::default()
+            },
+        );
+        let planted = tempfile::tempdir().expect("planted directory");
+        std::fs::set_permissions(planted.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("open the planted directory to the workload user");
+        std::os::unix::fs::symlink(shots.path().join("a.png"), planted.path().join("a.png"))
+            .expect("plant the symlink");
+        // The masked file is refused directly and through the planted symlink.
+        for requested in [shots.path().join("a.png"), planted.path().join("a.png")] {
+            let refused = open_workspace_file(
+                &masking,
+                root.path(),
+                &root.path().to_string_lossy(),
+                &requested.to_string_lossy(),
+            )
+            .await;
+            assert!(matches!(refused, Err(StackError::WorkspaceNotFound { .. })));
+        }
     }
 }

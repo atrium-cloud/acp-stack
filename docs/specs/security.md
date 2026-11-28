@@ -109,7 +109,7 @@ Pending requests expire according to config. Approval and denial decisions are d
 
 ## Workspace Boundary
 
-Workspace paths are resolved under `[workspace].root`. The runtime rejects absolute paths from API callers, `..` traversal, embedded NUL bytes, and reads, writes, and uploads above `workspace.max_file_bytes`. Oversized ones return `413 workspace.too_large`.
+Workspace paths are resolved under `[workspace].root`. The one absolute path API callers may send is a download's, which requires a workload identity and opens the file with the identity's credentials. In every sandbox mode, a download that resolves to a masked file or into a masked directory returns `404 workspace.not_found`, as a missing file does. The runtime rejects other absolute paths from API callers, `..` traversal, embedded NUL bytes, and reads, writes, and uploads above `workspace.max_file_bytes`. Oversized ones return `413 workspace.too_large`.
 
 Workspace reads, writes, uploads, and deletes follow symlinks and hard links like the kernel does, and refuse a path whose resolved form leaves the root with `400 workspace.symlink_escape`. A write through a symlink replaces the file at the end of its chain and keeps the link; a delete of a symlink removes the link. Writes replace the target atomically, and a non-regular target is refused.
 

@@ -225,10 +225,10 @@ Existing-instance apply is serialized through the agent-config mutation file loc
 
 ## Workspace And Files
 
-The workspace API is rooted at `[workspace].root`. All request paths are workspace-relative. The runtime rejects:
+The workspace API is rooted at `[workspace].root`. Request paths are workspace-relative; a download also takes an absolute path, read with the workload identity's credentials. The runtime rejects:
 
 - traversal
-- absolute paths
+- other absolute paths
 - NUL bytes
 - symlink escapes
 

@@ -124,7 +124,7 @@ headers = [{ name = "Authorization", value_ref = "LINEAR_API_KEY" }]
 
 ## Workspace
 
-`[workspace].root` and `[workspace].uploads` must be absolute paths. Workspace API paths are always resolved under `root`; traversal outside the root is rejected.
+`[workspace].root` and `[workspace].uploads` must be absolute paths. Workspace API paths are resolved under `root`; traversal outside the root is rejected. An absolute download path is resolved from `/` with the workload identity's credentials.
 
 `max_file_bytes` caps file reads, writes, and uploads. It is separate from the HTTP request body cap because workspace reads have no inbound request body.
 

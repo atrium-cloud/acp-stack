@@ -21,6 +21,9 @@ const HARD_LINK_REASON: &str = "target has more than one hard link";
 const NOT_REGULAR_REASON: &str = "target is not a regular file";
 const SYMLINK_LOOP_REASON: &str = "symlinks form a loop";
 const OWNER_MISMATCH_REASON: &str = "target is owned by another user";
+const WORKSPACE_RELATIVE_REASON: &str = "must be a workspace-relative path";
+/// Anchor of a walk over an absolute path.
+pub const FILESYSTEM_ROOT: &str = "/";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathIntent {
@@ -30,6 +33,25 @@ pub enum PathIntent {
 
 /// Validate a workspace-relative `requested` path and return it relative to the workspace root.
 pub fn workspace_relative_path(requested: &str, intent: PathIntent) -> Result<PathBuf> {
+    validated_relative_path(Path::new(requested), requested, intent)
+}
+
+/// Validate an absolute `requested` path for reading and return it relative to
+/// [`FILESYSTEM_ROOT`]. A walk from there is sound only as the workload identity, so the path is
+/// refused without one.
+pub fn filesystem_relative_path(requested: &str, profile: &SandboxProfile) -> Result<PathBuf> {
+    match Path::new(requested).strip_prefix(FILESYSTEM_ROOT) {
+        Ok(relative) if profile.identity.is_some() => {
+            validated_relative_path(relative, requested, PathIntent::ReadExisting)
+        }
+        _ => Err(StackError::WorkspacePathInvalid {
+            reason: WORKSPACE_RELATIVE_REASON.to_owned(),
+            requested: requested.to_owned(),
+        }),
+    }
+}
+
+fn validated_relative_path(path: &Path, requested: &str, intent: PathIntent) -> Result<PathBuf> {
     let invalid = |reason: &str| StackError::WorkspacePathInvalid {
         reason: reason.to_owned(),
         requested: requested.to_owned(),
@@ -38,11 +60,11 @@ pub fn workspace_relative_path(requested: &str, intent: PathIntent) -> Result<Pa
         return Err(invalid("contains NUL byte"));
     }
     let mut relative = PathBuf::new();
-    for component in Path::new(requested).components() {
+    for component in path.components() {
         match component {
             Component::ParentDir => return Err(invalid("contains `..` segment")),
             Component::Prefix(_) | Component::RootDir => {
-                return Err(invalid("must be a workspace-relative path"));
+                return Err(invalid(WORKSPACE_RELATIVE_REASON));
             }
             Component::CurDir => {}
             Component::Normal(name) => relative.push(name),
