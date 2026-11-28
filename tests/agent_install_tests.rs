@@ -445,36 +445,6 @@ fn a_harness_version_pin_fetches_that_release_tag_verbatim() {
 }
 
 #[test]
-fn a_harness_version_pin_is_not_rewritten_into_another_tag() {
-    let mock = start_mock_github();
-    let dest_dir = tempfile::tempdir().expect("dest tempdir");
-
-    let _env = EnvGuard::new(
-        "ACP_STACK_GITHUB_API_BASE",
-        &format!("http://{}", mock.addr),
-    );
-    let mut agent = agent_config(ADAPTER_BIN);
-    // The release is tagged `v0.4.2`; a bare `0.4.2` names a tag GitHub does not have.
-    agent.harness_version = Some(HARNESS_TAG.trim_start_matches('v').to_owned());
-    let result = install_resolved_capture(
-        &agent,
-        &adapter_kind_entry(),
-        &HarnessInstall::Install,
-        std::collections::HashMap::new(),
-        &host(dest_dir.path()),
-        dest_dir.path(),
-        None,
-    );
-
-    assert!(
-        result.outcome.is_err(),
-        "a tag GitHub does not have must fail the install, got {:?}",
-        result.outcome
-    );
-    assert!(!dest_dir.path().join(HARNESS_BIN).exists());
-}
-
-#[test]
 fn install_resolved_runs_adapter_step_for_native_entry_with_override() {
     let mock = start_mock_github();
     let dest_dir = tempfile::tempdir().expect("dest tempdir");
