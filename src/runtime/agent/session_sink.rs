@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::MaybeUndefined;
 use agent_client_protocol::v1::schema::{
-    AvailableCommandInput, CursorUpdate, SessionUpdate, SubagentUpdate,
+    AvailableCommandInput, ContentChunk, CursorAnchor, CursorAnchorPosition, CursorUpdate,
+    SessionUpdate, SubagentUpdate,
 };
 use tokio::sync::{Mutex as TokioMutex, oneshot};
 use tokio::task::JoinHandle;
@@ -149,7 +150,7 @@ pub struct StateStoreSessionSink {
     writer: TokioMutex<Option<JoinHandle<()>>>,
     /// Fork anchors per agent session id, keyed by the adapter's own session id. One entry
     /// per open session, updated as the turn streams and taken when it settles.
-    turn_anchors: TokioMutex<HashMap<String, TurnAnchors>>,
+    turn_anchors: TokioMutex<HashMap<String, TurnSlot>>,
     local_session_ids: TokioMutex<LocalSessionIds>,
 }
 
@@ -158,16 +159,82 @@ pub struct StateStoreSessionSink {
 pub struct TurnAnchors {
     /// `messageId` of the turn's last `agent_message_chunk`.
     pub agent_message_id: Option<String>,
-    /// The first fork-capable session cursor the agent announced during the turn. Both
-    /// cursor-announcing adapters announce one per prompt, at intake, naming the position
-    /// just before it.
+    /// The first fork-capable session cursor the agent announced during the turn, anchored
+    /// after the last entity the client held when the turn was dispatched: the position
+    /// just before the turn's prompt.
     pub fork_cursor_id: Option<String>,
 }
 
-/// A first announcement (it carries the anchor) of a cursor `session/fork` accepts.
-fn announces_fork_cursor(update: &CursorUpdate) -> bool {
-    update.anchor.is_some()
-        && matches!(&update.capabilities, MaybeUndefined::Value(capabilities) if capabilities.fork.is_some())
+/// One agent session's anchors: the open turn's, and the entities a live cursor is placed by.
+#[derive(Debug, Default)]
+struct TurnSlot {
+    anchors: TurnAnchors,
+    /// The last entity the client held when the open turn was dispatched.
+    held_before_turn: Option<HeldEntity>,
+    /// The last entity the client holds now.
+    last_held: Option<HeldEntity>,
+}
+
+/// An entity the client holds under an agent-assigned id, which a session cursor can be
+/// anchored to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HeldEntity {
+    UserMessage(String),
+    AgentMessage(String),
+    AgentThought(String),
+    ToolCall(String),
+    Compaction(String),
+}
+
+impl HeldEntity {
+    fn reported_by(update: &SessionUpdate) -> Option<Self> {
+        let message = |chunk: &ContentChunk| chunk.message_id.as_ref().map(|id| id.0.to_string());
+        match update {
+            SessionUpdate::UserMessageChunk(chunk) => message(chunk).map(Self::UserMessage),
+            SessionUpdate::AgentMessageChunk(chunk) => message(chunk).map(Self::AgentMessage),
+            SessionUpdate::AgentThoughtChunk(chunk) => message(chunk).map(Self::AgentThought),
+            SessionUpdate::ToolCall(call) => Some(Self::ToolCall(call.tool_call_id.0.to_string())),
+            SessionUpdate::CompactionUpdate(compaction) => {
+                Some(Self::Compaction(compaction.compaction_id.0.to_string()))
+            }
+            _ => None,
+        }
+    }
+
+    /// The entity a cursor lies directly after; `None` for any other placement, which a
+    /// client must not guess at.
+    fn anchored_after(anchor: &CursorAnchor) -> Option<Self> {
+        let after =
+            |position: &CursorAnchorPosition| matches!(position, CursorAnchorPosition::After);
+        match anchor {
+            CursorAnchor::UserMessage(anchor) if after(&anchor.position) => {
+                Some(Self::UserMessage(anchor.message_id.0.to_string()))
+            }
+            CursorAnchor::AgentMessage(anchor) if after(&anchor.position) => {
+                Some(Self::AgentMessage(anchor.message_id.0.to_string()))
+            }
+            CursorAnchor::AgentThought(anchor) if after(&anchor.position) => {
+                Some(Self::AgentThought(anchor.message_id.0.to_string()))
+            }
+            CursorAnchor::ToolCall(anchor) if after(&anchor.position) => {
+                Some(Self::ToolCall(anchor.tool_call_id.0.to_string()))
+            }
+            CursorAnchor::Compaction(anchor) if after(&anchor.position) => {
+                Some(Self::Compaction(anchor.compaction_id.0.to_string()))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Where a first announcement (it carries the anchor) of a cursor `session/fork` accepts lies.
+fn fork_cursor_placement(update: &CursorUpdate) -> Option<HeldEntity> {
+    let forks = matches!(&update.capabilities, MaybeUndefined::Value(capabilities) if capabilities.fork.is_some());
+    update
+        .anchor
+        .as_ref()
+        .filter(|_| forks)
+        .and_then(HeldEntity::anchored_after)
 }
 
 /// Local session id per agent session id on this target, so a streamed update
@@ -728,27 +795,26 @@ impl SessionEventSink for StateStoreSessionSink {
         Box::pin(async move {
             // A breakpoint fork names a point by the adapter's own ids; this is the only
             // place they arrive.
-            match update {
-                SessionUpdate::AgentMessageChunk(chunk) => {
-                    if let Some(message_id) = chunk.message_id.as_ref() {
-                        self.turn_anchors
-                            .lock()
-                            .await
-                            .entry(agent_session_id.to_owned())
-                            .or_default()
-                            .agent_message_id = Some(message_id.0.to_string());
-                    }
+            if let Some(entity) = HeldEntity::reported_by(update) {
+                let mut slots = self.turn_anchors.lock().await;
+                let slot = slots.entry(agent_session_id.to_owned()).or_default();
+                if let HeldEntity::AgentMessage(message_id) = &entity {
+                    slot.anchors.agent_message_id = Some(message_id.clone());
                 }
-                SessionUpdate::CursorUpdate(cursor) if announces_fork_cursor(cursor) => {
-                    self.turn_anchors
-                        .lock()
-                        .await
-                        .entry(agent_session_id.to_owned())
-                        .or_default()
+                slot.last_held = Some(entity);
+            } else if let SessionUpdate::CursorUpdate(cursor) = update
+                && let Some(placement) = fork_cursor_placement(cursor)
+            {
+                // A live prompt is never reported to its sender, so its cursor lies after the
+                // last entity the client held when it was sent. Any other cursor names some
+                // other position.
+                let mut slots = self.turn_anchors.lock().await;
+                let slot = slots.entry(agent_session_id.to_owned()).or_default();
+                if slot.held_before_turn.as_ref() == Some(&placement) {
+                    slot.anchors
                         .fork_cursor_id
                         .get_or_insert_with(|| cursor.cursor_id.0.to_string());
                 }
-                _ => {}
             }
             // Only tool-call updates carry diff content; skipping the session
             // lookup otherwise keeps chunk-heavy streams off the state database.
@@ -860,11 +926,10 @@ impl SessionEventSink for StateStoreSessionSink {
         agent_session_id: &'a str,
     ) -> futures::future::BoxFuture<'a, TurnAnchors> {
         Box::pin(async move {
-            self.turn_anchors
-                .lock()
-                .await
-                .remove(agent_session_id)
-                .unwrap_or_default()
+            let mut slots = self.turn_anchors.lock().await;
+            let slot = slots.entry(agent_session_id.to_owned()).or_default();
+            slot.held_before_turn = slot.last_held.clone();
+            std::mem::take(&mut slot.anchors)
         })
     }
 

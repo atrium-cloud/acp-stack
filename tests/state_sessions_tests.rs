@@ -1510,6 +1510,7 @@ fn fork_child(
             },
             parent_id,
             held_through_prompt_id,
+            true,
         )
         .expect("fork child inserted");
 }

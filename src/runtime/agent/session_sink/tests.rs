@@ -1116,12 +1116,15 @@ async fn the_last_stamped_chunk_id_is_taken_once_per_session() {
     );
 }
 
+/// The cursor before a live prompt lies after the last entity the client held when the
+/// prompt was sent; a cursor anchored anywhere else names another position.
 #[tokio::test]
-async fn the_first_announced_fork_cursor_of_a_turn_is_kept() {
+async fn the_first_cursor_anchored_before_the_prompt_is_kept() {
     use crate::runtime::agent::session_sink::{SessionEventSink, StateStoreSessionSink};
     use agent_client_protocol::v1::schema::{
-        CursorAnchor, CursorAnchorPosition, CursorCapabilities, CursorForkCapabilities,
-        CursorMessageAnchor, CursorUpdate, SessionUpdate,
+        ContentBlock, ContentChunk, CursorAnchor, CursorAnchorPosition, CursorCapabilities,
+        CursorForkCapabilities, CursorMessageAnchor, CursorUpdate, MessageId, SessionUpdate,
+        TextContent,
     };
 
     let tempdir = tempfile::tempdir().expect("tempdir");
@@ -1131,41 +1134,52 @@ async fn the_first_announced_fork_cursor_of_a_turn_is_kept() {
         "target".to_owned(),
         StateHandle::start(store).expect("start state handle"),
     );
-    let anchor = || {
-        CursorAnchor::AgentMessage(CursorMessageAnchor::new(
-            "msg_prev",
-            CursorAnchorPosition::After,
-        ))
+    let anchor = |message_id: &'static str, position| {
+        CursorAnchor::AgentMessage(CursorMessageAnchor::new(message_id, position))
     };
     let fork_capable = || CursorCapabilities::new().fork(CursorForkCapabilities::new());
-    let announce = |id: &str| {
+    let announce = |id: &str, anchor: CursorAnchor| {
         SessionUpdate::CursorUpdate(
             CursorUpdate::new(id)
-                .anchor(anchor())
+                .anchor(anchor)
                 .capabilities(fork_capable()),
         )
     };
+    let after_prev = || anchor("msg_prev", CursorAnchorPosition::After);
 
-    // A patch to a known cursor carries no anchor, and a cursor fork does not accept is
-    // no fork point.
+    // The previous turn's last message, then the dispatch of the next prompt.
     sink.capture_session_update(
         "agent_sess_1",
-        &SessionUpdate::CursorUpdate(CursorUpdate::new("cur_patch").capabilities(fork_capable())),
-    )
-    .await;
-    sink.capture_session_update(
-        "agent_sess_1",
-        &SessionUpdate::CursorUpdate(
-            CursorUpdate::new("cur_rewind_only")
-                .anchor(anchor())
-                .capabilities(CursorCapabilities::new()),
+        &SessionUpdate::AgentMessageChunk(
+            ContentChunk::new(ContentBlock::Text(TextContent::new("done")))
+                .message_id(MessageId::new("msg_prev")),
         ),
     )
     .await;
-    sink.capture_session_update("agent_sess_1", &announce("cur_first"))
-        .await;
-    sink.capture_session_update("agent_sess_1", &announce("cur_second"))
-        .await;
+    sink.take_turn_anchors("agent_sess_1").await;
+
+    // A patch to a known cursor carries no anchor, a cursor fork does not accept is no fork
+    // point, and cursors placed anywhere but after `msg_prev` name other positions.
+    for update in [
+        SessionUpdate::CursorUpdate(CursorUpdate::new("cur_patch").capabilities(fork_capable())),
+        SessionUpdate::CursorUpdate(
+            CursorUpdate::new("cur_rewind_only")
+                .anchor(after_prev())
+                .capabilities(CursorCapabilities::new()),
+        ),
+        announce(
+            "cur_earlier",
+            anchor("msg_older", CursorAnchorPosition::After),
+        ),
+        announce(
+            "cur_before",
+            anchor("msg_prev", CursorAnchorPosition::Before),
+        ),
+        announce("cur_first", after_prev()),
+        announce("cur_second", after_prev()),
+    ] {
+        sink.capture_session_update("agent_sess_1", &update).await;
+    }
 
     assert_eq!(
         sink.take_turn_anchors("agent_sess_1")

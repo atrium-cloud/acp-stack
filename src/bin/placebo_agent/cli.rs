@@ -95,7 +95,8 @@ pub(crate) struct AcpArgs {
     pub(crate) agent_message_id: Option<String>,
     /// Announce a fork-capable session cursor at intake of every prompt but a session's
     /// first, when the client advertises `session.cursors`, the way the vendor adapters do.
-    #[arg(long)]
+    /// It is anchored after the previous turn's last message, stamped `--agent-message-id`.
+    #[arg(long, requires = "agent_message_id")]
     pub(crate) announce_fork_cursors: bool,
     /// Announce those cursors after the turn's output, just before the prompt response,
     /// the way pi-acp does.

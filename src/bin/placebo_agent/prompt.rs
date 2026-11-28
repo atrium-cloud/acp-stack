@@ -24,15 +24,17 @@ pub(crate) async fn handle_prompt(
             Error::invalid_params().data(format!("unknown session \"{}\"", request.session_id.0)),
         );
     }
+    // `--announce-fork-cursors` requires the message id the cursor is anchored after.
     let fork_cursor = state
         .lock()
         .await
-        .fork_cursor_for_next_prompt(request.session_id.0.as_ref());
+        .fork_cursor_for_next_prompt(request.session_id.0.as_ref())
+        .zip(args.agent_message_id.clone());
     // Announced at intake, before the turn can fail, as the vendor adapters do.
     if !args.fork_cursors_at_settle
-        && let Some(cursor_id) = fork_cursor.clone()
+        && let Some((cursor_id, anchored_after)) = fork_cursor.clone()
     {
-        connection.send_notification(fork_cursor_update(&request, &args, cursor_id))?;
+        connection.send_notification(fork_cursor_update(&request, anchored_after, cursor_id))?;
     }
     if args.prompt_error {
         return responder.respond_with_error(Error::new(-32000, "fake prompt failure"));
@@ -130,9 +132,9 @@ pub(crate) async fn handle_prompt(
         }
     }
     if args.fork_cursors_at_settle
-        && let Some(cursor_id) = fork_cursor
+        && let Some((cursor_id, anchored_after)) = fork_cursor
     {
-        connection.send_notification(fork_cursor_update(&request, &args, cursor_id))?;
+        connection.send_notification(fork_cursor_update(&request, anchored_after, cursor_id))?;
     }
     // The two off-loop branches below keep the dispatch loop free, so the
     // client's `session/cancel` is processed while the turn is still open.
@@ -445,16 +447,12 @@ fn execute_tool_call_started(session_id: &SessionId) -> SessionNotification {
 }
 
 /// ACP v1 reports no live prompt, so the cursor before it is anchored after the last
-/// entity ahead of it.
+/// entity ahead of it: the previous turn's message, which every turn stamps alike.
 fn fork_cursor_update(
     request: &PromptRequest,
-    args: &AcpArgs,
+    anchored_after: String,
     cursor_id: String,
 ) -> SessionNotification {
-    let anchored_after = args
-        .agent_message_id
-        .clone()
-        .unwrap_or_else(|| UNSTAMPED_CURSOR_ANCHOR.to_owned());
     let anchor = CursorMessageAnchor::new(anchored_after, CursorAnchorPosition::After);
     SessionNotification::new(
         request.session_id.clone(),

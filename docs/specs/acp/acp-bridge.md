@@ -148,9 +148,10 @@ The bridge code lives in `src/runtime/agent/acp_bridge.rs`.
 
 The bridge advertises `clientCapabilities.session.cursors` at `initialize`, so an agent that implements session cursors announces them with `cursor_update`.
 
-- The first announcement of a cursor whose `capabilities.fork` is set, arriving during a prompt's turn, is the fork point just before that prompt. A turn that settles successfully records it on the turn's `prompts` row as `cursor_id`.
+- ACP v1 never reports a prompt to its sender, so the position just before a prompt is the one `after` the last entity the client held when the prompt was sent: the last agent message, agent thought, user message, tool call, or compaction the agent reported with an id.
+- The first announcement of a cursor whose `capabilities.fork` is set and whose anchor names that position, arriving during the prompt's turn, is the prompt's fork point. A turn that settles successfully records it on the turn's `prompts` row as `cursor_id`. A cursor anchored anywhere else is left unrecorded.
 - Cursor updates outside a live turn, including those a `session/load` replays, and later patches to an announced cursor leave the recorded ids unchanged.
-- A cursor belongs to the agent session that announced it, so a fork child's inherited prompts carry none.
+- A cursor belongs to the agent session that announced it, so a fork child's inherited prompts carry none, and keep their acknowledgement only on an adapter with a declared fork-point dialect.
 
 ### Fork Points
 

@@ -377,6 +377,7 @@ fn a_fork_leaves_its_parents_subagent_updates_behind() {
             },
             "sess_root",
             None,
+            true,
         )
         .expect("fork inserted");
 

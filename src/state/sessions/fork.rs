@@ -75,7 +75,9 @@ impl StateStore {
     ///
     /// Copies keep every column but the row id, the session id, and `seq`, so
     /// a carried payload still names the prompt row that recorded its turn.
-    /// Copies take the child's own seqs, contiguous from 1 in log order.
+    /// Copies take the child's own seqs, contiguous from 1 in log order. A
+    /// prompt copy carries no `cursor_id`, and keeps its acknowledgement only
+    /// when `dialect_forks_inherited` says the adapter can name it without one.
     pub fn insert_forked_session(
         &self,
         target_id: &str,
@@ -83,6 +85,7 @@ impl StateStore {
         record: NewSessionRecord,
         parent_session_id: &str,
         held_through_prompt_id: Option<&str>,
+        dialect_forks_inherited: bool,
     ) -> Result<SessionRecord> {
         validate_json_payload(self.connection(), &record.metadata_json)?;
         let mut row = new_active_session_row(target_id, agent_session_id, record);
@@ -119,7 +122,7 @@ impl StateStore {
                      agent_message_id)
                 SELECT ?1, ?2, created_at, updated_at, status, stop_reason,
                        error_code, error_message, prompt_json, message_id,
-                       message_id_acknowledged, failure_class, failure_detail_json,
+                       message_id_acknowledged AND ?4, failure_class, failure_detail_json,
                        agent_message_id
                 FROM prompts
                 WHERE id = ?3
@@ -127,7 +130,12 @@ impl StateStore {
             )?;
             for (parent_prompt_id, created_at) in held_prompts {
                 let prompt_id = next_prompt_id();
-                copy_prompt.execute(params![prompt_id, row.id, parent_prompt_id])?;
+                copy_prompt.execute(params![
+                    prompt_id,
+                    row.id,
+                    parent_prompt_id,
+                    dialect_forks_inherited
+                ])?;
                 copied.push(("prompts", prompt_id, created_at));
             }
         }

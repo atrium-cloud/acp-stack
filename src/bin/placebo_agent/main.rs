@@ -57,8 +57,6 @@ const FIRST_CHUNK: &str = "chunk-1";
 const SECOND_CHUNK: &str = "chunk-2";
 /// `cursorId` of the fork cursor announced for a session's Nth prompt is this plus N.
 const FORK_CURSOR_PREFIX: &str = "cursor_prompt_";
-/// The entity a v1 cursor is anchored after when the agent stamps no message ids.
-const UNSTAMPED_CURSOR_ANCHOR: &str = "placebo_previous_entity";
 /// Text of the `--emit-update-after-answer` chunk, followed by the answered method.
 const AFTER_ANSWER_CHUNK_PREFIX: &str = "after-answer:";
 const DEFAULT_CWD: &str = "/tmp";

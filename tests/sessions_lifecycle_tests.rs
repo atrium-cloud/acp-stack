@@ -1185,12 +1185,17 @@ async fn prompt_cursor_ids(harness: &Harness, prompt_ids: &[String]) -> Vec<Opti
         .expect("prompt cursor lookup")
 }
 
+/// What the placebo stamps on every agent message chunk, so its cursors can be anchored.
+const TURN_MESSAGE_ID: &str = "msg_placebo_turn";
+
 #[tokio::test]
 async fn a_breakpoint_fork_names_the_cursor_the_agent_announced_for_the_prompt() {
     let record = tempfile::tempdir().expect("record dir");
     let record_path = record.path().join("forks.jsonl");
     let harness = Harness::spawn_with(|config| {
         config.agent.args.extend([
+            "--agent-message-id".to_owned(),
+            TURN_MESSAGE_ID.to_owned(),
             "--announce-fork-cursors".to_owned(),
             "--cursorless-prompt".to_owned(),
             "3".to_owned(),
@@ -1238,13 +1243,16 @@ async fn a_breakpoint_fork_names_the_cursor_the_agent_announced_for_the_prompt()
 }
 
 /// pi-acp announces a prompt's cursor once the turn's output is out, just before it
-/// answers the prompt.
+/// answers the prompt. Its cursors stay with the session that announced them, and it
+/// declares no dialect, so a fork's inherited prompts cannot be named.
 #[tokio::test]
 async fn a_cursor_announced_as_the_turn_settles_names_its_prompt() {
     let record = tempfile::tempdir().expect("record dir");
     let record_path = record.path().join("forks.jsonl");
     let harness = Harness::spawn_with(|config| {
         config.agent.args.extend([
+            "--agent-message-id".to_owned(),
+            TURN_MESSAGE_ID.to_owned(),
             "--announce-fork-cursors".to_owned(),
             "--fork-cursors-at-settle".to_owned(),
             "--fork-record".to_owned(),
@@ -1256,16 +1264,49 @@ async fn a_cursor_announced_as_the_turn_settles_names_its_prompt() {
     let (first_prompt_id, _) = submit_and_settle_ids(&harness, &session_id, "first turn").await;
     let (second_prompt_id, second_message_id) =
         submit_and_settle_ids(&harness, &session_id, "second turn").await;
+    let (third_prompt_id, third_message_id) =
+        submit_and_settle_ids(&harness, &session_id, "third turn").await;
     assert_eq!(
-        prompt_cursor_ids(&harness, &[first_prompt_id, second_prompt_id]).await,
-        [None, Some("cursor_prompt_2".to_owned())]
+        prompt_cursor_ids(
+            &harness,
+            &[first_prompt_id, second_prompt_id, third_prompt_id]
+        )
+        .await,
+        [
+            None,
+            Some("cursor_prompt_2".to_owned()),
+            Some("cursor_prompt_3".to_owned())
+        ]
     );
 
-    fork_at(&harness, &session_id, Some(&second_message_id)).await;
+    let child_id = fork_at(&harness, &session_id, Some(&third_message_id)).await;
     assert_eq!(
         recorded_forks(&record_path),
-        [fork_keys(Some("cursor_prompt_2"), None)]
+        [fork_keys(Some("cursor_prompt_3"), None)]
     );
+
+    let inherited = {
+        let child_id = child_id.clone();
+        let second_message_id = second_message_id.clone();
+        harness
+            .state
+            .read(move |store| store.get_prompt_by_message_id(&child_id, &second_message_id))
+            .await
+            .expect("inherited prompt lookup")
+            .expect("the child inherits the second prompt")
+    };
+    assert!(!inherited.message_id_acknowledged);
+    let refused = http()
+        .post(format!(
+            "{}/v1/sessions/{}/fork",
+            harness.base_url, child_id
+        ))
+        .header("Authorization", session_bearer())
+        .json(&json!({ "message_id": second_message_id }))
+        .send()
+        .await
+        .expect("fork");
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
 }
 
 /// Cursors belong to the session that announced them, so a forked child's inherited
@@ -1371,13 +1412,7 @@ async fn fork_at_the_first_prompt_is_refused_for_an_air_adapter() {
 
     let home = tempfile::tempdir().expect("home");
     write_air_registry_override(home.path());
-    let harness = Harness::spawn_with_and_home(
-        |config| {
-            config.agent.args.extend([]);
-        },
-        home.path().to_path_buf(),
-    )
-    .await;
+    let harness = Harness::spawn_with_and_home(|_| {}, home.path().to_path_buf()).await;
     let client = http();
     let session_id = create_session(&harness).await;
 

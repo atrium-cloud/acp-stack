@@ -596,6 +596,9 @@ impl AgentSupervisor {
         };
         let parent_target_id = parent.target_id.clone();
         let parent_session_id = parent_session_id.to_owned();
+        // Cursors stay with the session that announced them, so only a dialect can name an
+        // inherited prompt.
+        let dialect_forks_inherited = self.fork_point_dialect().await.is_some();
         // Only the child row insert and its read-back propagate: once the agent
         // confirmed `session/fork`, a failed audit write must not drop the child row.
         let record = state
@@ -606,6 +609,7 @@ impl AgentSupervisor {
                     record,
                     &parent_session_id,
                     held_through_prompt_id.as_deref(),
+                    dialect_forks_inherited,
                 )?;
                 let payload = json!({
                     "target_id": &parent_target_id,
