@@ -40,6 +40,9 @@ pub enum ForkPoint {
     /// vendor adapters keep the named point, so the id named here is the one
     /// from the turn before the prompt the client asked to cut at.
     AirMessageId(String),
+    /// The standard `cursorId`: an agent session cursor naming the position just before
+    /// the prompt. Never sent together with an AIR fork point, which codex-acp rejects.
+    Cursor(String),
 }
 
 /// Asks the agent to cancel a session-opening request whose caller stopped waiting, as
@@ -327,6 +330,9 @@ impl AcpBridge {
             }
             Some(ForkPoint::AirMessageId(message_id)) => {
                 request = request.meta(air_fork_point_meta(message_id));
+            }
+            Some(ForkPoint::Cursor(cursor_id)) => {
+                request = request.cursor_id(CursorId::new(Arc::<str>::from(cursor_id.as_str())));
             }
             None => {}
         }

@@ -836,10 +836,11 @@ Session creation proceeds when a configured `agent.mode`, model, `agent.effort`,
 - Breakpoint semantics: a fork with `message_id` ends just before the named prompt. The named prompt, its turn, and everything after it stay out of the fork, which leaves the fork ready to receive an edited version of that prompt. acp-stack requires this cut of every adapter it forks at a message id.
 - Child history: the child's durable record opens with the part of the parent's conversation the fork holds, written with the child row in one transaction.
     - `GET /v1/sessions/{id}/events` on the child replays the parent's conversation rows up to the fork point in the parent's log order, numbered from `seq` 1 in the child's log, followed by the child's own `session.forked` row. The parent's lifecycle rows stay with the parent.
-    - The child's prompt rows include the parent's prompts up to the fork point, with their message ids and acknowledgement, so the child can itself be forked at an inherited `message_id`.
+    - The child's prompt rows include the parent's prompts up to the fork point, with their message ids and acknowledgement, so the child can itself be forked at an inherited `message_id` through the adapter's fork-point dialect.
     - See [Fork Inheritance](../state-logging.md#fork-inheritance) for which rows are carried and how they are keyed.
 - `message_id` is always an acp-stack prompt message id from the parent session, acknowledged by the agent. When the parent is itself a fork, its inherited prompts qualify too. acp-stack translates it into the fork point the running adapter reads:
-    - Adapters on the acp-stack dialect receive it verbatim as `_meta.acpStack.messageId` and perform the cut themselves.
+    - A prompt the agent announced a session cursor for is sent as the standard `cursorId`. When the agent rejects the cursor, the fork is retried once at the dialect's point below.
+    - Otherwise, adapters on the acp-stack dialect receive it verbatim as `_meta.acpStack.messageId` and perform the cut themselves.
     - Adapters declared `fork_point = "jetbrains-air"` in the agent catalog receive `_meta.jetbrains.air.fork`, which they resolve inclusively. They are handed the agent message id anchoring the turn before the named prompt, so the cut lands in the same place.
 - Naming the first prompt of a session is refused with `400 request.invalid_param` on an adapter that resolves the fork point inclusively: there is no preceding turn to keep, and a fork of nothing is a new session (`POST /v1/sessions`).
 

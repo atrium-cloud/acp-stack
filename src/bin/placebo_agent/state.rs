@@ -4,6 +4,19 @@ use super::*;
 /// the write-gate can read a mode applied through `session/set_config_option`.
 const MODE_CONFIG_OPTION_ID: &str = "mode";
 
+/// Append `value` to `path` as one JSON line, creating the file on first use.
+pub(crate) fn append_json_line(
+    path: &std::path::Path,
+    value: &serde_json::Value,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    writeln!(file, "{value}")
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct CreatedSession {
     pub(crate) id: String,
@@ -38,6 +51,8 @@ pub(crate) struct PlaceboState {
     /// The native mode applied via `session/set_mode`, keyed by session id, so the
     /// testflight-write gate can read each session's effective mode.
     pub(crate) native_mode_applied: HashMap<String, String>,
+    /// Prompts received per session, so the session's first gets no cursor.
+    pub(crate) prompt_counts: HashMap<String, u64>,
 }
 
 impl PlaceboState {
@@ -55,7 +70,26 @@ impl PlaceboState {
             config_option_values: BTreeMap::new(),
             mode_configured: false,
             native_mode_applied: HashMap::new(),
+            prompt_counts: HashMap::new(),
         }
+    }
+
+    /// Count a prompt on `session_id` and return the cursor id to announce for it, if any.
+    pub(crate) fn fork_cursor_for_next_prompt(&mut self, session_id: &str) -> Option<String> {
+        let ordinal = self.prompt_counts.entry(session_id.to_owned()).or_insert(0);
+        *ordinal += 1;
+        let ordinal = *ordinal;
+        let advertised = self
+            .client_capabilities
+            .as_ref()
+            .and_then(|caps| caps.session.as_ref())
+            .and_then(|session| session.cursors.as_ref())
+            .is_some();
+        (self.args.announce_fork_cursors
+            && advertised
+            && ordinal > 1
+            && self.args.cursorless_prompt != Some(ordinal))
+        .then(|| format!("{FORK_CURSOR_PREFIX}{ordinal}"))
     }
 
     /// A session's effective mode across both wire lanes: a `mode` config option

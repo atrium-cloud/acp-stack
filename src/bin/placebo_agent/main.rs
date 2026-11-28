@@ -7,21 +7,23 @@ use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1::schema::{
     AgentCapabilities, CancelNotification, ClientCapabilities, CloseSessionRequest,
     CloseSessionResponse, ConfigOptionUpdate, ContentBlock, ContentChunk, CreateTerminalRequest,
-    DeleteSessionRequest, DeleteSessionResponse, ForkSessionRequest, ForkSessionResponse,
-    IdleStateUpdate, IdleStopReason, Implementation, InitializeRequest, InitializeResponse,
-    KillTerminalRequest, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
-    LoadSessionResponse, McpCapabilities, MessageId, NewSessionRequest, NewSessionResponse,
-    PromptCapabilities, PromptRequest, PromptResponse, ReadTextFileRequest, ReleaseTerminalRequest,
-    RequestPermissionOutcome, RequestPermissionRequest, ResumeSessionRequest,
-    ResumeSessionResponse, RunningStateUpdate, SessionCancelCapabilities, SessionCapabilities,
-    SessionCloseCapabilities, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigOptionValue, SessionConfigSelectOption, SessionDeleteCapabilities,
-    SessionForkCapabilities, SessionId, SessionInfo, SessionListCapabilities, SessionMode,
-    SessionModeState, SessionNotification, SessionResumeCapabilities, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
-    SetSessionModeResponse, StateUpdate, StopReason, SubagentSessionCapabilities, SubagentUpdate,
-    TerminalId, TerminalOutputRequest, TextContent, ToolCall, ToolCallStatus, ToolCallUpdate,
-    ToolCallUpdateFields, ToolKind, Usage, WaitForTerminalExitRequest, WriteTextFileRequest,
+    CursorAnchor, CursorAnchorPosition, CursorCapabilities, CursorForkCapabilities,
+    CursorMessageAnchor, CursorUpdate, DeleteSessionRequest, DeleteSessionResponse,
+    ForkSessionRequest, ForkSessionResponse, IdleStateUpdate, IdleStopReason, Implementation,
+    InitializeRequest, InitializeResponse, KillTerminalRequest, ListSessionsRequest,
+    ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, McpCapabilities, MessageId,
+    NewSessionRequest, NewSessionResponse, PromptCapabilities, PromptRequest, PromptResponse,
+    ReadTextFileRequest, ReleaseTerminalRequest, RequestPermissionOutcome,
+    RequestPermissionRequest, ResumeSessionRequest, ResumeSessionResponse, RunningStateUpdate,
+    SessionCancelCapabilities, SessionCapabilities, SessionCloseCapabilities, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigOptionValue, SessionConfigSelectOption,
+    SessionDeleteCapabilities, SessionForkCapabilities, SessionId, SessionInfo,
+    SessionListCapabilities, SessionMode, SessionModeState, SessionNotification,
+    SessionResumeCapabilities, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse, StateUpdate,
+    StopReason, SubagentSessionCapabilities, SubagentUpdate, TerminalId, TerminalOutputRequest,
+    TextContent, ToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind, Usage,
+    WaitForTerminalExitRequest, WriteTextFileRequest,
 };
 use agent_client_protocol::v1::schema::{PermissionOption, PermissionOptionKind};
 use agent_client_protocol::v1::{ConnectionTo, Responder};
@@ -53,6 +55,10 @@ const TESTFLIGHT_MARKER: &str = ".acp-stack-testflight.txt";
 const TESTFLIGHT_CONTENT: &[u8] = b"acp-stack testflight ok\n";
 const FIRST_CHUNK: &str = "chunk-1";
 const SECOND_CHUNK: &str = "chunk-2";
+/// `cursorId` of the fork cursor announced for a session's Nth prompt is this plus N.
+const FORK_CURSOR_PREFIX: &str = "cursor_prompt_";
+/// The entity a v1 cursor is anchored after when the agent stamps no message ids.
+const UNSTAMPED_CURSOR_ANCHOR: &str = "placebo_previous_entity";
 /// Text of the `--emit-update-after-answer` chunk, followed by the answered method.
 const AFTER_ANSWER_CHUNK_PREFIX: &str = "after-answer:";
 const DEFAULT_CWD: &str = "/tmp";

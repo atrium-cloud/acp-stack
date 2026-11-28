@@ -86,11 +86,12 @@ Schema: `migrations/002_auth_failures_schema.sqlite.sql` (and the `.postgres.sql
 
 ## Prompt Lifecycle Columns
 
-Message identity columns: `migrations/017_prompt_message_ids.sqlite.sql` and `migrations/027_prompt_agent_message_ids.sqlite.sql`. Failure classification columns: `migrations/015_prompts_lifecycle_extension.sqlite.sql` (each with a `.postgres.sql` twin). Semantics not visible in the schema:
+Message identity columns: `migrations/017_prompt_message_ids.sqlite.sql`, `migrations/027_prompt_agent_message_ids.sqlite.sql`, and `migrations/031_prompt_cursor_ids.sqlite.sql`. Failure classification columns: `migrations/015_prompts_lifecycle_extension.sqlite.sql` (each with a `.postgres.sql` twin). Semantics not visible in the schema:
 
 - `message_id` is the ACP user prompt message id sent with `session/prompt`.
-- `message_id_acknowledged` is 1 once the agent has confirmed the message id. On the `acp-stack` fork-point dialect that means echoing it back in `_meta.acpStack.messageId` on the prompt response. On the `jetbrains-air` dialect, where the adapter implements no acp-stack extension, a settled prompt response is the confirmation, since the same settled turn produces the `agent_message_id` anchor its fork point is translated from.
+- `message_id_acknowledged` is 1 once the prompt is a valid fork breakpoint: its turn settled with a recorded `cursor_id`, or the agent confirmed the message id through its fork-point dialect. On `acp-stack` that means echoing it back in `_meta.acpStack.messageId` on the prompt response. On `jetbrains-air`, where the adapter implements no acp-stack extension, a settled prompt response is the confirmation, since the same settled turn produces the `agent_message_id` anchor its fork point is translated from.
 - `agent_message_id` is the adapter's own `messageId` from the last `agent_message_chunk` of this turn. It is the point a breakpoint fork names for an adapter that resolves fork points against its own transcript. NULL when the adapter stamps no message id on its chunks.
+- `cursor_id` is the agent's fork-capable session cursor announced during this turn, naming the position just before this prompt. NULL when the agent announced none, after a fork retried at the dialect's point because the agent rejected it, and on prompt rows a fork child inherits.
 - `failure_class` is the internal taxonomy bucket. NULL for non-terminal rows and for terminal rows the taxonomy does not cover.
 - `failure_detail_json` is a class-specific JSON envelope. NULL when no structured detail is captured.
 
@@ -291,9 +292,9 @@ The child receives:
     - `session.config_option_set` records a config change a client made on the parent through `POST /v1/sessions/{id}/config-options`. The child keeps that change's effect in the adapter's forked session and through the inherited `config_option_update` rows.
     - `usage.reported` and `tool.execute` are derived from `session.update` payloads the child already carries verbatim, so each usage report and shell run counts once, on the session that produced it.
     - `session.update` rows carrying a `subagent_update`, and `session.subagent_announced`, describe the parent's own subagents; the fork starts with none.
-- Prompts: a copy of each held prompt row, with the parent's message id, acknowledgement, `agent_message_id` anchor, status, and timestamps. A breakpoint fork of the child resolves an inherited message id exactly as it does on the parent. Copies take fresh prompt ids minted in the parent's submission order, so they sort before every prompt later sent to the child.
+- Prompts: a copy of each held prompt row, with the parent's message id, acknowledgement, `agent_message_id` anchor, status, and timestamps. The `cursor_id` stays with the parent, because a cursor belongs to the agent session that announced it, so a breakpoint fork of the child at an inherited message id goes through the adapter's fork-point dialect. Copies take fresh prompt ids minted in the parent's submission order, so they sort before every prompt later sent to the child.
 
-Copies are verbatim in every column but the row id, `session_id`, and an event's `seq`:
+Copies are verbatim in every column but the row id, `session_id`, an event's `seq`, and a prompt's `cursor_id`:
 
 - A carried payload still names the agent session and the prompt row that recorded it, in `sessionId`, `_meta.acpStack.promptId`, and `prompt_id`. The turn's message id is the identity the child's prompt row shares with its carried chunks.
 - Inherited rows keep their original `created_at`, so a session's inherited rows are exactly its rows older than the session's own `created_at`. The `turns` and `prompt_failures` metrics use this comparison to count a turn once, on the session that ran it, and the session status view uses it to start a new fork at `idle`.

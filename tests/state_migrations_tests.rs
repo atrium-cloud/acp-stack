@@ -33,7 +33,7 @@ fn migrations_are_idempotent() {
 
     assert_eq!(
         store.schema_version().expect("schema version should load"),
-        30
+        31
     );
 }
 
@@ -298,7 +298,7 @@ fn rejects_state_database_from_newer_schema_version() {
     assert!(
         error
             .to_string()
-            .contains("state schema version 99 is newer than supported version 30")
+            .contains("state schema version 99 is newer than supported version 31")
     );
 }
 
@@ -941,7 +941,7 @@ fn migration_015_preserves_rows_inserted_at_schema_14() {
     store.migrate().expect("migration to latest should pass");
     assert_eq!(
         store.schema_version().expect("schema version should load"),
-        30
+        31
     );
     let inspection = Connection::open(&path).expect("sqlite inspection should open");
     let columns = inspection

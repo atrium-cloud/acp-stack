@@ -696,9 +696,14 @@ fn client_capabilities() -> ClientCapabilities {
             .read_text_file(true)
             .write_text_file(true))
         .terminal(true)
-        .session(ClientSessionCapabilities::new().config_options(
-            SessionConfigOptionsCapabilities::new().boolean(BooleanConfigOptionCapabilities::new()),
-        ))
+        .session(
+            ClientSessionCapabilities::new()
+                .config_options(
+                    SessionConfigOptionsCapabilities::new()
+                        .boolean(BooleanConfigOptionCapabilities::new()),
+                )
+                .cursors(SessionCursorsCapabilities::new()),
+        )
         .subagents(agent_client_protocol::v1::schema::SubagentCapabilities::new())
 }
 

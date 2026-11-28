@@ -310,6 +310,43 @@ impl StateStore {
         })
     }
 
+    /// Record or clear the agent's fork-capable session cursor announced during this
+    /// prompt's turn. It names the position just before the prompt, and belongs to the
+    /// agent session that announced it.
+    pub fn set_prompt_cursor_id(&self, prompt_id: &str, cursor_id: Option<&str>) -> Result<()> {
+        let now = current_timestamp();
+        self.persist_with_outbox("prompts", prompt_id, &now, |conn| {
+            let affected = conn.execute(
+                r#"
+                UPDATE prompts
+                SET cursor_id = ?1,
+                    updated_at = ?2
+                WHERE id = ?3
+                "#,
+                params![cursor_id, now, prompt_id],
+            )?;
+            if affected == 0 {
+                return Err(StackError::PromptNotFound {
+                    id: prompt_id.to_owned(),
+                });
+            }
+            bump_prompt_session_change(conn, prompt_id)
+        })
+    }
+
+    pub fn prompt_cursor_id(&self, prompt_id: &str) -> Result<Option<String>> {
+        self.connection()
+            .query_row(
+                "SELECT cursor_id FROM prompts WHERE id = ?1",
+                params![prompt_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| StackError::PromptNotFound {
+                id: prompt_id.to_owned(),
+            })
+    }
+
     /// The prompt submitted immediately before `prompt_id` in the same session.
     /// Prompt ids carry a zero-padded nanosecond prefix, so id order is
     /// submission order.

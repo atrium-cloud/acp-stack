@@ -12,17 +12,17 @@ use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{
     AgentNotification, BooleanConfigOptionCapabilities, CancelNotification, ClientCapabilities,
-    ClientSessionCapabilities, CloseSessionRequest, CreateTerminalRequest, DeleteSessionRequest,
-    FileSystemCapabilities, ForkSessionRequest, ForkSessionResponse, Implementation,
-    InitializeRequest, InitializeResponse, KillTerminalRequest, ListSessionsRequest,
-    ListSessionsResponse, LoadSessionRequest, McpServer, NewSessionRequest, NewSessionResponse,
-    PromptRequest, PromptResponse, ReadTextFileRequest, ReleaseTerminalRequest,
+    ClientSessionCapabilities, CloseSessionRequest, CreateTerminalRequest, CursorId,
+    DeleteSessionRequest, FileSystemCapabilities, ForkSessionRequest, ForkSessionResponse,
+    Implementation, InitializeRequest, InitializeResponse, KillTerminalRequest,
+    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, McpServer, NewSessionRequest,
+    NewSessionResponse, PromptRequest, PromptResponse, ReadTextFileRequest, ReleaseTerminalRequest,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     ResumeSessionRequest, SessionConfigOptionCategory, SessionConfigOptionValue,
-    SessionConfigOptionsCapabilities, SessionConfigValueId, SessionId, SessionInfo, SessionModeId,
-    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
-    SetSessionModeResponse, TerminalOutputRequest, WaitForTerminalExitRequest,
-    WriteTextFileRequest,
+    SessionConfigOptionsCapabilities, SessionConfigValueId, SessionCursorsCapabilities, SessionId,
+    SessionInfo, SessionModeId, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
+    SetSessionModeRequest, SetSessionModeResponse, TerminalOutputRequest,
+    WaitForTerminalExitRequest, WriteTextFileRequest,
 };
 use agent_client_protocol::{Agent, Client};
 use tokio::process::{Child, Command};
@@ -553,11 +553,13 @@ impl AcpBridge {
         self.sink.drain().await;
     }
 
-    /// The adapter's own id for the last agent message of the turn that just
-    /// ended on this session. Taking it clears the slot, so the next turn
-    /// cannot inherit this turn's anchor.
-    pub async fn take_last_agent_message_id(&self, agent_session_id: &str) -> Option<String> {
-        self.sink.take_last_agent_message_id(agent_session_id).await
+    /// The fork anchors the turn that just ended on this session left. Taking them clears
+    /// the slot, so the next turn cannot inherit this turn's anchors.
+    pub async fn take_turn_anchors(
+        &self,
+        agent_session_id: &str,
+    ) -> crate::runtime::agent::session_sink::TurnAnchors {
+        self.sink.take_turn_anchors(agent_session_id).await
     }
 
     /// The configured id of the agent this bridge runs.

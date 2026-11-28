@@ -378,9 +378,11 @@ pub(crate) async fn handle_fork_session(
         cwd,
         additional_directories: _additional_directories,
         mcp_servers: _mcp_servers,
+        cursor_id,
         meta,
         ..
     } = request;
+    let cursor_id = cursor_id.map(|cursor_id| cursor_id.0.to_string());
     let message_id = meta
         .as_ref()
         .and_then(|meta| meta.get("acpStack"))
@@ -395,6 +397,20 @@ pub(crate) async fn handle_fork_session(
         .and_then(|fork| fork.get("messageId"))
         .and_then(serde_json::Value::as_str);
     let mut state = state.lock().await;
+    if let Some(path) = state.args.fork_record.as_ref() {
+        let line = serde_json::json!({
+            "cursorId": cursor_id,
+            "airMessageId": air_message_id,
+            "acpStackMessageId": message_id,
+        });
+        append_json_line(path, &line).map_err(Error::into_internal_error)?;
+    }
+    // codex-acp refuses a request naming both fork points.
+    if cursor_id.is_some() && (air_message_id.is_some() || state.args.reject_fork_cursors) {
+        return responder.respond_with_error(Error::invalid_params().data(format!(
+            "cursor {cursor_id:?} is not a cursor of the session"
+        )));
+    }
     if let Some(expected) = state.args.expect_fork_message_id.as_deref()
         && message_id != Some(expected)
     {

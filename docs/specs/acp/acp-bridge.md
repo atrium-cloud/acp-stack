@@ -141,14 +141,24 @@ Capability flags are read from the ACP `initialize` response: `loadSession` on t
 - Image, audio, and embedded-resource prompt blocks require the matching `promptCapabilities` flag.
 - HTTP and SSE MCP declarations require `mcpCapabilities.http` and `mcpCapabilities.sse`; stdio has no dedicated flag and requires at least one advertised MCP capability.
 - A declaration the advertisement does not cover is dropped from the session rather than failing it (see [MCP Servers](#mcp-servers)); an MCP transport variant the runtime does not model is still a hard failure.
-- Forking at a prompt breakpoint requires `_meta.acpStack.messageId` under `sessionCapabilities.fork` of the effective snapshot, which the agent either advertises itself or receives from a `fork_point = "jetbrains-air"` catalog declaration. An agent with neither is limited to current-head fork.
+- Forking at a prompt breakpoint requires a session cursor recorded for that prompt, or `_meta.acpStack.messageId` under `sessionCapabilities.fork` of the effective snapshot, which the agent either advertises itself or receives from a `fork_point = "jetbrains-air"` catalog declaration. An agent with neither is limited to current-head fork.
 - Unsupported combinations fail locally before a request is dispatched.
 
 The bridge code lives in `src/runtime/agent/acp_bridge.rs`.
 
+### Session Cursors
+
+The bridge advertises `clientCapabilities.session.cursors` at `initialize`, so an agent that implements session cursors announces them with `cursor_update`.
+
+- The first announcement of a cursor whose `capabilities.fork` is set, arriving during a prompt's turn, is the fork point just before that prompt. A turn that settles successfully records it on the turn's `prompts` row as `cursor_id`.
+- Cursor updates outside a live turn, including those a `session/load` replays, and later patches to an announced cursor leave the recorded ids unchanged.
+- A cursor belongs to the agent session that announced it, so a fork child's inherited prompts carry none.
+
+A breakpoint fork at a prompt with a recorded cursor sends the standard `cursorId` and no fork-point `_meta`. An agent that answers it with `-32602` (invalid params) no longer holds the cursor: the fork is retried once at the dialect's point (see [Fork Point Dialects](#fork-point-dialects)), and the stored cursor is dropped when that retry succeeds. When the dialect names no point for the prompt or the retry fails, the original error is returned.
+
 ### Prompt Message IDs (local extension)
 
-ACP v1 assigns message ids on agent-emitted update chunks but has no client-proposed prompt message id. Prompt breakpoints for `session/fork` therefore remain a local extension, tracked in `docs/todos/v0.1.0/phase_5.md` until upstream exposes an equivalent `session/fork` shape. The wire shape rides ACP's `_meta` extensibility point:
+ACP v1 assigns message ids on agent-emitted update chunks but has no client-proposed prompt message id. Prompt breakpoints for adapters that announce no session cursor therefore remain a local extension, tracked in `docs/todos/v0.1.0/phase_5.md`. The wire shape rides ACP's `_meta` extensibility point:
 
 - `session/prompt` requests carry `_meta.acpStack.messageId` with a runtime-generated id.
 - An agent that recorded the id acknowledges it by echoing the same `_meta.acpStack.messageId` shape on the `session/prompt` response. Only acknowledged ids are accepted as fork breakpoints.
@@ -158,16 +168,16 @@ Before ACP 1.0 this extension used the SDK's unstable top-level `messageId`/`use
 
 ### Fork Point Dialects
 
-A breakpoint fork ends just before the named prompt, and the public `message_id` is always an acp-stack prompt message id. Which `_meta` key carries that point to the agent depends on the adapter, declared per adapter as `fork_point` in `data/agents.toml`:
+A breakpoint fork ends just before the named prompt, and the public `message_id` is always an acp-stack prompt message id. A prompt without a recorded session cursor has that point carried to the agent in a `_meta` key that depends on the adapter, declared per adapter as `fork_point` in `data/agents.toml`:
 
 - `acp-stack` (the default) sends `_meta.acpStack.messageId` verbatim. The adapter owns the cut.
 - `jetbrains-air` sends `_meta.jetbrains.air.fork = { version = 1, messageId }`. The adapters on this dialect (`claude-agent-acp`, `codex-acp`) resolve the id against their own transcript and keep the point it names, so acp-stack sends the agent message id anchoring the turn before the named prompt. Naming the first prompt of a session is refused: there is no preceding turn.
 
 The declaration also shapes the reported capability snapshot (see [Reported capability snapshot](#reported-capability-snapshot)), so a consumer of that snapshot sees breakpoint fork support on these adapters.
 
-The anchor is the `messageId` of the last `agent_message_chunk` of a turn, kept on the turn's `prompts` row as `agent_message_id`. An adapter that emits no message id on its chunks leaves no anchor, and a breakpoint fork at the turn after it is refused.
+The anchor is the `messageId` of the last `agent_message_chunk` of a turn, kept on the turn's `prompts` row as `agent_message_id`. An adapter that emits no message id on its chunks leaves no anchor, and a dialect fork at the turn after it is refused.
 
-Adapters on the `jetbrains-air` dialect implement no acp-stack extension, so they never echo `_meta.acpStack.messageId` and could never acknowledge a prompt. For them a settled `session/prompt` response is the acknowledgment, because the same settled turn is what produces the anchor their fork point is translated from.
+A prompt is acknowledged, and so accepted as a breakpoint, once its turn settles with a recorded session cursor, or by its dialect's rule. On `acp-stack` that is the echoed `_meta.acpStack.messageId`. Adapters on `jetbrains-air` implement no acp-stack extension and never echo it, so for them a settled `session/prompt` response is the acknowledgment, because the same settled turn is what produces the anchor their fork point is translated from.
 
 ### Fork History
 

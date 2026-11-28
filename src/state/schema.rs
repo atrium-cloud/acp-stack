@@ -293,6 +293,14 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         sqlite: include_str!("../../migrations/030_session_subagents.sqlite.sql"),
         postgres: include_str!("../../migrations/030_session_subagents.postgres.sql"),
     },
+    Migration {
+        id: 31,
+        name: "prompt_cursor_ids",
+        sqlite_file: "031_prompt_cursor_ids.sqlite.sql",
+        postgres_file: "031_prompt_cursor_ids.postgres.sql",
+        sqlite: include_str!("../../migrations/031_prompt_cursor_ids.sqlite.sql"),
+        postgres: include_str!("../../migrations/031_prompt_cursor_ids.postgres.sql"),
+    },
 ];
 
 /// Read-only accessor for the migration registry, including Postgres SQL.

@@ -1079,11 +1079,12 @@ async fn the_last_stamped_chunk_id_is_taken_once_per_session() {
         TextContent::new("hi"),
     )));
 
-    assert!(
-        sink.take_last_agent_message_id("agent_sess_1")
+    let last_id = async |agent_session_id: &str| {
+        sink.take_turn_anchors(agent_session_id)
             .await
-            .is_none()
-    );
+            .agent_message_id
+    };
+    assert!(last_id("agent_sess_1").await.is_none());
 
     sink.capture_session_update("agent_sess_1", &stamped("msg_a"))
         .await;
@@ -1095,22 +1096,13 @@ async fn the_last_stamped_chunk_id_is_taken_once_per_session() {
     sink.capture_session_update("agent_sess_2", &stamped("msg_other"))
         .await;
 
-    assert_eq!(
-        sink.take_last_agent_message_id("agent_sess_1")
-            .await
-            .as_deref(),
-        Some("msg_b")
-    );
+    assert_eq!(last_id("agent_sess_1").await.as_deref(), Some("msg_b"));
     assert!(
-        sink.take_last_agent_message_id("agent_sess_1")
-            .await
-            .is_none(),
+        last_id("agent_sess_1").await.is_none(),
         "taking clears the slot"
     );
     assert_eq!(
-        sink.take_last_agent_message_id("agent_sess_2")
-            .await
-            .as_deref(),
+        last_id("agent_sess_2").await.as_deref(),
         Some("msg_other"),
         "slots are per agent session"
     );
@@ -1119,10 +1111,75 @@ async fn the_last_stamped_chunk_id_is_taken_once_per_session() {
         .await;
     sink.forget_session("agent_sess_1").await;
     assert!(
-        sink.take_last_agent_message_id("agent_sess_1")
-            .await
-            .is_none(),
+        last_id("agent_sess_1").await.is_none(),
         "forgetting a deleted session clears its slot"
+    );
+}
+
+#[tokio::test]
+async fn the_first_announced_fork_cursor_of_a_turn_is_kept() {
+    use crate::runtime::agent::session_sink::{SessionEventSink, StateStoreSessionSink};
+    use agent_client_protocol::v1::schema::{
+        CursorAnchor, CursorAnchorPosition, CursorCapabilities, CursorForkCapabilities,
+        CursorMessageAnchor, CursorUpdate, SessionUpdate,
+    };
+
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state open");
+    store.migrate().expect("migrate");
+    let sink = StateStoreSessionSink::new(
+        "target".to_owned(),
+        StateHandle::start(store).expect("start state handle"),
+    );
+    let anchor = || {
+        CursorAnchor::AgentMessage(CursorMessageAnchor::new(
+            "msg_prev",
+            CursorAnchorPosition::After,
+        ))
+    };
+    let fork_capable = || CursorCapabilities::new().fork(CursorForkCapabilities::new());
+    let announce = |id: &str| {
+        SessionUpdate::CursorUpdate(
+            CursorUpdate::new(id)
+                .anchor(anchor())
+                .capabilities(fork_capable()),
+        )
+    };
+
+    // A patch to a known cursor carries no anchor, and a cursor fork does not accept is
+    // no fork point.
+    sink.capture_session_update(
+        "agent_sess_1",
+        &SessionUpdate::CursorUpdate(CursorUpdate::new("cur_patch").capabilities(fork_capable())),
+    )
+    .await;
+    sink.capture_session_update(
+        "agent_sess_1",
+        &SessionUpdate::CursorUpdate(
+            CursorUpdate::new("cur_rewind_only")
+                .anchor(anchor())
+                .capabilities(CursorCapabilities::new()),
+        ),
+    )
+    .await;
+    sink.capture_session_update("agent_sess_1", &announce("cur_first"))
+        .await;
+    sink.capture_session_update("agent_sess_1", &announce("cur_second"))
+        .await;
+
+    assert_eq!(
+        sink.take_turn_anchors("agent_sess_1")
+            .await
+            .fork_cursor_id
+            .as_deref(),
+        Some("cur_first")
+    );
+    assert!(
+        sink.take_turn_anchors("agent_sess_1")
+            .await
+            .fork_cursor_id
+            .is_none(),
+        "taking clears the slot"
     );
 }
 

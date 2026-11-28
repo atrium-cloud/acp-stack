@@ -177,3 +177,9 @@ id = 30
 name = "session_subagents"
 sqlite_file = "030_session_subagents.sqlite.sql"
 postgres_file = "030_session_subagents.postgres.sql"
+
+[[migration]]
+id = 31
+name = "prompt_cursor_ids"
+sqlite_file = "031_prompt_cursor_ids.sqlite.sql"
+postgres_file = "031_prompt_cursor_ids.postgres.sql"

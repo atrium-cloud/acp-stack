@@ -97,6 +97,22 @@ pub(crate) struct AcpArgs {
     /// test can drive the anchor acp-stack translates an AIR fork point from.
     #[arg(long)]
     pub(crate) agent_message_id: Option<String>,
+    /// Announce a fork-capable session cursor at intake of every prompt but a session's
+    /// first, when the client advertises `session.cursors`, the way the vendor adapters do.
+    #[arg(long)]
+    pub(crate) announce_fork_cursors: bool,
+    /// Skip the cursor for this 1-based prompt of each session, the way a slash command
+    /// gets none.
+    #[arg(long)]
+    pub(crate) cursorless_prompt: Option<u64>,
+    /// Answer every `session/fork` that names a `cursorId` with `invalidParams`, the way an
+    /// adapter that no longer holds the cursor does.
+    #[arg(long)]
+    pub(crate) reject_fork_cursors: bool,
+    /// Append the fork point keys of each `session/fork` request to this file as one JSON
+    /// line.
+    #[arg(long)]
+    pub(crate) fork_record: Option<PathBuf>,
     /// Drop the `_meta.acpStack.messageId` echo from `PromptResponse`, the way
     /// an adapter that never implemented the acp-stack extension behaves.
     #[arg(long)]

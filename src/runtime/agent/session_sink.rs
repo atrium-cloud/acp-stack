@@ -6,7 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_client_protocol::schema::MaybeUndefined;
-use agent_client_protocol::v1::schema::{AvailableCommandInput, SessionUpdate, SubagentUpdate};
+use agent_client_protocol::v1::schema::{
+    AvailableCommandInput, CursorUpdate, SessionUpdate, SubagentUpdate,
+};
 use tokio::sync::{Mutex as TokioMutex, oneshot};
 use tokio::task::JoinHandle;
 
@@ -68,16 +70,15 @@ pub trait SessionEventSink: Send + Sync + 'static {
         Box::pin(async {})
     }
 
-    /// Remove and return the adapter's own `messageId` from the most recent
-    /// `agent_message_chunk` seen on this session. It is kept in memory rather
-    /// than written per chunk because a turn produces thousands of them and
-    /// only the last one anchors a fork point.
-    fn take_last_agent_message_id<'a>(
+    /// Remove and return the fork anchors seen on this session since the last take. They are
+    /// kept in memory rather than written per update because a turn produces thousands of
+    /// chunks and only the last one anchors a fork point.
+    fn take_turn_anchors<'a>(
         &'a self,
         agent_session_id: &'a str,
-    ) -> futures::future::BoxFuture<'a, Option<String>> {
+    ) -> futures::future::BoxFuture<'a, TurnAnchors> {
         let _ = agent_session_id;
-        Box::pin(async move { None })
+        Box::pin(async move { TurnAnchors::default() })
     }
 
     /// Default working directory for `terminal/create` requests that omit
@@ -146,11 +147,27 @@ pub struct StateStoreSessionSink {
     session_changes: SessionChangesHandle,
     tx: TokioMutex<Option<tokio::sync::mpsc::Sender<SessionWrite>>>,
     writer: TokioMutex<Option<JoinHandle<()>>>,
-    /// Newest `agent_message_chunk` `messageId` per agent session id, keyed by
-    /// the adapter's own session id. One entry per open session, replaced on
-    /// every chunk and taken when the turn settles.
-    last_agent_message_ids: TokioMutex<HashMap<String, String>>,
+    /// Fork anchors per agent session id, keyed by the adapter's own session id. One entry
+    /// per open session, updated as the turn streams and taken when it settles.
+    turn_anchors: TokioMutex<HashMap<String, TurnAnchors>>,
     local_session_ids: TokioMutex<LocalSessionIds>,
+}
+
+/// The adapter-owned ids one turn leaves for a later breakpoint fork.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct TurnAnchors {
+    /// `messageId` of the turn's last `agent_message_chunk`.
+    pub agent_message_id: Option<String>,
+    /// The first fork-capable session cursor the agent announced during the turn. Both
+    /// cursor-announcing adapters announce one per prompt, at intake, naming the position
+    /// just before it.
+    pub fork_cursor_id: Option<String>,
+}
+
+/// A first announcement (it carries the anchor) of a cursor `session/fork` accepts.
+fn announces_fork_cursor(update: &CursorUpdate) -> bool {
+    update.anchor.is_some()
+        && matches!(&update.capabilities, MaybeUndefined::Value(capabilities) if capabilities.fork.is_some())
 }
 
 /// Local session id per agent session id on this target, so a streamed update
@@ -612,7 +629,7 @@ impl StateStoreSessionSink {
             session_changes,
             tx: TokioMutex::new(Some(tx)),
             writer: TokioMutex::new(Some(writer)),
-            last_agent_message_ids: TokioMutex::new(HashMap::new()),
+            turn_anchors: TokioMutex::new(HashMap::new()),
             local_session_ids: TokioMutex::new(LocalSessionIds::default()),
         }
     }
@@ -709,15 +726,29 @@ impl SessionEventSink for StateStoreSessionSink {
         update: &'a SessionUpdate,
     ) -> futures::future::BoxFuture<'a, bool> {
         Box::pin(async move {
-            // An adapter that resolves a fork point against its own transcript
-            // needs one of its own ids; this is the only place they arrive.
-            if let SessionUpdate::AgentMessageChunk(chunk) = update
-                && let Some(message_id) = chunk.message_id.as_ref()
-            {
-                self.last_agent_message_ids
-                    .lock()
-                    .await
-                    .insert(agent_session_id.to_owned(), message_id.0.to_string());
+            // A breakpoint fork names a point by the adapter's own ids; this is the only
+            // place they arrive.
+            match update {
+                SessionUpdate::AgentMessageChunk(chunk) => {
+                    if let Some(message_id) = chunk.message_id.as_ref() {
+                        self.turn_anchors
+                            .lock()
+                            .await
+                            .entry(agent_session_id.to_owned())
+                            .or_default()
+                            .agent_message_id = Some(message_id.0.to_string());
+                    }
+                }
+                SessionUpdate::CursorUpdate(cursor) if announces_fork_cursor(cursor) => {
+                    self.turn_anchors
+                        .lock()
+                        .await
+                        .entry(agent_session_id.to_owned())
+                        .or_default()
+                        .fork_cursor_id
+                        .get_or_insert_with(|| cursor.cursor_id.0.to_string());
+                }
+                _ => {}
             }
             // Only tool-call updates carry diff content; skipping the session
             // lookup otherwise keeps chunk-heavy streams off the state database.
@@ -819,23 +850,21 @@ impl SessionEventSink for StateStoreSessionSink {
                 cache.ids.remove(agent_session_id);
                 cache.generation += 1;
             }
-            // An unsettled turn's anchor must not carry over to a re-created session.
-            self.last_agent_message_ids
-                .lock()
-                .await
-                .remove(agent_session_id);
+            // An unsettled turn's anchors must not carry over to a re-created session.
+            self.turn_anchors.lock().await.remove(agent_session_id);
         })
     }
 
-    fn take_last_agent_message_id<'a>(
+    fn take_turn_anchors<'a>(
         &'a self,
         agent_session_id: &'a str,
-    ) -> futures::future::BoxFuture<'a, Option<String>> {
+    ) -> futures::future::BoxFuture<'a, TurnAnchors> {
         Box::pin(async move {
-            self.last_agent_message_ids
+            self.turn_anchors
                 .lock()
                 .await
                 .remove(agent_session_id)
+                .unwrap_or_default()
         })
     }
 

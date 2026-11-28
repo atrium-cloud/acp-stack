@@ -67,9 +67,9 @@ impl AgentSupervisor {
         // writer queue after its prompt task settled. Wait them out so the
         // user row below lands after every row of the turn before it.
         bridge.drain_session_events().await;
-        // Chunks can still land after a cancel, so the slot is emptied here as
-        // well as at settle: this turn must anchor only on its own chunks.
-        bridge.take_last_agent_message_id(&agent_session_id).await;
+        // Chunks can still land after a cancel, and a load replays old cursors, so the
+        // slot is emptied here as well as at settle: this turn anchors only on its own.
+        bridge.take_turn_anchors(&agent_session_id).await;
         let prompt_id = next_prompt_id();
         let message_id = next_prompt_message_id();
         let (record, prompt_blocks) = {
@@ -142,17 +142,21 @@ impl AgentSupervisor {
             // Trailing chunks can still sit behind the notification worker on any
             // outcome; the anchor and the settle's events follow every accepted one.
             bridge.drain_session_events().await;
+            // Taken on every outcome: a failed or cancelled turn leaves no anchor, and its
+            // ids must not be recorded as the next turn's.
+            let anchors = bridge.take_turn_anchors(&agent_session_id_owned).await;
             if let Outcome::Settled(Ok(response)) = &outcome {
-                // An adapter on the AIR dialect never sees the acpStack key and
-                // so can never echo it. Its fork point is translated from the
-                // anchor recorded below, which a settled turn is what produces,
-                // so a settled turn is the acknowledgement for that dialect.
-                let acknowledged = match fork_point_dialect {
-                    ForkPointDialect::AcpStack => {
-                        meta_message_id(response.meta.as_ref()) == Some(message_id_owned.as_str())
-                    }
-                    ForkPointDialect::JetbrainsAir => true,
-                };
+                // A cursor confirms the point before this prompt is forkable. AIR adapters
+                // never see the acpStack key to echo; their fork point comes from the anchor
+                // recorded below, so a settled turn is the acknowledgement there.
+                let acknowledged = anchors.fork_cursor_id.is_some()
+                    || match fork_point_dialect {
+                        ForkPointDialect::AcpStack => {
+                            meta_message_id(response.meta.as_ref())
+                                == Some(message_id_owned.as_str())
+                        }
+                        ForkPointDialect::JetbrainsAir => true,
+                    };
                 if acknowledged {
                     let acknowledged_prompt_id = prompt_id_owned.clone();
                     let acknowledged_message_id = message_id_owned.clone();
@@ -173,10 +177,7 @@ impl AgentSupervisor {
                         );
                     }
                 }
-                if let Some(agent_message_id) = bridge
-                    .take_last_agent_message_id(&agent_session_id_owned)
-                    .await
-                {
+                if let Some(agent_message_id) = anchors.agent_message_id {
                     let anchored_prompt_id = prompt_id_owned.clone();
                     if let Err(err) = state_clone
                         .write(move |store| {
@@ -194,12 +195,21 @@ impl AgentSupervisor {
                         );
                     }
                 }
-            } else {
-                // A failed or cancelled turn has no anchor, and its last chunk
-                // must not be recorded as the next turn's.
-                bridge
-                    .take_last_agent_message_id(&agent_session_id_owned)
-                    .await;
+                if let Some(cursor_id) = anchors.fork_cursor_id {
+                    let cursor_prompt_id = prompt_id_owned.clone();
+                    if let Err(err) = state_clone
+                        .write(move |store| {
+                            store.set_prompt_cursor_id(&cursor_prompt_id, Some(&cursor_id))
+                        })
+                        .await
+                    {
+                        tracing::warn!(
+                            error = %crate::error::report(&err),
+                            prompt_id = %prompt_id_owned,
+                            "failed to record the session cursor before this prompt"
+                        );
+                    }
+                }
             }
 
             // The session-event emit must follow the row write so subscribers

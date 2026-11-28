@@ -1254,6 +1254,153 @@ async fn fork_at_an_air_adapter_names_the_preceding_turns_anchor() {
     assert_eq!(metadata["fork"]["message_id"], second_message_id);
 }
 
+/// The fork point keys of each `session/fork` the placebo received, in order.
+fn recorded_forks(path: &std::path::Path) -> Vec<Value> {
+    std::fs::read_to_string(path)
+        .expect("fork record")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("fork record line"))
+        .collect()
+}
+
+fn fork_keys(cursor_id: Option<&str>, air_message_id: Option<&str>) -> Value {
+    json!({ "cursorId": cursor_id, "airMessageId": air_message_id, "acpStackMessageId": null })
+}
+
+async fn prompt_cursor_ids(harness: &Harness, prompt_ids: &[String]) -> Vec<Option<String>> {
+    let prompt_ids = prompt_ids.to_vec();
+    harness
+        .state
+        .read(move |store| {
+            prompt_ids
+                .iter()
+                .map(|prompt_id| store.prompt_cursor_id(prompt_id))
+                .collect()
+        })
+        .await
+        .expect("prompt cursor lookup")
+}
+
+#[tokio::test]
+async fn a_breakpoint_fork_names_the_cursor_the_agent_announced_for_the_prompt() {
+    let record = tempfile::tempdir().expect("record dir");
+    let record_path = record.path().join("forks.jsonl");
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.extend([
+            "--announce-fork-cursors".to_owned(),
+            "--cursorless-prompt".to_owned(),
+            "3".to_owned(),
+            "--fork-record".to_owned(),
+            record_path.display().to_string(),
+        ]);
+    })
+    .await;
+    let session_id = create_session(&harness).await;
+    let (first_prompt_id, _) = submit_and_settle_ids(&harness, &session_id, "first turn").await;
+    let (second_prompt_id, second_message_id) =
+        submit_and_settle_ids(&harness, &session_id, "second turn").await;
+    let (third_prompt_id, third_message_id) =
+        submit_and_settle_ids(&harness, &session_id, "third turn").await;
+
+    // The third prompt got no cursor, and must not inherit the second's.
+    assert_eq!(
+        prompt_cursor_ids(
+            &harness,
+            &[first_prompt_id, second_prompt_id, third_prompt_id]
+        )
+        .await,
+        [None, Some("cursor_prompt_2".to_owned()), None]
+    );
+
+    fork_at(&harness, &session_id, Some(&second_message_id)).await;
+    fork_at(&harness, &session_id, Some(&third_message_id)).await;
+    assert_eq!(
+        recorded_forks(&record_path),
+        [
+            fork_keys(Some("cursor_prompt_2"), None),
+            json!({ "cursorId": null, "airMessageId": null, "acpStackMessageId": third_message_id }),
+        ]
+    );
+}
+
+/// Cursors belong to the session that announced them, so a forked child's inherited
+/// prompts have none and fork at the AIR point.
+#[tokio::test]
+async fn an_inherited_prompt_forks_at_the_air_point() {
+    const TURN_ANCHOR: &str = "msg_placebo_turn";
+
+    let home = tempfile::tempdir().expect("home");
+    write_air_registry_override(home.path());
+    let record_path = home.path().join("forks.jsonl");
+    let harness = Harness::spawn_with_and_home(
+        |config| {
+            config.agent.args.extend([
+                "--no-cap-fork-message-id".to_owned(),
+                "--no-echo-prompt-message-id".to_owned(),
+                "--agent-message-id".to_owned(),
+                TURN_ANCHOR.to_owned(),
+                "--announce-fork-cursors".to_owned(),
+                "--fork-record".to_owned(),
+                record_path.display().to_string(),
+            ]);
+        },
+        home.path().to_path_buf(),
+    )
+    .await;
+    let session_id = create_session(&harness).await;
+    submit_and_settle_ids(&harness, &session_id, "first turn").await;
+    let (_, second_message_id) = submit_and_settle_ids(&harness, &session_id, "second turn").await;
+
+    let child_id = fork_at(&harness, &session_id, None).await;
+    fork_at(&harness, &child_id, Some(&second_message_id)).await;
+    assert_eq!(
+        recorded_forks(&record_path),
+        [fork_keys(None, None), fork_keys(None, Some(TURN_ANCHOR))]
+    );
+}
+
+#[tokio::test]
+async fn a_rejected_cursor_is_retried_at_the_air_point_and_dropped() {
+    const TURN_ANCHOR: &str = "msg_placebo_turn";
+
+    let home = tempfile::tempdir().expect("home");
+    write_air_registry_override(home.path());
+    let record_path = home.path().join("forks.jsonl");
+    let harness = Harness::spawn_with_and_home(
+        |config| {
+            config.agent.args.extend([
+                "--no-cap-fork-message-id".to_owned(),
+                "--no-echo-prompt-message-id".to_owned(),
+                "--agent-message-id".to_owned(),
+                TURN_ANCHOR.to_owned(),
+                "--announce-fork-cursors".to_owned(),
+                "--reject-fork-cursors".to_owned(),
+                "--fork-record".to_owned(),
+                record_path.display().to_string(),
+            ]);
+        },
+        home.path().to_path_buf(),
+    )
+    .await;
+    let session_id = create_session(&harness).await;
+    submit_and_settle_ids(&harness, &session_id, "first turn").await;
+    let (second_prompt_id, second_message_id) =
+        submit_and_settle_ids(&harness, &session_id, "second turn").await;
+
+    fork_at(&harness, &session_id, Some(&second_message_id)).await;
+    assert_eq!(
+        recorded_forks(&record_path),
+        [
+            fork_keys(Some("cursor_prompt_2"), None),
+            fork_keys(None, Some(TURN_ANCHOR)),
+        ]
+    );
+    assert_eq!(
+        prompt_cursor_ids(&harness, &[second_prompt_id]).await,
+        [None]
+    );
+}
+
 /// A turn that emits stamped chunks and then fails leaves no anchor, so the
 /// next turn cannot inherit its last chunk id.
 #[tokio::test]

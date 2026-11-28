@@ -24,6 +24,27 @@ pub(crate) async fn handle_prompt(
             Error::invalid_params().data(format!("unknown session \"{}\"", request.session_id.0)),
         );
     }
+    // Announced at intake, before the turn can fail, as the vendor adapters do. ACP v1
+    // reports no live prompt, so the cursor is anchored after the last entity before it.
+    let fork_cursor = state
+        .lock()
+        .await
+        .fork_cursor_for_next_prompt(request.session_id.0.as_ref());
+    if let Some(cursor_id) = fork_cursor {
+        let anchored_after = args
+            .agent_message_id
+            .clone()
+            .unwrap_or_else(|| UNSTAMPED_CURSOR_ANCHOR.to_owned());
+        let anchor = CursorMessageAnchor::new(anchored_after, CursorAnchorPosition::After);
+        connection.send_notification(SessionNotification::new(
+            request.session_id.clone(),
+            SessionUpdate::CursorUpdate(
+                CursorUpdate::new(cursor_id)
+                    .anchor(CursorAnchor::AgentMessage(anchor))
+                    .capabilities(CursorCapabilities::new().fork(CursorForkCapabilities::new())),
+            ),
+        ))?;
+    }
     if args.prompt_error {
         return responder.respond_with_error(Error::new(-32000, "fake prompt failure"));
     }

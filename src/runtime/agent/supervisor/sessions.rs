@@ -2,9 +2,12 @@
 //! persists only after the agent confirms; a local row must never exist for a rejected session.
 
 use super::*;
-use crate::runtime::agent::acp_codec::session_config_option_is_current;
+use crate::runtime::agent::acp_codec::{PendingSessionUpdates, session_config_option_is_current};
 use crate::runtime::agent::model_discovery::resolve_advertised_model_value;
 use crate::runtime::agent::provider_keys::agent_provider_id_for_provider_id;
+use crate::state::PrecedingPromptRecord;
+use agent_client_protocol::ErrorCode;
+use agent_client_protocol::v1::schema::ForkSessionResponse;
 
 /// The `session.available` reason a detach records.
 const SESSION_DETACHED_REASON: &str = "detached";
@@ -414,11 +417,10 @@ impl AgentSupervisor {
     /// Translate the public `message_id` (always an acp-stack prompt message
     /// id) into the fork point the running adapter reads.
     ///
-    /// The contract is the same either way: the fork ends just before the named
-    /// prompt. The in-house adapters implement that cut themselves from the
-    /// acpStack key. The AIR adapters keep the point they are given, so they are
-    /// handed the anchor from the turn before instead, which leaves the named
-    /// prompt and everything after it out of the fork.
+    /// The contract is the same every way: the fork ends just before the named
+    /// prompt. A session cursor the agent announced for the prompt names that point
+    /// itself, so it is preferred; the adapter's dialect is the fallback, and the
+    /// retry when the agent rejects the cursor.
     async fn resolve_fork_point(
         &self,
         parent_session_id: &str,
@@ -427,7 +429,7 @@ impl AgentSupervisor {
     ) -> Result<BreakpointFork> {
         let job_parent_session_id = parent_session_id.to_owned();
         let job_message_id = message_id.to_owned();
-        let (prompt, preceding) = state
+        let (prompt, cursor_id, preceding) = state
             .read(move |store| {
                 let parent_session_id = job_parent_session_id;
                 let message_id = job_message_id;
@@ -439,8 +441,9 @@ impl AgentSupervisor {
                             "session `{parent_session_id}` has no prompt with message id `{message_id}`"
                         ),
                     })?;
+                let cursor_id = store.prompt_cursor_id(&prompt.id)?;
                 let preceding = store.preceding_prompt(&parent_session_id, &prompt.id)?;
-                Ok((prompt, preceding))
+                Ok((prompt, cursor_id, preceding))
             })
             .await?;
         if !prompt.message_id_acknowledged {
@@ -449,13 +452,44 @@ impl AgentSupervisor {
                 reason: format!("message id `{message_id}` was not acknowledged by the agent"),
             });
         }
-        let fork_point = match self.fork_point_dialect().await {
-            ForkPointDialect::AcpStack => ForkPoint::AcpStackMessageId(message_id.to_owned()),
+        let dialect_point = self
+            .dialect_fork_point(parent_session_id, message_id, preceding.as_ref())
+            .await;
+        let (fork_point, cursor_retry) = match cursor_id {
+            Some(cursor_id) => (
+                ForkPoint::Cursor(cursor_id),
+                Some(CursorRetry {
+                    prompt_id: prompt.id,
+                    fork_point: dialect_point.ok(),
+                }),
+            ),
+            None => (dialect_point?, None),
+        };
+        Ok(BreakpointFork {
+            fork_point,
+            cursor_retry,
+            held_through_prompt_id: preceding.map(|preceding| preceding.id),
+        })
+    }
+
+    /// The fork point the adapter's catalog-declared dialect reads for the prompt
+    /// `message_id` names. The in-house adapters cut just before that prompt themselves
+    /// from the acpStack key. The AIR adapters keep the point they are given, so they are
+    /// handed the anchor from the turn before instead, which leaves the named prompt and
+    /// everything after it out of the fork.
+    async fn dialect_fork_point(
+        &self,
+        parent_session_id: &str,
+        message_id: &str,
+        preceding: Option<&PrecedingPromptRecord>,
+    ) -> Result<ForkPoint> {
+        match self.fork_point_dialect().await {
+            ForkPointDialect::AcpStack => Ok(ForkPoint::AcpStackMessageId(message_id.to_owned())),
             ForkPointDialect::JetbrainsAir => {
                 // The named prompt opens the session, so there is no turn to
                 // keep. A fork of nothing is a new session, which the client
                 // asks for through `POST /v1/sessions` instead.
-                let preceding = preceding.as_ref().ok_or_else(|| StackError::InvalidParam {
+                let preceding = preceding.ok_or_else(|| StackError::InvalidParam {
                     field: "message_id",
                     reason: format!(
                         "message id `{message_id}` names the first prompt of session `{parent_session_id}`, and this agent cannot fork at a point with no preceding turn"
@@ -470,13 +504,9 @@ impl AgentSupervisor {
                         reason: format!(
                             "the turn before message id `{message_id}` produced no agent message this agent can be forked at"
                         ),
-                    })?
+                    })
             }
-        };
-        Ok(BreakpointFork {
-            fork_point,
-            held_through_prompt_id: preceding.map(|preceding| preceding.id),
-        })
+        }
     }
 
     /// `POST /v1/sessions/{id}/fork`. `ignored` is always empty: provisioning happens at create.
@@ -499,24 +529,26 @@ impl AgentSupervisor {
         // Taken before dispatch: a head fork holds the turns settled by the
         // time the adapter is asked, so a turn still in flight, or one
         // submitted while the fork is outstanding, stays with the parent.
-        let (fork_point, held_through_prompt_id) = match breakpoint_message_id.as_deref() {
-            Some(message_id) => {
-                let breakpoint = self
-                    .resolve_fork_point(parent_session_id, message_id, state)
-                    .await?;
-                (
-                    Some(breakpoint.fork_point),
-                    breakpoint.held_through_prompt_id,
-                )
-            }
-            None => {
-                let job_parent_session_id = parent_session_id.to_owned();
-                let held_through_prompt_id = state
-                    .read(move |store| store.newest_settled_prompt_id(&job_parent_session_id))
-                    .await?;
-                (None, held_through_prompt_id)
-            }
-        };
+        let (fork_point, cursor_retry, held_through_prompt_id) =
+            match breakpoint_message_id.as_deref() {
+                Some(message_id) => {
+                    let breakpoint = self
+                        .resolve_fork_point(parent_session_id, message_id, state)
+                        .await?;
+                    (
+                        Some(breakpoint.fork_point),
+                        breakpoint.cursor_retry,
+                        breakpoint.held_through_prompt_id,
+                    )
+                }
+                None => {
+                    let job_parent_session_id = parent_session_id.to_owned();
+                    let held_through_prompt_id = state
+                        .read(move |store| store.newest_settled_prompt_id(&job_parent_session_id))
+                        .await?;
+                    (None, None, held_through_prompt_id)
+                }
+            };
         let resolved_cwd = resolve_session_cwd(
             Some(cwd.unwrap_or_else(|| stored_or_workspace_cwd(&parent.cwd, workspace_root))),
             workspace_root,
@@ -529,14 +561,16 @@ impl AgentSupervisor {
         // already queued; they must be durable before the parent's log is
         // copied.
         bridge.drain_session_events().await;
-        let (response, pending_updates) = bridge
-            .fork_session(
-                AcpSessionId::new(parent_agent_session_id.clone()),
-                PathBuf::from(&resolved_cwd),
-                accepted,
-                fork_point,
-            )
-            .await?;
+        let (response, pending_updates) = fork_at(
+            &bridge,
+            &parent_agent_session_id,
+            &resolved_cwd,
+            accepted,
+            fork_point,
+            cursor_retry,
+            state,
+        )
+        .await?;
         let child_agent_session_id = response.session_id.0.to_string();
         let child_session_id = next_session_id();
         let metadata_json = json!({
@@ -847,9 +881,94 @@ impl AgentSupervisor {
 /// A breakpoint resolved for the running adapter.
 struct BreakpointFork {
     fork_point: ForkPoint,
+    /// Set when `fork_point` is a session cursor.
+    cursor_retry: Option<CursorRetry>,
     /// The parent's last prompt the fork holds: the one before the named
     /// prompt, `None` when the named prompt opens the session.
     held_through_prompt_id: Option<String>,
+}
+
+/// What a cursor fork falls back to when the agent rejects the cursor.
+struct CursorRetry {
+    /// The prompt row holding the cursor.
+    prompt_id: String,
+    /// The dialect's point for the same prompt, `None` when the dialect cannot name one.
+    fork_point: Option<ForkPoint>,
+}
+
+/// `session/fork` at `fork_point`. An agent that rejects a cursor as invalid params no
+/// longer holds it, so the fork is retried once at the dialect's point, and the stored
+/// cursor is dropped only once that retry succeeds.
+async fn fork_at(
+    bridge: &AcpBridge,
+    parent_agent_session_id: &str,
+    cwd: &str,
+    mcp_servers: Vec<McpServer>,
+    fork_point: Option<ForkPoint>,
+    cursor_retry: Option<CursorRetry>,
+    state: &StateHandle,
+) -> Result<(ForkSessionResponse, PendingSessionUpdates)> {
+    let fork = |fork_point, mcp_servers| {
+        bridge.fork_session(
+            AcpSessionId::new(parent_agent_session_id.to_owned()),
+            PathBuf::from(cwd),
+            mcp_servers,
+            fork_point,
+        )
+    };
+    let error = match fork(fork_point, mcp_servers.clone()).await {
+        Ok(forked) => return Ok(forked),
+        Err(error) => error,
+    };
+    let Some(CursorRetry {
+        prompt_id,
+        fork_point: Some(retry_point),
+    }) = cursor_retry
+    else {
+        return Err(error);
+    };
+    if !is_invalid_params(&error) {
+        return Err(error);
+    }
+    tracing::warn!(
+        error = %crate::error::report(&error),
+        prompt_id,
+        "agent rejected the session cursor for a breakpoint fork; retrying at the adapter's fork point"
+    );
+    let forked = match fork(Some(retry_point), mcp_servers).await {
+        Ok(forked) => forked,
+        Err(retry_error) => {
+            tracing::warn!(
+                error = %crate::error::report(&retry_error),
+                prompt_id,
+                "breakpoint fork retry at the adapter's fork point failed"
+            );
+            return Err(error);
+        }
+    };
+    let stale_prompt_id = prompt_id.clone();
+    if let Err(clear_error) = state
+        .write(move |store| store.set_prompt_cursor_id(&stale_prompt_id, None))
+        .await
+    {
+        tracing::warn!(
+            error = %crate::error::report(&clear_error),
+            prompt_id,
+            "failed to drop the session cursor the agent rejected"
+        );
+    }
+    Ok(forked)
+}
+
+/// The code an agent answers an unknown `cursorId` with.
+fn is_invalid_params(error: &StackError) -> bool {
+    matches!(
+        error,
+        StackError::AgentRequestFailed { context, .. }
+            if context.acp_error.as_ref().is_some_and(|detail| {
+                ErrorCode::from(detail.code) == ErrorCode::INVALID_PARAMS
+            })
+    )
 }
 
 /// Which ACP method [`AgentSupervisor::attach_session`] sends for an existing session.
