@@ -61,4 +61,4 @@ Pi has no session modes; `set_mode` stays off. The thinking level is exposed as 
 
 ## Session capabilities
 
-The adapter advertises `loadSession` and session list, resume, load, close, delete, and head-only fork support at initialize. Capability-dependent operations remain gated by the live `initialize` response. See [../specs/acp/acp-bridge.md](../specs/acp/acp-bridge.md) for the generic session-resume behavior.
+The adapter advertises `loadSession` and session list, resume, load, close, delete, and fork support at initialize. A breakpoint fork names the session cursor the adapter announced live for the prompt. A session's first prompt, the first prompt after a `session/resume`, and a forked child's inherited prompts have none, so they are refused as breakpoints. Capability-dependent operations remain gated by the live `initialize` response. See [../specs/acp/acp-bridge.md](../specs/acp/acp-bridge.md) for the generic session-resume behavior.

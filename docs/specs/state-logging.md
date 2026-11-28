@@ -88,8 +88,8 @@ Schema: `migrations/002_auth_failures_schema.sqlite.sql` (and the `.postgres.sql
 
 Message identity columns: `migrations/017_prompt_message_ids.sqlite.sql`, `migrations/027_prompt_agent_message_ids.sqlite.sql`, and `migrations/031_prompt_cursor_ids.sqlite.sql`. Failure classification columns: `migrations/015_prompts_lifecycle_extension.sqlite.sql` (each with a `.postgres.sql` twin). Semantics not visible in the schema:
 
-- `message_id` is the ACP user prompt message id sent with `session/prompt`.
-- `message_id_acknowledged` is 1 once the prompt is a valid fork breakpoint: its turn settled with a recorded `cursor_id`, or the agent confirmed the message id through its fork-point dialect. On `acp-stack` that means echoing it back in `_meta.acpStack.messageId` on the prompt response. On `jetbrains-air`, where the adapter implements no acp-stack extension, a settled prompt response is the confirmation, since the same settled turn produces the `agent_message_id` anchor its fork point is translated from.
+- `message_id` is the acp-stack prompt message id, stamped on the prompt's durable `user_message_chunk` rows.
+- `message_id_acknowledged` is 1 once the prompt is a valid fork breakpoint: its turn settled with a recorded `cursor_id`, or on the `jetbrains-air` dialect its turn settled at all, since the same settled turn produces the `agent_message_id` anchor its fork point is translated from.
 - `agent_message_id` is the adapter's own `messageId` from the last `agent_message_chunk` of this turn. It is the point a breakpoint fork names for an adapter that resolves fork points against its own transcript. NULL when the adapter stamps no message id on its chunks.
 - `cursor_id` is the agent's fork-capable session cursor announced during this turn, naming the position just before this prompt. NULL when the agent announced none, after a fork retried at the dialect's point because the agent rejected it, and on prompt rows a fork child inherits.
 - `failure_class` is the internal taxonomy bucket. NULL for non-terminal rows and for terminal rows the taxonomy does not cover.

@@ -492,8 +492,8 @@ pub fn adapter_spec_from_override(
         sync_id: None,
         github: override_config.github.clone(),
         // An operator override names a local binary, not a catalog adapter, so
-        // it speaks the acp-stack key until the catalog says otherwise.
-        fork_point: ForkPointDialect::default(),
+        // it declares no dialect and forks only at session cursors.
+        fork_point: None,
         install: InstallSet {
             provided_by: None,
             shell: override_config

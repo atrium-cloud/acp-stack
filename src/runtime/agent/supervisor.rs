@@ -80,8 +80,8 @@ use crate::runtime::agent::acp_bridge::{
     IGNORED_FEATURE_AGENT_CONFIG_OPTION, IGNORED_FEATURE_AGENT_EFFORT, IGNORED_FEATURE_AGENT_MODE,
     IGNORED_FEATURE_AGENT_MODEL, IgnoredFeature, LAUNCH_ENV_METHOD, LaunchEnvRequest,
     PartitionedMcpServers, SessionEventSink, SkippedMcpServer, StateStoreSessionSink,
-    meta_message_id, prompt_message_id_meta, resolve_command_path, session_config_id_for_value,
-    session_mode_selection_for_value, user_prompt_chunk_payload,
+    resolve_command_path, session_config_id_for_value, session_mode_selection_for_value,
+    user_prompt_chunk_payload,
 };
 use crate::runtime::agent::agent_headless_config::provision_for_launch;
 use crate::runtime::agent::model_discovery::{
@@ -746,13 +746,12 @@ impl AgentSupervisor {
 
     /// Fork-point dialect of the running agent, from the capability snapshot
     /// the spawn path paired with the catalog entry it launched from.
-    pub async fn fork_point_dialect(&self) -> ForkPointDialect {
+    pub async fn fork_point_dialect(&self) -> Option<ForkPointDialect> {
         self.capabilities
             .read()
             .await
             .as_ref()
-            .map(|capabilities| capabilities.fork_point)
-            .unwrap_or_default()
+            .and_then(|capabilities| capabilities.fork_point)
     }
 
     /// Snapshot the supervisor for status handlers.

@@ -16,6 +16,42 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 pub const SESSION_KEY: &str = "acps_session_cccccccccccccccccccccccccccccccccccccccccccc";
 pub const ADMIN_KEY: &str = "acps_admin_dddddddddddddddddddddddddddddddddddddddddddd";
+/// The `messageId` a [`Harness::spawn_air`] placebo stamps on every agent chunk.
+pub const AIR_TURN_ANCHOR: &str = "msg_placebo_turn";
+
+/// Registry override that makes the placebo agent look like a vendor adapter
+/// honoring the JetBrains AIR fork extension, which is the only way acp-stack
+/// learns an adapter speaks that dialect.
+pub fn write_air_registry_override(home: &std::path::Path) {
+    let registry_dir = home.join(".config").join("acp-stack");
+    std::fs::create_dir_all(&registry_dir).expect("registry override dir");
+    std::fs::write(
+        registry_dir.join("agents.toml"),
+        r#"
+[[agents]]
+id = "placebo"
+name = "Placebo Agent"
+kind = "adapter"
+headless_compatible = true
+support_doc = "docs/agents/placebo.md"
+
+[agents.adapter]
+id = "placebo-acp"
+fork_point = "jetbrains-air"
+
+[agents.adapter.install.npm]
+package = "placebo-acp"
+creates = "placebo-acp"
+
+[agents.harness]
+id = "placebo"
+
+[agents.harness.install]
+provided_by = "adapter"
+"#,
+    )
+    .expect("write registry override");
+}
 
 pub struct Harness {
     pub base_url: String,
@@ -43,6 +79,24 @@ impl Harness {
         home: std::path::PathBuf,
     ) -> Self {
         Self::spawn_inner(mutate, None, true, Some(home)).await
+    }
+
+    /// Spawn a placebo the catalog declares on the JetBrains AIR fork dialect, stamping
+    /// [`AIR_TURN_ANCHOR`] on its chunks, so every settled turn is a breakpoint and a fork
+    /// at any later prompt resolves without session cursors.
+    pub async fn spawn_air(home: &TempDir, mutate: impl FnOnce(&mut Config)) -> Self {
+        write_air_registry_override(home.path());
+        Self::spawn_with_and_home(
+            |config| {
+                config
+                    .agent
+                    .args
+                    .extend(["--agent-message-id".to_owned(), AIR_TURN_ANCHOR.to_owned()]);
+                mutate(config);
+            },
+            home.path().to_path_buf(),
+        )
+        .await
     }
 
     /// Harness that never calls `POST /v1/agent/start`, mirroring a freshly initialized host.

@@ -9,7 +9,7 @@ Registry entries describe:
 - `id` and display name
 - whether the agent is headless-compatible
 - native command or adapter-backed command
-- optional `adapter.fork_point`, the `_meta` dialect the adapter reads a breakpoint fork point from: `acp-stack` (the default) or `jetbrains-air`
+- optional `adapter.fork_point`, the `_meta` dialect the adapter reads a breakpoint fork point from when a prompt has no session cursor: `jetbrains-air`
 - optional `harness.acp_args`, used when the harness enters ACP mode through something other than an `acp` subcommand (e.g. a `--acp` flag)
     - must be non-empty; defaults to `["acp"]`
 - install steps and post-install executable checks

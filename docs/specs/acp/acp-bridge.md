@@ -12,9 +12,7 @@ The advertisement is also captured session-free. The init capability probe spawn
 
 The snapshot persisted at agent start, restart, and switch, and after init, is the effective capability set: what acp-stack can actually drive for this agent, which is the handshake advertisement plus what the agent catalog declares. A consumer reading the snapshot needs no second input to decide which session operations are available. It is served by `GET /v1/agent/capabilities` and stored in `agent_capabilities`.
 
-Today one capability is catalog-derived. An adapter declared `fork_point = "jetbrains-air"` gets `sessionCapabilities.fork._meta.acpStack.messageId` raised into its reported `capabilities` map as an object, because acp-stack can drive a breakpoint fork on it by translating the fork point even though the adapter advertises nothing about one. The raise happens only when the agent advertises `sessionCapabilities.fork`, so an agent that cannot fork is never reported as forkable at a message id. Existing keys are preserved.
-
-The raw handshake advertisement stays available inside the running bridge, which holds the agent's own reply untouched.
+The `capabilities` map is the agent's own advertisement, unchanged, and the snapshot carries the adapter's catalog-declared `fork_point` dialect beside it. An agent that advertises `sessionCapabilities.fork` can be forked at a prompt; whether a given prompt can be named is that prompt's `message_id_acknowledged` (see [Fork Points](#fork-points)).
 
 Initialization failure prevents the agent from becoming ready and is reported in agent status.
 
@@ -141,7 +139,7 @@ Capability flags are read from the ACP `initialize` response: `loadSession` on t
 - Image, audio, and embedded-resource prompt blocks require the matching `promptCapabilities` flag.
 - HTTP and SSE MCP declarations require `mcpCapabilities.http` and `mcpCapabilities.sse`; stdio has no dedicated flag and requires at least one advertised MCP capability.
 - A declaration the advertisement does not cover is dropped from the session rather than failing it (see [MCP Servers](#mcp-servers)); an MCP transport variant the runtime does not model is still a hard failure.
-- Forking at a prompt breakpoint requires a session cursor recorded for that prompt, or `_meta.acpStack.messageId` under `sessionCapabilities.fork` of the effective snapshot, which the agent either advertises itself or receives from a `fork_point = "jetbrains-air"` catalog declaration. An agent with neither is limited to current-head fork.
+- Forking at a prompt breakpoint requires a session cursor for that prompt or a `fork_point = "jetbrains-air"` catalog declaration. An agent with neither is limited to current-head fork.
 - Unsupported combinations fail locally before a request is dispatched.
 
 The bridge code lives in `src/runtime/agent/acp_bridge.rs`.
@@ -154,30 +152,20 @@ The bridge advertises `clientCapabilities.session.cursors` at `initialize`, so a
 - Cursor updates outside a live turn, including those a `session/load` replays, and later patches to an announced cursor leave the recorded ids unchanged.
 - A cursor belongs to the agent session that announced it, so a fork child's inherited prompts carry none.
 
-A breakpoint fork at a prompt with a recorded cursor sends the standard `cursorId` and no fork-point `_meta`. An agent that answers it with `-32602` (invalid params) no longer holds the cursor: the fork is retried once at the dialect's point (see [Fork Point Dialects](#fork-point-dialects)), and the stored cursor is dropped when that retry succeeds. When the dialect names no point for the prompt or the retry fails, the original error is returned.
+### Fork Points
 
-### Prompt Message IDs (local extension)
+A breakpoint fork ends just before the named prompt, and the public `message_id` is always an acp-stack prompt message id. The point is sent to the agent as:
 
-ACP v1 assigns message ids on agent-emitted update chunks but has no client-proposed prompt message id. Prompt breakpoints for adapters that announce no session cursor therefore remain a local extension, tracked in `docs/todos/v0.1.0/phase_5.md`. The wire shape rides ACP's `_meta` extensibility point:
+- the standard `cursorId`, when the named prompt has a recorded cursor;
+- otherwise the adapter's catalog-declared dialect, `fork_point` in `data/agents.toml`.
 
-- `session/prompt` requests carry `_meta.acpStack.messageId` with a runtime-generated id.
-- An agent that recorded the id acknowledges it by echoing the same `_meta.acpStack.messageId` shape on the `session/prompt` response. Only acknowledged ids are accepted as fork breakpoints.
-- `session/fork` requests carry the breakpoint as `_meta.acpStack.messageId`.
+The two are never sent together. An agent that answers a cursor fork with `-32602` (invalid params) no longer holds the cursor: the fork is retried once at the dialect's point, and the stored cursor is dropped when that retry succeeds. When the adapter declares no dialect, the dialect names no point for the prompt, or the retry fails, the original error is returned.
 
-Before ACP 1.0 this extension used the SDK's unstable top-level `messageId`/`userMessageId` prompt fields. Agents still speaking that pre-1.0 shape receive no acknowledgment, so only current-head fork remains available to them.
-
-### Fork Point Dialects
-
-A breakpoint fork ends just before the named prompt, and the public `message_id` is always an acp-stack prompt message id. A prompt without a recorded session cursor has that point carried to the agent in a `_meta` key that depends on the adapter, declared per adapter as `fork_point` in `data/agents.toml`:
-
-- `acp-stack` (the default) sends `_meta.acpStack.messageId` verbatim. The adapter owns the cut.
-- `jetbrains-air` sends `_meta.jetbrains.air.fork = { version = 1, messageId }`. The adapters on this dialect (`claude-agent-acp`, `codex-acp`) resolve the id against their own transcript and keep the point it names, so acp-stack sends the agent message id anchoring the turn before the named prompt. Naming the first prompt of a session is refused: there is no preceding turn.
-
-The declaration also shapes the reported capability snapshot (see [Reported capability snapshot](#reported-capability-snapshot)), so a consumer of that snapshot sees breakpoint fork support on these adapters.
+The one dialect is `jetbrains-air`, which sends `_meta.jetbrains.air.fork = { version = 1, messageId }`. The adapters on it (`claude-agent-acp`, `codex-acp`) resolve the id against their own transcript and keep the point it names, so acp-stack sends the agent message id anchoring the turn before the named prompt. Naming the first prompt of a session is refused: there is no preceding turn.
 
 The anchor is the `messageId` of the last `agent_message_chunk` of a turn, kept on the turn's `prompts` row as `agent_message_id`. An adapter that emits no message id on its chunks leaves no anchor, and a dialect fork at the turn after it is refused.
 
-A prompt is acknowledged, and so accepted as a breakpoint, once its turn settles with a recorded session cursor, or by its dialect's rule. On `acp-stack` that is the echoed `_meta.acpStack.messageId`. Adapters on `jetbrains-air` implement no acp-stack extension and never echo it, so for them a settled `session/prompt` response is the acknowledgment, because the same settled turn is what produces the anchor their fork point is translated from.
+A prompt is acknowledged, and so accepted as a breakpoint, once its turn settles with a recorded cursor, or on the `jetbrains-air` dialect once its turn settles at all, because the settled turn is what produces the anchor the fork point is translated from.
 
 ### Fork History
 
@@ -215,7 +203,7 @@ An agent that sees the `subagents` client capability may create child sessions a
 
 ### Session Resume Capability Matrix
 
-`data/agents.toml` declares no per-agent overrides for `session/list`, `session/load`, `session/resume`, or `session/fork` itself, so every supported agent reports the same status: discovered at runtime from the agent's `initialize` reply. The one catalog declaration is the per-adapter `fork_point` dialect, which shapes how a `session/fork` at a message id is sent and reported (see [Fork Point Dialects](#fork-point-dialects)).
+`data/agents.toml` declares no per-agent overrides for `session/list`, `session/load`, `session/resume`, or `session/fork` itself, so every supported agent reports the same status: discovered at runtime from the agent's `initialize` reply. The one catalog declaration is the per-adapter `fork_point` dialect, which shapes how a `session/fork` at a message id is sent and reported (see [Fork Points](#fork-points)).
 
 "Discovered" means the runtime trusts the value advertised by the agent's `initialize` response. When an agent reports `false` (or omits the flag), the matching `POST /v1/sessions/{id}/{load,resume,fork}` route returns HTTP 501 `agent.unsupported_capability`, and the operator-facing alternative is to create a fresh session. The per-agent live behavior of these capabilities is captured in `docs/agents/{agent}.md`.
 

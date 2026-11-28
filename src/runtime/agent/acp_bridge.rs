@@ -69,10 +69,10 @@ pub(crate) use self::spawn::resolve_command_path;
 pub(crate) use self::spawn::workload_process_path;
 
 pub use crate::runtime::agent::acp_codec::{
-    PendingSessionUpdates, air_fork_point_message_id, air_fork_point_meta, meta_message_id,
-    prompt_message_id_meta, session_config_id_for_value, session_config_values,
-    session_mode_selection_for_value, session_mode_values, session_model_selection_for_value,
-    session_model_values, user_prompt_chunk_payload,
+    PendingSessionUpdates, air_fork_point_message_id, air_fork_point_meta,
+    session_config_id_for_value, session_config_values, session_mode_selection_for_value,
+    session_mode_values, session_model_selection_for_value, session_model_values,
+    user_prompt_chunk_payload,
 };
 pub use crate::runtime::agent::acp_terminal::TerminalCommandLog;
 pub use crate::runtime::agent::session_changes::SessionChangesHandle;

@@ -13,7 +13,10 @@ use acp_stack::config::{
 };
 use acp_stack::secrets::SecretStore;
 use acp_stack::state::{NewPermissionRequest, NewPromptRecord, NewSessionRecord};
-use common::sessions::{Harness, admin_bearer, create_session, http, session_bearer};
+use common::sessions::{
+    AIR_TURN_ANCHOR, Harness, admin_bearer, create_session, http, session_bearer,
+    write_air_registry_override,
+};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
@@ -318,7 +321,8 @@ async fn full_lifecycle_create_list_get_prompt_poll_close() {
     assert_eq!(final_status["status"], "completed");
     assert_eq!(final_status["stop_reason"], "end_turn");
     assert_eq!(final_status["message_id"], message_id);
-    assert_eq!(final_status["message_id_acknowledged"], true);
+    // A session's first prompt has no point before it to fork at.
+    assert_eq!(final_status["message_id_acknowledged"], false);
 
     // The fake agent emits two `session/update` notifications per prompt.
     let events: Value = client
@@ -807,64 +811,6 @@ async fn fork_session_records_parent_lineage() {
     assert!(metadata["fork"]["message_id"].is_null());
 }
 
-#[tokio::test]
-async fn fork_session_forwards_message_breakpoint_to_placebo() {
-    const BREAKPOINT_MESSAGE_ID: &str = "00000000-0000-4000-8000-000000000001";
-
-    let harness = Harness::spawn_with(|config| {
-        config.agent.args.extend([
-            "--expect-fork-message-id".to_owned(),
-            BREAKPOINT_MESSAGE_ID.to_owned(),
-        ]);
-    })
-    .await;
-    let client = http();
-    let session_id = create_session(&harness).await;
-
-    let seeded_session_id = session_id.clone();
-    harness
-        .state
-        .write(move |store| {
-            store.insert_prompt_with_message_id(
-                NewPromptRecord {
-                    id: "prm_fork_breakpoint".to_owned(),
-                    session_id: seeded_session_id,
-                    prompt_json: r#"[{"type":"text","text":"fork breakpoint"}]"#.to_owned(),
-                },
-                Some(BREAKPOINT_MESSAGE_ID.to_owned()),
-            )?;
-            store.acknowledge_prompt_message_id("prm_fork_breakpoint", BREAKPOINT_MESSAGE_ID)
-        })
-        .await
-        .expect("prompt inserted and message id acknowledged");
-
-    let forked: Value = client
-        .post(format!(
-            "{}/v1/sessions/{}/fork",
-            harness.base_url, session_id
-        ))
-        .header("Authorization", session_bearer())
-        .json(&json!({ "message_id": BREAKPOINT_MESSAGE_ID }))
-        .send()
-        .await
-        .expect("fork")
-        .json()
-        .await
-        .expect("fork json");
-    let child_id = forked["data"]["id"].as_str().expect("child id").to_owned();
-
-    let child = harness
-        .state
-        .read(move |store| store.get_session(&child_id))
-        .await
-        .expect("child lookup")
-        .expect("child exists");
-    let metadata: Value = serde_json::from_str(&child.metadata_json).expect("metadata json");
-    assert_eq!(metadata["fork"]["parent_session_id"], session_id);
-    assert_eq!(metadata["fork"]["strategy"], "acp_native");
-    assert_eq!(metadata["fork"]["message_id"], BREAKPOINT_MESSAGE_ID);
-}
-
 /// `session.update` rows the placebo leaves per turn: the user chunk and its
 /// two agent chunks.
 const PLACEBO_CONVERSATION_ROWS_PER_TURN: usize = 3;
@@ -956,7 +902,8 @@ fn user_chunk_position(events: &[Value], prompt_id: &str) -> usize {
 
 #[tokio::test]
 async fn a_head_fork_carries_the_parent_conversation_before_its_fork_marker() {
-    let harness = Harness::spawn().await;
+    let home = tempfile::tempdir().expect("home");
+    let harness = Harness::spawn_air(&home, |_| {}).await;
     let session_id = create_session(&harness).await;
     let (_, first_message_id) = submit_and_settle_ids(&harness, &session_id, "first turn").await;
     let (_, second_message_id) = submit_and_settle_ids(&harness, &session_id, "second turn").await;
@@ -991,7 +938,8 @@ async fn a_head_fork_carries_the_parent_conversation_before_its_fork_marker() {
 
 #[tokio::test]
 async fn a_breakpoint_fork_carries_the_parent_conversation_strictly_before_the_named_prompt() {
-    let harness = Harness::spawn().await;
+    let home = tempfile::tempdir().expect("home");
+    let harness = Harness::spawn_air(&home, |_| {}).await;
     let session_id = create_session(&harness).await;
     let (_, first_message_id) = submit_and_settle_ids(&harness, &session_id, "first turn").await;
     let (second_prompt_id, second_message_id) =
@@ -1033,7 +981,8 @@ async fn a_breakpoint_fork_carries_the_parent_conversation_strictly_before_the_n
 
 #[tokio::test]
 async fn a_fork_of_a_fork_resolves_inherited_prompts_ahead_of_its_own() {
-    let harness = Harness::spawn().await;
+    let home = tempfile::tempdir().expect("home");
+    let harness = Harness::spawn_air(&home, |_| {}).await;
     let session_id = create_session(&harness).await;
     let (_, first_message_id) = submit_and_settle_ids(&harness, &session_id, "first turn").await;
     let (second_prompt_id, second_message_id) =
@@ -1098,40 +1047,6 @@ async fn a_fork_of_a_fork_resolves_inherited_prompts_ahead_of_its_own() {
     );
 }
 
-/// Registry override that makes the placebo agent look like a vendor adapter
-/// honoring the JetBrains AIR fork extension, which is the only way acp-stack
-/// learns an adapter speaks that dialect.
-fn write_air_registry_override(home: &std::path::Path) {
-    let registry_dir = home.join(".config").join("acp-stack");
-    std::fs::create_dir_all(&registry_dir).expect("registry override dir");
-    std::fs::write(
-        registry_dir.join("agents.toml"),
-        r#"
-[[agents]]
-id = "placebo"
-name = "Placebo Agent"
-kind = "adapter"
-headless_compatible = true
-support_doc = "docs/agents/placebo.md"
-
-[agents.adapter]
-id = "placebo-acp"
-fork_point = "jetbrains-air"
-
-[agents.adapter.install.npm]
-package = "placebo-acp"
-creates = "placebo-acp"
-
-[agents.harness]
-id = "placebo"
-
-[agents.harness.install]
-provided_by = "adapter"
-"#,
-    )
-    .expect("write registry override");
-}
-
 /// Submit a prompt and return `(prompt_id, message_id)` once its row settles.
 async fn submit_and_settle_ids(
     harness: &Harness,
@@ -1165,8 +1080,6 @@ async fn fork_at_an_air_adapter_names_the_preceding_turns_anchor() {
     let harness = Harness::spawn_with_and_home(
         |config| {
             config.agent.args.extend([
-                "--no-cap-fork-message-id".to_owned(),
-                "--no-echo-prompt-message-id".to_owned(),
                 "--agent-message-id".to_owned(),
                 TURN_ANCHOR.to_owned(),
                 "--expect-air-fork-message-id".to_owned(),
@@ -1178,9 +1091,6 @@ async fn fork_at_an_air_adapter_names_the_preceding_turns_anchor() {
     .await;
     let client = http();
 
-    // This is the snapshot a downstream consumer reads to decide whether it may
-    // offer a breakpoint fork. The adapter advertises nothing about it, so the
-    // catalog declaration has to reach the consumer through here.
     let reported: Value = client
         .get(format!("{}/v1/agent/capabilities", harness.base_url))
         .header("Authorization", session_bearer())
@@ -1190,11 +1100,6 @@ async fn fork_at_an_air_adapter_names_the_preceding_turns_anchor() {
         .json()
         .await
         .expect("capabilities json");
-    let fork = &reported["data"]["capabilities"]["capabilities"]["sessionCapabilities"]["fork"];
-    assert!(
-        fork["_meta"]["acpStack"]["messageId"].is_object(),
-        "reported fork capability must carry the sub-capability: {reported}"
-    );
     assert_eq!(
         reported["data"]["capabilities"]["fork_point"],
         "jetbrains-air"
@@ -1217,8 +1122,7 @@ async fn fork_at_an_air_adapter_names_the_preceding_turns_anchor() {
             .await
             .expect("first prompt and preceding lookup");
         let first = first.expect("first prompt exists");
-        // The adapter never echoes the acpStack key, so a settled turn is the
-        // acknowledgement on this dialect.
+        // A settled turn is the acknowledgement on this dialect.
         assert!(first.message_id_acknowledged);
         let preceding = preceding.expect("the first turn precedes the second");
         assert_eq!(preceding.id, first.id);
@@ -1264,7 +1168,7 @@ fn recorded_forks(path: &std::path::Path) -> Vec<Value> {
 }
 
 fn fork_keys(cursor_id: Option<&str>, air_message_id: Option<&str>) -> Value {
-    json!({ "cursorId": cursor_id, "airMessageId": air_message_id, "acpStackMessageId": null })
+    json!({ "cursorId": cursor_id, "airMessageId": air_message_id })
 }
 
 async fn prompt_cursor_ids(harness: &Harness, prompt_ids: &[String]) -> Vec<Option<String>> {
@@ -1313,13 +1217,54 @@ async fn a_breakpoint_fork_names_the_cursor_the_agent_announced_for_the_prompt()
     );
 
     fork_at(&harness, &session_id, Some(&second_message_id)).await;
-    fork_at(&harness, &session_id, Some(&third_message_id)).await;
     assert_eq!(
         recorded_forks(&record_path),
-        [
-            fork_keys(Some("cursor_prompt_2"), None),
-            json!({ "cursorId": null, "airMessageId": null, "acpStackMessageId": third_message_id }),
-        ]
+        [fork_keys(Some("cursor_prompt_2"), None)]
+    );
+
+    // With no cursor and no declared dialect, nothing names the point to the agent.
+    let refused = http()
+        .post(format!(
+            "{}/v1/sessions/{}/fork",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .json(&json!({ "message_id": third_message_id }))
+        .send()
+        .await
+        .expect("fork");
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(recorded_forks(&record_path).len(), 1);
+}
+
+/// pi-acp announces a prompt's cursor once the turn's output is out, just before it
+/// answers the prompt.
+#[tokio::test]
+async fn a_cursor_announced_as_the_turn_settles_names_its_prompt() {
+    let record = tempfile::tempdir().expect("record dir");
+    let record_path = record.path().join("forks.jsonl");
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.extend([
+            "--announce-fork-cursors".to_owned(),
+            "--fork-cursors-at-settle".to_owned(),
+            "--fork-record".to_owned(),
+            record_path.display().to_string(),
+        ]);
+    })
+    .await;
+    let session_id = create_session(&harness).await;
+    let (first_prompt_id, _) = submit_and_settle_ids(&harness, &session_id, "first turn").await;
+    let (second_prompt_id, second_message_id) =
+        submit_and_settle_ids(&harness, &session_id, "second turn").await;
+    assert_eq!(
+        prompt_cursor_ids(&harness, &[first_prompt_id, second_prompt_id]).await,
+        [None, Some("cursor_prompt_2".to_owned())]
+    );
+
+    fork_at(&harness, &session_id, Some(&second_message_id)).await;
+    assert_eq!(
+        recorded_forks(&record_path),
+        [fork_keys(Some("cursor_prompt_2"), None)]
     );
 }
 
@@ -1327,25 +1272,15 @@ async fn a_breakpoint_fork_names_the_cursor_the_agent_announced_for_the_prompt()
 /// prompts have none and fork at the AIR point.
 #[tokio::test]
 async fn an_inherited_prompt_forks_at_the_air_point() {
-    const TURN_ANCHOR: &str = "msg_placebo_turn";
-
     let home = tempfile::tempdir().expect("home");
-    write_air_registry_override(home.path());
     let record_path = home.path().join("forks.jsonl");
-    let harness = Harness::spawn_with_and_home(
-        |config| {
-            config.agent.args.extend([
-                "--no-cap-fork-message-id".to_owned(),
-                "--no-echo-prompt-message-id".to_owned(),
-                "--agent-message-id".to_owned(),
-                TURN_ANCHOR.to_owned(),
-                "--announce-fork-cursors".to_owned(),
-                "--fork-record".to_owned(),
-                record_path.display().to_string(),
-            ]);
-        },
-        home.path().to_path_buf(),
-    )
+    let harness = Harness::spawn_air(&home, |config| {
+        config.agent.args.extend([
+            "--announce-fork-cursors".to_owned(),
+            "--fork-record".to_owned(),
+            record_path.display().to_string(),
+        ]);
+    })
     .await;
     let session_id = create_session(&harness).await;
     submit_and_settle_ids(&harness, &session_id, "first turn").await;
@@ -1355,32 +1290,25 @@ async fn an_inherited_prompt_forks_at_the_air_point() {
     fork_at(&harness, &child_id, Some(&second_message_id)).await;
     assert_eq!(
         recorded_forks(&record_path),
-        [fork_keys(None, None), fork_keys(None, Some(TURN_ANCHOR))]
+        [
+            fork_keys(None, None),
+            fork_keys(None, Some(AIR_TURN_ANCHOR))
+        ]
     );
 }
 
 #[tokio::test]
 async fn a_rejected_cursor_is_retried_at_the_air_point_and_dropped() {
-    const TURN_ANCHOR: &str = "msg_placebo_turn";
-
     let home = tempfile::tempdir().expect("home");
-    write_air_registry_override(home.path());
     let record_path = home.path().join("forks.jsonl");
-    let harness = Harness::spawn_with_and_home(
-        |config| {
-            config.agent.args.extend([
-                "--no-cap-fork-message-id".to_owned(),
-                "--no-echo-prompt-message-id".to_owned(),
-                "--agent-message-id".to_owned(),
-                TURN_ANCHOR.to_owned(),
-                "--announce-fork-cursors".to_owned(),
-                "--reject-fork-cursors".to_owned(),
-                "--fork-record".to_owned(),
-                record_path.display().to_string(),
-            ]);
-        },
-        home.path().to_path_buf(),
-    )
+    let harness = Harness::spawn_air(&home, |config| {
+        config.agent.args.extend([
+            "--announce-fork-cursors".to_owned(),
+            "--reject-fork-cursors".to_owned(),
+            "--fork-record".to_owned(),
+            record_path.display().to_string(),
+        ]);
+    })
     .await;
     let session_id = create_session(&harness).await;
     submit_and_settle_ids(&harness, &session_id, "first turn").await;
@@ -1392,7 +1320,7 @@ async fn a_rejected_cursor_is_retried_at_the_air_point_and_dropped() {
         recorded_forks(&record_path),
         [
             fork_keys(Some("cursor_prompt_2"), None),
-            fork_keys(None, Some(TURN_ANCHOR)),
+            fork_keys(None, Some(AIR_TURN_ANCHOR)),
         ]
     );
     assert_eq!(
@@ -1445,10 +1373,7 @@ async fn fork_at_the_first_prompt_is_refused_for_an_air_adapter() {
     write_air_registry_override(home.path());
     let harness = Harness::spawn_with_and_home(
         |config| {
-            config.agent.args.extend([
-                "--no-cap-fork-message-id".to_owned(),
-                "--no-echo-prompt-message-id".to_owned(),
-            ]);
+            config.agent.args.extend([]);
         },
         home.path().to_path_buf(),
     )

@@ -33,15 +33,7 @@ pub(crate) async fn handle_initialize(
         session_capabilities = session_capabilities.delete(SessionDeleteCapabilities::new());
     }
     if !state.args.no_cap_fork_session {
-        let mut fork = SessionForkCapabilities::new();
-        if !state.args.no_cap_fork_message_id {
-            let mut stack = serde_json::Map::new();
-            stack.insert("messageId".to_owned(), serde_json::json!({}));
-            let mut meta = serde_json::Map::new();
-            meta.insert("acpStack".to_owned(), serde_json::Value::Object(stack));
-            fork = fork.meta(meta);
-        }
-        session_capabilities = session_capabilities.fork(fork);
+        session_capabilities = session_capabilities.fork(SessionForkCapabilities::new());
     }
     let mut capabilities = AgentCapabilities::new()
         .load_session(!state.args.no_cap_load_session)
@@ -383,11 +375,6 @@ pub(crate) async fn handle_fork_session(
         ..
     } = request;
     let cursor_id = cursor_id.map(|cursor_id| cursor_id.0.to_string());
-    let message_id = meta
-        .as_ref()
-        .and_then(|meta| meta.get("acpStack"))
-        .and_then(|stack| stack.get("messageId"))
-        .and_then(serde_json::Value::as_str);
     let air_message_id = meta
         .as_ref()
         .and_then(|meta| meta.get("jetbrains"))
@@ -401,7 +388,6 @@ pub(crate) async fn handle_fork_session(
         let line = serde_json::json!({
             "cursorId": cursor_id,
             "airMessageId": air_message_id,
-            "acpStackMessageId": message_id,
         });
         append_json_line(path, &line).map_err(Error::into_internal_error)?;
     }
@@ -410,14 +396,6 @@ pub(crate) async fn handle_fork_session(
         return responder.respond_with_error(Error::invalid_params().data(format!(
             "cursor {cursor_id:?} is not a cursor of the session"
         )));
-    }
-    if let Some(expected) = state.args.expect_fork_message_id.as_deref()
-        && message_id != Some(expected)
-    {
-        return responder.respond_with_error(Error::new(
-            -32000,
-            format!("expected fork message id {expected}"),
-        ));
     }
     if let Some(expected) = state.args.expect_air_fork_message_id.as_deref()
         && air_message_id != Some(expected)

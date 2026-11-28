@@ -473,9 +473,8 @@ impl AgentSupervisor {
     }
 
     /// The fork point the adapter's catalog-declared dialect reads for the prompt
-    /// `message_id` names. The in-house adapters cut just before that prompt themselves
-    /// from the acpStack key. The AIR adapters keep the point they are given, so they are
-    /// handed the anchor from the turn before instead, which leaves the named prompt and
+    /// `message_id` names. The AIR adapters keep the point they are given, so they are
+    /// handed the anchor from the turn before, which leaves the named prompt and
     /// everything after it out of the fork.
     async fn dialect_fork_point(
         &self,
@@ -484,8 +483,13 @@ impl AgentSupervisor {
         preceding: Option<&PrecedingPromptRecord>,
     ) -> Result<ForkPoint> {
         match self.fork_point_dialect().await {
-            ForkPointDialect::AcpStack => Ok(ForkPoint::AcpStackMessageId(message_id.to_owned())),
-            ForkPointDialect::JetbrainsAir => {
+            None => Err(StackError::InvalidParam {
+                field: "message_id",
+                reason: format!(
+                    "this agent announced no session cursor for message id `{message_id}` in session `{parent_session_id}`"
+                ),
+            }),
+            Some(ForkPointDialect::JetbrainsAir) => {
                 // The named prompt opens the session, so there is no turn to
                 // keep. A fork of nothing is a new session, which the client
                 // asks for through `POST /v1/sessions` instead.

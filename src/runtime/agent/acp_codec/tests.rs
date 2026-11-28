@@ -969,23 +969,12 @@ fn session_model_helpers_reject_removed_legacy_model_state() {
 }
 
 #[test]
-fn prompt_message_id_meta_round_trips() {
-    let meta = prompt_message_id_meta("msg_test_1");
-    assert_eq!(meta_message_id(Some(&meta)), Some("msg_test_1"));
-    assert_eq!(meta_message_id(None), None);
-    assert_eq!(meta_message_id(Some(&Meta::new())), None);
-}
-
-#[test]
 fn air_fork_point_meta_carries_the_versioned_jetbrains_key() {
     let meta = air_fork_point_meta("msg_previous_turn");
     assert_eq!(
         air_fork_point_message_id(Some(&meta)),
         Some("msg_previous_turn")
     );
-    // The AIR key is the only one on the wire: an adapter reading the acpStack
-    // key must not see a fork point it would resolve differently.
-    assert_eq!(meta_message_id(Some(&meta)), None);
     assert_eq!(
         serde_json::to_value(&meta).expect("meta json")["jetbrains"]["air"]["fork"]["version"],
         serde_json::json!(1)

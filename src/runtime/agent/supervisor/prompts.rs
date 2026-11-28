@@ -110,8 +110,7 @@ impl AgentSupervisor {
         let message_id_owned = message_id.clone();
         let fork_point_dialect = self.fork_point_dialect().await;
         let agent_session_id_owned = agent_session_id.clone();
-        let acp_request = PromptRequest::new(AcpSessionId::new(agent_session_id), prompt_blocks)
-            .meta(prompt_message_id_meta(&message_id));
+        let acp_request = PromptRequest::new(AcpSessionId::new(agent_session_id), prompt_blocks);
 
         let join = tokio::spawn(async move {
             // A failed `pending -> running` flip is survivable: the row stays
@@ -145,18 +144,12 @@ impl AgentSupervisor {
             // Taken on every outcome: a failed or cancelled turn leaves no anchor, and its
             // ids must not be recorded as the next turn's.
             let anchors = bridge.take_turn_anchors(&agent_session_id_owned).await;
-            if let Outcome::Settled(Ok(response)) = &outcome {
-                // A cursor confirms the point before this prompt is forkable. AIR adapters
-                // never see the acpStack key to echo; their fork point comes from the anchor
-                // recorded below, so a settled turn is the acknowledgement there.
+            if let Outcome::Settled(Ok(_)) = &outcome {
+                // A cursor confirms the point before this prompt is forkable. On the AIR
+                // dialect the fork point comes from the anchor recorded below, so a settled
+                // turn is the acknowledgement there.
                 let acknowledged = anchors.fork_cursor_id.is_some()
-                    || match fork_point_dialect {
-                        ForkPointDialect::AcpStack => {
-                            meta_message_id(response.meta.as_ref())
-                                == Some(message_id_owned.as_str())
-                        }
-                        ForkPointDialect::JetbrainsAir => true,
-                    };
+                    || fork_point_dialect == Some(ForkPointDialect::JetbrainsAir);
                 if acknowledged {
                     let acknowledged_prompt_id = prompt_id_owned.clone();
                     let acknowledged_message_id = message_id_owned.clone();

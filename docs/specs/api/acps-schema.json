@@ -2443,9 +2443,16 @@
             "default": null
           },
           "fork_point": {
-            "$ref": "#/$defs/response/ForkPointDialect",
-            "description": "Catalog-declared `_meta` dialect the launched adapter reads a breakpoint\nfork point from. No ACP capability names the JetBrains AIR extension, so\nthis declaration is what makes `session/fork` at a message id reachable\nfor the adapters that implement it.",
-            "default": "acp-stack"
+            "anyOf": [
+              {
+                "$ref": "#/$defs/response/ForkPointDialect"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Catalog-declared `_meta` dialect the launched adapter reads a breakpoint\nfork point from when a prompt has no session cursor. No ACP capability names\nthe JetBrains AIR extension, so this declaration is what makes it reachable.",
+            "default": null
           }
         },
         "required": [
@@ -2466,16 +2473,11 @@
         "oneOf": [
           {
             "type": "string",
-            "const": "acp-stack",
-            "description": "`_meta.acpStack.messageId`, carrying acp-stack's own prompt message id."
-          },
-          {
-            "type": "string",
             "const": "jetbrains-air",
             "description": "`_meta.jetbrains.air.fork`, carrying an id the adapter itself emitted as\nthe `messageId` of a `session/update` chunk."
           }
         ],
-        "description": "`_meta` dialect an adapter reads the breakpoint fork point from on\n`session/fork`. Declared per adapter because no advertised ACP capability\nnames the JetBrains AIR extension, so the catalog is the only source."
+        "description": "`_meta` dialect an adapter reads a breakpoint fork point from on `session/fork`\nwhen the prompt has no session cursor. Declared per adapter because no advertised\nACP capability names the JetBrains AIR extension, so the catalog is the only source."
       },
       "AgentStateLabel": {
         "type": "string",

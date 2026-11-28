@@ -583,9 +583,9 @@ All skill routes load config leniently, dropping individually invalid `[[skills.
 - Tier: `session`
 - Request: none.
 - Response: `{ "agent_id", "adapter"?, "captured_at", "capabilities", "process_state" }`. The latest handshake snapshot when available.
-    - `capabilities` is the same snapshot object the start/restart responses embed: `{ "protocol_version", "capabilities": {…effective ACP capability set…}, "agent_name", "agent_title", "agent_version", "agent_id", "harness_version", "adapter_id", "adapter_version", "fork_point" }`. Every key is present; the string fields are nullable.
-    - The inner `capabilities` map is the agent's `initialize` advertisement with the catalog's fork-point declaration raised into it: for a `jetbrains-air` adapter that advertises `sessionCapabilities.fork`, the map carries `sessionCapabilities.fork._meta.acpStack.messageId` so a consumer reads breakpoint fork support from the same path on every adapter.
-    - `fork_point` is the adapter's declared fork-point dialect from `data/agents.toml`: `acp-stack` (the default) or `jetbrains-air`. See [Fork Point Dialects](../acp/acp-bridge.md#fork-point-dialects).
+    - `capabilities` is the same snapshot object the start/restart responses embed: `{ "protocol_version", "capabilities": {…ACP capability set…}, "agent_name", "agent_title", "agent_version", "agent_id", "harness_version", "adapter_id", "adapter_version", "fork_point" }`. Every key is present; the string fields are nullable.
+    - The inner `capabilities` map is the agent's `initialize` advertisement, unchanged. An agent that advertises `sessionCapabilities.fork` accepts a `message_id` on `POST /v1/sessions/{id}/fork`, and a given prompt qualifies once its `message_id_acknowledged` is true.
+    - `fork_point` is the adapter's declared fork-point dialect from `data/agents.toml`: `jetbrains-air`, or `null` when none is declared. See [Fork Points](../acp/acp-bridge.md#fork-points).
     - `agent_id` is the configured `[agent].id` the snapshot was captured from. `harness_version` and `adapter_version` are the installed versions from the latest successful installer rows (`harness`/`install` and `adapter` steps), read at the moment of capture; `adapter_id` is the adapter the agent was launched through. Each is null when there is nothing to report: native agents carry no adapter fields, a harness bundled by its adapter has no harness version, and shell-recipe installs record no version.
 - Errors: `404 agent.not_initialized` occurs only when neither the init capability probe nor agent start has run.
 - Notes: populated by the init capability probe as well as by agent start. Capabilities cannot change between process starts, so the snapshot and its versions describe one launch.
@@ -836,12 +836,12 @@ Session creation proceeds when a configured `agent.mode`, model, `agent.effort`,
 - Breakpoint semantics: a fork with `message_id` ends just before the named prompt. The named prompt, its turn, and everything after it stay out of the fork, which leaves the fork ready to receive an edited version of that prompt. acp-stack requires this cut of every adapter it forks at a message id.
 - Child history: the child's durable record opens with the part of the parent's conversation the fork holds, written with the child row in one transaction.
     - `GET /v1/sessions/{id}/events` on the child replays the parent's conversation rows up to the fork point in the parent's log order, numbered from `seq` 1 in the child's log, followed by the child's own `session.forked` row. The parent's lifecycle rows stay with the parent.
-    - The child's prompt rows include the parent's prompts up to the fork point, with their message ids and acknowledgement, so the child can itself be forked at an inherited `message_id` through the adapter's fork-point dialect.
+    - The child's prompt rows include the parent's prompts up to the fork point, with their message ids and acknowledgement, so the child can itself be forked at an inherited `message_id` on an adapter with a declared fork-point dialect.
     - See [Fork Inheritance](../state-logging.md#fork-inheritance) for which rows are carried and how they are keyed.
 - `message_id` is always an acp-stack prompt message id from the parent session, acknowledged by the agent. When the parent is itself a fork, its inherited prompts qualify too. acp-stack translates it into the fork point the running adapter reads:
     - A prompt the agent announced a session cursor for is sent as the standard `cursorId`. When the agent rejects the cursor, the fork is retried once at the dialect's point below.
-    - Otherwise, adapters on the acp-stack dialect receive it verbatim as `_meta.acpStack.messageId` and perform the cut themselves.
-    - Adapters declared `fork_point = "jetbrains-air"` in the agent catalog receive `_meta.jetbrains.air.fork`, which they resolve inclusively. They are handed the agent message id anchoring the turn before the named prompt, so the cut lands in the same place.
+    - Otherwise, adapters declared `fork_point = "jetbrains-air"` in the agent catalog receive `_meta.jetbrains.air.fork`, which they resolve inclusively. They are handed the agent message id anchoring the turn before the named prompt, so the cut lands in the same place.
+    - With neither, the fork is refused with `400 request.invalid_param`.
 - Naming the first prompt of a session is refused with `400 request.invalid_param` on an adapter that resolves the fork point inclusively: there is no preceding turn to keep, and a fork of nothing is a new session (`POST /v1/sessions`).
 
 ### `POST /v1/sessions/{id}/prompt`

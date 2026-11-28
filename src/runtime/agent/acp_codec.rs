@@ -37,8 +37,7 @@ use crate::state::{EVENT_KIND_SESSION_UPDATE, StateHandle};
 
 use super::acp_bridge::{AcpPermissionPolicy, NotificationDrain, NotificationGuard};
 
-/// `_meta` namespace for acp-stack's local protocol extensions (also read by
-/// `AgentCapabilitiesDto::supports_fork_message_id`).
+/// `_meta` namespace for acp-stack's local protocol extensions.
 const ACP_STACK_META_KEY: &str = "acpStack";
 const MESSAGE_ID_META_KEY: &str = "messageId";
 /// `_meta.acpStack` key naming the `prompts` row a durable user-prompt chunk
@@ -484,22 +483,6 @@ pub(super) fn spawn_session_notification_queue(
     sender
 }
 
-/// Local prompt message-id extension, needed since ACP v1 dropped the unstable
-/// top-level `messageId` fields: `_meta.acpStack.messageId` on `session/prompt`.
-pub fn prompt_message_id_meta(message_id: &str) -> Meta {
-    let mut stack = serde_json::Map::new();
-    stack.insert(
-        MESSAGE_ID_META_KEY.to_owned(),
-        serde_json::Value::String(message_id.to_owned()),
-    );
-    let mut meta = Meta::new();
-    meta.insert(
-        ACP_STACK_META_KEY.to_owned(),
-        serde_json::Value::Object(stack),
-    );
-    meta
-}
-
 /// Fork-point `_meta` for adapters that honor the JetBrains AIR extension. The
 /// id is one the adapter itself emitted as a `session/update` `messageId`, not
 /// an acp-stack prompt message id, because that is what the adapter resolves
@@ -526,8 +509,7 @@ pub fn air_fork_point_meta(message_id: &str) -> Meta {
     meta
 }
 
-/// Read back an AIR fork point, for tests and for symmetry with
-/// [`meta_message_id`].
+/// Read back an AIR fork point, for tests.
 pub fn air_fork_point_message_id(meta: Option<&Meta>) -> Option<&str> {
     let fork = meta?
         .get(JETBRAINS_META_KEY)?
@@ -544,9 +526,8 @@ pub fn air_fork_point_message_id(meta: Option<&Meta>) -> Option<&str> {
 /// persists for the user's own turn, so a transcript rebuilt from the event log
 /// holds both sides of the conversation rather than agent output alone.
 ///
-/// The chunk's `messageId` is the prompt's message id, matching the id the
-/// agent echoes on its own chunks, and `_meta.acpStack.promptId` names the
-/// prompt row.
+/// The chunk's `messageId` is the prompt's message id, and `_meta.acpStack.promptId`
+/// names the prompt row.
 pub fn user_prompt_chunk_payload(
     agent_session_id: &str,
     message_id: &str,
@@ -574,13 +555,6 @@ pub fn user_prompt_chunk_payload(
         field: "session.update",
         reason: err.to_string(),
     })
-}
-
-pub fn meta_message_id(meta: Option<&Meta>) -> Option<&str> {
-    meta?
-        .get(ACP_STACK_META_KEY)?
-        .get(MESSAGE_ID_META_KEY)?
-        .as_str()
 }
 
 pub fn session_config_id_for_value(

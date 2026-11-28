@@ -56,17 +56,12 @@ impl HarnessSpec {
     }
 }
 
-/// `_meta` dialect an adapter reads the breakpoint fork point from on
-/// `session/fork`. Declared per adapter because no advertised ACP capability
-/// names the JetBrains AIR extension, so the catalog is the only source.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default, schemars::JsonSchema,
-)]
+/// `_meta` dialect an adapter reads a breakpoint fork point from on `session/fork`
+/// when the prompt has no session cursor. Declared per adapter because no advertised
+/// ACP capability names the JetBrains AIR extension, so the catalog is the only source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum ForkPointDialect {
-    /// `_meta.acpStack.messageId`, carrying acp-stack's own prompt message id.
-    #[default]
-    AcpStack,
     /// `_meta.jetbrains.air.fork`, carrying an id the adapter itself emitted as
     /// the `messageId` of a `session/update` chunk.
     JetbrainsAir,
@@ -83,7 +78,7 @@ pub struct AdapterSpec {
     /// Fork-point dialect this adapter honors. Adapters that implement the
     /// JetBrains AIR fork extension declare `jetbrains-air`.
     #[serde(default)]
-    pub fork_point: ForkPointDialect,
+    pub fork_point: Option<ForkPointDialect>,
     pub install: InstallSet,
     #[serde(default)]
     pub update: UpdateSet,

@@ -612,7 +612,7 @@ fn vendor_adapters_declare_the_jetbrains_air_fork_point() {
         let adapter = entry.adapter.as_ref().expect("adapter declared");
         assert_eq!(
             adapter.fork_point,
-            ForkPointDialect::JetbrainsAir,
+            Some(ForkPointDialect::JetbrainsAir),
             "{agent_id} adapter must declare the AIR fork point"
         );
     }

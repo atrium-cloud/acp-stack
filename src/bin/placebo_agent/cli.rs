@@ -76,8 +76,6 @@ pub(crate) struct AcpArgs {
     pub(crate) fail_delete_session: bool,
     #[arg(long)]
     pub(crate) no_cap_fork_session: bool,
-    #[arg(long)]
-    pub(crate) no_cap_fork_message_id: bool,
     /// Advertise `mcpCapabilities.http = true`. Without it the placebo
     /// advertises no MCP capability at all.
     #[arg(long)]
@@ -87,8 +85,6 @@ pub(crate) struct AcpArgs {
     /// launch env without a restart behaves.
     #[arg(long)]
     pub(crate) launch_env_record: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) expect_fork_message_id: Option<String>,
     /// Require `_meta.jetbrains.air.fork` to name this id on `session/fork`,
     /// the way the vendor adapters read their fork point.
     #[arg(long)]
@@ -101,6 +97,10 @@ pub(crate) struct AcpArgs {
     /// first, when the client advertises `session.cursors`, the way the vendor adapters do.
     #[arg(long)]
     pub(crate) announce_fork_cursors: bool,
+    /// Announce those cursors after the turn's output, just before the prompt response,
+    /// the way pi-acp does.
+    #[arg(long)]
+    pub(crate) fork_cursors_at_settle: bool,
     /// Skip the cursor for this 1-based prompt of each session, the way a slash command
     /// gets none.
     #[arg(long)]
@@ -113,10 +113,6 @@ pub(crate) struct AcpArgs {
     /// line.
     #[arg(long)]
     pub(crate) fork_record: Option<PathBuf>,
-    /// Drop the `_meta.acpStack.messageId` echo from `PromptResponse`, the way
-    /// an adapter that never implemented the acp-stack extension behaves.
-    #[arg(long)]
-    pub(crate) no_echo_prompt_message_id: bool,
     /// Attach this ACP `Usage` JSON to every `PromptResponse`, the way an
     /// adapter that reports end-turn token usage settles its turns.
     #[arg(long, value_parser = parse_prompt_usage)]

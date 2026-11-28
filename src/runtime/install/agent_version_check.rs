@@ -222,9 +222,9 @@ fn expected_agent_check_steps(entry: &RegistryEntry) -> Vec<&'static str> {
 pub struct InstalledComponents {
     pub adapter_id: Option<String>,
     pub steps: Vec<&'static str>,
-    /// Catalog-declared fork-point dialect of the launched adapter. Native
-    /// agents and registry-absent agents keep the acp-stack dialect.
-    pub fork_point: ForkPointDialect,
+    /// Catalog-declared fork-point dialect of the launched adapter. Native and
+    /// registry-absent agents declare none and fork only at session cursors.
+    pub fork_point: Option<ForkPointDialect>,
 }
 
 impl InstalledComponents {
@@ -238,8 +238,8 @@ impl InstalledComponents {
                 adapter_id: Some(adapter.id.clone()),
                 steps: vec![STEP_ADAPTER],
                 // The catalog owns the dialect declaration, so a
-                // registry-unavailable launch falls back to the acp-stack key.
-                fork_point: ForkPointDialect::default(),
+                // registry-unavailable launch has none.
+                fork_point: None,
             },
             None => Self::native(),
         }
@@ -249,7 +249,7 @@ impl InstalledComponents {
         Self {
             adapter_id: None,
             steps: vec![STEP_INSTALL],
-            fork_point: ForkPointDialect::default(),
+            fork_point: None,
         }
     }
 }
@@ -281,8 +281,7 @@ pub fn installed_components(
         fork_point: entry
             .adapter
             .as_ref()
-            .map(|adapter| adapter.fork_point)
-            .unwrap_or_default(),
+            .and_then(|adapter| adapter.fork_point),
     }
 }
 
@@ -381,7 +380,7 @@ provided_by = "adapter"
             InstalledComponents {
                 adapter_id: None,
                 steps: vec![STEP_INSTALL],
-                fork_point: ForkPointDialect::AcpStack,
+                fork_point: None,
             }
         );
     }
@@ -394,7 +393,7 @@ provided_by = "adapter"
             InstalledComponents {
                 adapter_id: Some("split-acp".to_owned()),
                 steps: vec![STEP_HARNESS, STEP_ADAPTER],
-                fork_point: ForkPointDialect::AcpStack,
+                fork_point: None,
             }
         );
     }
@@ -407,7 +406,7 @@ provided_by = "adapter"
             InstalledComponents {
                 adapter_id: Some("bundled-acp".to_owned()),
                 steps: vec![STEP_ADAPTER],
-                fork_point: ForkPointDialect::AcpStack,
+                fork_point: None,
             }
         );
     }
@@ -435,7 +434,7 @@ provided_by = "adapter"
             InstalledComponents {
                 adapter_id: Some("custom-acp".to_owned()),
                 steps: vec![STEP_HARNESS, STEP_ADAPTER],
-                fork_point: ForkPointDialect::AcpStack,
+                fork_point: None,
             }
         );
     }
@@ -464,7 +463,7 @@ provided_by = "adapter"
             InstalledComponents {
                 adapter_id: Some("split-acp".to_owned()),
                 steps: vec![STEP_ADAPTER],
-                fork_point: ForkPointDialect::AcpStack,
+                fork_point: None,
             }
         );
     }

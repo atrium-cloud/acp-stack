@@ -24,26 +24,15 @@ pub(crate) async fn handle_prompt(
             Error::invalid_params().data(format!("unknown session \"{}\"", request.session_id.0)),
         );
     }
-    // Announced at intake, before the turn can fail, as the vendor adapters do. ACP v1
-    // reports no live prompt, so the cursor is anchored after the last entity before it.
     let fork_cursor = state
         .lock()
         .await
         .fork_cursor_for_next_prompt(request.session_id.0.as_ref());
-    if let Some(cursor_id) = fork_cursor {
-        let anchored_after = args
-            .agent_message_id
-            .clone()
-            .unwrap_or_else(|| UNSTAMPED_CURSOR_ANCHOR.to_owned());
-        let anchor = CursorMessageAnchor::new(anchored_after, CursorAnchorPosition::After);
-        connection.send_notification(SessionNotification::new(
-            request.session_id.clone(),
-            SessionUpdate::CursorUpdate(
-                CursorUpdate::new(cursor_id)
-                    .anchor(CursorAnchor::AgentMessage(anchor))
-                    .capabilities(CursorCapabilities::new().fork(CursorForkCapabilities::new())),
-            ),
-        ))?;
+    // Announced at intake, before the turn can fail, as the vendor adapters do.
+    if !args.fork_cursors_at_settle
+        && let Some(cursor_id) = fork_cursor.clone()
+    {
+        connection.send_notification(fork_cursor_update(&request, &args, cursor_id))?;
     }
     if args.prompt_error {
         return responder.respond_with_error(Error::new(-32000, "fake prompt failure"));
@@ -140,6 +129,11 @@ pub(crate) async fn handle_prompt(
             ))?;
         }
     }
+    if args.fork_cursors_at_settle
+        && let Some(cursor_id) = fork_cursor
+    {
+        connection.send_notification(fork_cursor_update(&request, &args, cursor_id))?;
+    }
     // The two off-loop branches below keep the dispatch loop free, so the
     // client's `session/cancel` is processed while the turn is still open.
     // An inline await (as `--prompt-stall-after-update` does) would park the
@@ -187,7 +181,7 @@ pub(crate) async fn handle_prompt(
                 RequestPermissionOutcome::Cancelled => StopReason::Cancelled,
                 _ => StopReason::EndTurn,
             };
-            respond_to_prompt(request, responder, stop_reason, fields)
+            respond_to_prompt(responder, stop_reason, fields)
         });
     }
     if args.prompt_never_settle {
@@ -227,7 +221,7 @@ pub(crate) async fn handle_prompt(
         return connection.spawn(async move {
             cancel_aimed_at(&state_for_task, &request.session_id, start_cancels).await;
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-            respond_to_prompt(request, responder, StopReason::Cancelled, fields)
+            respond_to_prompt(responder, StopReason::Cancelled, fields)
         });
     }
     if args.prompt_stall_after_update {
@@ -384,7 +378,7 @@ async fn delegate_to_subagent(
                 &parent,
                 SubagentUpdate::new(child).state(idle(stop_reason)),
             ))?;
-            return respond_to_prompt(request, responder, StopReason::EndTurn, fields);
+            return respond_to_prompt(responder, StopReason::EndTurn, fields);
         }
         // The parent's cancel ends the work it waits on. The subagent reports that and
         // leaves its request open: settling it is the client's part.
@@ -394,7 +388,7 @@ async fn delegate_to_subagent(
         ))?;
         match answer.await {
             Ok(response) if matches!(response.outcome, RequestPermissionOutcome::Cancelled) => {
-                respond_to_prompt(request, responder, StopReason::Cancelled, fields)
+                respond_to_prompt(responder, StopReason::Cancelled, fields)
             }
             Ok(_) => responder.respond_with_error(Error::new(
                 -32000,
@@ -450,6 +444,28 @@ fn execute_tool_call_started(session_id: &SessionId) -> SessionNotification {
     )
 }
 
+/// ACP v1 reports no live prompt, so the cursor before it is anchored after the last
+/// entity ahead of it.
+fn fork_cursor_update(
+    request: &PromptRequest,
+    args: &AcpArgs,
+    cursor_id: String,
+) -> SessionNotification {
+    let anchored_after = args
+        .agent_message_id
+        .clone()
+        .unwrap_or_else(|| UNSTAMPED_CURSOR_ANCHOR.to_owned());
+    let anchor = CursorMessageAnchor::new(anchored_after, CursorAnchorPosition::After);
+    SessionNotification::new(
+        request.session_id.clone(),
+        SessionUpdate::CursorUpdate(
+            CursorUpdate::new(cursor_id)
+                .anchor(CursorAnchor::AgentMessage(anchor))
+                .capabilities(CursorCapabilities::new().fork(CursorForkCapabilities::new())),
+        ),
+    )
+}
+
 async fn finish_prompt(
     state: SharedState,
     request: PromptRequest,
@@ -472,53 +488,28 @@ async fn finish_prompt(
         };
         (stop_reason, fields)
     };
-    respond_to_prompt(request, responder, stop_reason, fields)
+    respond_to_prompt(responder, stop_reason, fields)
 }
 
 /// The optional parts of a `PromptResponse`, fixed per process by the CLI flags.
 struct ResponseFields {
-    echo_message_id: bool,
     usage: Option<Usage>,
 }
 
 impl ResponseFields {
     fn from_args(args: &AcpArgs) -> Self {
         Self {
-            echo_message_id: !args.no_echo_prompt_message_id,
             usage: args.prompt_usage.clone(),
         }
     }
 }
 
 fn respond_to_prompt(
-    request: PromptRequest,
     responder: Responder<PromptResponse>,
     stop_reason: StopReason,
     fields: ResponseFields,
 ) -> agent_client_protocol::Result<()> {
-    // Echo the local message-id extension: acp-stack treats `_meta.acpStack.messageId` on the
-    // response as the acknowledgment of the one it stamped on `session/prompt`.
-    let mut response = PromptResponse::new(stop_reason).usage(fields.usage);
-    if !fields.echo_message_id {
-        return responder.respond(response);
-    }
-    if let Some(message_id) = request
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.get("acpStack"))
-        .and_then(|stack| stack.get("messageId"))
-        .and_then(serde_json::Value::as_str)
-    {
-        let mut stack = serde_json::Map::new();
-        stack.insert(
-            "messageId".to_owned(),
-            serde_json::Value::String(message_id.to_owned()),
-        );
-        let mut meta = serde_json::Map::new();
-        meta.insert("acpStack".to_owned(), serde_json::Value::Object(stack));
-        response = response.meta(meta);
-    }
-    responder.respond(response)
+    responder.respond(PromptResponse::new(stop_reason).usage(fields.usage))
 }
 
 fn prompt_contains_testflight_marker(request: &PromptRequest) -> bool {

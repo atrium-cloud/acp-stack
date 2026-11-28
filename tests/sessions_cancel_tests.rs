@@ -28,7 +28,8 @@ const CANCEL_NO_STALL_BUDGET: Duration = Duration::from_secs(10);
 
 #[tokio::test]
 async fn cancel_waits_for_a_delayed_agent_acknowledgement() {
-    let harness = Harness::spawn_with(|config| {
+    let home = tempfile::tempdir().expect("home");
+    let harness = Harness::spawn_air(&home, |config| {
         config.agent.args.extend([
             "--prompt-settle-cancel-after-ms".to_owned(),
             "300".to_owned(),
@@ -47,9 +48,9 @@ async fn cancel_waits_for_a_delayed_agent_acknowledgement() {
     let record = prompt_record(&harness, &session_id, &prompt_id).await;
     assert_eq!(record["status"], "cancelled", "record = {record}");
     assert_eq!(record["stop_reason"], "cancelled", "record = {record}");
-    // Only the agent's own prompt response carries the message id back, so an
-    // acknowledged id proves the agent settled the turn rather than the
-    // supervisor writing `cancelled` on its own.
+    // On the AIR dialect only the agent's own prompt response acknowledges the
+    // message id, so an acknowledged id proves the agent settled the turn rather
+    // than the supervisor writing `cancelled` on its own.
     assert_eq!(record["message_id_acknowledged"], true, "record = {record}");
     assert!(
         session_event_kinds(&harness, &session_id)
